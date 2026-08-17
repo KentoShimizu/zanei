@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.0 — 2026-08-18
+
+Typed-text capture now works in Electron and Chromium apps.
+
+- With content capture on, the recorder activates each app's
+  accessibility tree (AXManualAccessibility), so apps like Claude,
+  ChatGPT, Slack, and VS Code expose their input fields and typed text
+  lands in `ui.value` like everywhere else. Password-field exclusion is
+  unchanged. Copied text was already captured regardless.
+- macOS permission dialogs are requested strictly one at a time: the
+  next request waits until the previous one is granted, and the event
+  tap waits for the permission worker, so a second dialog can no longer
+  replace the first.
+- `start` waits for the recorder's own permission verdict before
+  describing it, instead of claiming dialogs are pending on machines
+  where everything is already granted.
+- The Homebrew formula registers `Zanei.app` with LaunchServices at
+  install, so `tccutil reset <service> dev.zanei.recorder` works for
+  the whole time the app is installed; the docs put permission removal
+  before uninstalling.
+- The agent skill is half the size, points agents at `clipboard.copy`
+  bodies, and explains which apps produce typed-text diffs.
+
 ## 0.1.3 — 2026-08-18
 
 - The recorder shuts itself down within about 15 seconds when its
