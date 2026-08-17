@@ -12,8 +12,10 @@ use zanei_macos::permission::{
 };
 
 const PERMISSION_DECISION_POLL_INTERVAL: Duration = Duration::from_secs(1);
-// Permission dialogs are user-paced. Two minutes allows a deliberate response while bounding the
-// detached startup worker so an abandoned dialog is retried on the next daemon start.
+// AXIsProcessTrusted cannot distinguish pending from denied, so wait for a grant or this cap.
+// Two minutes is acceptable because the detached worker leaves the daemon responsive while the
+// user responds. At the cap, continue so a denied Accessibility request does not prevent asking
+// for Input Monitoring.
 const PERMISSION_DECISION_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +53,7 @@ fn request_missing_permissions_with<E>(
     poll_interval: Duration,
     timeout: Duration,
 ) -> Result<PermissionRequestOutcome, E> {
+    let mut outcome = PermissionRequestOutcome::Completed;
     for permission in [Permission::Accessibility, Permission::InputMonitoring] {
         if !required.contains(&permission) {
             continue;
@@ -59,20 +62,20 @@ fn request_missing_permissions_with<E>(
             continue;
         }
         request(&permission)?;
-        if !wait_for_permission_decision(
+        if !wait_for_permission_grant(
             &permission,
             &mut status_for,
             &mut sleep,
             poll_interval,
             timeout,
         )? {
-            return Ok(PermissionRequestOutcome::TimedOut);
+            outcome = PermissionRequestOutcome::TimedOut;
         }
     }
-    Ok(PermissionRequestOutcome::Completed)
+    Ok(outcome)
 }
 
-fn wait_for_permission_decision<E>(
+fn wait_for_permission_grant<E>(
     permission: &Permission,
     status_for: &mut impl FnMut(&Permission) -> Result<PermissionStatus, E>,
     sleep: &mut impl FnMut(Duration),
@@ -83,7 +86,7 @@ fn wait_for_permission_decision<E>(
     while elapsed < timeout {
         sleep(poll_interval);
         elapsed = elapsed.saturating_add(poll_interval);
-        if status_for(permission)? != PermissionStatus::NotDetermined {
+        if status_for(permission)? == PermissionStatus::Granted {
             return Ok(true);
         }
     }
@@ -203,16 +206,11 @@ mod tests {
     };
 
     #[test]
-    fn accessibility_timeout_stops_before_requesting_input_monitoring() {
-        let required = BTreeSet::from([
-            Permission::Accessibility,
-            Permission::InputMonitoring,
-            Permission::Automation {
-                bundle_id: "com.google.Chrome".to_owned(),
-            },
-        ]);
+    fn false_accessibility_status_does_not_advance_before_timeout() {
+        let required = BTreeSet::from([Permission::Accessibility, Permission::InputMonitoring]);
         let requested = RefCell::new(Vec::new());
         let accessibility_checks = Cell::new(0);
+        let input_checks = Cell::new(0);
 
         let outcome = request_missing_permissions_with(
             &required,
@@ -220,10 +218,20 @@ mod tests {
                 Ok::<_, ()>(match permission {
                     Permission::Accessibility => {
                         accessibility_checks.set(accessibility_checks.get() + 1);
-                        PermissionStatus::NotDetermined
+                        if accessibility_checks.get() == 1 {
+                            PermissionStatus::NotDetermined
+                        } else {
+                            PermissionStatus::Denied
+                        }
                     }
                     Permission::InputMonitoring => {
-                        panic!("input monitoring must not be checked before Accessibility resolves")
+                        assert_eq!(accessibility_checks.get(), 4);
+                        input_checks.set(input_checks.get() + 1);
+                        if input_checks.get() == 1 {
+                            PermissionStatus::NotDetermined
+                        } else {
+                            PermissionStatus::Granted
+                        }
                     }
                     Permission::Automation { .. } => panic!("automation must not be probed"),
                 })
@@ -232,7 +240,11 @@ mod tests {
                 requested.borrow_mut().push(permission.clone());
                 Ok::<_, ()>(())
             },
-            |_| assert_eq!(*requested.borrow(), [Permission::Accessibility]),
+            |_| {
+                if input_checks.get() == 0 {
+                    assert_eq!(*requested.borrow(), [Permission::Accessibility]);
+                }
+            },
             Duration::from_secs(1),
             Duration::from_secs(3),
         )
@@ -240,11 +252,14 @@ mod tests {
 
         assert_eq!(outcome, PermissionRequestOutcome::TimedOut);
         assert_eq!(accessibility_checks.get(), 4);
-        assert_eq!(requested.into_inner(), [Permission::Accessibility]);
+        assert_eq!(
+            requested.into_inner(),
+            [Permission::Accessibility, Permission::InputMonitoring]
+        );
     }
 
     #[test]
-    fn requests_input_monitoring_after_accessibility_is_decided() {
+    fn granted_transition_requests_the_next_permission() {
         let required = BTreeSet::from([Permission::Accessibility, Permission::InputMonitoring]);
         let requested = RefCell::new(Vec::new());
         let accessibility_checks = Cell::new(0);
@@ -259,17 +274,21 @@ mod tests {
                     Permission::Automation { .. } => panic!("automation must not be probed"),
                 };
                 checks.set(checks.get() + 1);
-                Ok::<_, ()>(if checks.get() == 1 {
-                    PermissionStatus::NotDetermined
-                } else {
-                    PermissionStatus::Granted
+                Ok::<_, ()>(match checks.get() {
+                    1 => PermissionStatus::NotDetermined,
+                    2 => PermissionStatus::Denied,
+                    _ => PermissionStatus::Granted,
                 })
             },
             |permission| {
                 requested.borrow_mut().push(permission.clone());
                 Ok::<_, ()>(())
             },
-            |_| {},
+            |_| {
+                if input_checks.get() == 0 {
+                    assert_eq!(*requested.borrow(), [Permission::Accessibility]);
+                }
+            },
             Duration::from_secs(1),
             Duration::from_secs(3),
         )
@@ -283,38 +302,55 @@ mod tests {
     }
 
     #[test]
-    fn denied_permission_does_not_block_the_next_request() {
+    fn accessibility_timeout_requests_input_monitoring_after_120_seconds() {
         let required = BTreeSet::from([Permission::Accessibility, Permission::InputMonitoring]);
         let requested = RefCell::new(Vec::new());
         let accessibility_checks = Cell::new(0);
         let input_checks = Cell::new(0);
+        let elapsed = Cell::new(Duration::ZERO);
 
         let outcome = request_missing_permissions_with(
             &required,
             |permission| {
-                let (checks, decided) = match permission {
-                    Permission::Accessibility => (&accessibility_checks, PermissionStatus::Denied),
-                    Permission::InputMonitoring => (&input_checks, PermissionStatus::Granted),
+                Ok::<_, ()>(match permission {
+                    Permission::Accessibility => {
+                        accessibility_checks.set(accessibility_checks.get() + 1);
+                        if accessibility_checks.get() == 1 {
+                            PermissionStatus::NotDetermined
+                        } else {
+                            PermissionStatus::Denied
+                        }
+                    }
+                    Permission::InputMonitoring => {
+                        assert_eq!(elapsed.get(), Duration::from_secs(120));
+                        input_checks.set(input_checks.get() + 1);
+                        if input_checks.get() == 1 {
+                            PermissionStatus::NotDetermined
+                        } else {
+                            PermissionStatus::Granted
+                        }
+                    }
                     Permission::Automation { .. } => panic!("automation must not be probed"),
-                };
-                checks.set(checks.get() + 1);
-                Ok::<_, ()>(if checks.get() == 1 {
-                    PermissionStatus::NotDetermined
-                } else {
-                    decided
                 })
             },
             |permission| {
                 requested.borrow_mut().push(permission.clone());
                 Ok::<_, ()>(())
             },
-            |_| {},
+            |duration| {
+                if input_checks.get() == 0 {
+                    assert_eq!(*requested.borrow(), [Permission::Accessibility]);
+                    elapsed.set(elapsed.get() + duration);
+                }
+            },
             Duration::from_secs(1),
-            Duration::from_secs(3),
+            Duration::from_secs(120),
         )
         .expect("request missing permissions");
 
-        assert_eq!(outcome, PermissionRequestOutcome::Completed);
+        assert_eq!(outcome, PermissionRequestOutcome::TimedOut);
+        assert_eq!(accessibility_checks.get(), 121);
+        assert_eq!(elapsed.get(), Duration::from_secs(120));
         assert_eq!(
             requested.into_inner(),
             [Permission::Accessibility, Permission::InputMonitoring]

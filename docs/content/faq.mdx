@@ -42,7 +42,7 @@ Zanei records your own activity on your own machine. If the machine is employer-
 
 ## I granted a permission but `doctor` still says `denied`
 
-Toggling a permission sometimes requires the recorded process to restart before macOS reports it correctly. Run `zanei stop && zanei start`, then `zanei doctor` again. If you built from source, remember that permissions bind to the signing identity — a rebuilt binary may need re-granting (see [permissions](/guides/permissions#permissions-and-code-signing)).
+Toggling a permission sometimes requires the recorded process to restart before macOS reports it correctly. Run `zanei stop && zanei start`, then `zanei doctor` again. After `tccutil reset`, tccd may suppress permission dialogs until macOS is restarted; this behavior has been confirmed on physical hardware. If you built from source, remember that permissions bind to the signing identity — a rebuilt binary may need re-granting (see [permissions](/guides/permissions#permissions-and-code-signing)).
 
 ## `zanei start` exits with code 3. Is the recorder running?
 
