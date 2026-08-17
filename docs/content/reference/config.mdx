@@ -1,0 +1,107 @@
+---
+title: Configuration
+description: The config.toml schema — capture sources, filters, output, and retention.
+---
+
+Configuration lives in a single TOML file:
+
+```
+~/.config/zanei/config.toml
+```
+
+Override the path per invocation with the global `--config <path>` flag. Helper commands:
+
+```bash
+zanei config init   # create a fully commented template at the configuration path
+zanei config path   # print the config file path
+zanei config show   # effective configuration (defaults merged)
+zanei config edit   # open in $EDITOR
+zanei config set capture.text_content true
+```
+
+`zanei config init` creates missing parent directories and writes the complete template shown
+below. It never overwrites an existing file; if the destination exists, it reports that path and
+exits with code 1. Use the global `--config <path>` option to initialize a non-default location.
+
+Use [`zanei config set`](/reference/cli#config) for `capture.text_content`,
+`output.batch_interval_s`, and `output.retention_hours`. Use
+[`zanei filter`](/reference/cli#filter) for filter lists and `config edit` for other arrays.
+
+## Full example (defaults)
+
+```toml config.toml
+[capture]
+sources = ["app", "window", "ui", "input", "browser"]
+text_content = false            # content capture is an explicit opt-in
+
+[filter]                        # capture-time filters — the privacy boundary (applied before the store)
+exclude_apps = ["1Password", "Keychain Access"]   # deny list (bundle_id recommended); defaults ship built-in
+include_only_apps = []          # non-empty switches to allow-list mode
+exclude_websites = []           # Chrome URL events/text bodies; dot-boundary host suffix match
+include_only_websites = []      # allow list for Chrome URL events/text bodies
+redactors = ["email", "credit_card", "token"]     # scrubbing of captured values (second line of defense)
+
+[output]
+batch_interval_s = 5
+retention_hours = 48            # short-lived retention by default
+```
+
+There is no egress-related setting — external transmission does not exist as a feature.
+
+## Validation
+
+Validation runs after omitted settings are filled with their defaults. Only the nine keys below, in their declared sections, are accepted; any other key makes the file invalid. A file that violates a rule is not accepted: every command that loads it, including `config show` and `config edit`, exits with code 1. Invalid values given to `config set` or `filter` are usage errors (code 2) and nothing is saved. `config set` accepts only scalar keys (`capture.text_content`, `output.batch_interval_s`, `output.retention_hours`); array keys are edited with `filter` or by hand.
+
+| Key | Accepted values |
+| --- | --- |
+| `capture.sources` | Zero or more of `app`, `window`, `ui`, `input`, `browser`; no duplicates |
+| `capture.text_content` | TOML boolean; `config set` accepts exactly `true` or `false` |
+| `filter.exclude_apps`, `filter.include_only_apps` | Strings; each non-empty, no leading or trailing whitespace, unique within the list ignoring case. `filter ... add` of a value already present (including a case-only variant) is a no-op (code 0) |
+| `filter.exclude_websites`, `filter.include_only_websites` | Domain names, same non-empty / whitespace / uniqueness rules. At most one trailing dot; without it, at most 253 bytes total, each dot-separated label 1–63 bytes of ASCII letters, digits, or `-`, starting and ending with a letter or digit. A value that is itself a public suffix in the bundled snapshot (for example `com`) is accepted, but `filter ... add` prints a warning unless `--quiet` is set |
+| `filter.redactors` | Zero or more of `email`, `credit_card`, `token`; no duplicates |
+| `output.batch_interval_s`, `output.retention_hours` | Unsigned integer (`u64`) greater than zero |
+## `[capture]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `sources` | `["app", "window", "ui", "input", "browser"]` | Which event families to capture. Without `browser`, Chrome Automation is required only when `text_content` is enabled with `ui` or `input`; `window` alone does not require it (see [permissions](/guides/permissions)) |
+| `text_content` | `false` | Capture typed/field content (`ui.value`, `input.key`, clipboard contents). Off by default; see the [privacy model](/guides/privacy) |
+
+## `[filter]`
+
+Capture-time filters apply **before** writing. App matches discard all events. Website matches discard Chrome URL events and suppress text-content bodies while retaining titles and interaction metadata. Semantics, matching rules, and precedence are documented in the [filters guide](/guides/filters); manage them with [`zanei filter`](/reference/cli#filter) rather than editing by hand.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `exclude_apps` | built-in defaults | Deny list of apps (`bundle_id` recommended; display names allowed) |
+| `include_only_apps` | `[]` | Allow list; non-empty switches to allow-list mode |
+| `exclude_websites` | `[]` | Deny list of URL hosts for Chrome URL events and text-content bodies. Dot-boundary suffix match with no Public Suffix List handling: `example.com` covers `api.example.com` but not `evil-example.com`; a bare `com` would match every `.com` host |
+| `include_only_websites` | `[]` | Allow list of URL hosts for Chrome URL events and text-content bodies |
+| `redactors` | `["email", "credit_card", "token"]` | Redaction rules applied to captured values |
+
+The daemon watches the config file at roughly 2-second intervals, so filter changes apply within a few seconds — no daemon restart required.
+
+## `[output]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `batch_interval_s` | `5` | Interval for flushing coalesced events and SQLite batches |
+| `retention_hours` | `48` | Events older than this are purged at startup and periodically, and excluded from reads |
+
+`zanei record` emits NDJSON as events are recorded. The daemon writes to the single local SQLite
+store; neither output behavior nor the store backend is configurable.
+
+## Change propagation
+
+- `[filter]` changes are picked up by the daemon's config watch (roughly 2-second intervals) and apply within a few seconds — no restart needed.
+- `output.retention_hours` is picked up by the daemon without a restart and immediately purges
+  events outside the new window. Other changes (e.g. `capture.sources` and
+  `output.batch_interval_s`) take effect after a daemon restart:
+  `zanei stop && zanei start`.
+
+## Related paths
+
+| Path | Purpose | Override |
+| --- | --- | --- |
+| `~/.config/zanei/config.toml` | Configuration | `--config <path>` |
+| `~/.local/state/zanei/store.sqlite` | Event store | `--store <path>` |

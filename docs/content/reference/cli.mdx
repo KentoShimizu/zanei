@@ -1,0 +1,493 @@
+---
+title: CLI reference
+description: Every zanei command, flag, shared convention, and exit code.
+---
+
+All functionality lives in a single binary, `zanei` — daemon control, permission diagnostics, data retrieval, filter management, agent setup, and the MCP server. The CLI and the [MCP server](/reference/mcp) are thin wrappers over the same core and store, and share the conventions on this page.
+
+- Signed, notarized single Rust binary; no external runtime.
+- Strictly local: the CLI performs no network egress of any kind.
+- Apart from the destructive operation (`purge`), commands have minimal side effects and are safe for agents to call.
+
+## Commands at a glance
+
+| Command | Summary |
+| --- | --- |
+| [`doctor`](#doctor) | Diagnose required macOS permissions; guide granting |
+| [`start`](#start) | Start background recording (launchd) |
+| [`stop`](#stop) | Stop recording and unregister (data kept) |
+| [`pause`](#pause) / [`resume`](#resume) | Temporarily suspend / resume recording |
+| [`status`](#status) | Daemon state, event counts, store info |
+| [`record`](#record) | Foreground capture to stdout/file (debug & piping) |
+| [`query`](#query) | Retrieve raw events with filters |
+| [`timeline`](#timeline) | LLM-ready, token-budgeted timeline |
+| [`export`](#export) | Bulk dump of raw events |
+| [`purge`](#purge) | Manually delete stored events (destructive) |
+| [`filter`](#filter) | Manage capture-time allow/deny lists |
+| [`config`](#config) | Initialize, show, locate, or edit configuration |
+| [`mcp`](#mcp) | Run the stdio MCP server |
+| [`setup`](#setup) | Configure agent instructions and MCP integration |
+
+## Global options
+
+Valid for every subcommand.
+
+| Flag | Description |
+| --- | --- |
+| `--config <path>` | Override config file path (default `~/.config/zanei/config.toml`) |
+| `--store <path>` | Override store path (default `~/.local/state/zanei/store.sqlite`) |
+| `--json` | Select JSON output where supported; see [Output formats](#output-formats) |
+| `-q, --quiet` | Suppress progress output and notices |
+| `-v, --verbose` | Verbose logging to stderr |
+| `--version` / `--help` | Version / help |
+
+## Shared conventions
+
+### Time expressions
+
+Values accepted by `--since` / `--until`:
+
+| Form | Example | Meaning |
+| --- | --- | --- |
+| Relative | `15m` `2h` `1d` `1w` | Looking back from now; units `s` `m` `h` `d` `w` |
+| Absolute | `2026-08-16T09:00:00Z` | RFC3339 timestamp |
+| Keyword | `now` | Current moment (mainly for `--until`) |
+
+`--until` defaults to `now`. `--since` defaults per command: `timeline` = `1h`, `query` = `15m`, `export` = `24h`.
+
+### Event types
+
+`--types` takes a comma-separated list of [event types](/reference/events), with trailing wildcards allowed (`browser.*`).
+
+### Output formats
+
+Commands with a `--format` option support these values:
+
+| Value | Commands | Description |
+| --- | --- | --- |
+| `jsonl` | `query`, `export`, `record` | One raw event per line (machine-readable) |
+| `json` | `query`, `export`, `timeline` | Single JSON document; for `timeline`, the structured timeline |
+| `md` | `timeline` | LLM-ready Markdown (default) |
+| `table` | `query` | Human-readable table |
+
+Diagnostic/state commands use a separate fixed-output convention:
+
+| Commands | Machine-readable output | Without `--json` |
+| --- | --- | --- |
+| `status`, `doctor` | Global `--json` only; these commands do not accept `--format` | Fixed human-readable output |
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | General error |
+| `2` | Usage error (invalid arguments) |
+| `3` | **Missing permissions**. For background `start`, the recorder is already running and reported the missing TCC permission through its heartbeat; `doctor` uses the same code for its diagnostic result |
+| `4` | No daemon (nothing to act on for `status`, `stop`, ...) |
+
+---
+
+## `doctor`
+
+Diagnoses the granted state of required TCC permissions (Accessibility / Input Monitoring / Automation) against the configured `capture.sources`.
+
+```bash
+zanei doctor            # human-readable; shows granting steps and the System Settings pane if anything is missing
+zanei doctor --fix      # interactively opens each relevant System Settings pane (granting is still a user action)
+zanei doctor --json     # machine-readable, for agents
+```
+
+| Flag | Description |
+| --- | --- |
+| `--fix` | Interactively open each missing permission's System Settings pane |
+| `--json` | Machine-readable output |
+
+`--fix` handles missing permissions one pane at a time. Before opening the next pane, it waits for
+Return; the final pane does not add another wait. Combining `--json --fix` does not disable this
+walkthrough: Zanei prints the JSON report first and then enters the same interactive flow when a
+required permission is missing. In that combination, stdout is therefore not JSON-only.
+
+- Exits with **code 3** if any required permission is missing.
+- `input_monitoring` counts as required when the configuration captures `input.*` or `ui.click`;
+  when neither `input` nor `ui` is selected, its absence still yields `ok`.
+
+`--json` output:
+
+```json
+{
+  "ok": false,
+  "reported_by_recorder": true,
+  "capture_sources": ["app", "window", "ui", "input", "browser"],
+  "permissions": {
+    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value"] },
+    "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
+    "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
+  },
+  "missing_required": ["input_monitoring"],
+  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+}
+```
+
+`status` values: `granted` / `denied` / `not_determined`. `reported_by_recorder` is `true` when the result came from a fresh recorder heartbeat. Without one, `doctor` probes from its own process, sets this field to `false`, and the human output notes that the recorder must be started to see its own permissions.
+
+Human-readable output always ends with the next action. When a required permission is denied, it
+walks through granting it: run `zanei start` so the recorder asks macOS for the permission, then
+follow the dialog and System Settings guidance. Accessibility adds the bundled app as `Zanei`, but
+Input Monitoring may omit the row even after the dialog grant takes effect. After restarting, the
+recorder-reported `doctor` result — not the list — is authoritative. The manual `+` walkthrough
+copies the `Zanei.app` root when running from a bundle and the executable path when running as a raw
+binary; use Command-Shift-G (or a single `~`) to select that path. A manually added bundle entry
+persists. See the [permissions guide](/guides/permissions) for the complete setup and removal flow.
+When Chrome Automation is `not_determined`, no advance
+action is needed: macOS asks the first time Zanei contacts Chrome. An unsigned or ad-hoc-signed
+build also produces a warning that rebuilding will reset granted permissions.
+
+## `start`
+
+Registers Zanei with launchd and starts background recording.
+If an agent is already registered, Zanei waits up to 10 seconds for launchd to finish unregistering it before registering the agent again.
+For background starts, Zanei waits up to 10 seconds for the daemon to report that it is alive before returning.
+At recorder startup, required missing Accessibility and Input Monitoring permissions are requested once. Automation remains deferred until the first real Apple Event to Chrome.
+
+```bash
+zanei start              # start background recording
+zanei start --foreground # run in the foreground instead (dev/debug)
+```
+
+| Flag | Description |
+| --- | --- |
+| `--foreground` | Don't daemonize; run in the foreground |
+
+After a background recorder reports that required permissions are missing, `start` prints the same granting guidance as `doctor` and exits with **code 3**. The recorder remains running; grant the permissions, run `zanei stop && zanei start`, and confirm with `zanei doctor`. `--foreground` runs the same recorder startup request logic in the foreground process.
+
+Only one recorder can own a store at a time. A second foreground or launchd recorder for the same
+store exits with code 1 and reports the PID of the current owner.
+
+After a background start succeeds, the confirmation states that Zanei is registered as a
+launchd background item. A macOS notification or an entry under **Login Items & Extensions** is
+expected behavior.
+
+## `stop`
+
+Stops the recorder instance that owns the selected store. A launchd recorder is unregistered; a
+foreground recorder receives `SIGTERM`. **Not destructive** — stored data is kept. Exits with
+**code 4** if there is no recorder to stop.
+
+Stopping uses two bounded stages in order: it waits up to 10 seconds for the selected store owner
+to disappear, then, for a launchd recorder, up to another 10 seconds for launchd registration to
+be removed. A timeout in either stage is an error.
+
+```bash
+zanei stop
+```
+
+## `pause`
+
+Temporarily suspends recording without unregistering the daemon.
+
+```bash
+zanei pause --for 30m   # auto-resume after 30 minutes
+zanei pause             # paused until `resume`
+```
+
+| Flag | Description |
+| --- | --- |
+| `--for <TIME>` | Duration; omit to pause indefinitely |
+
+## `resume`
+
+Resumes recording after a pause.
+
+```bash
+zanei resume
+```
+
+## `status`
+
+Reports daemon state, capture configuration, and store statistics.
+
+```bash
+zanei status
+zanei status --json
+```
+
+Human-readable output shows `TEXT CONTENT      on (opt-in)` when enabled and
+`TEXT CONTENT      off (opt-in: zanei config set capture.text_content true)` when disabled, so the
+privacy-sensitive opt-in state and its explicit activation command are visible without requesting JSON.
+
+```json
+{
+  "state": "running",
+  "running": true,
+  "paused": false,
+  "since": "2026-08-16T08:00:00.000Z",
+  "instance": "4242@2026-08-16T08:00:00.000Z",
+  "mode": "launchd",
+  "uptime_s": 3600,
+  "events_captured": 12345,
+  "events_dropped": 2,
+  "collector_failures": { "eventtap": 1 },
+  "last_event_ts": "2026-08-16T08:59:58.000Z",
+  "heartbeat_freshness": "fresh",
+  "heartbeat_age_s": 2,
+  "last_event_age_s": 4,
+  "store_write_state": "healthy",
+  "degraded": {},
+  "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z" },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
+  "permissions_ok": true
+}
+```
+
+The JSON object always has the following fields. `integer` values are non-negative.
+
+| Field | JSON type | Meaning and `null` condition |
+| --- | --- | --- |
+| `state` | string | `running` when the store lock has an owner; `stopped` when it does not. Inspection failures use `store_missing`, `store_unavailable`, or `store_corrupt`. Never null |
+| `running` | boolean | Whether the lock has an owner. Never null, including in a `store_*` state |
+| `paused` | boolean \| null | For a readable store, true only when a lock owner exists, its heartbeat is fresh, and its pause request is active. A stale, future, or missing heartbeat and a readable stopped store report false. Null when database contents cannot be read |
+| `since` | string \| null | Current owner's RFC3339 start timestamp; null when there is no owner |
+| `instance` | string \| null | Current owner identity, composed from PID and start timestamp; null when there is no owner |
+| `mode` | `"foreground"` \| `"launchd"` \| null | Current owner's lifecycle mode; null when there is no owner |
+| `uptime_s` | integer \| null | Seconds since the current owner started; null when there is no owner |
+| `events_captured` | integer \| null | Persisted cumulative captured count; null when database contents cannot be read |
+| `events_dropped` | integer \| null | Persisted cumulative delivery loss from backpressure, a full queue, disconnection, or similar failure. It excludes unattributable out-of-scope input and unflushed crash/`SIGKILL` loss. Null when database contents cannot be read |
+| `collector_failures` | `object<string, integer>` \| null | Persisted cumulative failure counts by collector; an empty object means no recorded failures. Null when database contents cannot be read |
+| `last_event_ts` | string \| null | RFC3339 timestamp of the latest event; null when no event exists or database contents cannot be read |
+| `heartbeat_freshness` | `"fresh"` \| `"stale"` \| `"future"` \| `"missing"` \| null | For a readable store: `fresh` when the elapsed whole-second age is 0 through 15 inclusive, `stale` when it is greater than 15, `future` when the timestamp is ahead of the clock, and `missing` when absent. Null only when database contents cannot be read |
+| `heartbeat_age_s` | integer \| null | Heartbeat age in seconds, clamped to zero for a future timestamp; null when the heartbeat is absent or database contents cannot be read |
+| `last_event_age_s` | integer \| null | Latest-event age in seconds, clamped to zero for a future timestamp; null when no event exists or database contents cannot be read |
+| `store_write_state` | `"healthy"` \| `"suspected_unavailable"` \| `"heartbeat_stale"` \| `"stopped"` \| null | `healthy` requires a lock owner and its matching fresh heartbeat. No owner yields `stopped`. A mismatched owner/heartbeat, or a matching non-fresh heartbeat with no newer event, yields `suspected_unavailable`; the remaining matching-owner/non-fresh case with a newer event yields `heartbeat_stale`. Null when database contents cannot be read |
+| `degraded` | `object<string, string>` | Current component/reason map only when the persisted instance matches the current owner; otherwise empty. A store inspection failure is reported under `store`. Never null |
+| `store.path` | string | Selected store path. Never null |
+| `store.size_bytes` | integer \| null | File size when metadata is available; null when unavailable or the file does not exist |
+| `store.retention_hours` | integer \| null | With a readable store, the recorder's value when its matching heartbeat is fresh, otherwise the current configuration value. Null when database contents cannot be read |
+| `store.oldest_event_ts` | string \| null | Oldest retained event timestamp; null when there are no events or database contents cannot be read |
+| `capture.sources` | `string[]` | Sources from the current configuration. Never null |
+| `capture.text_content` | boolean | Text-content opt-in from the current configuration. Never null |
+| `permissions_ok` | boolean | Available permission snapshot from a fresh heartbeat whose instance matches the current owner; otherwise, including when the snapshot is absent or the heartbeat is stale, future, or missing, a local probe. Never null |
+
+Human-readable output is a fixed set of lines rather than a table selected with `--format`:
+
+| Line | Value |
+| --- | --- |
+| `STATE` | `state` |
+| `PAUSED` | `paused`, or `-` when null |
+| `SINCE` | `since`, or `-` when null |
+| `INSTANCE` | `instance`, or `-` when null |
+| `MODE` | `mode`, or `-` when null |
+| `EVENTS CAPTURED` | `events_captured`, or `-` when null |
+| `EVENTS DROPPED` | `events_dropped`, or `-` when null |
+| `LAST EVENT` | `last_event_ts`, or `-` when null |
+| `HEARTBEAT` | Freshness plus `(<N>s old)` when age exists; `-` when freshness is null |
+| `STORE WRITES` | `store_write_state`, or `-` when null |
+| `STORE` | `store.path` |
+| `TEXT CONTENT` | `on (opt-in)` or `off (opt-in: zanei config set capture.text_content true)` |
+| `PERMISSIONS OK` | `true` or `false` |
+| `DEGRADED` | `false` for an empty map; otherwise `true` followed by one indented `component: reason` line per entry |
+
+JSON fields not listed in this human-output table are not printed in human mode.
+
+`status` exits with code 0 for `running`, 4 for `stopped`, and 1 for every `store_*` state.
+
+For `store_corrupt`, preserve the damaged file and create a fresh store:
+
+```bash
+zanei stop
+mv ~/.local/state/zanei/store.sqlite ~/.local/state/zanei/store.sqlite.corrupt
+zanei start
+```
+
+Use the configured store path instead of the default path when applicable. The moved file remains available for investigation; the new store is empty.
+
+## `record`
+
+Foreground capture: streams raw events as NDJSON to stdout (or a file) without daemonizing. Intended for piping and experiments — use [`start`](#start) for everyday recording.
+
+```bash
+zanei record --stream                 # NDJSON to stdout
+zanei record --out events.jsonl       # to a file
+```
+
+| Flag | Description |
+| --- | --- |
+| `--stream` | Stream events to stdout as they occur |
+| `--out <FILE>` | Write to a file instead |
+| `--format jsonl` | Output format (NDJSON) |
+
+## `query`
+
+Retrieves raw events matching the given conditions. Machine-readable, structured output.
+
+```bash
+zanei query --since 15m --types browser.navigate,app.activate
+zanei query --since 2h --app Safari --format json --limit 500
+```
+
+| Flag | Description |
+| --- | --- |
+| `--since` / `--until` | Time range (default `--since 15m`) |
+| `--types <TYPE,...>` | Event-type filter (comma-separated; `browser.*` wildcards allowed) |
+| `--app <NAME>` / `--bundle-id <ID>` | Filter by app name / bundle ID |
+| `--limit <N>` | Max events (default 500) |
+| `--format` | `jsonl` (default) / `json` / `table` |
+
+These are query-time filters — they narrow reads, not what gets recorded (see [filters](/guides/filters)).
+
+## `timeline`
+
+Splits raw events into sessions, deduplicates, coalesces, and serializes an LLM-ready summary within a token budget. **The command agents call most.**
+
+```bash
+zanei timeline --since 1h --format md --token-budget 4000
+zanei timeline --since 30m --format json --granularity fine
+```
+
+| Flag | Description |
+| --- | --- |
+| `--since` / `--until` | Time range (default `--since 1h`) |
+| `--format` | `md` (default; LLM-ready Markdown) / `json` (structured) |
+| `--token-budget <N>` | Approximate token cap (default 4000, minimum 34); content is coarsened to fit |
+| `--granularity` | `coarse` (default; per session) / `fine` (per interaction) |
+
+Default `--format md` output (abridged; activity phrases and headings are emitted exactly as shown):
+
+```md
+# Zanei timeline
+
+Range: 2026-08-16T08:00:00.000Z — 2026-08-16T09:00:00.000Z
+Estimated tokens: 3810
+Truncated: no
+
+## 2026-08-16T08:12:00.000Z — 2026-08-16T08:31:00.000Z · Safari
+
+Title: Reviewing PR #42
+- Browsed 3 pages on github.com
+- Edited text in "Reviewing PR #42"
+```
+
+With `--format json`, the same session is represented by `range`, `token_estimate`, `truncated`,
+and `sessions`; session activities use the same fixed phrases. JSON sessions always include
+`event_ids_truncated` and include up to 100 `event_ids` when the token budget permits. `event_ids`
+may be omitted before sessions are removed.
+
+## `export`
+
+Dumps every raw event in range (backup / external processing).
+
+```bash
+zanei export --since 24h --format jsonl --out dump.jsonl
+```
+
+| Flag | Description |
+| --- | --- |
+| `--since` / `--until` | Time range (default `--since 24h`) |
+| `--format` | `jsonl` / `json` |
+| `--out <FILE>` | Output file |
+
+## `purge`
+
+Deletes stored events manually, independent of retention-based auto-purge. **Destructive.**
+
+```bash
+zanei purge --before 24h   # delete events older than 24 hours
+zanei purge --all          # delete everything (confirmation prompt; suppress with --quiet)
+```
+
+| Flag | Description |
+| --- | --- |
+| `--before <TIME>` | Delete events older than this |
+| `--all` | Delete everything (asks for confirmation) |
+
+## `filter`
+
+Manages capture-time allow/deny lists. App matches are discarded before storage; Chrome site matches discard URL events and suppress text-content bodies while titles and interaction metadata remain. Semantics and matching rules are covered in the [filters guide](/guides/filters). Equivalent to editing `[filter]` in `config.toml`, with added validation and deduplication.
+
+```bash
+zanei filter show                                      # all lists and the active mode
+zanei filter exclude-app add com.1password.1password
+zanei filter exclude-app remove com.1password.1password
+zanei filter only-app add com.apple.Safari
+zanei filter exclude-site add example.com
+zanei filter only-site add github.com
+```
+
+| Subcommand | `[filter]` key | Meaning |
+| --- | --- | --- |
+| `exclude-app (add\|remove) <BUNDLE_ID or NAME>` | `exclude_apps` | Deny list (everything else is captured) |
+| `only-app (add\|remove) <BUNDLE_ID or NAME>` | `include_only_apps` | Allow list (when set, only listed apps are captured) |
+| `exclude-site (add\|remove) <DOMAIN>` | `exclude_websites` | Deny list for Chrome URL events and text-content bodies, matched by URL host |
+| `only-site (add\|remove) <DOMAIN>` | `include_only_websites` | Allow list for Chrome URL events and text-content bodies, matched by URL host |
+
+- Apps: specify by `BUNDLE_ID` (recommended) or display name. `filter show` also displays the built-in default exclusions (`1Password`, `Keychain Access`, ...).
+- Changes apply on the next configuration-watch cycle, normally within 2 seconds; events that occur before then use the previous filter. No daemon restart is required.
+- Adding a single `only-app` entry switches to allow-list mode; `filter show` states the active mode.
+
+## `config`
+
+```bash
+zanei config init   # create a fully commented configuration template
+zanei config path   # print the config file path
+zanei config show   # print the effective configuration (defaults merged)
+zanei config edit   # open the config in $EDITOR
+zanei config set capture.text_content true
+```
+
+`config init` writes a complete, commented template containing every supported option and its
+current default. By default it creates `~/.config/zanei/config.toml`; the global
+`--config <path>` flag selects a different destination. Missing parent directories are created. On
+success, the command prints the created path and exits with code 0. If the destination already
+exists, it leaves the file unchanged, reports the existing path, and exits with code 1.
+
+`config set <DOTTED_KEY> <VALUE>` validates and saves one scalar setting. Supported keys and values:
+
+| Key | Accepted values |
+| --- | --- |
+| `capture.text_content` | `true`, `false` |
+| `output.batch_interval_s` | Unsigned integer greater than zero |
+| `output.retention_hours` | Unsigned integer greater than zero |
+
+Array settings are not accepted: use [`zanei filter`](#filter) for filter lists, or
+`zanei config edit` for other arrays. Unknown keys, array keys, and invalid values exit with
+code 2 without saving. `output.retention_hours` is reloaded by a running daemon and immediately
+applied to retention purging. If the daemon is running, a successful `capture.text_content` or
+`output.batch_interval_s` change prints:
+
+```text
+Restart recording with `zanei stop && zanei start` for this to take effect.
+```
+
+Schema: see the [configuration reference](/reference/config).
+
+## `mcp`
+
+Runs the stdio MCP server — JSON-RPC on stdin/stdout, zero network surface. Started by MCP clients (Claude Code, Codex, opencode, Claude Desktop, ...), not usually by hand.
+
+```bash
+zanei mcp [--store <PATH>]
+```
+
+- **Read-only view** over the store; independent from the recording daemon.
+- Exposed tools: `get_timeline` / `query_events` / `get_status` — see the [MCP reference](/reference/mcp).
+
+## `setup`
+
+Configures Zanei instructions and MCP integration for the target agent. Agents with native skill support and Claude Desktop retain their file-based setup; opencode and pi only print manual setup instructions and do not modify files.
+
+```bash
+zanei setup --agent claude            # SKILL.md into Claude Code's skill location + MCP registration
+zanei setup --agent codex --scope user
+zanei setup --agent hermes            # skill into ~/.hermes/skills/ + MCP in ~/.hermes/config.yaml
+zanei setup --agent pi                # print derived README instructions; no MCP or file writes
+zanei setup --agent claude-desktop    # MCP registration in claude_desktop_config.json
+zanei setup --agent opencode          # print AGENTS.md snippet + MCP JSON; no file writes
+```
+
+| Flag | Description |
+| --- | --- |
+| `--agent` | `claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
+| `--scope` | `project` (default; current repository) / `user` (account-wide). It has no effect on the manual opencode/pi output |
+| `--print` | Preview planned file changes without writing. opencode and pi do not write files, with or without this flag |
+
+Per-agent behavior and setup output: see [agent setup](/agents/setup).

@@ -1,0 +1,101 @@
+---
+title: Quickstart
+description: From install to your first timeline and agent integration. Takes about five minutes.
+---
+
+Requires **macOS** (Apple Silicon or Intel) — currently the only supported platform.
+
+<Steps>
+<Step title="Install">
+
+Homebrew and GitHub Releases distribution are being prepared. Until they are available, build and
+install the app bundle from source:
+
+```bash
+git clone https://github.com/KentoShimizu/zanei.git
+cd zanei
+cargo build --release
+./packaging/make-app.sh -
+mkdir -p "$HOME/.local/libexec/zanei" "$HOME/.cargo/bin"
+ditto dist/Zanei.app "$HOME/.local/libexec/zanei/Zanei.app"
+ln -sfn "$HOME/.local/libexec/zanei/Zanei.app/Contents/MacOS/zanei" \
+  "$HOME/.cargo/bin/zanei"
+```
+
+Make sure `$HOME/.cargo/bin` is on your `PATH`.
+
+:::warning[Source builds and macOS permissions]
+The `-` identity creates an ad-hoc-signed app for local use, so macOS may require its permissions
+again after a rebuild. To preserve permissions across rebuilds, pass a persistent development
+certificate identity to `make-app.sh`; see the
+[packaging instructions](https://github.com/KentoShimizu/zanei/blob/main/packaging/README.md).
+
+A raw `cargo install` binary is not the distributed app bundle. A permission row added with `+`
+may not persist, and a reset addressed to `dev.zanei.recorder` does not apply to it. Use the app
+bundle distribution for stable permission management.
+:::
+
+</Step>
+<Step title="Start recording">
+
+Start the background recorder so macOS can register it and ask for the Accessibility and Input Monitoring permissions required by your capture configuration:
+
+```bash
+zanei start
+```
+
+On first setup, `start` may exit with code 3 after the recorder starts and reports missing permissions. The daemon remains running so you can grant them. Automation is requested separately by macOS the first time Zanei contacts Chrome.
+
+</Step>
+<Step title="Grant and verify permissions">
+
+Permission dialogs identify the bundled app as `Zanei`, and **Privacy & Security → Accessibility** adds its row automatically. **Input Monitoring** may omit the row even after the dialog grant takes effect. After restarting, trust the recorder-reported `zanei doctor` result. To manage that permission from the list, use `+` and select the installed `Zanei.app`; while the permission is still reported missing, `zanei doctor --fix` opens the pane and copies that exact path.
+
+Restart the recorder so it picks up the new grants, then verify its own report:
+
+```bash
+zanei stop && zanei start
+zanei doctor
+```
+
+:::note
+`zanei doctor --fix` opens a missing permission's System Settings pane and copies the path needed by the fallback. Granting is always a user action; `doctor` verifies the state enforced for the recorder itself. See the [permissions guide](/guides/permissions) for manual addition and removal details.
+:::
+
+</Step>
+<Step title="Get your first timeline">
+
+Work normally for a bit, then pull up your recent history:
+
+```bash
+zanei timeline --since 15m
+```
+
+You get a session-structured, deduplicated Markdown timeline — the same form agents consume. For raw events, use `zanei query --since 15m` instead (see [retrieving data](/guides/timeline)).
+
+</Step>
+<Step title="Connect your agent (optional)">
+
+Place the skill file for your agent and print its MCP registration command:
+
+```bash
+zanei setup --agent claude
+```
+
+From now on, telling your agent "check what I was just working on and continue" lets it restore context from the timeline. See [agent integration](/agents) for supported agents and details.
+
+</Step>
+</Steps>
+
+## Recording defaults
+
+- Data is stored in a local SQLite database (`~/.local/state/zanei/store.sqlite`) and is not sent anywhere.
+- Keystroke content is not recorded by default — only the fact that typing happened and the
+  field type. To opt in explicitly, run `zanei config set capture.text_content true`, then
+  restart recording with `zanei stop && zanei start`.
+- Events are deleted automatically after 48 hours by default (configurable in [settings](/reference/config)).
+- Apps and sites you don't want recorded can be excluded before they are written with [filters](/guides/filters).
+
+:::note[If you want to stop]
+`zanei pause --for 1h` pauses temporarily, `zanei stop` stops completely (data is kept), and `zanei purge --all` deletes all data.
+:::

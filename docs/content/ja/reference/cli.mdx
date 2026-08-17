@@ -1,0 +1,491 @@
+---
+title: CLI リファレンス
+description: zanei の全コマンド・フラグ・共通規約・終了コード。
+---
+
+すべての機能は単一バイナリ `zanei` に入っています — デーモン管理、権限診断、データ取得、フィルタ管理、agent セットアップ、MCP サーバまで。CLI と [MCP サーバ](/ja/reference/mcp)は同一コア・同一ストアの薄いラッパーであり、このページの規約を共有します。
+
+- 署名・notarize 済みの単一 Rust バイナリ。外部ランタイム依存なし。
+- 完全ローカル：CLI はいかなる外部送信も行いません。
+- 破壊的操作（`purge`）以外は副作用が小さく、agent から安全に呼べます。
+
+## コマンド一覧
+
+| コマンド | 概要 |
+| --- | --- |
+| [`doctor`](#doctor) | 必要な macOS 権限の診断と付与誘導 |
+| [`start`](#start) | バックグラウンド記録の開始（launchd） |
+| [`stop`](#stop) | 記録停止と登録解除（データは保持） |
+| [`pause`](#pause) / [`resume`](#resume) | 記録の一時停止 / 再開 |
+| [`status`](#status) | 稼働状態・イベント件数・ストア情報 |
+| [`record`](#record) | 前面での捕捉を stdout/ファイルへ（デバッグ・パイプ用） |
+| [`query`](#query) | 条件付きで生イベントを取得 |
+| [`timeline`](#timeline) | LLM-ready・token budget 付きタイムライン |
+| [`export`](#export) | 生イベントの一括ダンプ |
+| [`purge`](#purge) | 保存イベントの手動削除（破壊的） |
+| [`filter`](#filter) | capture-time 許可/不許可リストの管理 |
+| [`config`](#config) | 設定の初期化・表示・パス・編集 |
+| [`mcp`](#mcp) | stdio MCP サーバの起動 |
+| [`setup`](#setup) | agent 向け指示と MCP 連携の設定 |
+
+## グローバルオプション
+
+すべてのサブコマンドで有効です。
+
+| フラグ | 説明 |
+| --- | --- |
+| `--config <path>` | 設定ファイルパスの上書き（既定 `~/.config/zanei/config.toml`） |
+| `--store <path>` | ストアパスの上書き（既定 `~/.local/state/zanei/store.sqlite`） |
+| `--json` | 対応コマンドで JSON 出力を選択。詳細は[出力形式](#出力形式)を参照 |
+| `-q, --quiet` | 進捗・注意書きを抑制 |
+| `-v, --verbose` | 詳細ログを stderr へ |
+| `--version` / `--help` | バージョン / ヘルプ |
+
+## 共通規約
+
+### 時間表現
+
+`--since` / `--until` が受け取る値：
+
+| 形式 | 例 | 意味 |
+| --- | --- | --- |
+| 相対 | `15m` `2h` `1d` `1w` | 現在からの遡り。単位は `s` `m` `h` `d` `w` |
+| 絶対 | `2026-08-16T09:00:00Z` | RFC3339 タイムスタンプ |
+| キーワード | `now` | 現在時刻（主に `--until` 用） |
+
+`--until` の既定は `now`。`--since` の既定はコマンドごとに `timeline` = `1h`、`query` = `15m`、`export` = `24h`。
+
+### イベント型
+
+`--types` は[イベント型](/ja/reference/events)のカンマ区切りリストを受け取ります。末尾ワイルドカード（`browser.*`）が使えます。
+
+### 出力形式
+
+`--format` オプションを持つコマンドは次の値をサポートします。
+
+| 値 | 対象コマンド | 説明 |
+| --- | --- | --- |
+| `jsonl` | `query`・`export`・`record` | 1 行 1 イベントの生イベント（機械可読） |
+| `json` | `query`・`export`・`timeline` | 単一 JSON。`timeline` では構造化タイムライン |
+| `md` | `timeline` | LLM-ready Markdown（既定） |
+| `table` | `query` | 人間可読の整形テーブル |
+
+診断・状態コマンドは、これとは別の固定出力です。
+
+| コマンド | 機械可読出力 | `--json` なし |
+| --- | --- | --- |
+| `status`・`doctor` | グローバル `--json` のみ。`--format` は受け取らない | 固定の人間向け出力 |
+
+### 終了コード
+
+| コード | 意味 |
+| --- | --- |
+| `0` | 正常 |
+| `1` | 一般エラー |
+| `2` | 使用法エラー（引数不正） |
+| `3` | **権限不足**。バックグラウンド `start` では recorder は起動済みで、heartbeat を通じて不足権限を報告しています。`doctor` も診断結果に同じコードを使います |
+| `4` | デーモン未起動（`status`・`stop` 等で対象がない） |
+
+---
+
+## `doctor`
+
+設定中の `capture.sources` に照らして、必要な TCC 権限（アクセシビリティ / 入力監視 / オートメーション）の付与状況を診断します。
+
+```bash
+zanei doctor            # 人間可読。不足があれば付与手順と System Settings ペインを案内
+zanei doctor --fix      # 不足権限の設定ペインを対話的に順番に開く（付与自体はユーザー操作）
+zanei doctor --json     # agent 向け機械可読
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--fix` | 不足している権限の System Settings ペインを対話的に順番に開く |
+| `--json` | 機械可読出力 |
+
+`--fix` は不足権限を 1 ペインずつ処理し、次のペインを開く前に Return キー入力を待ちます。
+最後のペインの後には追加の待機はありません。`--json --fix` を併用しても対話は無効にならず、
+まず JSON report を出力した後、必要権限が不足していれば同じ対話フローに入ります。
+したがって、この組み合わせの stdout は JSON だけにはなりません。
+
+- 必要権限がひとつでも欠けていれば**終了コード 3**。
+- `input_monitoring` が「必須」になるのは `input.*` または `ui.click` を捕捉する設定です。
+  `input` と `ui` のどちらも選択しない構成では、欠けていても `ok` です。
+
+`--json` の出力：
+
+```json
+{
+  "ok": false,
+  "reported_by_recorder": true,
+  "capture_sources": ["app", "window", "ui", "input", "browser"],
+  "permissions": {
+    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value"] },
+    "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
+    "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
+  },
+  "missing_required": ["input_monitoring"],
+  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+}
+```
+
+`status` の値：`granted` / `denied` / `not_determined`。`reported_by_recorder` は、新鮮な recorder heartbeat 由来なら `true` です。heartbeat がなければ `doctor` 自身のプロセスから probe して `false` とし、人間向け出力には recorder 自身の権限を見るには起動が必要という注記を加えます。
+
+人間向け出力の最終行には、必ず次の操作が表示されます。必要な権限が denied の場合は、
+`zanei start` で recorder に権限を要求させ、ダイアログと System Settings の案内に従います。
+アクセシビリティにはバンドル版が `Zanei` として自動追加されますが、入力監視はダイアログでの
+付与が有効でも行がないことがあります。再起動後は一覧ではなく、recorder 由来の `doctor` の
+結果を正とします。手動の `+` walkthrough では、バンドル実行時は `Zanei.app` のルート、
+素のバイナリでは実行ファイルの path をコピーします。Command-Shift-G（または `~` 1 文字）で
+その path を選択します。手動追加した bundle の行は定着します。設定と解除の全体は
+[権限ガイド](/ja/guides/permissions)を参照してください。Chrome Automation が `not_determined` の
+場合は事前操作不要で、Zanei が初めて Chrome に問い合わせる際に macOS が確認します。
+未署名または ad-hoc 署名のビルドでは、再ビルド時に付与済み権限がリセットされる旨も警告します。
+
+## `start`
+
+launchd に登録し、バックグラウンド記録を開始します。
+既に agent が登録されている場合は、launchd による登録解除の完了を最大 10 秒待ってから再登録します。
+バックグラウンド起動では、デーモンが生存報告するまで最大 10 秒待ってから戻ります。
+recorder は起動時に、必要かつ未付与のアクセシビリティと入力監視を 1 回要求します。オートメーションは Chrome への初回の実 Apple Event まで要求しません。
+
+```bash
+zanei start              # バックグラウンド記録を開始
+zanei start --foreground # デーモン化せず前面で実行（開発・デバッグ用）
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--foreground` | デーモン化せず前面で実行 |
+
+バックグラウンド recorder が必要権限の不足を報告すると、`start` は `doctor` と同じ付与手順を表示し、**終了コード 3** で終了します。recorder は動作を継続します。権限を付与し、`zanei stop && zanei start` してから `zanei doctor` で確認してください。`--foreground` も同じ recorder 起動時の要求ロジックを前面プロセスで実行します。
+
+1 つのストアを所有できる recorder は 1 instance だけです。同じストアに対して foreground
+または launchd recorder を二重起動すると終了コード 1 となり、現在の owner PID を表示します。
+
+バックグラウンド起動に成功すると、Zanei が launchd のバックグラウンド項目として
+登録されたことを表示します。macOS の通知や **Login Items & Extensions** への表示は正常な挙動です。
+
+## `stop`
+
+選択したストアを所有する recorder instance を停止します。launchd recorder は登録解除し、
+foreground recorder には `SIGTERM` を送ります。**破壊的操作ではありません** — データは保持されます。
+対象 recorder がなければ**終了コード 4**。
+
+停止は 2 段階の bounded wait を順番に行います。まず選択した store owner の消失を最大 10 秒待ち、
+launchd recorder の場合は続けて launchd 登録の除去をさらに最大 10 秒待ちます。どちらかが
+timeout した場合はエラーになります。
+
+```bash
+zanei stop
+```
+
+## `pause`
+
+デーモンを解除せず、記録だけを一時停止します。
+
+```bash
+zanei pause --for 30m   # 30 分後に自動再開
+zanei pause             # resume まで無期限
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--for <TIME>` | 停止期間。省略時は `resume` まで無期限 |
+
+## `resume`
+
+一時停止から再開します。
+
+```bash
+zanei resume
+```
+
+## `status`
+
+デーモンの状態・捕捉設定・ストア統計を表示します。
+
+```bash
+zanei status
+zanei status --json
+```
+
+人間向け出力は、有効時に `TEXT CONTENT      on (opt-in)`、無効時に
+`TEXT CONTENT      off (opt-in: zanei config set capture.text_content true)` を表示します。
+プライバシーに関わる opt-in 状態と明示的な有効化コマンドを JSON なしで確認できます。
+
+```json
+{
+  "state": "running",
+  "running": true,
+  "paused": false,
+  "since": "2026-08-16T08:00:00.000Z",
+  "instance": "4242@2026-08-16T08:00:00.000Z",
+  "mode": "launchd",
+  "uptime_s": 3600,
+  "events_captured": 12345,
+  "events_dropped": 2,
+  "collector_failures": { "eventtap": 1 },
+  "last_event_ts": "2026-08-16T08:59:58.000Z",
+  "heartbeat_freshness": "fresh",
+  "heartbeat_age_s": 2,
+  "last_event_age_s": 4,
+  "store_write_state": "healthy",
+  "degraded": {},
+  "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z" },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
+  "permissions_ok": true
+}
+```
+
+JSON object は常に次の field を持ちます。`integer` は非負整数です。
+
+| フィールド | JSON 型 | 意味と `null` 条件 |
+| --- | --- | --- |
+| `state` | string | store lock に owner がいれば `running`、いなければ `stopped`。検査失敗時は `store_missing` / `store_unavailable` / `store_corrupt`。null にならない |
+| `running` | boolean | lock owner の有無。`store_*` state でも null にならない |
+| `paused` | boolean \| null | store を読める場合、lock owner が存在し、その heartbeat が fresh で pause request が有効な場合だけ true。stale・future・missing heartbeat および読める stopped store は false。database 内容を読めない場合は null |
+| `since` | string \| null | 現在の owner の RFC3339 起動 timestamp。owner がなければ null |
+| `instance` | string \| null | PID と起動 timestamp からなる現在の owner identity。owner がなければ null |
+| `mode` | `"foreground"` \| `"launchd"` \| null | 現在の owner の lifecycle mode。owner がなければ null |
+| `uptime_s` | integer \| null | 現在の owner の起動後秒数。owner がなければ null |
+| `events_captured` | integer \| null | 永続化済みの累積捕捉数。database 内容を読めない場合は null |
+| `events_dropped` | integer \| null | backpressure・queue full・切断等で実際に失われた配送 loss の永続化済み累計。帰属不能で記録対象外の入力と crash / `SIGKILL` 時の未 flush loss は含まない。database 内容を読めない場合は null |
+| `collector_failures` | `object<string, integer>` \| null | collector ごとの永続化済み累積失敗数。空 object は記録済み失敗なし。database 内容を読めない場合は null |
+| `last_event_ts` | string \| null | 最新 event の RFC3339 timestamp。event がない場合、または database 内容を読めない場合は null |
+| `heartbeat_freshness` | `"fresh"` \| `"stale"` \| `"future"` \| `"missing"` \| null | store を読める場合、heartbeat の経過秒数の整数部が 0〜15（両端を含む）なら `fresh`、15 より大きければ `stale`、timestamp が時計より未来なら `future`、未記録なら `missing`。database 内容を読めない場合だけ null |
+| `heartbeat_age_s` | integer \| null | heartbeat の経過秒。未来 timestamp は 0 に切り上げる。heartbeat 未記録または database 内容を読めない場合は null |
+| `last_event_age_s` | integer \| null | 最新 event の経過秒。未来 timestamp は 0 に切り上げる。event がない場合または database 内容を読めない場合は null |
+| `store_write_state` | `"healthy"` \| `"suspected_unavailable"` \| `"heartbeat_stale"` \| `"stopped"` \| null | `healthy` には lock owner とそれに一致する fresh heartbeat が必要。owner なしは `stopped`。owner/heartbeat 不一致、または一致する非 fresh heartbeat かつそれより新しい event がない場合は `suspected_unavailable`。残る owner 一致・非 fresh・新しい event ありの場合は `heartbeat_stale`。database 内容を読めない場合は null |
+| `degraded` | `object<string, string>` | 永続化済み instance が現在の owner に一致するときだけ現在の component/reason map、それ以外は空。store 検査失敗は `store` key で報告。null にならない |
+| `store.path` | string | 選択した store path。null にならない |
+| `store.size_bytes` | integer \| null | file metadata を取得できる場合の byte 数。取得不能または file 不在なら null |
+| `store.retention_hours` | integer \| null | store を読める場合、owner に一致する heartbeat が fresh なら recorder の active 値、それ以外は現在の設定値。database 内容を読めない場合は null |
+| `store.oldest_event_ts` | string \| null | 保持中の最古 event timestamp。event がない場合または database 内容を読めない場合は null |
+| `capture.sources` | `string[]` | 現在の設定の source。null にならない |
+| `capture.text_content` | boolean | 現在の設定の text-content opt-in。null にならない |
+| `permissions_ok` | boolean | 現在の owner と instance が一致する fresh heartbeat の permission snapshot があればその値。snapshot がない場合、または heartbeat が stale・future・missing な場合はローカル probe。null にならない |
+
+人間向け出力は `--format` で選ぶ table ではなく、次の固定行です。
+
+| 行 | 値 |
+| --- | --- |
+| `STATE` | `state` |
+| `PAUSED` | `paused`。null は `-` |
+| `SINCE` | `since`。null は `-` |
+| `INSTANCE` | `instance`。null は `-` |
+| `MODE` | `mode`。null は `-` |
+| `EVENTS CAPTURED` | `events_captured`。null は `-` |
+| `EVENTS DROPPED` | `events_dropped`。null は `-` |
+| `LAST EVENT` | `last_event_ts`。null は `-` |
+| `HEARTBEAT` | freshness と、age があれば `(<N>s old)`。freshness が null なら `-` |
+| `STORE WRITES` | `store_write_state`。null は `-` |
+| `STORE` | `store.path` |
+| `TEXT CONTENT` | `on (opt-in)` または `off (opt-in: zanei config set capture.text_content true)` |
+| `PERMISSIONS OK` | `true` または `false` |
+| `DEGRADED` | 空 map は `false`。それ以外は `true` と、各 entry の indented `component: reason` 行 |
+
+この human 出力表にない JSON field は human mode では表示されません。
+
+終了コードは `running` が 0、`stopped` が 4、すべての `store_*` state が 1 です。
+
+`store_corrupt` の場合は、破損ファイルを保持したまま新しい store を作成します。
+
+```bash
+zanei stop
+mv ~/.local/state/zanei/store.sqlite ~/.local/state/zanei/store.sqlite.corrupt
+zanei start
+```
+
+既定値以外を設定している場合は、その store path に読み替えてください。退避したファイルは調査用に残り、新しい store は空です。
+
+## `record`
+
+前面での捕捉：デーモン化せず、生イベントを NDJSON で stdout（またはファイル）へストリームします。パイプ実験・検証用 — 常用の記録は [`start`](#start) を使ってください。
+
+```bash
+zanei record --stream                 # NDJSON を stdout へ
+zanei record --out events.jsonl       # ファイルへ
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--stream` | 発生順に stdout へストリーム |
+| `--out <FILE>` | ファイルへ書き出し |
+| `--format jsonl` | 出力形式（NDJSON） |
+
+## `query`
+
+条件に合う生イベントを取り出します。構造化された機械可読出力。
+
+```bash
+zanei query --since 15m --types browser.navigate,app.activate
+zanei query --since 2h --app Safari --format json --limit 500
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--since` / `--until` | 対象範囲（既定 `--since 15m`） |
+| `--types <TYPE,...>` | イベント型フィルタ（カンマ区切り。`browser.*` 可） |
+| `--app <NAME>` / `--bundle-id <ID>` | アプリ名 / バンドル ID で絞り込み |
+| `--limit <N>` | 最大件数（既定 500） |
+| `--format` | `jsonl`（既定）/ `json` / `table` |
+
+これらは query-time フィルタです — 読み出しを絞るだけで、記録対象には影響しません（[フィルタ](/ja/guides/filters)参照）。
+
+## `timeline`
+
+生イベントをセッション分割・重複除去・coalesce し、token budget 内に収めた LLM 向け要約を返します。**agent が最もよく叩くコマンド**です。
+
+```bash
+zanei timeline --since 1h --format md --token-budget 4000
+zanei timeline --since 30m --format json --granularity fine
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--since` / `--until` | 対象範囲（既定 `--since 1h`） |
+| `--format` | `md`（既定、LLM-ready Markdown）/ `json`（構造化） |
+| `--token-budget <N>` | 概算トークン上限（既定 4000、下限 34）。超過分は粒度を粗くして収める |
+| `--granularity` | `coarse`（既定、セッション単位）/ `fine`（操作単位まで） |
+
+既定の `--format md` 出力（抜粋。activity の固定句と header は次のとおり出力されます）：
+
+```md
+# Zanei timeline
+
+Range: 2026-08-16T08:00:00.000Z — 2026-08-16T09:00:00.000Z
+Estimated tokens: 3810
+Truncated: no
+
+## 2026-08-16T08:12:00.000Z — 2026-08-16T08:31:00.000Z · Safari
+
+Title: Reviewing PR #42
+- Browsed 3 pages on github.com
+- Edited text in "Reviewing PR #42"
+```
+
+`--format json` では同じ session を `range`・`token_estimate`・`truncated`・`sessions` で
+表し、activity には同じ固定句を使います。JSON session は `event_ids_truncated` を
+常に含み、token budget が許す場合は最大 100 件の `event_ids` も含みます。`event_ids` は
+session を削除する前に省略されることがあります。
+
+## `export`
+
+範囲内の全生イベントをダンプします（バックアップ / 外部処理用）。
+
+```bash
+zanei export --since 24h --format jsonl --out dump.jsonl
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--since` / `--until` | 対象範囲（既定 `--since 24h`） |
+| `--format` | `jsonl` / `json` |
+| `--out <FILE>` | 出力ファイル |
+
+## `purge`
+
+保持期間による自動 purge とは別に、手動で削除します。**破壊的操作**です。
+
+```bash
+zanei purge --before 24h   # 24 時間より古いイベントを削除
+zanei purge --all          # 全削除（確認プロンプトあり。--quiet で抑制）
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--before <TIME>` | これより古いイベントを削除 |
+| `--all` | 全削除（確認プロンプトあり） |
+
+## `filter`
+
+capture-time の許可/不許可リストを管理します。アプリ一致はストア書込前に破棄し、Chrome のサイト一致は URL イベントと本文を抑止します。タイトルと操作メタデータは残ります。セマンティクスとマッチングルールは[フィルタガイド](/ja/guides/filters)を参照。`config.toml` の `[filter]` 編集と等価ですが、キー検証と重複排除を行うぶん安全です。
+
+```bash
+zanei filter show                                      # 全リストと有効モード
+zanei filter exclude-app add com.1password.1password
+zanei filter exclude-app remove com.1password.1password
+zanei filter only-app add com.apple.Safari
+zanei filter exclude-site add example.com
+zanei filter only-site add github.com
+```
+
+| サブコマンド | `[filter]` キー | 意味 |
+| --- | --- | --- |
+| `exclude-app (add\|remove) <BUNDLE_ID か NAME>` | `exclude_apps` | 不許可リスト（その他は捕捉） |
+| `only-app (add\|remove) <BUNDLE_ID か NAME>` | `include_only_apps` | 許可リスト（設定時は列挙分のみ捕捉） |
+| `exclude-site (add\|remove) <DOMAIN>` | `exclude_websites` | Chrome URL イベントと本文の不許可リスト。URL host で照合 |
+| `only-site (add\|remove) <DOMAIN>` | `include_only_websites` | Chrome URL イベントと本文の許可リスト。URL host で照合 |
+
+- アプリは `BUNDLE_ID`（推奨）または表示名で指定。`filter show` は既定の除外リスト（`1Password`・`Keychain Access` 等）も併せて表示します。
+- 変更は次の設定監視サイクルで反映され、通常 2 秒以内です。それまでに発生したイベントには旧フィルタが適用されます。デーモン再起動は不要です。
+- `only-app` をひとつでも追加すると許可リストモードに切り替わります。`filter show` が現在のモードを明示します。
+
+## `config`
+
+```bash
+zanei config init   # 全設定項目にコメントを付けたテンプレートを生成
+zanei config path   # 設定ファイルのパスを表示
+zanei config show   # 有効設定（既定値マージ後）を表示
+zanei config edit   # $EDITOR で設定を開く
+zanei config set capture.text_content true
+```
+
+`config init` は、対応する全設定項目と現在の既定値を含むコメント付きテンプレートを
+生成します。既定の生成先は `~/.config/zanei/config.toml` で、グローバル
+`--config <path>` で別の生成先を指定できます。親ディレクトリがなければ作成します。
+成功時は生成したパスを表示して終了コード 0 で終了します。生成先にファイルが存在する
+場合は変更せず、既存ファイルのパスを表示して終了コード 1 で終了します。
+
+`config set <DOTTED_KEY> <VALUE>` は、スカラー設定を 1 項目検証して保存します。対応するキーと値は次のとおりです。
+
+| キー | 設定できる値 |
+| --- | --- |
+| `capture.text_content` | `true`、`false` |
+| `output.batch_interval_s` | 0 より大きい符号なし整数 |
+| `output.retention_hours` | 0 より大きい符号なし整数 |
+
+配列設定には対応しません。filter リストには [`zanei filter`](#filter)、その他の配列には
+`zanei config edit` を使います。不明なキー、配列キー、不正な値は保存せず終了コード 2 で
+終了します。`output.retention_hours` は稼働中デーモンが再読込し、即時 retention purge に
+反映します。記録デーモンの稼働中に `capture.text_content` または
+`output.batch_interval_s` の変更に成功すると、次のメッセージを表示します。
+
+```text
+Restart recording with `zanei stop && zanei start` for this to take effect.
+```
+
+スキーマは[設定リファレンス](/ja/reference/config)を参照。
+
+## `mcp`
+
+stdio MCP サーバを起動します — stdin/stdout 上の JSON-RPC で、ネットワーク面ゼロ。通常は MCP クライアント（Claude Code・Codex・opencode・Claude Desktop 等）から起動され、手で叩くものではありません。
+
+```bash
+zanei mcp [--store <PATH>]
+```
+
+- ストアへの**read-only ビュー**。記録デーモンとは独立プロセス。
+- 公開ツール：`get_timeline` / `query_events` / `get_status` — [MCP リファレンス](/ja/reference/mcp)参照。
+
+## `setup`
+
+対象 agent 向けの Zanei 指示と MCP 連携を設定します。native skill 対応 agent と Claude Desktop は従来どおりファイルへ設定し、opencode と pi は手動設定用の指示を表示するだけで、ファイルは変更しません。
+
+```bash
+zanei setup --agent claude            # SKILL.md を Claude Code の skill 位置へ + MCP 登録
+zanei setup --agent codex --scope user
+zanei setup --agent hermes            # skill を ~/.hermes/skills/ へ + ~/.hermes/config.yaml に MCP 登録
+zanei setup --agent pi                # 導出した README 向け指示を表示。MCP・ファイル書き込みなし
+zanei setup --agent claude-desktop    # claude_desktop_config.json へ MCP 登録
+zanei setup --agent opencode          # AGENTS.md スニペット + MCP JSON を表示。ファイル書き込みなし
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--agent` | `claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
+| `--scope` | `project`（既定。カレントリポジトリ）/ `user`（ユーザー全体）。opencode/pi の手動設定出力には影響しない |
+| `--print` | 書き込み予定のファイル変更を、実際には書き込まず表示する。opencode と pi は、このフラグの有無にかかわらずファイルを書き込まない |
+
+agent 別の挙動とセットアップ出力は [agent セットアップ](/ja/agents/setup)を参照。

@@ -1,0 +1,59 @@
+---
+title: フィルタ
+description: どのアプリ・サイトを記録するかを決める許可/不許可リスト。ストアに書き込まれる前に適用されます。
+---
+
+フィルタは、どのアプリ・サイトを記録するかを決めます。除外アプリに帰属できたイベントは保存されません。帰属不能な clipboard 変化は除外アプリと照合できないため、`app.name: "Unknown"` かつ `bundle_id`・`pid`・`window`・本文が null の `clipboard.copy` として残り得ます。除外した Chrome サイトは URL イベントを生成せず、本文も記録しませんが、タイトルと操作メタデータは残り得ます。
+
+## capture-time と query-time
+
+「アプリで絞る」には2種類あり、役割が異なります：
+
+| | capture-time フィルタ（このページ） | query-time フィルタ（`--app` 等） |
+| --- | --- | --- |
+| 効く場所 | ストアの手前 — 該当イベントは破棄 | 読み出し時のみ |
+| 目的 | 機微アプリをストアに入れない | 結果の絞り込み |
+| 設定手段 | `zanei filter` コマンド / `config.toml` の `[filter]` | 各コマンドの `--app` `--types` 等 |
+| MCP から | 変更不可（read-only） | `query_events` の引数として利用可 |
+
+## リストの管理
+
+```bash
+zanei filter show                                      # 現在の全リストと有効モード
+zanei filter exclude-app add com.1password.1password   # 不許可リストに追加
+zanei filter exclude-app remove com.1password.1password
+zanei filter only-app add com.apple.Safari             # 許可のみリストに追加
+zanei filter exclude-site add example.com              # Chrome の URL host と本文を除外
+zanei filter only-site add github.com
+```
+
+| サブコマンド | `config.toml` のキー | 意味 |
+| --- | --- | --- |
+| `exclude-app` | `exclude_apps` | 不許可リスト — それ以外は捕捉 |
+| `only-app` | `include_only_apps` | 許可リスト — 非空のとき列挙分のみ捕捉 |
+| `exclude-site` | `exclude_websites` | Chrome の URL イベントと本文の不許可リスト。URL host で照合 |
+| `only-site` | `include_only_websites` | Chrome の URL イベントと本文の許可リスト。URL host で照合 |
+
+`config.toml` を直接編集しても同じです。CLI はキーの検証と重複排除を行います。デーモンは設定ファイルを約2秒間隔で監視しており、変更は数秒以内に反映されます（再起動不要）。
+
+:::warning[許可リストモード]
+`only-app` にエントリをひとつでも追加すると、アプリ捕捉は許可リストモードに切り替わり、列挙したアプリしか記録されなくなります。`zanei filter show` が現在のモードを表示します。
+:::
+
+## マッチング
+
+- **アプリ** — `bundle_id` で照合します（推奨。表示名は変わり得ます）。`bundle_id` を持つアプリは `bundle_id` だけで照合され、表示名のエントリは `bundle_id` を持たないイベントにのみ効きます。大文字小文字は区別しません。
+- **サイト** — URL host のドット境界サフィックス一致：`example.com` は `api.example.com` にも一致しますが、`evil-example.com` には一致しません。Public Suffix List は扱わないため、`com` のような指定は全 `.com` ホストに一致します。完全なドメイン名を指定してください。サイトルールは一致する Chrome URL イベントを落とし、その window の `ui.value.data.text`・`input.key.text`・clipboard text を null にします。タイトルと操作メタデータは残ります。
+- **優先順位** — `include_only_*` が非空なら「そのリストにあり、かつ `exclude_*` にない」ものだけ捕捉。空なら「`exclude_*` にない」ものすべてを捕捉します。
+- **帰属できたイベントに対するアプリ単位の除外は全面的** — そのアプリに帰属できたすべてのイベント型（`ui.*`・`input.*`・`window.*`・…）を落とします。帰属不能な clipboard 変化は `app.name: "Unknown"` として残り得ます。
+
+## 常時有効の除外
+
+リスト設定に関係なく：
+
+- **プライベートブラウジング** — Chrome incognito は URL イベントを生成せず、本文も null のままです。タイトルと操作メタデータは残り得ます。
+- **組み込みの除外** — パスワードマネージャ・資格情報ストア（`1Password`・`Keychain Access` 等）は、`include_only_apps` でも解除できない固定の層で除外されます。`config.toml` の `exclude_apps` に見える既定エントリとは別の層で、そちらを編集しても影響しません。`filter show` は組み込み分をユーザー設定と分けて表示します。
+
+## フィルタと MCP
+
+capture-time フィルタは MCP から変更できません。MCP サーバは read-only です。フィルタの管理は CLI と `config.toml` のみです。[MCP サーバ](/ja/reference/mcp)参照。

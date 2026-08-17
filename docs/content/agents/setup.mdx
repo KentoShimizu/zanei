@@ -1,0 +1,143 @@
+---
+title: Setup
+description: Set up Zanei with native integration or printed instructions for manual placement.
+---
+
+Zanei ships one canonical `skills/SKILL.md`. `zanei setup` installs it unchanged for agents with native skill support. For opencode and pi, it derives an instruction snippet, prints it to stdout, and leaves placement to you. For MCP, setup prints the registration command to run — only Claude Desktop's config file is written directly; opencode's MCP JSON is likewise printed for manual configuration.
+
+```bash
+zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
+```
+
+| Flag | Description |
+| --- | --- |
+| `--agent` | Target: `claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
+| `--scope` | `project` (default; current repository) or `user` (account-wide). It has no effect on the manual opencode/pi output |
+| `--print` | Preview planned file changes without writing. opencode and pi never write files, with or without this flag |
+
+:::note
+For agents that write files, run with `--print` first to preview every file that would be created or modified.
+:::
+
+## Per-agent setup
+
+<Tabs param="agent">
+<Tab title="Claude Code">
+
+```bash
+zanei setup --agent claude
+```
+
+This installs the canonical `SKILL.md` unchanged where Claude Code discovers skills, and prints the MCP registration command to run:
+
+```bash
+claude mcp add zanei -- zanei mcp
+```
+
+With `--scope user`, the skill installs for all your projects instead of the current repository.
+
+</Tab>
+<Tab title="Codex CLI">
+
+```bash
+zanei setup --agent codex
+```
+
+Installs the canonical `SKILL.md` unchanged at `~/.codex/skills/zanei/SKILL.md` and prints the MCP registration command to run:
+
+```bash
+codex mcp add zanei -- zanei mcp
+```
+
+or in Codex's `config.toml`:
+
+```toml config.toml
+[mcp_servers.zanei]
+command = "zanei"
+args = ["mcp"]
+```
+
+Codex skills and MCP registration are user-global, so setup always targets `~/.codex/` regardless of `--scope`.
+
+</Tab>
+<Tab title="opencode">
+
+```bash
+zanei setup --agent opencode
+```
+
+This command does not modify any files. It prints the MCP JSON below and an `AGENTS.md` snippet derived from the canonical `SKILL.md` body. Add the JSON to `opencode.json`, then paste the instruction snippet wherever you prefer in `AGENTS.md`. The behavior is the same with or without `--print`.
+
+```json opencode.json
+{
+  "mcp": {
+    "zanei": { "type": "local", "command": ["zanei", "mcp"] }
+  }
+}
+```
+
+</Tab>
+<Tab title="Hermes Agent">
+
+```bash
+zanei setup --agent hermes
+```
+
+Hermes Agent has first-class skills and MCP, both user-global under `~/.hermes/`. Setup installs the canonical `SKILL.md` unchanged at `~/.hermes/skills/zanei/SKILL.md` and prints the MCP registration command to run:
+
+```bash
+hermes mcp add zanei --command zanei --args mcp
+```
+
+or in `~/.hermes/config.yaml`:
+
+```yaml config.yaml
+mcp_servers:
+  zanei:
+    command: "zanei"
+    args: ["mcp"]
+```
+
+Because Hermes Agent configuration is user-global, `--scope project` does not apply here — setup always targets `~/.hermes/`.
+
+</Tab>
+<Tab title="Claude Desktop">
+
+```bash
+zanei setup --agent claude-desktop
+```
+
+Claude Desktop has no shell, so MCP is the only surface. The command registers the server in `claude_desktop_config.json`:
+
+```json claude_desktop_config.json
+{
+  "mcpServers": {
+    "zanei": {
+      "command": "zanei",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+</Tab>
+<Tab title="pi">
+
+```bash
+zanei setup --agent pi
+```
+
+pi ships without MCP and does not support native skills. This command does not modify any files: it derives an instruction snippet from the canonical `SKILL.md` body and prints it to stdout. Paste the snippet wherever you prefer in a README or another instruction file that pi reads. The behavior is the same with or without `--print`; `zanei mcp` is not used.
+
+</Tab>
+</Tabs>
+
+Other MCP-capable agents not listed above: register `zanei mcp` as a stdio server using the client's standard MCP configuration — the JSON shape is the same as the Claude Desktop snippet.
+
+## Verify it works
+
+1. Make sure recording is on: `zanei status` (agents can check this themselves via `get_status`).
+2. Ask your agent something like *"check what I was working on in the last hour."*
+3. The agent should call `get_timeline` (MCP) or `zanei timeline` (CLI) and answer from your actual activity.
+
+If the agent reports that recording is off, run `zanei start`. If it exits with code 3, the recorder is running but needs permissions: grant them using its instructions, run `zanei stop && zanei start`, then verify with `zanei doctor` (see the [permissions guide](/guides/permissions)).

@@ -1,0 +1,143 @@
+---
+title: セットアップ
+description: native 連携または手動配置用に表示される指示で、agent に Zanei を設定する。
+---
+
+Zanei が持つ agent 向け指示の単一ソースは、標準形式の `skills/SKILL.md` だけです。`zanei setup` は skill 対応 agent にはそのまま配置します。opencode と pi では指示スニペットを導出して stdout に表示し、配置はユーザー自身が行います。MCP は各 agent 向けの登録コマンドを表示します — 設定ファイルへ直接書き込むのは Claude Desktop のみです。opencode の MCP JSON も手動設定用に表示します。
+
+```bash
+zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--agent` | 対象：`claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
+| `--scope` | `project`（既定。カレントリポジトリ）/ `user`（ユーザー全体）。opencode/pi の手動設定出力には影響しない |
+| `--print` | 書き込み予定のファイル変更を、実際には書き込まず表示する。opencode と pi は、このフラグの有無にかかわらずファイルを書き込まない |
+
+:::note
+ファイルを書き込む agent では、まず `--print` を付けて実行すると、作成・変更されるファイルをすべて事前確認できます。
+:::
+
+## agent 別セットアップ
+
+<Tabs param="agent">
+<Tab title="Claude Code">
+
+```bash
+zanei setup --agent claude
+```
+
+単一ソースの `SKILL.md` を変更せずに Claude Code が skill を発見する位置へ配置し、実行すべき MCP 登録コマンドを表示します：
+
+```bash
+claude mcp add zanei -- zanei mcp
+```
+
+`--scope user` を付けると、カレントリポジトリではなく全プロジェクト共通で有効になります。
+
+</Tab>
+<Tab title="Codex CLI">
+
+```bash
+zanei setup --agent codex
+```
+
+単一ソースの `SKILL.md` を変更せずに `~/.codex/skills/zanei/SKILL.md` へ配置し、実行すべき MCP 登録コマンドを表示します：
+
+```bash
+codex mcp add zanei -- zanei mcp
+```
+
+または Codex の `config.toml` に：
+
+```toml config.toml
+[mcp_servers.zanei]
+command = "zanei"
+args = ["mcp"]
+```
+
+Codex の skill と MCP 登録はユーザーグローバルのため、`--scope` にかかわらず常に `~/.codex/` 配下を対象にします。
+
+</Tab>
+<Tab title="opencode">
+
+```bash
+zanei setup --agent opencode
+```
+
+このコマンドはファイルを一切変更しません。以下の MCP JSON と、単一ソースの `SKILL.md` 本文から導出した `AGENTS.md` スニペットを stdout に表示します。JSON は `opencode.json` に追加し、指示スニペットは `AGENTS.md` の好きな場所に貼り付けてください。`--print` の有無による挙動の違いはありません。
+
+```json opencode.json
+{
+  "mcp": {
+    "zanei": { "type": "local", "command": ["zanei", "mcp"] }
+  }
+}
+```
+
+</Tab>
+<Tab title="Hermes Agent">
+
+```bash
+zanei setup --agent hermes
+```
+
+Hermes Agent は skill と MCP を両方第一級で持ち、どちらも `~/.hermes/` 配下のユーザーグローバル設定です。setup は単一ソースの `SKILL.md` を変更せずに `~/.hermes/skills/zanei/SKILL.md` へ配置し、実行すべき MCP 登録コマンドを表示します：
+
+```bash
+hermes mcp add zanei --command zanei --args mcp
+```
+
+または `~/.hermes/config.yaml` に：
+
+```yaml config.yaml
+mcp_servers:
+  zanei:
+    command: "zanei"
+    args: ["mcp"]
+```
+
+Hermes Agent の設定はユーザーグローバルのため、`--scope project` はここでは適用されません — setup は常に `~/.hermes/` を対象にします。
+
+</Tab>
+<Tab title="Claude Desktop">
+
+```bash
+zanei setup --agent claude-desktop
+```
+
+Claude Desktop はシェルを持たないため、MCP で接続します。`claude_desktop_config.json` にサーバを登録します：
+
+```json claude_desktop_config.json
+{
+  "mcpServers": {
+    "zanei": {
+      "command": "zanei",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+</Tab>
+<Tab title="pi">
+
+```bash
+zanei setup --agent pi
+```
+
+pi は MCP を搭載せず、skill にも対応していません。このコマンドはファイルを一切変更せず、単一ソースの `SKILL.md` 本文から指示スニペットを導出して stdout に表示します。スニペットは README など、pi が読み込む指示ファイルの好きな場所に貼り付けてください。`--print` の有無による挙動の違いはなく、`zanei mcp` も使いません。
+
+</Tab>
+</Tabs>
+
+ここに載っていない MCP 対応 agent の場合：クライアント標準の MCP 設定で `zanei mcp` を stdio サーバとして登録してください。JSON の形は Claude Desktop のスニペットと同じです。
+
+## 動作確認
+
+1. 記録が動いていることを確認：`zanei status`（agent 自身も `get_status` で確認できます）。
+2. agent に聞いてみる：*「直近 1 時間で何をしていたか確認して」*
+3. agent が `get_timeline`（MCP）または `zanei timeline`（CLI）を呼び、実際の行動履歴から答えれば成功です。
+
+agent が「記録が動いていない」と報告した場合は `zanei start` を実行します。終了コード 3 なら recorder は起動済みですが権限が必要です。表示された手順で付与し、`zanei stop && zanei start` してから `zanei doctor` で確認してください（[権限ガイド](/ja/guides/permissions)）。

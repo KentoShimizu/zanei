@@ -1,0 +1,101 @@
+---
+title: クイックスタート
+description: インストールから最初のタイムライン取得、agent 連携まで。所要 5 分。
+---
+
+**macOS** が必要です（Apple Silicon / Intel）。現在対応しているのは macOS のみです。
+
+<Steps>
+<Step title="インストール">
+
+Homebrew と GitHub Releases での配布は準備中です。利用可能になるまでは、ソースから
+app bundle をビルドしてインストールします。
+
+```bash
+git clone https://github.com/KentoShimizu/zanei.git
+cd zanei
+cargo build --release
+./packaging/make-app.sh -
+mkdir -p "$HOME/.local/libexec/zanei" "$HOME/.cargo/bin"
+ditto dist/Zanei.app "$HOME/.local/libexec/zanei/Zanei.app"
+ln -sfn "$HOME/.local/libexec/zanei/Zanei.app/Contents/MacOS/zanei" \
+  "$HOME/.cargo/bin/zanei"
+```
+
+`$HOME/.cargo/bin` が `PATH` に含まれていることを確認してください。
+
+:::warning[ソースビルドと macOS 権限]
+`-` はローカル利用向けの ad-hoc 署名 app を作るため、再ビルド後に macOS が権限の
+再付与を求めることがあります。再ビルド後も権限を維持するには、永続的な開発用証明書の
+identity を `make-app.sh` に渡してください。詳細は
+[packaging/README.md](https://github.com/KentoShimizu/zanei/blob/main/packaging/README.md)を参照してください。
+
+素の `cargo install` バイナリは配布用 app bundle ではありません。`+` で追加した権限の行が
+定着しないことがあり、`dev.zanei.recorder` 宛ての reset も適用されません。安定して権限を
+管理するには app bundle 版を使用してください。
+:::
+
+</Step>
+<Step title="記録を開始する">
+
+設定に応じて必要なアクセシビリティと入力監視の権限を macOS に要求させるため、まずバックグラウンド recorder を起動します。
+
+```bash
+zanei start
+```
+
+初回は recorder の起動後に権限不足が報告され、`start` が終了コード 3 を返すことがあります。デーモンは動いたままなので、その状態で権限を付与できます。オートメーションは、Zanei が初めて Chrome に問い合わせるときに macOS が別途確認します。
+
+</Step>
+<Step title="権限を付与して確認する">
+
+権限ダイアログはバンドル版を `Zanei` 名義で表示し、**Privacy & Security → Accessibility** にはその行が自動追加されます。**Input Monitoring** はダイアログでの付与が有効でも、行が自動追加されないことがあります。再起動後は recorder 由来の `zanei doctor` の結果を正とします。一覧からその権限を操作する場合は、`+` でインストール済みの `Zanei.app` を選択します。まだ権限不足と報告されている間は、`zanei doctor --fix` がペインを開いて正確な path をコピーします。
+
+付与結果を recorder に反映するため再起動し、recorder 自身の報告を確認します。
+
+```bash
+zanei stop && zanei start
+zanei doctor
+```
+
+:::note
+`zanei doctor --fix` は不足権限の System Settings ペインを開き、fallback で使う path をクリップボードへコピーします。付与そのものは必ずユーザーが行い、`doctor` は recorder 自身に適用されている状態を検証します。手動追加と解除の詳細は[権限ガイド](/ja/guides/permissions)を参照してください。
+:::
+
+</Step>
+<Step title="タイムラインを取得する">
+
+しばらく普通に作業してから、直近の履歴を取り出してみます。
+
+```bash
+zanei timeline --since 15m
+```
+
+セッション分割・重複除去済みの Markdown タイムラインが出力されます。これが agent に渡る基本形です。生イベントが見たい場合は `zanei query --since 15m` を使います（[データの取り出し](/ja/guides/timeline)）。
+
+</Step>
+<Step title="agent と接続する（任意）">
+
+使っている agent に skill を配置し、MCP の登録コマンドを表示します。
+
+```bash
+zanei setup --agent claude
+```
+
+以後、agent に「さっきまでの作業を見て続きをやって」と言えば、agent がタイムラインを読んで文脈を復元します。対応 agent 一覧と各種セットアップは [Agent 連携](/ja/agents)を参照してください。
+
+</Step>
+</Steps>
+
+## 記録の既定値
+
+- データはローカルの SQLite（`~/.local/state/zanei/store.sqlite`）に保存され、外部には送信されません。
+- キー入力の内容は既定で記録されません。記録されるのは「入力があった事実とフィールド種別」までです。
+  明示的に opt-in するには `zanei config set capture.text_content true` を実行し、
+  `zanei stop && zanei start` で記録を再起動します。
+- 記録は既定 48 時間で自動削除されます（[設定](/ja/reference/config)で変更可能）。
+- 記録したくないアプリやサイトは、[フィルタ](/ja/guides/filters)で書き込まれる前に除外できます。
+
+:::note[止めたくなったら]
+`zanei pause --for 1h` で一時停止、`zanei stop` で完全停止（データは保持）、`zanei purge --all` で全データ削除です。
+:::

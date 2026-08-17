@@ -1,0 +1,54 @@
+---
+title: Agent 連携
+description: Zanei が AI agent とつながる仕組み — 2 つの面と skill 指示レイヤー、対応 agent、agent にできること・できないこと。
+---
+
+Zanei は、あなたが打ち込まなかった文脈 — 何を読んでいたか、どの PR をレビューしていたか、どこで中断したか — を agent に渡します。どの連携面も同じローカルストアの上のラッパーです。
+
+## 2 つの面と、1 つの指示レイヤー
+
+Zanei が履歴を露出する面は 2 つです — どちらも同じローカルストアの薄いラッパーです：
+
+| 面 | 実体 | 使う相手 |
+| --- | --- | --- |
+| **CLI** | `zanei` バイナリそのもの。シェルを持つ agent が直接呼ぶ | ターミナル型 agent（Claude Code・Codex CLI・opencode・pi・…） |
+| **[MCP サーバ](/ja/reference/mcp)** | `zanei mcp`。read-only ツールを公開する stdio JSON-RPC サーバ | シェルなしクライアント（Claude Desktop・ChatGPT コネクタ）にはこれが唯一の道。ターミナル型 agent も利用可 |
+
+skill は第 3 の面ではなく、「いつ履歴を見るか」「トークンを抑える呼び方」を agent に伝える指示レイヤーです。指示の届き方は面ごとに異なります：
+
+- MCP では指示は内在化されています。ツール名・説明・既定値・スキーマはプロトコル（`tools/list`）の中で配信されるため、MCP クライアントに追加の設定は不要です。Claude Desktop の [setup](/ja/agents/setup) がサーバ登録だけで済むのはこのためです。
+- CLI は agent に対して自己記述的でないため、Zanei は単一の `skills/SKILL.md` を指示の正本として持ちます。setup は skill 対応 agent にはそのまま配置します。opencode と pi では `AGENTS.md` または README 向けの指示を導出して表示し、配置はユーザー自身が行います。各 agent はその指示を固有の方式で読み込みます。
+
+## 対応 agent
+
+| Agent | CLI + skill | MCP (stdio) |
+| --- | --- | --- |
+| Claude Code | ✅ `SKILL.md` | ✅ |
+| Codex CLI | ✅ `SKILL.md`（`~/.codex/skills/`） | ✅ `codex mcp add` |
+| opencode | ✅ `SKILL.md` から導出してユーザーが配置する `AGENTS.md` スニペット | ✅ `opencode.json`（手動設定用 JSON を表示） |
+| Hermes Agent | ✅ `SKILL.md`（`~/.hermes/skills/`） | ✅ `hermes mcp add` |
+| pi | ✅ **推奨経路**（CLI + `SKILL.md` から導出してユーザーが配置する README 向け指示） | —（pi は思想として MCP 非搭載。CLI 経路でカバー） |
+| Claude Desktop・ChatGPT コネクタ（シェルなし） | — | ✅ **唯一の道** |
+
+setup は skill を配置し、agent 向けの MCP 登録コマンドと、opencode / pi に必要な手動設定用の指示を表示します — [セットアップ](/ja/agents/setup)参照。
+
+## agent にできること
+
+MCP 経由では 3 つの read-only ツールが使えます（詳細は [MCP リファレンス](/ja/reference/mcp)）：
+
+- **`get_timeline`** — LLM-ready タイムライン。`zanei timeline` と等価。agent が最もよく呼ぶツール。
+- **`query_events`** — 生イベント検索。`zanei query` と等価。
+- **`get_status`** — 記録が動いているか・権限は大丈夫か。`running` が `false` のとき、良い agent は「履歴は現在記録されていない」とユーザーに伝えられます。
+
+CLI 経由なら（あなたの承認フローの下で）記録の開始・停止を含むすべてが使えます。同梱の skill が教えるのは読み出し系・`status` / `doctor` の診断・「記録設定の変更はユーザーの明示的な依頼があったときだけ」という規律です。
+
+## agent にできないこと
+
+MCP サーバは記録デーモンとは独立したプロセスで動く、ストアへの読み取り専用ビューです：
+
+- 記録の開始・停止はできません。
+- 設定の変更はできません。[capture-time フィルタ](/ja/guides/filters)も含みます。agent が MCP 経由で記録対象を広げることはできません。
+
+## データの流れについて
+
+Zanei 自体はデータをどこにも送りません。タイムラインを読んだ agent は通常それを LLM プロバイダへ転送します。そのホップは agent の管轄です。同梱の skill は、数日分を引くのではなく送信前に範囲を絞る（例：`--since 2h`、token budget 4000）よう agent に指示しています。

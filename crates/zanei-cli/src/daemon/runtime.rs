@@ -1,0 +1,569 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use zanei_collector::Permission;
+use zanei_core::{
+    config::{CONFIG_WATCH_INTERVAL, Config, ConfigWatcher},
+    normalize::format_timestamp,
+    store::{DaemonMode, DaemonPermissions, DaemonState, StoreReader, StoreStatus, StoreWriter},
+};
+
+use super::{
+    DaemonError, StoreOwner, StoreOwnership,
+    collectors::CollectorSet,
+    main_thread,
+    pipeline::{Pipeline, SharedStoreWriter},
+    runtime_support::{ShutdownSignals, StdinEofWatcher, ensure_store_parent, record_writer},
+};
+use crate::permissions::{probe_permissions, request_missing_permissions};
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const PAUSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const RETENTION_PURGE_INTERVAL: time::Duration = time::Duration::minutes(10);
+const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordOutput {
+    Stdout,
+    File(PathBuf),
+}
+
+pub fn required_permissions_for(config: &Config) -> BTreeSet<Permission> {
+    CollectorSet::new(config).required_permissions()
+}
+
+pub fn run_daemon(
+    config_path: &Path,
+    store_path: &Path,
+    mode: DaemonMode,
+) -> Result<(), DaemonError> {
+    let config = Config::load(config_path)?;
+    ensure_store_parent(store_path)?;
+    let started_at = format_timestamp(OffsetDateTime::now_utc());
+    let owner = StoreOwner::new(mode, started_at);
+    let ownership = StoreOwnership::acquire(store_path, owner.clone())?;
+    let main_run_loop = main_thread::prepare()?;
+    let mut writer = StoreWriter::open(store_path)?;
+    writer.purge_retention(OffsetDateTime::now_utc(), config.output.retention_hours)?;
+    let writer = Arc::new(Mutex::new(writer));
+    let reader = StoreReader::open(store_path)?;
+    let initial_status = reader.status()?;
+    let base_dropped = initial_status.events_dropped;
+    let base_collector_failures = initial_status.collector_failures.clone();
+    let mut pipeline = Pipeline::store(&config, Arc::clone(&writer))?;
+    let mut collectors = CollectorSet::new(&config);
+    let permission_request_error = request_missing_permissions(&collectors.required_permissions())
+        .err()
+        .map(|error| error.to_string());
+    let _main_thread_observers = collectors.prepare_main_thread();
+    let mut runtime_degraded = BTreeMap::new();
+    if let Some(error) = permission_request_error {
+        runtime_degraded.insert("permission_request".to_owned(), error);
+    }
+    let mut paused = false;
+    main_thread::run(main_run_loop, "daemon-runtime", move || {
+        let _ownership = ownership;
+        let loop_result = ActiveDaemon {
+            config_path,
+            active_retention_hours: config.output.retention_hours,
+            pending_retention_hours: None,
+            writer: &writer,
+            reader: &reader,
+            pipeline: &pipeline,
+            collectors: &mut collectors,
+            owner: &owner,
+            base_dropped,
+            base_collector_failures: &base_collector_failures,
+            paused: &mut paused,
+            intake_suspended: false,
+            degraded: &mut runtime_degraded,
+            last_status: initial_status,
+            last_permissions: None,
+        }
+        .run();
+
+        let store_accepts_intake = pipeline
+            .store_health()
+            .is_ok_and(|health| health.accepts_intake());
+        if pipeline.is_finished() || !store_accepts_intake {
+            collectors.suspend();
+        } else {
+            collectors.stop();
+        }
+        let pipeline_result = pipeline.shutdown();
+        let clear_result = clear_heartbeat(
+            &writer,
+            &reader,
+            &collectors,
+            &pipeline,
+            base_dropped,
+            &base_collector_failures,
+        );
+        loop_result.and(pipeline_result).and(clear_result)
+    })?
+}
+
+pub fn run_record(config_path: &Path, output: RecordOutput) -> Result<(), DaemonError> {
+    let config = Config::load(config_path)?;
+    let main_run_loop = main_thread::prepare()?;
+    let writer = record_writer(output)?;
+    let mut pipeline = Pipeline::stream(&config, writer)?;
+    let mut collectors = CollectorSet::new(&config);
+    let _main_thread_observers = collectors.prepare_main_thread();
+    main_thread::run(main_run_loop, "record-runtime", move || {
+        let record_result = wait_for_record_shutdown(&pipeline, &mut collectors);
+        collectors.stop();
+        let pipeline_result = pipeline.shutdown();
+        record_result.and(pipeline_result)
+    })?
+}
+
+struct ActiveDaemon<'a> {
+    config_path: &'a Path,
+    active_retention_hours: u64,
+    pending_retention_hours: Option<u64>,
+    writer: &'a SharedStoreWriter,
+    reader: &'a StoreReader,
+    pipeline: &'a Pipeline,
+    collectors: &'a mut CollectorSet,
+    owner: &'a StoreOwner,
+    base_dropped: u64,
+    base_collector_failures: &'a BTreeMap<String, u64>,
+    paused: &'a mut bool,
+    intake_suspended: bool,
+    degraded: &'a mut BTreeMap<String, String>,
+    last_status: StoreStatus,
+    last_permissions: Option<DaemonPermissions>,
+}
+
+impl ActiveDaemon<'_> {
+    fn run(mut self) -> Result<(), DaemonError> {
+        let signals = ShutdownSignals::install()?;
+        *self.paused =
+            normalize_pause_request(self.writer, self.last_status.paused_until.as_deref())?;
+        if !*self.paused {
+            self.collectors.start(self.pipeline.sender());
+        }
+        self.publish_heartbeat()?;
+        self.run_loop(signals.stop_flag())
+    }
+
+    fn run_loop(&mut self, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
+        let mut watcher = ConfigWatcher::new(self.config_path.to_owned())?;
+        let mut last_heartbeat = Instant::now();
+        let mut last_pause_poll = Instant::now();
+        let mut last_config_poll = Instant::now();
+        let mut retention_purge_deadline = OffsetDateTime::now_utc() + RETENTION_PURGE_INTERVAL;
+
+        while !stop.load(Ordering::Relaxed) {
+            self.sync_store_intake()?;
+            if last_pause_poll.elapsed() >= PAUSE_POLL_INTERVAL {
+                self.update_pause_state()?;
+                last_pause_poll = Instant::now();
+            }
+            let now = OffsetDateTime::now_utc();
+            if last_config_poll.elapsed() >= CONFIG_WATCH_INTERVAL {
+                let retention_promoted = match watcher.reload_if_changed() {
+                    Ok(Some(config)) => {
+                        self.collectors.replace_filter(config.filter.clone());
+                        self.pipeline.replace_filter(&config.filter)?;
+                        self.degraded.remove("config");
+                        self.request_retention_reload(config.output.retention_hours, now)?
+                    }
+                    Ok(None) => self.retry_pending_retention(now)?,
+                    Err(error) => {
+                        self.degraded.insert("config".to_owned(), error.to_string());
+                        false
+                    }
+                };
+                if retention_promoted {
+                    retention_purge_deadline = now + RETENTION_PURGE_INTERVAL;
+                }
+                last_config_poll = Instant::now();
+            }
+            if now >= retention_purge_deadline {
+                self.purge_active_retention(now)?;
+                retention_purge_deadline = now + RETENTION_PURGE_INTERVAL;
+            }
+            if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                ensure_pipeline_running(self.pipeline, self.collectors)?;
+                let permissions = self.refresh_permissions();
+                if !*self.paused && !self.intake_suspended {
+                    if let Some(permissions) = permissions.as_ref() {
+                        self.collectors.supervise(
+                            self.pipeline.sender(),
+                            permissions,
+                            Instant::now(),
+                        )?;
+                    }
+                }
+                self.publish_heartbeat_with_permissions(permissions)?;
+                last_heartbeat = Instant::now();
+            }
+            thread::sleep(RUNTIME_POLL_INTERVAL);
+        }
+        Ok(())
+    }
+
+    fn request_retention_reload(
+        &mut self,
+        requested_retention_hours: u64,
+        now: OffsetDateTime,
+    ) -> Result<bool, DaemonError> {
+        if requested_retention_hours == self.active_retention_hours {
+            self.pending_retention_hours = None;
+            self.degraded.remove("retention");
+            return Ok(false);
+        }
+        self.pending_retention_hours = Some(requested_retention_hours);
+        self.retry_pending_retention(now)
+    }
+
+    fn retry_pending_retention(&mut self, now: OffsetDateTime) -> Result<bool, DaemonError> {
+        let Some(retention_hours) = self.pending_retention_hours else {
+            return Ok(false);
+        };
+        let purge_result = lock_writer(self.writer)?.purge_retention(now, retention_hours);
+        match purge_result {
+            Ok(_) => {
+                self.active_retention_hours = retention_hours;
+                self.pending_retention_hours = None;
+                self.degraded.remove("retention");
+                self.publish_heartbeat()?;
+                Ok(true)
+            }
+            Err(error) => {
+                self.degraded
+                    .insert("retention".to_owned(), error.to_string());
+                Ok(false)
+            }
+        }
+    }
+
+    fn purge_active_retention(&mut self, now: OffsetDateTime) -> Result<(), DaemonError> {
+        let purge_result =
+            lock_writer(self.writer)?.purge_retention(now, self.active_retention_hours);
+        match purge_result {
+            Ok(_) if self.pending_retention_hours.is_none() => {
+                self.degraded.remove("retention");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.degraded
+                    .insert("retention".to_owned(), error.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_store_intake(&mut self) -> Result<(), DaemonError> {
+        let accepts_intake = self.pipeline.store_health()?.accepts_intake();
+        match (accepts_intake, self.intake_suspended) {
+            (false, false) => {
+                self.collectors.suspend();
+                self.intake_suspended = true;
+                self.degraded.insert(
+                    "store_intake".to_owned(),
+                    "capture intake is stopped while the store recovers".to_owned(),
+                );
+                self.publish_heartbeat()?;
+            }
+            (true, true) => {
+                self.intake_suspended = false;
+                self.degraded.remove("store_intake");
+                if !*self.paused {
+                    self.collectors.start(self.pipeline.sender());
+                }
+                self.publish_heartbeat()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn update_pause_state(&mut self) -> Result<(), DaemonError> {
+        let status = self.reader.status()?;
+        let requested = normalize_pause_request(self.writer, status.paused_until.as_deref())?;
+        match (requested, *self.paused) {
+            (true, false) => {
+                self.collectors.stop();
+                self.pipeline.flush()?;
+                *self.paused = true;
+            }
+            (false, true) => {
+                if !self.intake_suspended {
+                    self.collectors.start(self.pipeline.sender());
+                }
+                *self.paused = false;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn publish_heartbeat(&mut self) -> Result<(), DaemonError> {
+        let permissions = self.refresh_permissions();
+        self.publish_heartbeat_with_permissions(permissions)
+    }
+
+    fn refresh_permissions(&mut self) -> Option<DaemonPermissions> {
+        match probe_permissions(&self.collectors.required_permissions()) {
+            Ok(permissions) => {
+                self.degraded.remove("permissions");
+                self.last_permissions = Some(permissions.clone());
+            }
+            Err(error) => {
+                self.degraded
+                    .insert("permissions".to_owned(), error.to_string());
+            }
+        }
+        self.last_permissions.clone()
+    }
+
+    fn publish_heartbeat_with_permissions(
+        &mut self,
+        permissions: Option<DaemonPermissions>,
+    ) -> Result<(), DaemonError> {
+        match self.reader.status() {
+            Ok(status) => {
+                self.last_status = status;
+                self.degraded.remove("store_read");
+            }
+            Err(error) => {
+                self.degraded
+                    .insert("store_read".to_owned(), error.to_string());
+            }
+        }
+        let collector_health = self.collectors.health();
+        let mut degraded = self.degraded.clone();
+        degraded.extend(self.pipeline.degraded()?);
+        degraded.extend(collector_health.degraded);
+        self.pipeline.heartbeat(DaemonState {
+            pid: Some(i64::from(self.owner.pid)),
+            started_at: Some(self.owner.started_at.clone()),
+            instance_id: Some(self.owner.instance_id.clone()),
+            mode: Some(self.owner.mode),
+            heartbeat_at: Some(format_timestamp(OffsetDateTime::now_utc())),
+            retention_hours: Some(self.active_retention_hours),
+            paused_until: self.last_status.paused_until.clone(),
+            events_captured: self.last_status.events_captured,
+            events_dropped: self
+                .base_dropped
+                .saturating_add(collector_health.dropped)
+                .saturating_add(self.pipeline.dropped()),
+            last_event_ts: self.last_status.last_event_ts.clone(),
+            degraded,
+            collector_failures: merge_collector_failures(
+                self.base_collector_failures,
+                &collector_health.collector_failures,
+            ),
+            permissions,
+        })
+    }
+}
+
+fn ensure_pipeline_running(
+    pipeline: &Pipeline,
+    collectors: &mut CollectorSet,
+) -> Result<(), DaemonError> {
+    if pipeline.is_finished() {
+        collectors.suspend();
+        Err(DaemonError::ThreadTerminated { thread: "pipeline" })
+    } else {
+        Ok(())
+    }
+}
+
+fn wait_for_record_shutdown(
+    pipeline: &Pipeline,
+    collectors: &mut CollectorSet,
+) -> Result<(), DaemonError> {
+    let signals = ShutdownSignals::install()?;
+    let stop = signals.stop_flag();
+    let stdin = StdinEofWatcher::start()?;
+    collectors.start(pipeline.sender());
+
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(watcher) = stdin.as_ref() {
+            match watcher.try_result() {
+                Some(Ok(())) => break,
+                Some(Err(error)) => return Err(DaemonError::Stdin(error)),
+                None => {}
+            }
+        }
+        thread::sleep(RUNTIME_POLL_INTERVAL);
+    }
+    Ok(())
+}
+
+fn normalize_pause_request(
+    writer: &SharedStoreWriter,
+    paused_until: Option<&str>,
+) -> Result<bool, DaemonError> {
+    let Some(paused_until) = paused_until else {
+        return Ok(false);
+    };
+    if paused_until == "infinity" {
+        return Ok(true);
+    }
+    let deadline = OffsetDateTime::parse(paused_until, &Rfc3339).map_err(|source| {
+        DaemonError::InvalidPausedUntil {
+            value: paused_until.to_owned(),
+            source,
+        }
+    })?;
+    if deadline > OffsetDateTime::now_utc() {
+        return Ok(true);
+    }
+    lock_writer(writer)?.set_paused_until(None)?;
+    Ok(false)
+}
+
+fn clear_heartbeat(
+    writer: &SharedStoreWriter,
+    reader: &StoreReader,
+    collectors: &CollectorSet,
+    pipeline: &Pipeline,
+    base_dropped: u64,
+    base_collector_failures: &BTreeMap<String, u64>,
+) -> Result<(), DaemonError> {
+    let writer = lock_writer(writer)?;
+    let status = reader.status()?;
+    let collector_health = collectors.health();
+    writer.write_daemon_state(&DaemonState {
+        pid: None,
+        started_at: None,
+        instance_id: None,
+        mode: None,
+        heartbeat_at: None,
+        retention_hours: None,
+        paused_until: status.paused_until,
+        events_captured: status.events_captured,
+        events_dropped: base_dropped
+            .saturating_add(collector_health.dropped)
+            .saturating_add(pipeline.dropped()),
+        last_event_ts: status.last_event_ts,
+        degraded: BTreeMap::new(),
+        collector_failures: merge_collector_failures(
+            base_collector_failures,
+            &collector_health.collector_failures,
+        ),
+        permissions: None,
+    })?;
+    Ok(())
+}
+
+fn merge_collector_failures(
+    base: &BTreeMap<String, u64>,
+    current: &BTreeMap<String, u64>,
+) -> BTreeMap<String, u64> {
+    let mut merged = base.clone();
+    for (collector, failures) in current {
+        merged
+            .entry(collector.clone())
+            .and_modify(|total| *total = total.saturating_add(*failures))
+            .or_insert(*failures);
+    }
+    merged
+}
+
+fn lock_writer(
+    writer: &SharedStoreWriter,
+) -> Result<std::sync::MutexGuard<'_, StoreWriter>, DaemonError> {
+    writer
+        .lock()
+        .map_err(|_| DaemonError::SynchronizationPoisoned {
+            name: "store writer",
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+        thread,
+        time::Duration as StdDuration,
+    };
+
+    use tempfile::NamedTempFile;
+    use time::Duration;
+    use zanei_core::{
+        config::Config,
+        normalize::format_timestamp,
+        store::DaemonState,
+        store::{StoreReader, StoreWriter},
+    };
+
+    use super::{
+        CollectorSet, Pipeline, ensure_pipeline_running, merge_collector_failures,
+        normalize_pause_request,
+    };
+
+    #[test]
+    fn collector_failures_accumulate_across_daemon_instances() {
+        let base = BTreeMap::from([("eventtap".to_owned(), 2), ("ax".to_owned(), u64::MAX)]);
+        let current = BTreeMap::from([("eventtap".to_owned(), 3), ("ax".to_owned(), 1)]);
+
+        assert_eq!(
+            merge_collector_failures(&base, &current),
+            BTreeMap::from([("ax".to_owned(), u64::MAX), ("eventtap".to_owned(), 5),])
+        );
+    }
+
+    #[test]
+    fn expired_pause_is_cleared_atomically() {
+        let store = NamedTempFile::new().expect("temporary store");
+        let writer = Arc::new(Mutex::new(
+            StoreWriter::open(store.path()).expect("store writer"),
+        ));
+        let expired = format_timestamp(time::OffsetDateTime::now_utc() - Duration::seconds(1));
+        writer
+            .lock()
+            .expect("writer lock")
+            .set_paused_until(Some(&expired))
+            .expect("pause state");
+
+        assert!(!normalize_pause_request(&writer, Some(&expired)).expect("pause request"));
+        assert_eq!(
+            StoreReader::open(store.path())
+                .expect("store reader")
+                .status()
+                .expect("store status")
+                .paused_until,
+            None
+        );
+    }
+
+    #[test]
+    fn pipeline_panic_makes_the_daemon_tick_fail() {
+        let config = Config::default();
+        let mut pipeline = Pipeline::panicking_store(&config).expect("pipeline");
+        pipeline
+            .heartbeat(DaemonState::default())
+            .expect("trigger writer panic");
+        for _ in 0..100 {
+            if pipeline.is_finished() {
+                break;
+            }
+            thread::sleep(StdDuration::from_millis(1));
+        }
+        assert!(pipeline.is_finished());
+
+        let mut collectors = CollectorSet::new(&config);
+        assert!(matches!(
+            ensure_pipeline_running(&pipeline, &mut collectors),
+            Err(super::DaemonError::ThreadTerminated { thread: "pipeline" })
+        ));
+        assert!(pipeline.shutdown().is_err());
+    }
+}

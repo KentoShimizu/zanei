@@ -1,0 +1,495 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Zanei event envelope (v1)",
+  "description": "The authoritative closed OS-independent v1 envelope shared by every event Zanei records. One event per line (NDJSON) in raw outputs (query --format jsonl, record, export) and in the events[] array of the MCP query_events result. This file is the single machine-readable contract for all exposure surfaces; the Rust core's schema types are tested against it. Unknown fields and event types are rejected. Adding a field or event type requires a new v and matching store migration.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "id", "ts", "mono_ns", "source", "type", "app", "window", "element", "data", "truncated", "redaction"],
+  "$defs": {
+    "field_kind": {
+      "type": ["string", "null"],
+      "enum": ["text", "search", "url", "email", "number", "other", null],
+      "description": "Kind of the focused input field, derived from the accessibility role/subrole. Null when focus is not on a text-like element. Secure text fields are excluded at the collector stage, so no password/secure kind can occur."
+    },
+    "modifiers": {
+      "type": "array",
+      "items": { "enum": ["cmd", "shift", "opt", "ctrl", "fn"] },
+      "uniqueItems": true,
+      "description": "Modifier keys held. Sorted, no duplicates."
+    }
+  },
+  "properties": {
+    "v": {
+      "const": 1,
+      "description": "Envelope schema version."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^evt_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "description": "Event ID: `evt_` prefix + ULID (Crockford base32). Unique and time-sortable."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Wall-clock timestamp, RFC3339 with millisecond precision."
+    },
+    "mono_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615,
+      "description": "Monotonic clock in nanoseconds. Use for reliable ordering even across wall-clock adjustments. Not comparable across daemon restarts."
+    },
+    "source": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+\\.[a-z0-9_]+$",
+      "description": "Capture backend. v1 (macOS) values: macos.workspace, macos.ax, macos.eventtap, macos.applescript. Future platforms add values without a version bump."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["app.activate", "app.launch", "app.terminate", "window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "input.key", "input.scroll", "browser.navigate", "clipboard.copy", "clipboard.paste"],
+      "description": "Closed v1 event taxonomy. Adding an event type requires a new envelope version and matching store migration."
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "bundle_id", "pid"],
+      "description": "The application the event originates from. For clipboard.copy with data.origin=unknown, name is Unknown and bundle_id and pid are null because no application attribution is available.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Display name of the application."
+        },
+        "bundle_id": {
+          "type": ["string", "null"],
+          "description": "macOS bundle identifier (e.g. com.google.Chrome). Null for processes without a bundle."
+        },
+        "pid": {
+          "type": ["integer", "null"],
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807,
+          "description": "Process ID at capture time."
+        }
+      }
+    },
+    "window": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["title", "id"],
+      "description": "Window context, when applicable; null otherwise.",
+      "properties": {
+        "title": {
+          "type": ["string", "null"],
+          "description": "Window title, after redaction."
+        },
+        "id": {
+          "type": ["integer", "null"],
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807,
+          "description": "OS window identifier (CGWindowNumber-derived on macOS); daemon-local, null when unavailable."
+        }
+      }
+    },
+    "element": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["role", "title", "value"],
+      "description": "UI element context. Non-null only for ui.* events. Secure text fields (password inputs) never appear here.",
+      "properties": {
+        "role": {
+          "type": ["string", "null"],
+          "description": "Accessibility role (e.g. AXButton)."
+        },
+        "title": {
+          "type": ["string", "null"],
+          "description": "Element title/label."
+        },
+        "value": {
+          "type": ["string", "null"],
+          "description": "Element value, after redaction. Present only when capture.text_content is enabled and the role is an allowlisted known-safe non-text control; null for free-text, secure, unknown, and unavailable roles, and always null when capture.text_content is disabled."
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "description": "Type-specific payload, pinned per type by the allOf conditions below. Empty object when the type carries no extra data."
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "True when normalize removed at least one URL, title, or text field because its UTF-8 byte length exceeded the documented per-field limit. This required field is true exactly when redaction.rules contains size_limit."
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applied", "rules"],
+      "description": "Record of content transformations applied to this event at capture time. Configured redactors apply to free-text fields only (app.name, window.title, element.title, element.value, data.text, data.url, data.tab_title, window.title.data.prev_title), replacing matches with [REDACTED:<rule>]. The always-on size_limit rule removes oversized fields. These transformations are the second line of defense; the first is not capturing at all (secure fields, incognito, capture-time filters).",
+      "properties": {
+        "applied": {
+          "type": "boolean",
+          "description": "Whether any redaction rule modified this event."
+        },
+        "rules": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "IDs of the transformations that fired: configured privacy rules such as email, credit_card, and token, plus the always-on size_limit safety rule. Empty when applied is false."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "enum": ["app.activate", "app.launch", "app.terminate", "window.focus"] } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "description": "No extra data; context is fully carried by the envelope."
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "window.title" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["prev_title"],
+            "properties": {
+              "prev_title": {
+                "type": ["string", "null"],
+                "description": "Previous window title (after redaction). The new title is in the envelope's window.title."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "ui.focus" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["field_kind"],
+            "properties": {
+              "field_kind": { "$ref": "#/$defs/field_kind" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "ui.click" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["button", "click_count"],
+            "properties": {
+              "button": { "enum": ["left", "right", "other"] },
+              "click_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615,
+                "description": "1 = single click, 2 = double click, ..."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "ui.value" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["field_kind", "value_len", "text"],
+            "properties": {
+              "field_kind": { "$ref": "#/$defs/field_kind" },
+              "value_len": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": 18446744073709551615,
+                "description": "Character count after the change when exposed by Accessibility; null when unavailable. Free-text content never lives in element.value."
+              },
+              "text": {
+                "type": ["string", "null"],
+                "description": "Newly added difference after redaction. Present only when capture.text_content is enabled and a keystroke or paste from the same app and focused-element generation has a value-change notification timestamp no more than 3 seconds after input. Authorization is not consumed on emission: the same non-consuming 3-second window can authorize multiple value-change notifications. Null for deletion, app or generation mismatch, expired or missing authorization, unavailable or secure input, and Chrome Incognito or website-filtered windows. The complete field value is never recorded."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "input.key" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "modifiers", "count", "combo", "text", "field_kind"],
+            "properties": {
+              "kind": {
+                "enum": ["text", "shortcut", "navigation", "delete", "other"],
+                "description": "text = printable typing (coalesced); shortcut = modifier combo; navigation = arrows/page/home/end/tab; delete = backspace/delete; other = esc/F-keys/media."
+              },
+              "modifiers": { "$ref": "#/$defs/modifiers" },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615,
+                "description": "Number of keystrokes coalesced into this event. Shortcuts never coalesce (always 1)."
+              },
+              "combo": {
+                "type": ["string", "null"],
+                "description": "Shortcut string like cmd+s. Always recorded for kind=shortcut (a shortcut is an action, not content); null for other kinds."
+              },
+              "text": {
+                "type": ["string", "null"],
+                "description": "Characters produced directly by keystrokes from a keyboard-layout input source (coalesced, after redaction). Only when capture.text_content is enabled, kind=text, Accessibility reports a known non-secure text field, Secure Input is inactive, and the Chrome window is eligible when applicable. Null otherwise."
+              },
+              "field_kind": { "$ref": "#/$defs/field_kind" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "input.scroll" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["direction", "amount", "count"],
+            "properties": {
+              "direction": { "enum": ["up", "down", "left", "right"] },
+              "amount": {
+                "type": "number",
+                "description": "Total scroll delta coalesced into this event."
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615,
+                "description": "Number of scroll events coalesced."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "browser.navigate" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["url", "tab_title", "mode", "transition"],
+            "properties": {
+              "url": {
+                "type": ["string", "null"],
+                "format": "uri",
+                "description": "Current URL of the active tab (normal windows only), after redaction. Null only when its UTF-8 representation exceeded 4 KiB and truncated is true."
+              },
+              "tab_title": {
+                "type": ["string", "null"],
+                "description": "Title of the active tab, after redaction."
+              },
+              "mode": {
+                "const": "normal",
+                "description": "Always \"normal\": incognito windows never produce events, so no other value can occur. Kept in the payload as an auditable trace of that guarantee."
+              },
+              "transition": {
+                "enum": ["navigate", "tab_switch", null],
+                "description": "navigate = URL changed within the tab; tab_switch = active tab changed; null when indistinguishable."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "clipboard.copy" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["origin", "content_kind", "size_bytes", "text"],
+            "properties": {
+              "origin": {
+                "enum": ["copy_shortcut", "unknown"],
+                "description": "copy_shortcut when a Command-C observation from the same process corresponds to the pasteboard change within 500 ms; unknown otherwise. Unknown origin has an unattributed app envelope and no body."
+              },
+              "content_kind": {
+                "enum": ["text", "image", "file", "other"],
+                "description": "Derived from pasteboard types. Always recorded."
+              },
+              "size_bytes": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": 18446744073709551615,
+                "description": "Payload size. Present only for an attributed copy when content capture is authorized; null otherwise."
+              },
+              "text": {
+                "type": ["string", "null"],
+                "description": "Copied text (after redaction). Present only for origin=copy_shortcut when capture.text_content is enabled, Secure Input is inactive, and the Chrome window is eligible when applicable; null otherwise."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "clipboard.paste" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["content_kind", "size_bytes", "text", "field_kind"],
+            "properties": {
+              "content_kind": {
+                "enum": ["text", "image", "file", "other"],
+                "description": "Derived from pasteboard types. Always recorded."
+              },
+              "size_bytes": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": 18446744073709551615,
+                "description": "Payload size. Present only when content capture is authorized; null otherwise."
+              },
+              "text": {
+                "type": ["string", "null"],
+                "description": "Pasted text (after redaction). Present only when capture.text_content is enabled, Accessibility reports a known non-secure text field, Secure Input is inactive, and the Chrome window is eligible when applicable; null otherwise."
+              },
+              "field_kind": { "$ref": "#/$defs/field_kind" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["type", "data"],
+        "properties": {
+          "type": { "const": "clipboard.copy" },
+          "data": {
+            "required": ["origin"],
+            "properties": { "origin": { "const": "unknown" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "app": {
+            "properties": {
+              "name": { "const": "Unknown" },
+              "bundle_id": { "const": null },
+              "pid": { "const": null }
+            }
+          },
+          "window": { "const": null },
+          "element": { "const": null },
+          "data": {
+            "properties": {
+              "size_bytes": { "const": null },
+              "text": { "const": null }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["type", "data"],
+        "properties": {
+          "type": { "const": "clipboard.copy" },
+          "data": {
+            "required": ["origin"],
+            "properties": { "origin": { "const": "copy_shortcut" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "window": { "type": "object" },
+          "element": { "const": null }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "app.activate" } } },
+      "then": { "properties": { "element": { "const": null } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["app.launch", "app.terminate"] } } },
+      "then": {
+        "properties": {
+          "window": { "const": null },
+          "element": { "const": null }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["window.focus", "window.title", "input.key", "input.scroll", "browser.navigate", "clipboard.paste"] } } },
+      "then": {
+        "properties": {
+          "window": { "type": "object" },
+          "element": { "const": null }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["ui.focus", "ui.click", "ui.value"] } } },
+      "then": {
+        "properties": {
+          "window": { "type": "object" },
+          "element": { "type": "object" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "truncated": { "const": true } } },
+      "then": {
+        "properties": {
+          "redaction": {
+            "properties": {
+              "rules": { "contains": { "const": "size_limit" } }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "redaction": {
+            "properties": {
+              "rules": { "not": { "contains": { "const": "size_limit" } } }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "browser.navigate" },
+          "data": {
+            "properties": { "url": { "const": null } }
+          }
+        }
+      },
+      "then": { "properties": { "truncated": { "const": true } } }
+    }
+  ]
+}

@@ -1,0 +1,294 @@
+// Cargo compiles this shared module once per integration-test binary, and each binary uses a
+// different subset of the helpers.
+#![allow(dead_code)]
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use assert_cmd::Command;
+use tempfile::TempDir;
+use time::{Duration, OffsetDateTime};
+use zanei_core::config::DEFAULT_RETENTION_HOURS;
+use zanei_core::normalize::{format_timestamp, normalize};
+use zanei_core::schema::{
+    App, BrowserMode, BrowserNavigateData, BrowserTransition, ClickButton, ClipboardCopyData,
+    ClipboardOrigin, ClipboardPasteData, ContentKind, Element, EmptyData, Event, EventData,
+    FieldKind, InputKeyData, InputKeyKind, InputScrollData, KNOWN_EVENT_TYPES, RawEvent,
+    ScrollDirection, UiClickData, UiFocusData, UiValueData, Window, WindowTitleData,
+};
+use zanei_core::store::{
+    DaemonMode, DaemonPermissions, DaemonState, PermissionState, StoreReader, StoreWriter,
+};
+
+pub struct Fixture {
+    pub directory: TempDir,
+    pub config: PathBuf,
+    pub store: PathBuf,
+}
+
+impl Fixture {
+    pub fn populated() -> Self {
+        Self::create(StoreContents::Populated)
+    }
+
+    pub fn empty() -> Self {
+        Self::create(StoreContents::Empty)
+    }
+
+    pub fn uninitialized() -> Self {
+        Self::create(StoreContents::Uninitialized)
+    }
+
+    pub fn command(&self) -> Command {
+        let mut command = Command::cargo_bin("zanei").expect("zanei binary");
+        command
+            .arg("--config")
+            .arg(&self.config)
+            .arg("--store")
+            .arg(&self.store);
+        command
+    }
+
+    pub fn process_command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zanei"));
+        command
+            .arg("--config")
+            .arg(&self.config)
+            .arg("--store")
+            .arg(&self.store);
+        command
+    }
+
+    pub fn set_recorder_permissions(&self, permissions_ok: bool) {
+        let status = StoreReader::open(&self.store)
+            .and_then(|reader| reader.status())
+            .expect("fixture daemon status");
+        StoreWriter::open(&self.store)
+            .and_then(|writer| {
+                writer.write_daemon_state(&DaemonState {
+                    pid: status.pid,
+                    started_at: status.started_at,
+                    instance_id: status.instance_id,
+                    mode: status.mode,
+                    heartbeat_at: Some(format_timestamp(OffsetDateTime::now_utc())),
+                    retention_hours: status.retention_hours,
+                    paused_until: status.paused_until,
+                    events_captured: status.events_captured,
+                    events_dropped: status.events_dropped,
+                    last_event_ts: status.last_event_ts,
+                    degraded: status.degraded,
+                    collector_failures: status.collector_failures,
+                    permissions: Some(DaemonPermissions {
+                        permissions_ok,
+                        accessibility: PermissionState::Granted,
+                        input_monitoring: PermissionState::Granted,
+                        automation: BTreeMap::new(),
+                    }),
+                })
+            })
+            .expect("set fixture recorder permissions");
+    }
+
+    fn create(contents: StoreContents) -> Self {
+        let directory = TempDir::new().expect("fixture directory");
+        let config = directory.path().join("config.toml");
+        let store = directory.path().join("store.sqlite");
+        fs::write(
+            &config,
+            "[capture]\nsources = [\"app\"]\ntext_content = false\n",
+        )
+        .expect("fixture config");
+
+        match contents {
+            StoreContents::Populated => populate_store(&store),
+            StoreContents::Empty => {
+                StoreWriter::open(&store).expect("empty fixture store");
+            }
+            StoreContents::Uninitialized => {}
+        }
+
+        Self {
+            directory,
+            config,
+            store,
+        }
+    }
+}
+
+enum StoreContents {
+    Populated,
+    Empty,
+    Uninitialized,
+}
+
+fn populate_store(store: &Path) {
+    let now = OffsetDateTime::now_utc();
+    let started_at = format_timestamp(now - Duration::minutes(1));
+    let events = synthetic_events(now);
+    let mut writer = StoreWriter::open(store).expect("fixture writer");
+    writer.append_batch(&events).expect("fixture events");
+    writer
+        .write_daemon_state(&DaemonState {
+            pid: Some(42),
+            started_at: Some(started_at.clone()),
+            instance_id: Some(format!("42@{started_at}")),
+            mode: Some(DaemonMode::Foreground),
+            heartbeat_at: Some(format_timestamp(now)),
+            retention_hours: Some(DEFAULT_RETENTION_HOURS),
+            paused_until: None,
+            events_captured: u64::try_from(events.len()).expect("fixture event count fits u64"),
+            events_dropped: 2,
+            last_event_ts: events.last().map(|event| event.ts.clone()),
+            degraded: BTreeMap::new(),
+            collector_failures: BTreeMap::from([("eventtap".to_owned(), 1)]),
+            permissions: Some(DaemonPermissions {
+                permissions_ok: true,
+                accessibility: PermissionState::Granted,
+                input_monitoring: PermissionState::Granted,
+                automation: BTreeMap::new(),
+            }),
+        })
+        .expect("fixture daemon state");
+}
+
+fn synthetic_events(now: OffsetDateTime) -> Vec<Event> {
+    let payloads = event_payloads();
+    let event_types: Vec<_> = payloads.iter().map(|(event_type, _)| *event_type).collect();
+    assert_eq!(event_types.as_slice(), KNOWN_EVENT_TYPES.as_slice());
+
+    let event_count = payloads.len();
+    payloads
+        .into_iter()
+        .enumerate()
+        .map(|(index, (event_type, data))| {
+            let age_seconds = i64::try_from(event_count - index).expect("fixture age fits i64");
+            let mono_ns = u64::try_from(index + 1).expect("fixture index fits u64") * 1_000_000_000;
+            normalize(
+                raw_event(event_type, data),
+                now - Duration::seconds(age_seconds),
+                mono_ns,
+            )
+            .expect("normalize fixture event")
+        })
+        .collect()
+}
+
+fn event_payloads() -> Vec<(&'static str, EventData)> {
+    vec![
+        ("app.activate", EventData::AppActivate(EmptyData {})),
+        ("app.launch", EventData::AppLaunch(EmptyData::default())),
+        (
+            "app.terminate",
+            EventData::AppTerminate(EmptyData::default()),
+        ),
+        ("window.focus", EventData::WindowFocus(EmptyData::default())),
+        (
+            "window.title",
+            EventData::WindowTitle(WindowTitleData {
+                prev_title: Some("Previous Fixture Window".to_owned()),
+            }),
+        ),
+        (
+            "ui.focus",
+            EventData::UiFocus(UiFocusData {
+                field_kind: Some(FieldKind::Text),
+            }),
+        ),
+        (
+            "ui.click",
+            EventData::UiClick(UiClickData {
+                button: ClickButton::Left,
+                click_count: 1,
+            }),
+        ),
+        (
+            "ui.value",
+            EventData::UiValue(UiValueData {
+                field_kind: Some(FieldKind::Text),
+                value_len: Some(7),
+                text: None,
+            }),
+        ),
+        (
+            "input.key",
+            EventData::InputKey(InputKeyData {
+                kind: InputKeyKind::Text,
+                modifiers: Vec::new(),
+                count: 1,
+                combo: None,
+                text: None,
+                field_kind: Some(FieldKind::Text),
+            }),
+        ),
+        (
+            "input.scroll",
+            EventData::InputScroll(InputScrollData {
+                direction: ScrollDirection::Down,
+                amount: 1.0,
+                count: 1,
+            }),
+        ),
+        (
+            "browser.navigate",
+            EventData::BrowserNavigate(BrowserNavigateData {
+                url: "https://example.com/fixture".to_owned().into(),
+                tab_title: Some("Fixture Page".to_owned()),
+                mode: BrowserMode::Normal,
+                transition: Some(BrowserTransition::Navigate),
+            }),
+        ),
+        (
+            "clipboard.copy",
+            EventData::ClipboardCopy(ClipboardCopyData {
+                origin: ClipboardOrigin::CopyShortcut,
+                content_kind: ContentKind::Text,
+                size_bytes: None,
+                text: None,
+            }),
+        ),
+        (
+            "clipboard.paste",
+            EventData::ClipboardPaste(ClipboardPasteData {
+                content_kind: ContentKind::Text,
+                size_bytes: None,
+                text: None,
+                field_kind: Some(FieldKind::Text),
+            }),
+        ),
+    ]
+}
+
+fn raw_event(event_type: &str, data: EventData) -> RawEvent {
+    let has_window = !event_type.starts_with("app.");
+    let has_element = event_type.starts_with("ui.");
+    let source = if event_type.starts_with("app.") {
+        "macos.workspace"
+    } else if event_type.starts_with("window.") || event_type.starts_with("ui.") {
+        "macos.ax"
+    } else if event_type.starts_with("browser.") {
+        "macos.applescript"
+    } else {
+        "macos.eventtap"
+    };
+
+    RawEvent {
+        source: source.to_owned(),
+        event_type: event_type.to_owned(),
+        app: App {
+            name: "FixtureApp".to_owned(),
+            bundle_id: Some("com.example.FixtureApp".to_owned()),
+            pid: Some(42),
+        },
+        window: has_window.then(|| Window {
+            title: Some("Fixture Window".to_owned()),
+            id: Some(7),
+        }),
+        element: has_element.then(|| Element {
+            role: Some("AXTextField".to_owned()),
+            title: Some("Fixture Field".to_owned()),
+            value: None,
+        }),
+        data,
+    }
+}

@@ -1,0 +1,101 @@
+---
+title: FAQ
+description: プライバシー・ブラウザ対応・データアクセス・対応 OS・トラブルシューティングに関するよくある質問。
+---
+
+## これはキーロガーですか？
+
+いいえ。キー入力の内容は、opt-in（`text_content = true`）しない限り捕捉されません。既定で記録されるのは入力があった事実とフィールド種別だけです。opt-in してもパスワード欄は除外され、redactor が検出可能な機密をスクラブし、データはマシンの外に出ません。[プライバシーモデル](/ja/guides/privacy)参照。
+
+## データはどこへ行きますか？
+
+ローカルの SQLite ファイル（`~/.local/state/zanei/store.sqlite`）ただ一つに入り、他のどこにも行きません。バイナリにはデータを送信する機能がありません — エンドポイントもテレメトリもアカウントも存在しません。既定では 48 時間で自動削除されます。
+
+## どのブラウザの URL が取れますか？Safari は？
+
+**現在は Chrome のみ**です。Chromium の AppleScript インターフェースが返す window mode を使い、incognito の URL イベントと本文を抑止します。Safari と Firefox には信頼できる同等の手段がないため、URL 捕捉は実装していません。詳細とブラウザ別の表は[イベントリファレンス](/ja/reference/events#ブラウザの-url-捕捉)へ。
+
+## 特定のアプリやサイトを記録から外すには？
+
+```bash
+zanei filter exclude-app add com.example.app
+zanei filter exclude-site add example.com
+```
+
+これらは capture-time フィルタです：該当イベントはストアに書き込まれる前に破棄されるため、後から掃除する必要がありません。パスワードマネージャは既定で除外済みです。[フィルタ](/ja/guides/filters)参照。
+
+## ストアを直接読んでもいいですか？
+
+はい — 普通の SQLite ファイルなので直接読んで構いません（将来の言語 SDK もその方式になります）。ただし多くの用途では `zanei query --format jsonl` や `zanei export` のほうが簡単で、バージョン間で変わり得る内部テーブル構造ではなく、安定したイベントエンベロープの上に乗れます。
+
+## ChatGPT の Computer History と何が違いますか？
+
+アイデアは同じ（あなたの行動を AI の文脈にする）で、アーキテクチャが違います：オープンソース、保存はローカルのみ、クラウド処理なし、特定のアシスタントに縛られない面（CLI / skill / MCP）。Zanei は構造化された LLM-ready データまでで止まり、解釈は接続した agent が行います。
+
+## Windows や Linux では動きますか？
+
+まだです。イベントスキーマは設計上 OS 非依存で、Windows（UI Automation）と Linux（AT-SPI2/evdev、X11 先行）の collector がロードマップにあります。現在は macOS のみです。
+
+## 会社のマシンで使ってもいいですか？
+
+Zanei は自分のマシン上の自分の操作を記録するツールです。会社管理のマシンであれば、所属組織のポリシーに従ってください。他者の監視は想定外の用途であり、地域によっては違法です。
+
+## 権限を付与したのに `doctor` が `denied` のままです
+
+権限の切り替えは、対象プロセスの再起動後に正しく反映されることがあります。`zanei stop && zanei start` してから、もう一度 `zanei doctor` を実行してください。ソースからビルドした場合は、権限が署名 ID に紐づく点にも注意 — ビルドし直したバイナリは再付与が必要になることがあります（[権限とコード署名](/ja/guides/permissions#権限とコード署名)）。
+
+## `zanei start` が終了コード 3 を返しました。recorder は動いていますか？
+
+動いています。バックグラウンド `start` は recorder の生存確認後、heartbeat で権限不足が報告された場合に終了コード 3 を返します。アクセシビリティにはバンドル版の `Zanei` 行が自動追加されますが、入力監視はダイアログでの付与が有効でも行がないことがあります。再起動後は recorder 由来の `zanei doctor` の結果を正とします。一覧から行を操作する場合は、`+` でインストール済みの `Zanei.app` を選択します。まだ権限不足と報告されている間は、`zanei doctor --fix` がペインを開いて正確な path をコピーします。詳細は[権限ガイド](/ja/guides/permissions#初回セットアップ)を参照してください。権限を必要とする collector が degraded の間も、デーモンは動作を継続します。
+
+## Zanei の権限を完全に解除するには？
+
+ペインに `Zanei` の行があれば OFF にします。または Zanei を停止し、消去する判断に対応する service の reset を実行します。
+
+```bash
+zanei stop
+tccutil reset Accessibility dev.zanei.recorder
+tccutil reset ListenEvent dev.zanei.recorder
+```
+
+この bundle ID のコマンドは配布版 `Zanei.app` が対象で、素の `cargo install` バイナリには適用されません。素のバイナリは `+` で追加した行も定着しないことがあるため、app bundle 版を使用してください。詳細は[権限ガイド](/ja/guides/permissions#権限を解除リセットする)。
+
+## `zanei start` で `Bootstrap failed: 5: Input/output error` が表示されます
+
+`zanei start` で `error: daemon operation failed: /bin/launchctl failed while attempting to bootstrap the Zanei launch agent with exit status: 5: Bootstrap failed: 5: Input/output error` が表示された場合は、`zanei stop` を実行して完了を待ってから、改めて `zanei start` を実行してください。
+
+## タイムラインが空です
+
+次の順で確認してください：
+
+1. `zanei status` — `running` ですか？違うなら `zanei start`。
+2. `zanei doctor` — 権限は揃っていますか？（権限不足は終了コード 3）
+3. 範囲は合っていますか？`timeline` の既定は直近 1 時間です。`--since 24h` を試してください。
+4. [フィルタ](/ja/guides/filters)が許可リストモードになっていませんか？`zanei filter show` が現在のモードを表示します。
+
+## `status` が `store_corrupt` を返します
+
+記録を停止し、破損ファイルを別名で退避してから、新しいストアで開始します：
+
+```bash
+zanei stop
+mv ~/.local/state/zanei/store.sqlite ~/.local/state/zanei/store.sqlite.corrupt
+zanei start
+```
+
+`--store` を使っている場合は、そのパスに読み替えてください。退避したファイルは修復も削除もされず、新しい空のストアで記録を開始します。
+
+## テキスト本文が捕捉されません
+
+プライバシーに配慮した診断を有効にして、短時間のフォアグラウンドセッションを実行します：
+
+```bash
+zanei stop
+ZANEI_TRACE=1 zanei start --foreground 2> ~/zanei-trace.log
+```
+
+数十秒入力してから Ctrl-C を押し、`~/zanei-trace.log` を確認してください。trace にテキスト本文は含まれず、フィールド種別、値の長さ、捕捉判断などの診断メタデータだけが記録されます。
+
+## その他の質問
+
+Issue を開いてください — インターフェースを確定させている今の段階では、バグ報告も設計議論も歓迎です。

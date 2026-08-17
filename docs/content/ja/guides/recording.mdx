@@ -1,0 +1,87 @@
+---
+title: 記録の開始と管理
+description: デーモンの起動・停止・一時停止・状態確認と、保存データのライフサイクル。
+---
+
+記録はバックグラウンドのデーモン（launchd エージェント）が行い、次のコマンドで制御します。
+
+| コマンド | 動作 |
+| --- | --- |
+| `zanei start` | launchd に登録し、バックグラウンド記録を開始 |
+| `zanei stop` | 記録を停止し launchd から解除。保存データは残ります |
+| `zanei pause --for 30m` | 一時停止。`--for` 省略時は `resume` するまで無期限 |
+| `zanei resume` | 一時停止から再開 |
+| `zanei status` | 稼働状態・イベント件数・ストア情報の確認 |
+
+## 記録を開始する
+
+```bash
+zanei start
+```
+
+recorder は起動時に、必要かつ未付与のアクセシビリティと入力監視を 1 回要求します。recorder heartbeat が権限不足を報告すると、バックグラウンド `start` は終了コード 3 を返しますが、デーモンは degraded 状態で動作を継続します。付与後に `zanei stop && zanei start` し、`zanei doctor` で確認してください（[権限ガイド](/ja/guides/permissions)）。
+
+### フォアグラウンドで試す
+
+デーモン化せずに動きを確かめたいときは 2 つの方法があります。
+
+```bash
+zanei start --foreground   # デーモンと同じ構成で前面実行（開発・デバッグ用）
+zanei record --stream      # 生イベントを NDJSON で stdout に流す
+```
+
+`record` はパイプ処理や検証向けです。ファイルに書く場合は `--out events.jsonl` を使います。常用の記録は `start` です。
+
+## 状態を確認する
+
+```bash
+zanei status
+zanei status --json   # agent・スクリプト向け
+```
+
+次は抜粋例です。完全な JSON shape と null 条件は [CLI リファレンス](/ja/reference/cli#status)に定義しています。
+
+```json
+{
+  "running": true,
+  "paused": false,
+  "since": "2026-08-16T08:00:00Z",
+  "uptime_s": 3600,
+  "events_captured": 12345,
+  "last_event_ts": "2026-08-16T08:59:58Z",
+  "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00Z" },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
+  "permissions_ok": true
+}
+```
+
+対象デーモンが存在しない場合（`status` / `stop` など）は終了コード 4 を返します。
+
+## 一時停止と再開
+
+会議や画面共有の間だけ記録を止めるには `pause` を使います。
+
+```bash
+zanei pause --for 30m   # 30分後に自動で再開
+zanei pause             # resume するまで無期限に停止
+zanei resume
+```
+
+:::note
+特定のアプリ・サイトを常に記録対象から外したい場合は、一時停止ではなく[フィルタ](/ja/guides/filters)を使ってください。ストアに書き込まれる前に破棄されます。
+:::
+
+## データのライフサイクル
+
+- 保存先はローカルの SQLite ストア `~/.local/state/zanei/store.sqlite` のみです（`--store` で変更可能）。
+- 既定で **48 時間**より古いイベントは起動時と定期実行で purge され、読み取り結果からも除外されます（`retention_hours`、[設定](/ja/reference/config)）。
+- 手動で削除する場合は `purge` を使います。
+
+```bash
+zanei purge --before 24h   # 24時間より古いイベントを削除
+zanei purge --all          # 全削除（確認プロンプトあり）
+```
+
+:::warning
+`purge` は破壊的操作です。`--all` には確認プロンプトがあります（`--quiet` で抑制可能）。
+:::

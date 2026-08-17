@@ -1,0 +1,48 @@
+[workspace]
+members = [
+  "crates/zanei-core",
+  "crates/zanei-collector",
+  "crates/zanei-macos",
+  "crates/zanei-mcp",
+  "crates/zanei-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/KentoShimizu/zanei"
+rust-version = "1.85"
+authors = ["Kento Shimizu"]
+
+[workspace.dependencies]
+assert_cmd = "2"
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+rustix = { version = "1.1.4", default-features = false, features = ["fs"] }
+rmcp = { version = "=0.11.0", default-features = false, features = ["base64", "macros", "schemars", "server", "transport-io"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
+tempfile = "3"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+tokio = { version = "1", features = ["io-std", "rt"] }
+toml = "0.9"
+ulid = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "deny"
+
+[profile.release]
+# Size: fat LTO + one codegen unit + symbol strip cut the binary ~35%
+# (7.3 MB -> 4.8 MB single-arch; a universal binary is roughly double).
+# No behavior change. panic stays "unwind": the daemon supervisor
+# detects worker-thread panics via JoinHandle::join Err.
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

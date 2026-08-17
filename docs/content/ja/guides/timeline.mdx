@@ -1,0 +1,124 @@
+---
+title: データの取り出し
+description: 記録した行動を読み出す 3 つの方法 — timeline・query・export の使い分け。
+---
+
+記録されたデータは 3 つの形で読み出せます。
+
+| コマンド | 形 | 向いている用途 |
+| --- | --- | --- |
+| [`timeline`](#timeline--llm-ready-な要約) | セッション構造の要約（token budget 付き） | LLM・agent に渡す |
+| [`query`](#query--生イベント) | 条件で絞った生イベント | 精密な検索・検証・独自処理 |
+| [`export`](#export--一括ダンプ) | 範囲内の生イベント全部 | バックアップ・外部パイプライン |
+
+## 時間表現
+
+`--since` / `--until` が受け取る値：
+
+| 形式 | 例 | 意味 |
+| --- | --- | --- |
+| 相対 | `15m` `2h` `1d` `1w` | 現在からの遡り。単位は `s` `m` `h` `d` `w` |
+| 絶対 | `2026-08-16T09:00:00Z` | RFC3339 タイムスタンプ |
+| キーワード | `now` | 現在時刻（主に `--until` 用） |
+
+`--until` の既定は `now`。`--since` の既定はコマンドごとに `timeline` = `1h`、`query` = `15m`、`export` = `24h` です。
+
+## `timeline` — LLM-ready な要約
+
+生イベントをセッション分割・重複除去・coalesce し、token budget に収めて出力します。
+
+```bash
+zanei timeline --since 1h                             # Markdown、約 4000 トークン
+zanei timeline --since 30m --format json --granularity fine
+zanei timeline --since 1d --token-budget 8000
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--since` / `--until` | 対象範囲（既定 `--since 1h`） |
+| `--format` | `md`（既定、LLM-ready Markdown）/ `json`（構造化） |
+| `--token-budget <N>` | 概算トークン上限（既定 4000）。超過分は粒度を粗くして収めます |
+| `--granularity` | `coarse`（既定、セッション単位）/ `fine`（操作単位まで） |
+
+既定の Markdown 出力（抜粋。header と activity の固定句は次のとおり出力されます）：
+
+```md
+# Zanei timeline
+
+Range: 2026-08-16T08:00:00.000Z — 2026-08-16T09:00:00.000Z
+Estimated tokens: 3810
+Truncated: no
+
+## 2026-08-16T08:12:00.000Z — 2026-08-16T08:31:00.000Z · Safari
+
+Title: PR #42 のレビュー
+- Browsed 3 pages on github.com
+- Edited text in "PR #42 のレビュー"
+```
+
+`--format json` では構造化された形が得られます：
+
+```json
+{
+  "range": { "since": "2026-08-16T08:00:00.000Z", "until": "2026-08-16T09:00:00.000Z" },
+  "token_estimate": 3810,
+  "truncated": false,
+  "sessions": [
+    {
+      "start": "2026-08-16T08:12:00.000Z", "end": "2026-08-16T08:31:00.000Z",
+      "app": "Safari", "title_summary": "PR #42 のレビュー",
+      "activities": ["Browsed 3 pages on github.com", "Edited text in \"PR #42 のレビュー\""],
+      "event_ids": ["evt_01J...", "evt_01J..."],
+      "event_ids_truncated": false
+    }
+  ]
+}
+```
+
+各セッションの `event_ids` は背後の生イベントへの参照です。要約から `query` で掘り下げられます。1 セッション最大 100 ID で、追加の ID がある場合は常に出力される `event_ids_truncated` が `true` になります。token budget を満たすため必要な場合は、session を削除する前に全 ID が省略されます。
+
+## `query` — 生イベント
+
+```bash
+zanei query --since 15m --types browser.navigate,app.activate
+zanei query --since 2h --app Safari --format json --limit 500
+zanei query --since 1d --bundle-id com.google.Chrome --types "browser.*"
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--since` / `--until` | 対象範囲（既定 `--since 15m`） |
+| `--types` | [イベント型](/ja/reference/events)のカンマ区切り。末尾ワイルドカード `browser.*` 可 |
+| `--app` / `--bundle-id` | アプリ名 / バンドル ID で絞り込み |
+| `--limit <N>` | 最大件数（既定 500） |
+| `--format` | `jsonl`（既定）/ `json` / `table` |
+
+これらは **query-time フィルタ**です — 読み出しを絞るだけで、記録対象は変わりません。記録側の境界は[フィルタ](/ja/guides/filters)を参照。
+
+## `export` — 一括ダンプ
+
+```bash
+zanei export --since 24h --format jsonl --out dump.jsonl
+```
+
+範囲内の全生イベントをダンプします（バックアップ・外部処理用）。既定範囲は `--since 24h` です。
+
+## レシピ
+
+作業再開時の文脈復元（skill ファイルに同梱される一行。token budget は既定値の 4000 のまま）：
+
+```bash
+zanei timeline --since 2h --format md
+```
+
+agent が記録の稼働を確認する：
+
+```bash
+zanei status --json
+```
+
+今日 Chrome で見ていたものだけを引く：
+
+```bash
+zanei query --since 1d --app "Google Chrome" --types browser.navigate --format json
+```

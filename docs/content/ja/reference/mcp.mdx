@@ -1,0 +1,161 @@
+---
+title: MCP サーバ
+description: zanei mcp が公開する read-only な MCP（Model Context Protocol）サーバ — ツール・スキーマ・エラー・登録方法。
+---
+
+`zanei mcp` は記録された行動履歴を MCP クライアントへ公開します — ターミナル型 agent（Claude Code・Codex・opencode・Hermes Agent）と、シェルを持たないクライアント（Claude Desktop・ChatGPT コネクタ）の接続経路です。
+
+| | |
+| --- | --- |
+| サーバ名 | `zanei` |
+| サーババージョン | `initialize` 結果の `serverInfo.version` は Zanei の build に使われた package version。`zanei --version` が示す version 番号と同じ |
+| 起動コマンド | `zanei mcp` |
+| トランスポート | stdio のみ（stdin/stdout 上の JSON-RPC 2.0）— **ネットワーク面ゼロ** |
+| capability | `tools` のみ。`resources` / `prompts` は未提供（[将来拡張](#将来拡張)参照） |
+
+**役割と境界。** サーバはローカルストアへの**read-only ビュー**です。記録デーモンとは独立プロセスで動き、記録の開始・停止も、設定変更も — 特に [capture-time フィルタ](/ja/guides/filters)の変更も — できません。`query_events` の `app` / `bundle_id` は保存済みデータへの query-time の絞り込みであり、プライバシー境界ではありません。
+
+共有規約 — 時間表現・イベント型・イベントエンベロープ — は [CLI リファレンス](/ja/reference/cli#共通規約)と[イベントリファレンス](/ja/reference/events)に一致します。
+
+## ツール
+
+3 つのツールはすべて読み取り専用・副作用なしです。
+
+### `get_timeline`
+
+指定範囲の LLM-ready タイムラインを返します。`zanei timeline` と等価。agent が最もよく呼ぶツールです。
+
+**入力**
+
+| パラメータ | 型 | 既定値 | 説明 |
+| --- | --- | --- | --- |
+| `since` | string | `"1h"` | 遡り開始。相対（`15m`・`2h`・`1d`）または RFC3339 |
+| `until` | string | `now` | 終了 |
+| `format` | `"markdown"` または `"structured"` | `"markdown"` | 出力の形 |
+| `token_budget` | integer | `4000` | 概算トークン上限（下限 34）。超過分は粒度を粗くして収める |
+| `granularity` | `"coarse"` または `"fine"` | `"coarse"` | セッション単位か操作単位か |
+
+**出力**（`format: "markdown"`）。以下は省略した例で、token estimate は生成された完全な content によって変わります。
+
+```json
+{
+  "range": { "since": "2026-08-16T08:00:00.000Z", "until": "2026-08-16T09:00:00.000Z" },
+  "format": "markdown",
+  "content": "# Zanei timeline\n\nRange: 2026-08-16T08:00:00.000Z — 2026-08-16T09:00:00.000Z\nEstimated tokens: 3810\nTruncated: no\n\n## 2026-08-16T08:12:00.000Z — 2026-08-16T08:31:00.000Z · Safari\n\nTitle: PR #42 のレビュー\n- Browsed 3 pages on github.com\n- Edited text in \"PR #42 のレビュー\"\n...",
+  "token_estimate": 3810,
+  "truncated": false
+}
+```
+
+`format: "structured"` の場合、結果は [CLI リファレンス](/ja/reference/cli#timeline)の `timeline --format json` と同一の `sessions[]` 構造です。各 session の `event_ids` は最大 100 件で、`event_ids_truncated` は常に出力されます。token budget をなお満たせない場合は session を削除する前に全 ID が省略されます。
+
+### `query_events`
+
+条件に合う生イベントを返します。`zanei query` と等価。粒度の細かい検証や、特定アプリ・型の抽出に使います。
+
+**入力**
+
+| パラメータ | 型 | 既定値 | 説明 |
+| --- | --- | --- | --- |
+| `since` | string | `"15m"` | 遡り開始 |
+| `until` | string | `now` | 終了 |
+| `types` | string[] | `[]` | [イベント型](/ja/reference/events)。`browser.*` 等のワイルドカード可。空配列の場合はイベント型で絞り込まない |
+| `app` | string | — | アプリ名で絞り込み |
+| `bundle_id` | string | — | バンドル ID で絞り込み |
+| `limit` | integer | `200` | 最大件数。有効範囲は 1〜1000 |
+
+**出力**
+
+```json
+{
+  "range": { "since": "2026-08-16T08:45:00Z", "until": "2026-08-16T09:00:00Z" },
+  "count": 42,
+  "truncated": false,
+  "events": [
+    {
+      "v": 1, "id": "evt_01J...", "ts": "2026-08-16T08:46:12.120Z", "mono_ns": 128374651234,
+      "source": "macos.applescript", "type": "browser.navigate",
+      "app": { "name": "Google Chrome", "bundle_id": "com.google.Chrome", "pid": 501 },
+      "window": { "title": "PR #42", "id": 42 },
+      "element": null,
+      "data": { "url": "https://github.com/...", "tab_title": "PR #42", "mode": "normal", "transition": "navigate" },
+      "truncated": false,
+      "redaction": { "applied": false, "rules": [] }
+    }
+  ]
+}
+```
+
+`limit` を超えた場合は `truncated: true`。イベント内容は捕捉時点で既にプライバシー処理（secure field 除外・redaction）済みのものが格納されています — MCP 層で除外済みの情報が復元されることはありません。
+
+### `get_status`
+
+agent 向けの軽量チェック：記録は動いているか。`zanei status` のサブセットです。
+
+**入力**：なし（`{}`）
+
+**出力**
+
+```json
+{
+  "running": true,
+  "paused": false,
+  "last_event_ts": "2026-08-16T08:59:58Z",
+  "events_dropped": 2,
+  "degraded": {},
+  "collector_failures": { "eventtap": 1 },
+  "retention_hours": 48,
+  "oldest_event_ts": "2026-08-14T09:00:00Z",
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
+  "permissions_ok": true
+}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `events_dropped` | 本来記録対象だったが、backpressure・queue full・切断などの配送障害で実際に失われたイベントの累計。app または window に帰属できず記録対象外となる入力と、crash / `SIGKILL` で失われた未 flush データは含まない |
+| `degraded` | component ごとの現在の collector / runtime 劣化状態。回復時に削除される。AX の observer 不在は、daemon 起動後に使用された app、すなわち起動後に activate されたか現在 frontmost の app のみ報告する。observer の attach 成功時に劣化状態から除去される |
+| `collector_failures` | collector ごとの累積処理失敗回数。非ゼロであることだけでは現在劣化中を意味しない |
+| `permissions_ok` | heartbeat が新鮮な間は実行中 recorder 自身の権限判定。recorder 不在時はローカル probe の結果 |
+
+`running: false` を見た agent は、何もないところから答えるのではなく「PC 操作履歴は現在記録されていない」とユーザーに伝えられます。
+
+## エラー
+
+| 状況 | 挙動 |
+| --- | --- |
+| ストア未初期化 / 記録未実施 | `get_status` が `running: false` を返す（エラーにしない）。`get_timeline` / `query_events` は空結果 |
+| 権限不足による空 | 空結果。`get_status` の `permissions_ok: false` で判別可能 |
+| 不正な時間・範囲・イベント型pattern、1〜1000の範囲外の `limit`、34未満の `token_budget` など、ツール引数が不正 | JSON-RPC `-32602`（Invalid params） |
+| 設定・store・権限確認・timeline構築・serializeなどの内部処理に失敗 | JSON-RPC `-32603`（Internal error） |
+
+MCP サーバは記録の開始も権限付与も行いません。CLI で `zanei start` → 権限付与 → `zanei stop && zanei start` → `zanei doctor` の順に設定します。
+
+## 登録方法
+
+`zanei setup --agent <name>` が以下をすべて自動化します — クライアント別の手順は [agent セットアップ](/ja/agents/setup)を参照。stdio サーバ共通の JSON 形：
+
+```json
+{
+  "mcpServers": {
+    "zanei": {
+      "command": "zanei",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+## 将来拡張
+
+現在は未提供です。いずれも同じ read-only ストアビューの上に増設され、記録デーモンへの書き込み権限は将来も追加されません：
+
+- **resources** — 直近タイムラインや現在の設定を read-only リソースとして公開（resources を好むクライアント向け）。
+- **prompts** — 「作業を再開する」定型プロンプトのサーバ提供。
+- **notifications** — 新規セッション検出時の push（需要が出れば）。
+
+## セキュリティ境界
+
+- サーバ自体は外部送信を行いません（stdio のみ）。
+- ツール結果を受け取った agent がそれを LLM プロバイダへ送るのは **agent 側の責務**です。PC 操作履歴の機微性を踏まえ、同梱の skill ファイルは送信前に対象範囲を絞るよう agent に指示しています。
+- ストア内容は捕捉時点でプライバシー処理済みです。既定の `text_content: false` では、入力内容はそもそもストアに存在しません。

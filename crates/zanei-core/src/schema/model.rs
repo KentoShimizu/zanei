@@ -1,0 +1,338 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+use super::EventData;
+
+pub const EVENT_SCHEMA_VERSION: u8 = 1;
+pub const KNOWN_EVENT_TYPES: [&str; 13] = [
+    "app.activate",
+    "app.launch",
+    "app.terminate",
+    "window.focus",
+    "window.title",
+    "ui.focus",
+    "ui.click",
+    "ui.value",
+    "input.key",
+    "input.scroll",
+    "browser.navigate",
+    "clipboard.copy",
+    "clipboard.paste",
+];
+
+pub fn is_known_event_type(event_type: &str) -> bool {
+    KNOWN_EVENT_TYPES.contains(&event_type)
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct App {
+    pub name: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub bundle_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub pid: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Window {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub title: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub id: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Element {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub role: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub title: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub value: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Redaction {
+    pub applied: bool,
+    pub rules: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Event {
+    pub version: u8,
+    pub id: String,
+    pub ts: String,
+    pub mono_ns: u64,
+    pub source: String,
+    pub event_type: String,
+    pub app: App,
+    pub window: Option<Window>,
+    pub element: Option<Element>,
+    pub data: EventData,
+    pub redaction: Redaction,
+}
+
+impl Event {
+    pub(crate) const SIZE_LIMIT_RULE: &'static str = "size_limit";
+
+    #[must_use]
+    pub fn is_truncated(&self) -> bool {
+        self.redaction
+            .rules
+            .iter()
+            .any(|rule| rule == Self::SIZE_LIMIT_RULE)
+    }
+
+    pub(crate) fn mark_truncated(&mut self) {
+        if !self.is_truncated() {
+            self.redaction
+                .rules
+                .insert(0, Self::SIZE_LIMIT_RULE.to_owned());
+        }
+        self.redaction.applied = true;
+    }
+}
+
+impl<'de> Deserialize<'de> for Event {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let envelope = EventEnvelope::deserialize(deserializer)?;
+        if envelope.version != EVENT_SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported event schema version: {}",
+                envelope.version
+            )));
+        }
+        let rule_marks_truncation = envelope
+            .redaction
+            .rules
+            .iter()
+            .any(|rule| rule == Self::SIZE_LIMIT_RULE);
+        if envelope.truncated != rule_marks_truncation {
+            return Err(serde::de::Error::custom(
+                "event truncated marker must match the size_limit redaction rule",
+            ));
+        }
+        let data = EventData::from_type_and_value(&envelope.event_type, envelope.data)
+            .map_err(serde::de::Error::custom)?;
+        let event = Self {
+            version: envelope.version,
+            id: envelope.id,
+            ts: envelope.ts,
+            mono_ns: envelope.mono_ns,
+            source: envelope.source,
+            event_type: envelope.event_type,
+            app: envelope.app,
+            window: envelope.window,
+            element: envelope.element,
+            data,
+            redaction: envelope.redaction,
+        };
+        event.validate().map_err(serde::de::Error::custom)?;
+        Ok(event)
+    }
+}
+
+impl Serialize for Event {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.version != EVENT_SCHEMA_VERSION {
+            return Err(serde::ser::Error::custom(format!(
+                "unsupported event schema version: {}",
+                self.version
+            )));
+        }
+        self.validate().map_err(serde::ser::Error::custom)?;
+
+        EventRef {
+            version: self.version,
+            id: &self.id,
+            ts: &self.ts,
+            mono_ns: self.mono_ns,
+            source: &self.source,
+            event_type: &self.event_type,
+            app: &self.app,
+            window: &self.window,
+            element: &self.element,
+            data: &self.data,
+            truncated: self.is_truncated(),
+            redaction: &self.redaction,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl Event {
+    fn validate(&self) -> Result<(), &'static str> {
+        let ulid = self
+            .id
+            .strip_prefix("evt_")
+            .ok_or("event id must start with evt_")?;
+        if !is_valid_ulid_text(ulid) || ulid.parse::<ulid::Ulid>().is_err() {
+            return Err("event id must contain a valid ULID");
+        }
+        OffsetDateTime::parse(&self.ts, &Rfc3339).map_err(|_| "event ts must be RFC3339")?;
+        if !is_dotted_identifier(&self.source) {
+            return Err("event source must be a dotted identifier");
+        }
+        if !is_dotted_identifier(&self.event_type) {
+            return Err("event type must be a dotted identifier");
+        }
+        if !is_known_event_type(&self.event_type) {
+            return Err("unknown event type");
+        }
+        if !self.data.matches_event_type(&self.event_type) {
+            return Err("event type does not match its typed payload");
+        }
+        self.validate_context()?;
+        if let EventData::BrowserNavigate(data) = &self.data {
+            match data.url.as_deref() {
+                Some(url) if is_absolute_uri(url) => {}
+                Some(_) => return Err("browser URL must be an absolute URI"),
+                None if self.is_truncated() => {}
+                None => return Err("browser URL may be null only when the event is truncated"),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_context(&self) -> Result<(), &'static str> {
+        let has_window = self.window.is_some();
+        let has_element = self.element.is_some();
+        let valid = match &self.data {
+            EventData::AppActivate(_) => !has_element,
+            EventData::AppLaunch(_) | EventData::AppTerminate(_) => !has_window && !has_element,
+            EventData::WindowFocus(_) | EventData::WindowTitle(_) => has_window && !has_element,
+            EventData::UiFocus(_) | EventData::UiClick(_) | EventData::UiValue(_) => {
+                has_window && has_element
+            }
+            EventData::InputKey(_)
+            | EventData::InputScroll(_)
+            | EventData::BrowserNavigate(_)
+            | EventData::ClipboardPaste(_) => has_window && !has_element,
+            EventData::ClipboardCopy(data) => match data.origin {
+                super::ClipboardOrigin::CopyShortcut => has_window && !has_element,
+                super::ClipboardOrigin::Unknown => {
+                    !has_window
+                        && !has_element
+                        && self.app.name == "Unknown"
+                        && self.app.bundle_id.is_none()
+                        && self.app.pid.is_none()
+                        && data.size_bytes.is_none()
+                        && data.text.is_none()
+                }
+            },
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err("window, element, or clipboard attribution does not match the event type")
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventEnvelope {
+    #[serde(rename = "v")]
+    version: u8,
+    id: String,
+    ts: String,
+    mono_ns: u64,
+    source: String,
+    #[serde(rename = "type")]
+    event_type: String,
+    app: App,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    window: Option<Window>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    element: Option<Element>,
+    data: Value,
+    truncated: bool,
+    redaction: Redaction,
+}
+
+fn is_dotted_identifier(value: &str) -> bool {
+    let Some((family, name)) = value.split_once('.') else {
+        return false;
+    };
+    !family.is_empty()
+        && !name.is_empty()
+        && !name.contains('.')
+        && family
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn is_valid_ulid_text(value: &str) -> bool {
+    value.len() == 26
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| matches!(byte, b'0'..=b'7'))
+        && value.bytes().all(|byte| {
+            byte.is_ascii_digit()
+                || matches!(byte, b'A'..=b'H' | b'J'..=b'N' | b'P'..=b'T' | b'V'..=b'Z')
+        })
+}
+
+fn is_absolute_uri(value: &str) -> bool {
+    let Some((scheme, remainder)) = value.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphabetic()
+                || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
+        })
+        && !remainder.is_empty()
+        && !value.chars().any(char::is_whitespace)
+}
+
+#[derive(Serialize)]
+struct EventRef<'a> {
+    #[serde(rename = "v")]
+    version: u8,
+    id: &'a str,
+    ts: &'a str,
+    mono_ns: u64,
+    source: &'a str,
+    #[serde(rename = "type")]
+    event_type: &'a str,
+    app: &'a App,
+    window: &'a Option<Window>,
+    element: &'a Option<Element>,
+    data: &'a EventData,
+    truncated: bool,
+    redaction: &'a Redaction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RawEvent {
+    pub source: String,
+    pub event_type: String,
+    pub app: App,
+    pub window: Option<Window>,
+    pub element: Option<Element>,
+    pub data: EventData,
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}

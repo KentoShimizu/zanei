@@ -1,0 +1,59 @@
+---
+title: Filters
+description: Allow and deny lists that decide which apps and sites are recorded, applied before events reach the store.
+---
+
+Filters decide which apps and sites are recorded. Events attributable to excluded apps are not stored. An unattributed clipboard change can still be stored as `clipboard.copy` with `app.name: "Unknown"` and null `bundle_id`, `pid`, `window`, and body because it cannot be matched to the excluded app. Excluded Chrome sites produce no URL events and no text-content-derived bodies; titles and interaction metadata can remain.
+
+## Capture-time and query-time filtering
+
+There are two ways to narrow by app, and they do different things:
+
+| | Capture-time filters (this page) | Query-time filters (`--app` etc.) |
+| --- | --- | --- |
+| Where it acts | Before the store — matching events are discarded | Only when reading data back |
+| Purpose | Keep sensitive apps out of the store | Narrow results |
+| Configured via | `zanei filter` commands / `[filter]` in `config.toml` | Per-command flags like `--app`, `--types` |
+| From MCP | Cannot be changed (read-only) | Usable as `query_events` arguments |
+
+## Managing the lists
+
+```bash
+zanei filter show                                      # current lists and active mode
+zanei filter exclude-app add com.1password.1password   # deny list: add
+zanei filter exclude-app remove com.1password.1password
+zanei filter only-app add com.apple.Safari             # allow-only list: add
+zanei filter exclude-site add example.com              # exclude a Chrome URL host and its text bodies
+zanei filter only-site add github.com
+```
+
+| Subcommand | `config.toml` key | Meaning |
+| --- | --- | --- |
+| `exclude-app` | `exclude_apps` | Deny list — everything else is captured |
+| `only-app` | `include_only_apps` | Allow list — when non-empty, only listed apps are captured |
+| `exclude-site` | `exclude_websites` | Deny list for Chrome URL events and text-content bodies, matched by URL host |
+| `only-site` | `include_only_websites` | Allow list for Chrome URL events and text-content bodies, matched by URL host |
+
+Editing `config.toml` directly is equivalent; the CLI additionally validates keys and deduplicates. The daemon watches the config file at roughly 2-second intervals, so changes apply within a few seconds without a restart.
+
+:::warning[Allow-list mode]
+Adding even one entry with `only-app` switches app capture to allow-list mode: only listed apps are recorded. `zanei filter show` displays which mode is active.
+:::
+
+## Matching
+
+- **Apps** — match by `bundle_id` (recommended; display names can change). An app that has a `bundle_id` is matched only by it; a display-name entry applies only to events whose app has no `bundle_id`. Matching is case-insensitive.
+- **Sites** — dot-boundary suffix match on the URL host: `example.com` also covers `api.example.com`, but not `evil-example.com`. There is no Public Suffix List handling — an entry like `com` matches every `.com` host, so prefer full domain names. Site rules drop matching Chrome URL events and keep `ui.value.data.text`, `input.key.text`, and clipboard text null for that window. Titles and interaction metadata remain.
+- **Precedence** — if `include_only_*` is non-empty, an event is captured only if it is in that list and not in `exclude_*`. If empty, everything not excluded is captured.
+- **App-level exclusion is total for attributed events** — it drops all event types that can be attributed to that app (`ui.*`, `input.*`, `window.*`, ...). An unattributed clipboard change may remain under `app.name: "Unknown"`.
+
+## Always-on exclusions
+
+Independent of your lists:
+
+- **Private browsing** — Chrome Incognito produces no URL events and keeps text-content-derived bodies null. Titles and interaction metadata can remain.
+- **Built-in exclusions** — password managers and credential stores (`1Password`, `Keychain Access`, ...) are excluded by a hard-coded layer that cannot be lifted, not even with `include_only_apps`. It is separate from the default entries you see in `exclude_apps` in `config.toml`; editing those does not affect it. `filter show` lists the built-in entries separately from your own.
+
+## Filters and MCP
+
+Capture-time filters cannot be modified over MCP; the MCP server is read-only. Filter management happens only through the CLI or `config.toml`. See [MCP server](/reference/mcp).

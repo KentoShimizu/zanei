@@ -1,0 +1,101 @@
+---
+title: FAQ
+description: Common questions about privacy, browser support, data access, platforms, and troubleshooting.
+---
+
+## Is this a keylogger?
+
+No. Keystroke content is not captured unless you opt in (`text_content = true`); by default only the fact of typing and the field type are recorded. Password fields are excluded even if you opt in, redactors scrub recognizable secrets, and data does not leave your machine. See the [privacy model](/guides/privacy).
+
+## Where does my data go?
+
+Into one local SQLite file (`~/.local/state/zanei/store.sqlite`) and nowhere else. The binary has no feature that transmits data — there is no endpoint, no telemetry, no account. Data is deleted automatically after 48 hours by default.
+
+## Which browsers can it capture URLs from?
+
+**Chrome only, for now.** Chromium's AppleScript interface reports each window's mode. Zanei uses that state to omit Incognito URL events and text-content bodies. Safari and Firefox offer no reliable equivalent, so URL capture for them is not implemented. Details and the per-browser table: [event reference](/reference/events#browser-url-capture).
+
+## How do I keep an app or site out of the record?
+
+```bash
+zanei filter exclude-app add com.example.app
+zanei filter exclude-site add example.com
+```
+
+These are capture-time filters: matching events are discarded before being written, so there is nothing to clean up afterwards. Password managers are excluded by default. See [filters](/guides/filters).
+
+## Can I read the store directly?
+
+Yes — it's a regular SQLite file, and reading it directly is fine (that's also how future language SDKs would work). For most purposes `zanei query --format jsonl` or `zanei export` is easier and keeps you on the stable event envelope rather than internal table layouts, which may change between versions.
+
+## How is this different from ChatGPT's Computer History?
+
+The same idea — your activity as context for an AI — with a different architecture: open source, local-only storage, no cloud processing, and agent-agnostic surfaces (CLI / skill / MCP) rather than one assistant. Zanei stops at structured, LLM-ready data; interpretation is done by whatever agent you connect.
+
+## Does it work on Windows or Linux?
+
+Not yet. The event schema is OS-independent by design, and collectors for Windows (UI Automation) and Linux (AT-SPI2/evdev, X11 first) are on the roadmap. Today, Zanei is macOS only.
+
+## Can I use it on a work machine?
+
+Zanei records your own activity on your own machine. If the machine is employer-managed, follow your organization's policies. Using it to monitor other people is out of scope and may be illegal in your jurisdiction.
+
+## I granted a permission but `doctor` still says `denied`
+
+Toggling a permission sometimes requires the recorded process to restart before macOS reports it correctly. Run `zanei stop && zanei start`, then `zanei doctor` again. If you built from source, remember that permissions bind to the signing identity — a rebuilt binary may need re-granting (see [permissions](/guides/permissions#permissions-and-code-signing)).
+
+## `zanei start` exits with code 3. Is the recorder running?
+
+Yes. A background `start` returns code 3 only after the recorder is alive and its heartbeat reports missing permissions. Accessibility adds the bundled app's `Zanei` row automatically, while Input Monitoring may omit it even after the dialog grant takes effect. Restart, then trust the recorder-reported `zanei doctor` result. To manage an omitted row from the list, use `+` and select the installed `Zanei.app`; while the permission is still reported missing, `zanei doctor --fix` opens the pane and copies that exact path. See the [permissions guide](/guides/permissions#first-time-setup). The daemon stays alive while permission-dependent collectors are degraded.
+
+## How do I remove Zanei's permissions completely?
+
+Switch an existing `Zanei` row OFF. Alternatively, stop Zanei and run the service-specific reset for each decision you want to clear:
+
+```bash
+zanei stop
+tccutil reset Accessibility dev.zanei.recorder
+tccutil reset ListenEvent dev.zanei.recorder
+```
+
+These bundle-ID commands apply to the distributed `Zanei.app`, not a raw `cargo install` binary. A raw entry added with `+` may also fail to persist, so use the app bundle distribution. See [permissions](/guides/permissions#remove-or-reset-permissions).
+
+## `zanei start` fails with `Bootstrap failed: 5: Input/output error`
+
+If `zanei start` reports `error: daemon operation failed: /bin/launchctl failed while attempting to bootstrap the Zanei launch agent with exit status: 5: Bootstrap failed: 5: Input/output error`, run `zanei stop`, wait for it to finish, and then run `zanei start` again.
+
+## My timeline is empty
+
+Check in this order:
+
+1. `zanei status` — is it `running`? If not: `zanei start`.
+2. `zanei doctor` — are permissions OK? (Missing permissions exit with code 3.)
+3. Is the range right? `timeline` defaults to the last hour; try `--since 24h`.
+4. Are [filters](/guides/filters) in allow-list mode? `zanei filter show` displays the active mode.
+
+## `status` reports `store_corrupt`
+
+Stop the recorder, preserve the damaged file under another name, and start with a new store:
+
+```bash
+zanei stop
+mv ~/.local/state/zanei/store.sqlite ~/.local/state/zanei/store.sqlite.corrupt
+zanei start
+```
+
+Replace the path when using `--store`. This does not repair or delete the moved file; it starts a new empty store.
+
+## Text content is not captured
+
+Run a short foreground session with privacy-safe diagnostics enabled:
+
+```bash
+zanei stop
+ZANEI_TRACE=1 zanei start --foreground 2> ~/zanei-trace.log
+```
+
+Type for a few tens of seconds, press Ctrl-C, and inspect `~/zanei-trace.log`. The trace never includes text content; it records only diagnostic metadata such as field class, value length, and capture decisions.
+
+## Something else?
+
+Open an issue — bug reports and design discussion are welcome while the interface is being finalized.

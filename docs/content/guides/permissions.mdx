@@ -1,0 +1,104 @@
+---
+title: macOS permissions
+description: The TCC permissions Zanei requests, how to grant them, and how zanei doctor verifies the recorder's state.
+---
+
+Depending on what you capture (the `capture.sources` setting), Zanei uses up to three macOS permissions (TCC). Screen recording is not one of them.
+
+## Required permissions
+
+| Permission | System Settings item | Used for | Related event types |
+| --- | --- | --- | --- |
+| Accessibility | Accessibility | Window titles, focus, UI elements | `window.*` `ui.*` |
+| Input Monitoring | Input Monitoring | Detecting keys, scrolling, clicks | `input.*` `ui.click` `clipboard.*` |
+| Automation | Automation (per target app) | Reading Chrome URL/window eligibility for URL capture and text-body suppression | `browser.navigate`; Chrome `ui.value`/`input.key`/clipboard bodies |
+
+Two important properties:
+
+- App launch, termination, and switching (`app.*`) require no permissions. With nothing granted, Zanei still records app-level activity.
+- A permission counts as required only when a feature that needs it is enabled. With both `input` and `ui` removed from `capture.sources`, for example, Input Monitoring is not required. Without `browser`, Chrome Automation is required only when `text_content` is enabled with `ui` or `input`; `window` alone does not require it.
+
+## First-time setup
+
+The signed app bundle has the stable TCC identity `dev.zanei.recorder`. Permission dialogs identify it as `Zanei`. Accessibility adds a `Zanei` row automatically, but Input Monitoring may omit the row even after the dialog grant has taken effect. Use this order:
+
+1. Run `zanei start`. The recorder requests required Accessibility and Input Monitoring permissions once during startup. If `start` exits with code 3, the daemon has started and its heartbeat reported the missing permissions; it remains running.
+2. Open the matching pane below. Switch the automatically added Accessibility row ON. If Input Monitoring lists `Zanei`, switch that row ON; absence of that row alone does not mean the dialog grant failed.
+3. To manage an omitted Input Monitoring permission from the list, click `+` and select the installed `Zanei.app`. While the permission is still reported missing, `zanei doctor --fix` opens the pane and copies the exact `Zanei.app` path. Press Command-Shift-G in the file dialog and paste that path. A manually added bundle entry persists.
+4. Run `zanei stop && zanei start` so the recorder picks up the grants.
+5. Run `zanei doctor` to verify the state enforced for the recorder itself. Its recorder-reported result is authoritative even when Input Monitoring has no row.
+
+| Permission | Location |
+| --- | --- |
+| Accessibility | Privacy & Security → Accessibility |
+| Input Monitoring | Privacy & Security → Input Monitoring |
+| Automation | Privacy & Security → Automation (macOS asks on the first Apple Event; Zanei does not request it at startup) |
+
+`zanei doctor --fix` opens missing required-permission panes one at a time. When more than one pane is needed, it waits for Return between panes; it does not wait after the final pane. It copies the `Zanei.app` root when running from the bundle and the executable path otherwise. Granting is always your action.
+
+## Verify with `doctor`
+
+```bash
+zanei doctor
+```
+
+While a recorder heartbeat is fresh, `doctor` reports that recorder's own permission state. Otherwise it probes from the `doctor` process and adds a human-readable note that the recorder must be started to see its own permissions. If anything is missing, it explains what to grant and exits with code 3.
+
+```bash
+zanei doctor --fix
+```
+
+`--fix` opens missing required-permission panes one at a time. When more than one pane is needed,
+it waits for Return between panes and does not wait after the final pane. `--json --fix` is accepted:
+Zanei prints the JSON report first, then runs the same interactive guide when a required permission
+is missing, so stdout is not JSON-only. When nothing required is missing, it prints only JSON.
+
+### For agents and scripts: `--json`
+
+```bash
+zanei doctor --json
+```
+
+```json
+{
+  "ok": false,
+  "reported_by_recorder": true,
+  "capture_sources": ["app", "window", "ui", "input", "browser"],
+  "permissions": {
+    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value"] },
+    "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
+    "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
+  },
+  "missing_required": ["input_monitoring"],
+  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+}
+```
+
+`status` is one of `granted` / `denied` / `not_determined`. `reported_by_recorder` distinguishes a recorder heartbeat from a local-process probe. Missing permissions use the dedicated exit code 3, so agents and scripts can detect a permission problem without parsing output (see [exit codes](/reference/cli#exit-codes)).
+
+## Remove or reset permissions
+
+If a pane contains a `Zanei` row, switch it OFF to remove that permission. Alternatively, stop Zanei and run the service-specific reset for each decision you want to clear before starting it again:
+
+```bash
+zanei stop
+tccutil reset Accessibility dev.zanei.recorder
+tccutil reset ListenEvent dev.zanei.recorder
+zanei start
+```
+
+These commands affect the signed app bundle identity. They do not address a raw, unbundled `cargo install` executable.
+
+## Permissions and code signing
+
+macOS ties permissions to the signed app identity. Release artifacts contain the signed, notarized, and stapled `Zanei.app`; the Homebrew formula installs that same app under `libexec` and exposes a CLI symlink. Both execute `Zanei.app/Contents/MacOS/zanei`, so TCC attributes access to `dev.zanei.recorder` across upgrades.
+
+:::warning[Building from source]
+A locally bundled app signed with `-` has an ad-hoc identity, so you may need to re-grant permissions after each rebuild. A raw `cargo install` binary has no app bundle identity: an entry added with `+` may not persist, and the bundle-ID reset commands cannot address it. Use the app bundle distribution for stable permission management.
+:::
+
+## Scope
+
+- Zanei asks macOS to present Accessibility and Input Monitoring decisions, but it never grants permissions or touches the TCC database. The reset commands above are explicit user actions. Automation remains tied to the first real Apple Event.
+- Each recorder requests required missing permissions only once at startup. It does not repeatedly prompt during the same run.
+- A background `start` with missing permissions exits with code 3 after the recorder reports them. The daemon remains running in a degraded state; after granting, restart it with `zanei stop && zanei start`.

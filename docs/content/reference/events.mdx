@@ -1,0 +1,187 @@
+---
+title: Event reference
+description: The event taxonomy, the JSON envelope shared by all events, and per-browser URL capture support.
+---
+
+Every event Zanei records — regardless of source — shares one OS-independent JSON envelope. The stable schema is the core asset of the project: capture backends may change per OS, but the shape your tools consume does not.
+
+## Event envelope
+
+One event per line (NDJSON) in raw outputs (`query --format jsonl`, `record`, `export`):
+
+```json
+{
+  "v": 1,
+  "id": "evt_01J...",
+  "ts": "2026-08-16T12:34:56.789Z",
+  "mono_ns": 128374651234,
+  "source": "macos.ax",
+  "type": "window.focus",
+  "app":    { "name": "Safari", "bundle_id": "com.apple.Safari", "pid": 501 },
+  "window": { "title": "Design doc", "id": 42 },
+  "element": null,
+  "data":   { },
+  "truncated": false,
+  "redaction": { "applied": true, "rules": ["email"] }
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `v` | Envelope schema version (currently `1`) |
+| `id` | ULID-based event ID, unique and time-sortable |
+| `ts` | Wall-clock timestamp (RFC3339, millisecond precision) |
+| `mono_ns` | Monotonic clock in nanoseconds — reliable ordering even across wall-clock changes |
+| `source` | Capture backend, e.g. `macos.ax`, `macos.workspace`, `macos.eventtap`, `macos.applescript` |
+| `type` | Event type (see the [taxonomy](#event-taxonomy)) |
+| `app` | App name, bundle ID, and PID. An unattributed `clipboard.copy` uses `name: "Unknown"`, `bundle_id: null`, and `pid: null` |
+| `window` | Window title and ID (when applicable) |
+| `element` | UI element role/title/value (when applicable; `value` is limited to allowlisted known-safe non-text controls, unknown elements have `value: null`, and secure fields never appear) |
+| `data` | Type-specific payload, e.g. `url` / `tab_title` / `mode` for `browser.navigate` |
+| `truncated` | `true` when normalize removed at least one oversized text, URL, or title field |
+| `redaction` | Which transformations were applied: configured privacy rules (`email` / `credit_card` / `token`) and the always-on `size_limit` safety rule. Secure fields leave no trace — they are excluded before capture |
+
+This envelope is also published as a machine-readable JSON Schema at [`/schema/event.schema.json`](/schema/event.schema.json) — the single contract all surfaces share, and the file the Rust core's types are tested against.
+
+## Field size limits
+
+Zanei measures these limits in UTF-8 bytes during normalization. A value at the limit is retained; a value one byte over it is replaced with `null`, while other metadata such as `ui.value.value_len` remains unchanged. The event then has `truncated: true` and the always-on `size_limit` transformation in `redaction.rules`.
+
+| Limit | Fields | Rationale |
+| --- | --- | --- |
+| 64 KiB (65,536 bytes) | `element.value`; `data.text` for `ui.value`, `input.key`, `clipboard.copy`, and `clipboard.paste` | Keeps useful text and clipboard differences while bounding per-field redaction, serialization, and in-memory batch cost |
+| 4 KiB (4,096 bytes) | `window.title`; `element.title`; `data.prev_title` for `window.title`; `data.url` and `data.tab_title` for `browser.navigate` | URLs and titles are context metadata; normal values fit comfortably while abnormal OS or application payloads are rejected |
+
+The same limits are checked again after key-event coalescing and privacy redaction, because concatenation and replacement markers can increase the byte length. A browser event whose URL was removed cannot be evaluated against website filters, so it is discarded rather than bypassing those filters.
+
+## Event taxonomy
+
+The current event types. The **Permission** column shows what must be granted for the type to be captured (see the [permissions guide](/guides/permissions)).
+
+| Type | Source | What it records | Permission |
+| --- | --- | --- | --- |
+| `app.activate` | `macos.workspace` | Frontmost app changed | None |
+| `app.launch` / `app.terminate` | `macos.workspace` | App started / quit | None |
+| `window.focus` | `macos.ax` | Focused window changed | Accessibility |
+| `window.title` | `macos.ax` | Window title changed | Accessibility |
+| `ui.focus` | `macos.ax` | Focused UI element changed | Accessibility |
+| `ui.click` | `macos.ax` | Click on a UI element | Accessibility (+ Input Monitoring) |
+| `ui.value` | `macos.ax` | Element value changed; newly added input is opt-in and never includes the full free-text value | Accessibility |
+| `input.key` | `macos.eventtap` | Key / shortcut. Default: fact of typing + field type; content is opt-in | Input Monitoring |
+| `input.scroll` | `macos.eventtap` | Scrolling | Input Monitoring |
+| `browser.navigate` | `macos.applescript` | URL / tab change. **Chrome only, currently**; Incognito always excluded | Automation |
+| `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | Clipboard use; content is opt-in | Input Monitoring |
+
+In `--types` filters, a trailing wildcard selects a whole family: `browser.*`, `ui.*`, and so on.
+
+`type` is a closed enum for each envelope version. Unknown types are rejected; adding an event type requires a new `v` and a matching store migration.
+
+## Per-type payloads
+
+What each type carries in `data`, and whether the envelope's `window` / `element` are present (✓) or null (—). The normative definitions live in the [JSON Schema](/schema/event.schema.json) as per-type conditions.
+
+| Type | `window` | `element` | `data` |
+| --- | --- | --- | --- |
+| `app.activate` | ✓ / — | — | empty; window context is included when available; derive the transition from consecutive activation events |
+| `app.launch` / `app.terminate` | — | — | empty |
+| `window.focus` | ✓ | — | empty (the focused window is in the envelope) |
+| `window.title` | ✓ | — | `prev_title` — the new title is in the envelope |
+| `ui.focus` | ✓ | ✓ | `field_kind` |
+| `ui.click` | ✓ | ✓ | `button` (`left`/`right`/`other`), `click_count` |
+| `ui.value` | ✓ | ✓ | `field_kind`, `value_len`, `text`. `text` is the newly added authorized difference, or null; it is null in Chrome Incognito and website-filtered windows. `element.value` is never recorded for free-text or unknown fields |
+| `input.key` | ✓ | — | `kind`, `modifiers`, `count`, `combo`, `text`, `field_kind` (details below) |
+| `input.scroll` | ✓ | — | `direction`, `amount`, `count` — coalesced totals |
+| `browser.navigate` | ✓ | — | `url` (null only after size limiting), `tab_title`, `mode` (always `"normal"`), `transition` (`navigate`/`tab_switch`/null) |
+| `clipboard.copy` | ✓ / — | — | `origin` (`copy_shortcut`/`unknown`), `content_kind` (`text`/`image`/`file`/`other`), `size_bytes`, `text`. Unknown origin has no app/window attribution or body |
+| `clipboard.paste` | ✓ | — | `content_kind`, `size_bytes`, `text`, and `field_kind` of the paste target |
+
+`field_kind` classifies the focused input field: `text` / `search` / `url` / `email` / `number` / `other`, or null when focus is not on a text-like element. There is no `password` value. Text bodies require Accessibility to confirm a known non-secure input field; failure to confirm leaves `input.key.text` and pasted text null.
+
+### `ui.value` in detail
+
+For a free-text field, `data.text` contains only the difference added after an authorized input, and only when `text_content` is enabled. A keystroke or paste that Zanei recorded (`input.key`, `clipboard.paste`) authorizes value changes in the same app and focused element for the next 3 seconds; several value-change notifications may follow one input, and all of them are covered. Input that Zanei rejected — secure input, an excluded window, an unknown or unreadable field — authorizes nothing. The field's complete value is never stored in `element.value`.
+
+Value changes are batched while typing continues and recorded after a 1-second pause or at most every 5 seconds, and when focus moves or the recorder stops. A batch can end in the middle of an IME composition, in which case part of the uncommitted reading appears in one event and the committed text in the next.
+
+A value change with no authorizing input — a different app, a different focused element, more than 3 seconds after the last input, or a Chrome window whose text bodies are suppressed — is not recorded as text: `data.text` is null and only `value_len` describes the resulting value. Deletion likewise has `text: null`. Voice input does not itself open an authorization window because it has no recorded keystroke or paste trigger. If voice text is inserted while a 3-second window opened by a preceding recorded keystroke or paste for the same app and focused-element generation is still active, that text can be included in the authorized difference.
+
+### `input.key` in detail
+
+The exact shape of "fact of typing + field type by default, content opt-in":
+
+| `kind` | Meaning | `combo` | `text` | Coalesced |
+| --- | --- | --- | --- | --- |
+| `text` | Printable typing | null | characters produced directly by a keyboard-layout input source, **opt-in only**; null for keyboard input modes and when the input-source type is unknown or unavailable | yes |
+| `shortcut` | Modifier combo (`cmd+s`, ...) | **always recorded** | null | no |
+| `navigation` | Arrows, PageUp/Down, Home/End, Tab | null | null | yes |
+| `delete` | Backspace / Delete | null | null | yes |
+| `other` | Esc, F-keys, media keys | null | null | no |
+
+A shortcut is an *action*, not *content* — so `combo` is recorded without opt-in. It is a primary timeline ingredient (saves, commits, tab switches). `input.key.text` also requires inactive Secure Input, a known non-secure Accessibility field, and an eligible Chrome window when Chrome is active.
+
+### Clipboard attribution
+
+`clipboard.copy` has body content only when a pasteboard change matches a Command-C observed from the same process within 500 milliseconds. Other changes remain as `origin: "unknown"` with an unattributed app envelope and null body. Copy and paste bodies require inactive Secure Input; paste additionally requires a known non-secure Accessibility field. Chrome Incognito and website-filtered windows keep both bodies null.
+
+## Coalescing guarantees
+
+Events are coalesced before they reach the store, so consumers do not see raw key-repeat or scroll floods:
+
+| Events | Grouped by | Window | Result |
+| --- | --- | --- | --- |
+| `input.key` (`text`/`navigation`/`delete`) | app + window + `field_kind` + `kind` | gap ≤ 2s | one event; `count` summed, `text` concatenated (opt-in) |
+| `input.scroll` | app + window + `direction` | gap ≤ 1s | `amount` and `count` summed |
+| `window.title` | window | 500ms debounce | only the final title is emitted |
+| `ui.value` | focused element | 1s observation idle time or 5s maximum hold, whichever comes first | one event for the final value in each batch; `text` is the added difference between that value and the pre-batch baseline |
+
+Shortcuts and `ui.click` do not coalesce (one action = one event). Core coalescing buffers are flushed on pause, stop, and batch flush. The collector-side `ui.value` buffer is flushed at the earlier of 1 second after its latest observation or 5 seconds after its first pending observation, and is also flushed on focus change and collector stop.
+
+The SQLite writer flushes a batch at the first of the configured interval, 512 events, or 4 MiB (4,194,304 bytes) of serialized event data. The byte limit bounds transaction and retained-memory cost even when a batch contains unusually large but valid events.
+
+`events_dropped` counts only events intended for recording but actually lost to backpressure, a full queue, disconnection, or a similar delivery failure. Inputs outside the recording scope because they cannot be attributed to an app or window are not counted.
+
+Pause, stop, and handled termination signals (`SIGTERM` / `SIGINT`) drain the in-memory channel and flush coalescing state and the SQLite batch. A process crash or `SIGKILL` bypasses that shutdown path, so data still in those buffers is lost and is not included in `events_dropped`. With a healthy store, the SQLite batch portion of this loss window is bounded by the first flush condition above; during write backoff, a retained batch can remain in memory longer than `batch_interval_s`.
+
+## What `text_content` changes
+
+Only *content* (what you typed or copied) is opt-in. *Facts of use* (shortcuts, clicks, URLs, titles) are recorded by default:
+
+| Field | Default (`false`) | Opt-in (`true`) |
+| --- | --- | --- |
+| `element.value` | always null | recorded only for allowlisted known-safe non-text controls (such as buttons, checkboxes, radio buttons, sliders, pop-up buttons, menu items, tabs, and short static text); null for free-text, secure, and unknown elements |
+| `input.key.text` | always null | characters produced directly by a keyboard-layout input source (after redaction); null unless Accessibility confirms a known non-secure field and Secure Input is inactive; also null for keyboard input modes, unknown input sources, and ineligible Chrome windows |
+| `input.key.combo` (shortcuts) | **recorded** | recorded |
+| `clipboard.copy.text` / `size_bytes` | always null | recorded only for an authorized Command-C correlation (after redaction); unknown origin, Secure Input, and ineligible Chrome windows keep them null |
+| `clipboard.paste.text` / `size_bytes` | always null | recorded only for a known non-secure target while Secure Input is inactive (after redaction); ineligible Chrome windows keep them null |
+| `ui.value.value_len` | recorded | recorded |
+| `ui.value.data.text` | always null | the difference added within 3 seconds after a recorded keystroke or paste in the same app and focused element (after redaction); Chrome windows with suppressed text bodies keep it null |
+| `window.title` / `tab_title` / `url` | recorded (after redaction) | recorded |
+
+## Schema versioning
+
+The published JSON Schema is authoritative for `v: 1`. Its envelope, event taxonomy, contexts, and per-type payloads are closed: unknown fields and event types are rejected. Adding a field or event type requires a new `v` and a matching store migration.
+
+## Browser URL capture
+
+`browser.navigate` (URL capture) currently supports Chrome only. Chromium exposes each window's mode (`normal` / `incognito`) via AppleScript. Incognito windows produce no URL events, and their text-content-derived bodies remain null without a configuration knob.
+
+| Browser | URL capture (current) | Private windows |
+| --- | --- | --- |
+| **Google Chrome** | ✅ Supported | `mode` suppresses Incognito URL events and text-content bodies |
+| Brave / Edge / Vivaldi (Chromium family) | ❌ Not supported — the collector only launches for Chrome's bundle ID | No URL capture, so no private-window handling applies |
+| **Safari** | ❌ Not supported | No private-mode property; menu-diff heuristics are brittle, so not attempted |
+| **Firefox** | ❌ Not supported | AppleScript has no URL API |
+| **Arc** | ❌ Not supported (unverified) | Chromium-based but limited AppleScript support |
+
+:::warning[Window titles]
+Chrome Incognito and website-filtered windows keep text-content-derived bodies null, but still produce `window.title` and interaction metadata like other windows. Browsers without URL capture have no private-mode body suppression. To suppress Chrome titles too, exclude the browser itself with `zanei filter exclude-app add com.google.Chrome` (see [filters](/guides/filters)).
+:::
+
+Safari/Firefox support may come later if a reliable private-mode detection mechanism exists.
+
+## Two layers of data
+
+- **Raw event layer** — complete and machine-readable; what `query`, `record`, and `export` return.
+- **Timeline layer** — human/LLM-readable; session splitting, dedup, coalescing, token-budgeted serialization. What [`timeline`](/reference/cli#timeline) and [`get_timeline`](/reference/mcp#get_timeline) return.
+
+Timeline sessions carry `event_ids` back-references to the underlying raw events. JSON output includes at most 100 IDs per session and sets `event_ids_truncated: true` when more exist; the field is always present, including when false. If the token budget is still exceeded, all `event_ids` are omitted before sessions are removed.

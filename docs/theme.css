@@ -1,0 +1,6 @@
+/* Hide the "Edit on GitHub" page action: not useful for end users, and
+   the generated URL 404s (see repo history). The header repository link
+   from the github config stays. */
+a[href*="/zanei/edit/"] {
+  display: none;
+}

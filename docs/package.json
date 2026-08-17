@@ -1,0 +1,15 @@
+{
+  "name": "zanei-docs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "blume dev",
+    "build": "blume build",
+    "preview": "blume preview",
+    "check": "blume doctor && blume validate"
+  },
+  "packageManager": "pnpm@10.26.2",
+  "dependencies": {
+    "blume": "^1.4.3"
+  }
+}

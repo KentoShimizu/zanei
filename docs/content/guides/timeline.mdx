@@ -1,0 +1,124 @@
+---
+title: Retrieving data
+description: The three ways to read recorded activity — timeline, query, and export — and how to choose between them.
+---
+
+Recorded data can be read back in three shapes:
+
+| Command | Shape | Best for |
+| --- | --- | --- |
+| [`timeline`](#timeline--llm-ready-summaries) | Session-structured summary, token-budgeted | Feeding an LLM or agent |
+| [`query`](#query--raw-events) | Raw events, filtered | Precise lookups, debugging, custom processing |
+| [`export`](#export--bulk-dumps) | Raw events, everything in range | Backups, external pipelines |
+
+## Time expressions
+
+`--since` / `--until` accept:
+
+| Form | Example | Meaning |
+| --- | --- | --- |
+| Relative | `15m` `2h` `1d` `1w` | Looking back from now; units are `s` `m` `h` `d` `w` |
+| Absolute | `2026-08-16T09:00:00Z` | RFC3339 timestamp |
+| Keyword | `now` | The current moment (mainly for `--until`) |
+
+`--until` defaults to `now`. `--since` defaults per command: `timeline` = `1h`, `query` = `15m`, `export` = `24h`.
+
+## `timeline` — LLM-ready summaries
+
+Raw events are split into sessions, deduplicated, coalesced, and serialized to fit a token budget:
+
+```bash
+zanei timeline --since 1h                             # Markdown, ~4000 tokens
+zanei timeline --since 30m --format json --granularity fine
+zanei timeline --since 1d --token-budget 8000
+```
+
+| Flag | Description |
+| --- | --- |
+| `--since` / `--until` | Range (default `--since 1h`) |
+| `--format` | `md` (default, LLM-ready Markdown) or `json` (structured) |
+| `--token-budget <N>` | Approximate token cap (default 4000). Content is coarsened to fit |
+| `--granularity` | `coarse` (default, per session) or `fine` (down to individual interactions) |
+
+Default Markdown output (abridged; headings and activity phrases are emitted exactly as shown):
+
+```md
+# Zanei timeline
+
+Range: 2026-08-16T08:00:00.000Z — 2026-08-16T09:00:00.000Z
+Estimated tokens: 3810
+Truncated: no
+
+## 2026-08-16T08:12:00.000Z — 2026-08-16T08:31:00.000Z · Safari
+
+Title: Reviewing PR #42
+- Browsed 3 pages on github.com
+- Edited text in "Reviewing PR #42"
+```
+
+With `--format json` you get the structured form:
+
+```json
+{
+  "range": { "since": "2026-08-16T08:00:00.000Z", "until": "2026-08-16T09:00:00.000Z" },
+  "token_estimate": 3810,
+  "truncated": false,
+  "sessions": [
+    {
+      "start": "2026-08-16T08:12:00.000Z", "end": "2026-08-16T08:31:00.000Z",
+      "app": "Safari", "title_summary": "Reviewing PR #42",
+      "activities": ["Browsed 3 pages on github.com", "Edited text in \"Reviewing PR #42\""],
+      "event_ids": ["evt_01J...", "evt_01J..."],
+      "event_ids_truncated": false
+    }
+  ]
+}
+```
+
+`event_ids` link each session back to the raw events behind it, so a consumer can drill down with `query`. Each session includes at most 100 IDs; `event_ids_truncated` is always present and becomes `true` when additional IDs exist. If necessary to meet the token budget, all IDs are omitted before sessions are removed.
+
+## `query` — raw events
+
+```bash
+zanei query --since 15m --types browser.navigate,app.activate
+zanei query --since 2h --app Safari --format json --limit 500
+zanei query --since 1d --bundle-id com.google.Chrome --types "browser.*"
+```
+
+| Flag | Description |
+| --- | --- |
+| `--since` / `--until` | Range (default `--since 15m`) |
+| `--types` | Comma-separated [event types](/reference/events); trailing wildcard like `browser.*` allowed |
+| `--app` / `--bundle-id` | Filter by app name / bundle ID |
+| `--limit <N>` | Max events (default 500) |
+| `--format` | `jsonl` (default) / `json` / `table` |
+
+These flags are **query-time filters** — they narrow what you read, not what gets recorded. For the recording-side boundary, see [filters](/guides/filters).
+
+## `export` — bulk dumps
+
+```bash
+zanei export --since 24h --format jsonl --out dump.jsonl
+```
+
+Dumps every raw event in range, for backups or external processing. Default range is `--since 24h`.
+
+## Recipes
+
+Restore context when resuming work (the one-liner shipped in skill files; the token budget stays at its default of 4000):
+
+```bash
+zanei timeline --since 2h --format md
+```
+
+Let an agent check whether recording is even on:
+
+```bash
+zanei status --json
+```
+
+Pull only what you did in Chrome today:
+
+```bash
+zanei query --since 1d --app "Google Chrome" --types browser.navigate --format json
+```

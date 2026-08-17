@@ -1,0 +1,187 @@
+---
+title: イベントリファレンス
+description: イベント型タクソノミー、全イベント共通の JSON エンベロープ、ブラウザ別の URL 捕捉対応。
+---
+
+Zanei が記録するすべてのイベントは、ソースによらず OS 非依存の JSON エンベロープを共有します。この安定スキーマがプロジェクトのコア資産です — 捕捉バックエンドは OS ごとに変わっても、ツールが消費する形は変わりません。
+
+## イベントエンベロープ
+
+生出力（`query --format jsonl`・`record`・`export`）では 1 行 1 イベント（NDJSON）：
+
+```json
+{
+  "v": 1,
+  "id": "evt_01J...",
+  "ts": "2026-08-16T12:34:56.789Z",
+  "mono_ns": 128374651234,
+  "source": "macos.ax",
+  "type": "window.focus",
+  "app":    { "name": "Safari", "bundle_id": "com.apple.Safari", "pid": 501 },
+  "window": { "title": "Design doc", "id": 42 },
+  "element": null,
+  "data":   { },
+  "truncated": false,
+  "redaction": { "applied": true, "rules": ["email"] }
+}
+```
+
+| フィールド | 説明 |
+| --- | --- |
+| `v` | エンベロープのスキーマバージョン（現在 `1`） |
+| `id` | ULID ベースのイベント ID。一意かつ時刻順ソート可能 |
+| `ts` | 実時刻タイムスタンプ（RFC3339、ミリ秒精度） |
+| `mono_ns` | 単調時計（ナノ秒）— 実時刻が変わっても順序が保証される |
+| `source` | 捕捉バックエンド。例：`macos.ax`・`macos.workspace`・`macos.eventtap`・`macos.applescript` |
+| `type` | イベント型（[タクソノミー](#イベント型タクソノミー)参照） |
+| `app` | アプリ名・バンドル ID・PID。帰属不能な `clipboard.copy` は `name: "Unknown"`、`bundle_id: null`、`pid: null` |
+| `window` | ウィンドウタイトルと ID（該当時） |
+| `element` | UI 要素の role/title/value（該当時。`value` は allowlist で安全と分類した非テキスト要素に限定し、不明な要素は `value: null`、secure field は決して現れない） |
+| `data` | 型固有ペイロード。例：`browser.navigate` の `url` / `tab_title` / `mode` |
+| `truncated` | normalize が上限超過の text・URL・title field を 1 つ以上除去した場合は `true` |
+| `redaction` | 適用された変換の有無と内訳。設定可能な privacy rule（`email` / `credit_card` / `token`）と常時適用の安全 rule `size_limit` を含みます。secure field は捕捉前に除外されるため痕跡は残りません |
+
+このエンベロープは機械可読な JSON Schema としても公開されています：[`/schema/event.schema.json`](/schema/event.schema.json)。全露出面が共有する単一契約であり、Rust コアの型はこのファイルとの一致をテストで担保されます。
+
+## field の byte 上限
+
+Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ちょうどの値は保持し、1 byte でも超えた値は `null` にします。`ui.value.value_len` など他の metadata は保持され、event には `truncated: true` と常時適用の変換ルール `size_limit` が `redaction.rules` に記録されます。
+
+| 上限 | 対象 field | 根拠 |
+| --- | --- | --- |
+| 64 KiB（65,536 bytes） | `element.value`、`ui.value`・`input.key`・`clipboard.copy`・`clipboard.paste` の `data.text` | 有用な text・clipboard 差分を保持しつつ、field 単位の redaction・serialize・batch memory コストを制限するため |
+| 4 KiB（4,096 bytes） | `window.title`、`element.title`、`window.title` の `data.prev_title`、`browser.navigate` の `data.url`・`data.tab_title` | URL/title は文脈 metadata であり、通常値を十分収めながら異常な OS・application payload を拒否するため |
+
+同じ上限を key event の coalesce 後と privacy redaction 後にも再検査します。文字列の連結や置換 marker により byte 数が増えるためです。URL が除去された browser event は website filter を評価できないため、filter を迂回させず event 全体を破棄します。
+
+## イベント型タクソノミー
+
+現在のイベント型です。**権限**列は、その型の捕捉に必要な macOS 権限を示します（[権限ガイド](/ja/guides/permissions)参照）。
+
+| 型 | ソース | 記録内容 | 権限 |
+| --- | --- | --- | --- |
+| `app.activate` | `macos.workspace` | 前面アプリの切替 | 不要 |
+| `app.launch` / `app.terminate` | `macos.workspace` | アプリの起動 / 終了 | 不要 |
+| `window.focus` | `macos.ax` | フォーカスウィンドウの変更 | アクセシビリティ |
+| `window.title` | `macos.ax` | タイトルの変化 | アクセシビリティ |
+| `ui.focus` | `macos.ax` | フォーカス UI 要素の変更 | アクセシビリティ |
+| `ui.click` | `macos.ax` | UI 要素へのクリック | アクセシビリティ（+ 入力監視） |
+| `ui.value` | `macos.ax` | 要素値の変化。新たに増えた入力内容のみ opt-in で記録し、自由入力の全体値は記録しない | アクセシビリティ |
+| `input.key` | `macos.eventtap` | キー / ショートカット。既定は「入力の事実 + フィールド種別」。内容は opt-in | 入力監視 |
+| `input.scroll` | `macos.eventtap` | スクロール | 入力監視 |
+| `browser.navigate` | `macos.applescript` | URL / タブの変化。**現在は Chrome のみ**。incognito は常に除外 | オートメーション |
+| `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | クリップボード操作。内容は opt-in | 入力監視 |
+
+`--types` フィルタでは末尾ワイルドカードでファミリー全体を選べます：`browser.*`・`ui.*` など。
+
+`type` は envelope version ごとの closed enum です。未知の型は拒否され、event type の追加には新しい `v` と対応する store migration が必要です。
+
+## 型別ペイロード
+
+各型が `data` に何を持つか、およびエンベロープの `window` / `element` の有無（✓ = あり、— = null）。規範的な定義は [JSON Schema](/schema/event.schema.json) の型別条件にあります。
+
+| 型 | `window` | `element` | `data` |
+| --- | --- | --- | --- |
+| `app.activate` | ✓ / — | — | 空。取得できた場合は window context を含む。遷移元は連続する activate イベントから導出 |
+| `app.launch` / `app.terminate` | — | — | 空 |
+| `window.focus` | ✓ | — | 空（フォーカス先はエンベロープ側） |
+| `window.title` | ✓ | — | `prev_title` — 変化後のタイトルはエンベロープ側 |
+| `ui.focus` | ✓ | ✓ | `field_kind` |
+| `ui.click` | ✓ | ✓ | `button`（`left`/`right`/`other`）、`click_count` |
+| `ui.value` | ✓ | ✓ | `field_kind`、`value_len`、`text`。`text` は認可された入力によって増えた差分、または null。Chrome incognito・サイト除外中は null。自由入力・不明なフィールドでは `element.value` は記録されない |
+| `input.key` | ✓ | — | `kind`、`modifiers`、`count`、`combo`、`text`、`field_kind`（詳細は下記） |
+| `input.scroll` | ✓ | — | `direction`、`amount`、`count` — coalesce 済み合計 |
+| `browser.navigate` | ✓ | — | `url`（size limit 適用後のみ null）、`tab_title`、`mode`（常に `"normal"`）、`transition`（`navigate`/`tab_switch`/null） |
+| `clipboard.copy` | ✓ / — | — | `origin`（`copy_shortcut`/`unknown`）、`content_kind`（`text`/`image`/`file`/`other`）、`size_bytes`、`text`。unknown origin は app/window 帰属と本文を持たない |
+| `clipboard.paste` | ✓ | — | `content_kind`、`size_bytes`、`text`、ペースト先の `field_kind` |
+
+`field_kind` はフォーカス中の入力フィールドの種別です：`text` / `search` / `url` / `email` / `number` / `other`、テキスト系要素にフォーカスがなければ null。`password` という値は存在しません。Accessibility が既知の非 secure 入力欄を確認できなければ、`input.key.text` とペースト本文は null です。
+
+### `ui.value` の詳細
+
+自由入力フィールドの `data.text` には、認可された入力のあとに増えた差分だけが入ります（`text_content` が有効なときのみ）。Zanei が記録した打鍵またはペースト（`input.key`・`clipboard.paste`）は、同じアプリ・同じフォーカス要素の値変化をそれから 3 秒間認可します。1 つの入力に複数の値変化通知が続くことがありますが、すべて認可の対象です。Zanei が拒否した入力（secure input・除外ウィンドウ・不明または読めないフィールド）は何も認可しません。フィールドの全体値が `element.value` に入ることはありません。
+
+入力が続いている間は値変化をまとめ、1 秒の間が空いたとき、または最長 5 秒ごと、そしてフォーカス移動時と recorder 停止時に記録します。IME の変換途中でまとまりが区切られることがあり、その場合は未確定の読みの一部が前のイベントに、確定した文字列が次のイベントに入ります。
+
+認可する入力のない値変化（別のアプリ、別のフォーカス要素、最後の入力から 3 秒超、本文抑止中の Chrome ウィンドウ）はテキストとして記録しません。`data.text` は null となり、変化後の `value_len` だけを記録します。削除の場合も `text: null` です。音声入力自体は、記録済みの打鍵またはペーストのトリガーを伴わないため認可窓を開きません。ただし、同じアプリ・同じフォーカス要素世代への直前の打鍵またはペーストが開いた 3 秒の窓が有効な間に音声テキストが挿入されると、そのテキストが認可された差分に含まれ得ます。
+
+### `input.key` の詳細
+
+「既定は入力の事実 + フィールド種別、内容は opt-in」の正確な形：
+
+| `kind` | 意味 | `combo` | `text` | coalesce |
+| --- | --- | --- | --- | --- |
+| `text` | 印字可能文字の打鍵 | null | keyboard layout 型の入力ソースが直接生む文字（**opt-in のみ**）。keyboard input mode 型、入力ソース型が不明、または取得失敗時は null | する |
+| `shortcut` | 修飾キー付き（`cmd+s` 等） | **常に記録** | null | しない |
+| `navigation` | 矢印・PageUp/Down・Home/End・Tab | null | null | する |
+| `delete` | Backspace / Delete | null | null | する |
+| `other` | Esc・F キー・メディアキー | null | null | しない |
+
+ショートカットは「内容」ではなく「操作」なので、`combo` は opt-in なしで記録されます。保存・コミット・タブ切替などタイムラインの主要な材料です。`input.key.text` には Secure Input が無効、Accessibility field が既知かつ非 secure、Chrome 使用時は window が本文許可済み、という条件も必要です。
+
+### クリップボードの帰属
+
+`clipboard.copy` が本文を持つのは、pasteboard 変更が同じプロセスで観測した Command-C と 500 ミリ秒以内に対応するときだけです。それ以外は `origin: "unknown"`、app 帰属なし、本文 null のイベントとして残ります。copy/paste 本文には Secure Input が無効であることが必要で、paste は既知の非 secure Accessibility field も必要です。Chrome incognito・サイト除外中は両方の本文が null です。
+
+## coalesce の保証
+
+イベントはストアに届く前に coalesce されるため、consumer はキー連打やスクロールを生のまま受け取りません：
+
+| 対象 | グループ化キー | 窓 | 結果 |
+| --- | --- | --- | --- |
+| `input.key`（`text`/`navigation`/`delete`） | app + window + `field_kind` + `kind` | 間隔 ≤ 2s | 1 イベントに集約。`count` 合算、`text` 連結（opt-in 時） |
+| `input.scroll` | app + window + `direction` | 間隔 ≤ 1s | `amount`・`count` を合算 |
+| `window.title` | window | 500ms debounce | 最後のタイトルのみ emit |
+| `ui.value` | フォーカス要素 | 観測が 1 秒止まった時点、または最初の pending 観測から最長 5 秒の早い方 | batch ごとの最終値について 1 イベントを emit。`text` は batch 前の基準値から最終値までに増えた差分 |
+
+ショートカットと `ui.click` は coalesce しません（1 操作 = 1 イベント）。core 側の coalesce バッファは pause・stop・batch flush 時に吐き出されます。collector 側の `ui.value` バッファは、最後の観測から 1 秒後、または最初の pending 観測から 5 秒後の早い方で flush し、フォーカス変更時と collector 停止時にも flush します。
+
+SQLite writer は、設定された interval・512 events・serialize 済み event data 4 MiB（4,194,304 bytes）のうち最初に到達した条件で batch を flush します。byte 上限により、通常より大きい有効 event が含まれても transaction と保持 memory のコストを制限します。
+
+`events_dropped` は、本来記録対象だったが、backpressure・queue full・切断などの配送障害で実際に失われたイベントだけを数えます。app または window に帰属できず記録対象外となる入力は数えません。
+
+pause・stop・処理対象の終了シグナル（`SIGTERM` / `SIGINT`）では、メモリ上の channel を drain し、coalesce 状態と SQLite batch を flush します。process crash または `SIGKILL` はこの shutdown path を通らないため、これらの buffer に残るデータは失われ、`events_dropped` にも計上されません。store が healthy なら、この loss window のうち SQLite batch は上記の flush 条件の最初の到達点までに制限されますが、write backoff 中は保持 batch が `batch_interval_s` を超えてメモリに残ることがあります。
+
+## `text_content` で変わるもの
+
+opt-in なのは「内容」（打った・コピーした文字列）だけです。「操作の事実」（ショートカット・クリック・URL・タイトル）は既定で記録されます：
+
+| フィールド | 既定（`false`） | opt-in（`true`） |
+| --- | --- | --- |
+| `element.value` | 常に null | allowlist で安全と分類した非テキスト要素（ボタン、チェックボックス、ラジオボタン、スライダー、ポップアップボタン、メニュー項目、タブ、短い静的テキストなど）のみ記録。自由入力、secure、不明な要素は null |
+| `input.key.text` | 常に null | keyboard layout 型の入力ソースが直接生む文字を記録（redaction 後）。Accessibility が既知の非 secure field を確認できない場合、Secure Input が有効な場合、keyboard input mode、入力ソース不明、または Chrome window が本文不許可なら null |
+| `input.key.combo`（ショートカット） | **記録** | 記録 |
+| `clipboard.copy.text` / `size_bytes` | 常に null | 認可された Command-C 対応時のみ記録（redaction 後）。unknown origin、Secure Input、Chrome window 本文不許可では null |
+| `clipboard.paste.text` / `size_bytes` | 常に null | Secure Input 無効かつ既知の非 secure target の場合のみ記録（redaction 後）。Chrome window 本文不許可では null |
+| `ui.value.value_len` | 記録 | 記録 |
+| `ui.value.data.text` | 常に null | 同じアプリ・同じフォーカス要素への記録済みの打鍵またはペーストから 3 秒以内に増えた差分（redaction 後）。本文抑止中の Chrome ウィンドウでは null |
+| `window.title` / `tab_title` / `url` | 記録（redaction 後） | 記録 |
+
+## スキーマのバージョニング
+
+公開 JSON Schema が `v: 1` の正規契約です。envelope・event taxonomy・context・型別 payload は closed で、未知の field と event type は拒否されます。field または event type の追加には新しい `v` と対応する store migration が必要です。
+
+## ブラウザの URL 捕捉
+
+`browser.navigate`（URL 捕捉）は現在 Chrome のみ対応します。Chromium は AppleScript でウィンドウのモード（`normal` / `incognito`）を返します。incognito は URL イベントを生成せず、本文も設定なしで null のままです。
+
+| ブラウザ | URL 捕捉（現在） | プライベートウィンドウ |
+| --- | --- | --- |
+| **Google Chrome** | ✅ 対応 | `mode` で incognito の URL イベントと本文を抑止 |
+| Brave / Edge / Vivaldi（Chromium 系） | ❌ 非対応 — collector は Chrome の bundle ID でのみ起動します | URL 捕捉自体がないため、プライベートウィンドウの扱いも発生しません |
+| **Safari** | ❌ 非対応 | プライベート判定プロパティなし。メニュー差分ヒューリスティックは脆いため不採用 |
+| **Firefox** | ❌ 非対応 | AppleScript に URL 取得 API が存在しない |
+| **Arc** | ❌ 非対応（要検証） | Chromium 系だが AppleScript 対応が限定的 |
+
+:::warning[ウィンドウタイトル]
+Chrome incognito・サイト除外中は本文が null のままですが、他の window と同様に `window.title` と操作 metadata は記録されます。URL 捕捉に非対応の browser には private-mode の本文抑止がありません。Chrome のタイトルも抑止するには browser 自体を `zanei filter exclude-app add com.google.Chrome` で除外してください（[フィルタ](/ja/guides/filters)参照）。
+:::
+
+Safari / Firefox 対応は、信頼できるプライベートモード判定手段があれば将来検討します。
+
+## データの 2 層
+
+- **生イベント層** — 完全・機械可読。`query`・`record`・`export` が返すもの。
+- **タイムライン層** — 人間 / LLM 可読。セッション分割・重複除去・coalesce・token budget 付き serialize。[`timeline`](/ja/reference/cli#timeline) と [`get_timeline`](/ja/reference/mcp#get_timeline) が返すもの。
+
+タイムラインの各セッションは背後の生イベントへの `event_ids` 逆参照を持ちます。JSON 出力では 1 セッション最大 100 ID で、超過時は `event_ids_truncated: true` になります。この field は false の場合も常に出力され、token budget をなお超える場合は session を削除する前に全 `event_ids` が省略されます。

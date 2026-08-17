@@ -1,0 +1,18 @@
+[package]
+name = "zanei-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zanei-collector = { path = "../zanei-collector" }
+zanei-core = { path = "../zanei-core" }
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "deny"

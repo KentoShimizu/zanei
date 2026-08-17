@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches the workspace version
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "tag v$tag does not match workspace version $version" >&2
+            exit 1
+          fi
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          mkdir -p target/release dist
+          lipo -create -output target/release/zanei \
+            target/aarch64-apple-darwin/release/zanei \
+            target/x86_64-apple-darwin/release/zanei
+
+      - name: Import signing certificate
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/build.keychain-db"
+          keychain_password=$(uuidgen)
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 900 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S "apple-tool:,apple:" \
+            -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+
+      - name: Build and sign app bundle
+        run: |
+          ./packaging/make-app.sh --timestamp \
+            "Developer ID Application: Kento Shimizu (63KP9X2CM6)"
+          plutil -lint dist/Zanei.app/Contents/Info.plist
+          test "$(plutil -extract CFBundleIdentifier raw -o - dist/Zanei.app/Contents/Info.plist)" = \
+            "dev.zanei.recorder"
+          test -x dist/Zanei.app/Contents/MacOS/zanei
+
+      - name: Notarize
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          key_path="$RUNNER_TEMP/AuthKey.p8"
+          submission_zip="$RUNNER_TEMP/zanei-notarization.zip"
+          cleanup() {
+            rm -f "$key_path" "$submission_zip"
+          }
+          trap cleanup EXIT
+          printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
+          ditto -c -k --keepParent dist/Zanei.app "$submission_zip"
+          xcrun notarytool submit "$submission_zip" \
+            --key "$key_path" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple dist/Zanei.app
+          xcrun stapler validate dist/Zanei.app
+
+      - name: Package artifacts
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ditto -c -k --keepParent dist/Zanei.app \
+            "dist/zanei-$version-macos-universal.zip"
+          tar -czf "dist/zanei-$version-macos-universal.tar.gz" -C dist Zanei.app
+          (cd dist && shasum -a 256 ./*.zip ./*.tar.gz > SHA256SUMS)
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--title "$GITHUB_REF_NAME" --generate-notes)
+          case "$GITHUB_REF_NAME" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" \
+            dist/*.zip dist/*.tar.gz dist/SHA256SUMS

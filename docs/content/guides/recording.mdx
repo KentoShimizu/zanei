@@ -1,0 +1,87 @@
+---
+title: Recording
+description: Starting, stopping, and pausing the daemon, checking status, and the lifecycle of stored data.
+---
+
+Recording runs as a background daemon (a launchd agent), controlled with these commands:
+
+| Command | Effect |
+| --- | --- |
+| `zanei start` | Register with launchd and start background recording |
+| `zanei stop` | Stop recording and unregister from launchd; stored data is kept |
+| `zanei pause --for 30m` | Pause; without `--for`, pauses indefinitely until `resume` |
+| `zanei resume` | Resume from pause |
+| `zanei status` | Check daemon state, event counts, and store info |
+
+## Starting
+
+```bash
+zanei start
+```
+
+At startup, the recorder requests required missing Accessibility and Input Monitoring permissions once. A background `start` exits with code 3 if the recorder heartbeat reports missing permissions, but the daemon remains running in a degraded state. Grant them, run `zanei stop && zanei start`, and verify with `zanei doctor` (see the [permissions guide](/guides/permissions)).
+
+### Running in the foreground
+
+Two ways to observe what's happening without daemonizing:
+
+```bash
+zanei start --foreground   # same configuration as the daemon, in the foreground (dev/debug)
+zanei record --stream      # stream raw events as NDJSON to stdout
+```
+
+`record` is for piping and experimentation; use `--out events.jsonl` to write to a file. For everyday recording, use `start`.
+
+## Checking status
+
+```bash
+zanei status
+zanei status --json   # for agents and scripts
+```
+
+The following is an abridged example. The [CLI reference](/reference/cli#status) defines the complete JSON shape and null conditions.
+
+```json
+{
+  "running": true,
+  "paused": false,
+  "since": "2026-08-16T08:00:00Z",
+  "uptime_s": 3600,
+  "events_captured": 12345,
+  "last_event_ts": "2026-08-16T08:59:58Z",
+  "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00Z" },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
+  "permissions_ok": true
+}
+```
+
+When there is no daemon to act on (`status`, `stop`, etc.), the exit code is 4.
+
+## Pausing and resuming
+
+`pause` turns recording off temporarily, for example during a meeting or a screen share:
+
+```bash
+zanei pause --for 30m   # resumes automatically after 30 minutes
+zanei pause             # paused until you resume
+zanei resume
+```
+
+:::note
+If you want certain apps or sites permanently excluded rather than temporarily paused, use [filters](/guides/filters) — they discard matching events before anything is written to the store.
+:::
+
+## Data lifecycle
+
+- Data lives only in the local SQLite store at `~/.local/state/zanei/store.sqlite` (override with `--store`).
+- Events older than 48 hours are purged at startup and periodically, and are excluded from reads (`retention_hours`, see [configuration](/reference/config)).
+- To delete manually, use `purge`:
+
+```bash
+zanei purge --before 24h   # delete events older than 24 hours
+zanei purge --all          # delete everything (with a confirmation prompt)
+```
+
+:::warning
+`purge` is destructive. `--all` asks for confirmation (suppress with `--quiet`).
+:::

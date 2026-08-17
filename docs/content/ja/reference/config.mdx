@@ -1,0 +1,107 @@
+---
+title: 設定
+description: config.toml のスキーマ — 捕捉ソース・フィルタ・出力・保持期間。
+---
+
+設定は単一の TOML ファイルにまとまっています：
+
+```
+~/.config/zanei/config.toml
+```
+
+グローバルフラグ `--config <path>` で呼び出しごとに上書きできます。ヘルパーコマンド：
+
+```bash
+zanei config init   # 設定パスに全項目のコメント付きテンプレートを生成
+zanei config path   # 設定ファイルのパスを表示
+zanei config show   # 有効設定（既定値マージ後）を表示
+zanei config edit   # $EDITOR で開く
+zanei config set capture.text_content true
+```
+
+`zanei config init` は不足している親ディレクトリを作成し、以下の完全なテンプレートを
+書き込みます。既存ファイルは上書きせず、生成先が存在する場合はそのパスを表示して終了コード
+1 で終了します。既定以外の場所を初期化するにはグローバル `--config <path>` を使います。
+
+`capture.text_content`、`output.batch_interval_s`、`output.retention_hours` には
+[`zanei config set`](/ja/reference/cli#config)を使います。filter リストには
+[`zanei filter`](/ja/reference/cli#filter)、その他の配列には `config edit` を使います。
+
+## 全体例（既定値）
+
+```toml config.toml
+[capture]
+sources = ["app", "window", "ui", "input", "browser"]
+text_content = false            # 内容の捕捉は明示的な opt-in
+
+[filter]                        # capture-time フィルタ = プライバシー境界（ストア書込前に適用）
+exclude_apps = ["1Password", "Keychain Access"]   # 不許可リスト（bundle_id 推奨）。既定除外を同梱
+include_only_apps = []          # 非空で許可リストモードに切替
+exclude_websites = []           # Chrome URL event/本文。URL host のドット境界サフィックス一致
+include_only_websites = []      # Chrome URL event/本文の許可リスト
+redactors = ["email", "credit_card", "token"]     # 捕捉値のスクラブ（二次防御）
+
+[output]
+batch_interval_s = 5
+retention_hours = 48            # 既定で短命保持
+```
+
+egress に相当する設定は存在しません — 外部送信は機能として存在しないためです。
+
+## バリデーション
+
+省略した設定に既定値を補完した後にバリデーションを実行します。受理するのは以下の 9 キー（それぞれ定義された section 内）だけで、それ以外のキーがあるとファイル全体を不正とします。ルールに違反するファイルは受理されず、`config show` や `config edit` を含む設定を読み込むすべてのコマンドが exit code 1 で終了します。`config set` や `filter` に渡した不正値は使用法エラー（code 2）で、何も保存されません。`config set` が受け付けるのはスカラーキー（`capture.text_content`・`output.batch_interval_s`・`output.retention_hours`）のみで、配列キーは `filter` か手編集で変更します。
+
+| キー | 受理する値 |
+| --- | --- |
+| `capture.sources` | `app`・`window`・`ui`・`input`・`browser` のうち 0 個以上。重複不可 |
+| `capture.text_content` | TOML boolean。`config set` では `true` / `false` と完全一致する値のみ |
+| `filter.exclude_apps`・`filter.include_only_apps` | 文字列。各 entry は非空・前後 whitespace なし・リスト内で大文字小文字を無視して一意。既存値（大文字小文字違いを含む）の `filter ... add` は no-op（code 0） |
+| `filter.exclude_websites`・`filter.include_only_websites` | ドメイン名。非空・whitespace・一意性のルールは上と同じ。末尾の `.` は 1 個まで。それを除いて全体 253 bytes 以下、dot 区切りの各 label は 1〜63 bytes の ASCII 英数字と `-` で、先頭と末尾は英数字。同梱の public suffix snapshot に含まれる値（`com` など）は受理するが、`filter ... add` は `--quiet` 未指定なら warning を表示 |
+| `filter.redactors` | `email`・`credit_card`・`token` のうち 0 個以上。重複不可 |
+| `output.batch_interval_s`・`output.retention_hours` | 0 より大きい符号なし整数（`u64`） |
+## `[capture]`
+
+| キー | 既定値 | 説明 |
+| --- | --- | --- |
+| `sources` | `["app", "window", "ui", "input", "browser"]` | 捕捉するイベントファミリー。`browser` がない場合、Chrome Automation が必要なのは `text_content` と `ui` または `input` を有効にしたときだけです。`window` 単独では不要です（[権限](/ja/guides/permissions)参照） |
+| `text_content` | `false` | 入力・フィールド内容（`ui.value`・`input.key`・クリップボードの中身）の捕捉。既定オフ。[プライバシーモデル](/ja/guides/privacy)参照 |
+
+## `[filter]`
+
+capture-time フィルタはストア書込**前に**適用されます。アプリ一致は全イベントを破棄し、サイト一致は Chrome URL イベントと本文を抑止します。タイトルと操作メタデータは残ります。セマンティクス・マッチング・優先順位は[フィルタガイド](/ja/guides/filters)を参照。手編集より [`zanei filter`](/ja/reference/cli#filter) での管理を推奨します。
+
+| キー | 既定値 | 説明 |
+| --- | --- | --- |
+| `exclude_apps` | 既定除外を同梱 | アプリの不許可リスト（`bundle_id` 推奨。表示名も可） |
+| `include_only_apps` | `[]` | 許可リスト。非空で許可リストモードに切替 |
+| `exclude_websites` | `[]` | Chrome URL イベントと本文に対する URL host の不許可リスト。Public Suffix List 非対応のドット境界サフィックス一致：`example.com` は `api.example.com` に一致し、`evil-example.com` には一致しません。`com` を指定するとすべての `.com` ホストが除外されます |
+| `include_only_websites` | `[]` | Chrome URL イベントと本文に対する URL host の許可リスト |
+| `redactors` | `["email", "credit_card", "token"]` | 捕捉値に適用する redaction ルール |
+
+デーモンは設定ファイルを約 2 秒間隔で監視しており、フィルタの変更は数秒以内に反映されます — デーモン再起動は不要です。
+
+## `[output]`
+
+| キー | 既定値 | 説明 |
+| --- | --- | --- |
+| `batch_interval_s` | `5` | coalesce 済みイベントと SQLite batch のフラッシュ間隔 |
+| `retention_hours` | `48` | これより古いイベントは起動時と定期実行で purge され、読み取り結果からも除外 |
+
+`zanei record` は記録したイベントを NDJSON で出力します。daemon は単一のローカル SQLite
+ストアへ書き込みます。出力動作とストアバックエンドは設定できません。
+
+## 変更の反映
+
+- `[filter]` の変更はデーモンの設定監視（約 2 秒間隔）で検知され、数秒以内に反映されます — 再起動は不要です。
+- `output.retention_hours` は daemon 再起動なしで反映され、新しい保持期間の外にある
+  event を即時 purge します。それ以外（`capture.sources`・`output.batch_interval_s` 等）は
+  デーモン再起動後に反映：
+  `zanei stop && zanei start`
+
+## 関連パス
+
+| パス | 用途 | 上書き |
+| --- | --- | --- |
+| `~/.config/zanei/config.toml` | 設定 | `--config <path>` |
+| `~/.local/state/zanei/store.sqlite` | イベントストア | `--store <path>` |

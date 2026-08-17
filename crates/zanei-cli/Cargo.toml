@@ -1,0 +1,33 @@
+[package]
+name = "zanei-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "zanei"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signal-hook.workspace = true
+thiserror.workspace = true
+time.workspace = true
+zanei-collector = { path = "../zanei-collector" }
+zanei-core = { path = "../zanei-core", features = ["write"] }
+zanei-macos = { path = "../zanei-macos" }
+zanei-mcp = { path = "../zanei-mcp" }
+toml.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+jsonschema = { version = "0.33", default-features = false }
+tempfile.workspace = true
+
+[lints]
+workspace = true

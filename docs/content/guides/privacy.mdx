@@ -1,0 +1,62 @@
+---
+title: Privacy model
+description: What is recorded, what is not, and the layers that keep sensitive data out of the store.
+---
+
+Zanei records what you do on your computer. Because that data is sensitive, the defaults are conservative and each layer below applies without configuration.
+
+## Defaults
+
+1. **No egress.** There is no feature that sends data anywhere. Everything stays in a local SQLite file.
+2. **No screen recording.** No screenshots or screen-capture APIs. Zanei reads OS accessibility and event metadata.
+3. **No keystroke content by default.** Typing is recorded as "typing happened in this kind of field," not what was typed, unless you opt in.
+4. **Capture-time filtering.** Events attributable to excluded apps are discarded before they reach the store. An unattributed clipboard change can still be stored with `app.name: "Unknown"` because it cannot be matched to the excluded app. Excluded Chrome sites produce no URL events or text-content bodies.
+5. **Read-only MCP exposure.** The [MCP server](/reference/mcp) is a read-only view. An agent connected only through MCP can read the timeline but cannot change what is recorded or edit filters.
+
+## What is recorded with the default configuration
+
+| Recorded | Not recorded |
+| --- | --- |
+| Which app is frontmost, and when it changes | Screenshots or screen video |
+| Window titles and focus changes | Keystroke content (only the fact of typing and the field type) |
+| UI interactions (clicks, focus moves) as element metadata | Values of password fields (`AXSecureTextField`), excluded at the source |
+| The fact of typing, scrolling, and clipboard use | URLs, tab info, and text-content bodies from Chrome Incognito windows |
+| Chrome URLs and tab titles (normal windows only) | Events attributable to excluded apps (password managers by default) |
+
+## Capturing content is opt-in
+
+Setting `capture.text_content = true` in the [configuration](/reference/config) enables recording of authorized typed characters (`input.key`), text inserted into fields (`ui.value.data.text`), and clipboard contents. For free-text fields, Zanei captures only the difference inserted within 3 seconds after a keystroke or paste in the same app and focused element; it does not capture the displayed document or the field's full value. While you keep typing, changes are batched and recorded after a 1-second pause or at most every 5 seconds. Clipboard copy text requires a matching Command-C from the same process within 500 milliseconds. `element.value` stays null for free-text and unknown elements; only an allow-list of known-safe non-text controls (buttons, checkboxes, sliders) provides it. This is off by default. `start` and `status` show the opt-in command; the setting is never enabled automatically. If you opt in:
+
+- Password fields remain excluded; secure fields are dropped at capture time.
+- If Accessibility cannot confirm a known non-secure input field, `input.key.text` and pasted text remain null.
+- Value changes outside a 3-second authorization window opened by a confirmed keystroke or paste are not recorded as text. Rejected inputs do not open a window.
+- Chrome Incognito and website-filtered windows keep text-content bodies null. Window titles and interaction metadata can remain.
+- Unknown UI elements do not provide `element.value`.
+- `input.key.text` is null while an input method (IME) is active and when the input-source type is unknown; committed text can be captured only as an authorized `ui.value.data.text` difference.
+- Voice input does not itself open an authorization window because it has no recorded keystroke or paste trigger. If voice text is inserted while a 3-second window opened by a preceding recorded keystroke or paste for the same app and focused-element generation is still active, that text can be included in the authorized `ui.value.data.text` difference.
+- [Redactors](#redaction) scrub recognizable secrets from captured values.
+
+:::danger
+With `text_content` enabled, captured text stays in your local store for the retention window. Pair it with [filters](/guides/filters) and a short `retention_hours`.
+:::
+
+## Automatic exclusions
+
+- **Password fields** — anything macOS marks as a secure text field is dropped at the source.
+- **Chrome Incognito** — Chromium reports the window mode over AppleScript. Incognito windows produce no URL events, and text-content bodies remain null. There is no configuration knob.
+- **Built-in app exclusions** — password managers and credential stores (for example `1Password`, `Keychain Access`) are excluded by a hard-coded layer that cannot be lifted, not even with `include_only_apps`. It is separate from the editable `exclude_apps` defaults in `config.toml`.
+
+## Redaction
+
+For values that are captured, redactors scrub recognizable sensitive content: emails, credit-card numbers, tokens (`redactors = ["email", "credit_card", "token"]`). Every event carries a `redaction` field recording whether rules were applied.
+
+## Limitations
+
+- **Window titles from non-Chrome browsers.** Safari and Firefox offer no reliable way to detect private windows, so Zanei does not capture URLs from them, but their window titles are still recorded like any other app's, and a private window's page title can appear there. To avoid this, exclude that browser; for example, for Safari: `zanei filter exclude-app add com.apple.Safari`.
+- **Window titles from Chrome Incognito and excluded-site windows.** Their text-content bodies remain null, but Accessibility can still record the title as a `window.title` event. To suppress titles too, exclude Chrome: `zanei filter exclude-app add com.google.Chrome`.
+- **Agents with shell access.** An agent with shell access can use the CLI to change recording settings, filters, and stored recordings, subject to the host's approval policy. The shipped skill instructs agents not to make these changes unless the user explicitly asks.
+- **After an agent reads your data.** The MCP server and CLI do not send anything anywhere, but an agent that reads your timeline will typically send it to its LLM provider. That handoff is governed by the agent. The shipped skill instructs agents to narrow the time range before sending.
+
+## Intended use
+
+Zanei records your own activity on your own machine. It is not built for monitoring others, and using it that way may be illegal in your jurisdiction. On an employer-managed device, follow your organization's policies.

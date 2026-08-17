@@ -1,0 +1,104 @@
+---
+title: macOS 権限のセットアップ
+description: Zanei が要求する TCC 権限の一覧、付与手順、zanei doctor による recorder 状態の確認。
+---
+
+何を記録するか（設定の `capture.sources`）に応じて、Zanei は最大 3 種類の macOS 権限（TCC）を使います。画面収録は含まれません。
+
+## 必要な権限
+
+| 権限 | System Settings 上の項目 | 何のために使うか | 関係するイベント型 |
+| --- | --- | --- | --- |
+| アクセシビリティ | Accessibility | ウィンドウタイトル・フォーカス・UI 要素の取得 | `window.*` `ui.*` |
+| 入力監視 | Input Monitoring | キー・スクロール・クリックの検知 | `input.*` `ui.click` `clipboard.*` |
+| オートメーション | Automation（対象アプリごと） | Chrome の URL と window eligibility を取得し、URL 捕捉と本文抑止に使用 | `browser.navigate`、Chrome の `ui.value`/`input.key`/clipboard 本文 |
+
+2 つの性質があります。
+
+- アプリの起動・終了・前面切替（`app.*`）は権限なしで記録できます。何も付与しなくても、アプリ単位の行動履歴は記録されます。
+- 権限が必須になるのは、それを必要とする機能が有効な場合だけです。たとえば `capture.sources` から `input` と `ui` の両方を外すと入力監視は不要です。`browser` がない場合、Chrome Automation が必要なのは `text_content` と `ui` または `input` を有効にしたときだけです。`window` 単独では不要です。
+
+## 初回セットアップ
+
+署名済み app bundle の TCC identity は `dev.zanei.recorder` です。権限ダイアログは `Zanei` 名義で表示されます。アクセシビリティには `Zanei` の行が自動追加されますが、入力監視はダイアログでの付与が有効でも行が自動追加されないことがあります。次の順で設定します。
+
+1. `zanei start` を実行します。recorder は起動時に、必要なアクセシビリティと入力監視を 1 回だけ要求します。`start` が終了コード 3 を返した場合も、デーモンは起動済みで、heartbeat が権限不足を報告しています。デーモンは動作を継続します。
+2. 下表のペインを開きます。自動追加されたアクセシビリティの行を ON にします。入力監視に `Zanei` があればその行を ON にしますが、行がないことだけではダイアログでの付与失敗を意味しません。
+3. 一覧から入力監視の権限を操作する場合は、`+` でインストール済みの `Zanei.app` を選択します。まだ権限不足と報告されている間は、`zanei doctor --fix` がペインを開いて正確な `Zanei.app` の path をコピーします。ファイル選択ダイアログで Command-Shift-G を押してその path を貼り付けます。手動追加した bundle の行は定着します。
+4. `zanei stop && zanei start` を実行し、付与結果を recorder に反映します。
+5. `zanei doctor` を実行し、recorder 自身に適用されている状態を確認します。入力監視に行がなくても、recorder 由来の結果を正とします。
+
+| 権限 | 場所 |
+| --- | --- |
+| アクセシビリティ | Privacy & Security → Accessibility |
+| 入力監視 | Privacy & Security → Input Monitoring |
+| オートメーション | Privacy & Security → Automation（初回の実 Apple Event 時に macOS が確認。起動時には要求しない） |
+
+`zanei doctor --fix` は不足している必要権限のペインを 1 つずつ開きます。複数のペインが必要な場合はペイン間で Return キー入力を待ち、最後のペイン後には待機しません。バンドル実行時は `Zanei.app` のルート、その他は実行ファイルの path をコピーします。付与操作は必ずユーザーが行います。
+
+## `doctor` で確認する
+
+```bash
+zanei doctor
+```
+
+recorder の heartbeat が新鮮な間は、recorder 自身が報告した権限状態を表示します。それ以外では `doctor` プロセスから probe し、人間向け出力に「recorder 自身の権限を見るには起動する」旨を注記します。不足があれば付与手順を案内し、**終了コード 3** で終了します。
+
+```bash
+zanei doctor --fix
+```
+
+`--fix` は不足している必要権限のペインを 1 つずつ開きます。複数のペインが必要な場合は
+ペイン間で Return キー入力を待ち、最後のペイン後には待機しません。`--json --fix` も指定でき、
+最初に JSON report を出力した後、必要権限が不足していれば同じ対話フローを実行します。
+この場合の stdout は JSON のみではありません。不足がなければ JSON だけを出力します。
+
+### agent・スクリプト向け：`--json`
+
+```bash
+zanei doctor --json
+```
+
+```json
+{
+  "ok": false,
+  "reported_by_recorder": true,
+  "capture_sources": ["app", "window", "ui", "input", "browser"],
+  "permissions": {
+    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value"] },
+    "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
+    "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
+  },
+  "missing_required": ["input_monitoring"],
+  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+}
+```
+
+`status` の値は `granted` / `denied` / `not_determined` の 3 値です。`reported_by_recorder` で recorder heartbeat とローカルプロセスの probe を区別できます。権限不足は専用の終了コード 3 で通知されるため、agent やスクリプトは出力を解析せずに権限の問題を判定できます（[終了コード](/ja/reference/cli#終了コード)）。
+
+## 権限を解除・リセットする
+
+ペインに `Zanei` の行があれば、OFF にするとその権限を解除できます。または Zanei を停止し、消去する判断に対応する service の reset を実行してから再起動します。
+
+```bash
+zanei stop
+tccutil reset Accessibility dev.zanei.recorder
+tccutil reset ListenEvent dev.zanei.recorder
+zanei start
+```
+
+このコマンドが対象にするのは署名済み app bundle の identity です。bundle を持たない素の `cargo install` 実行ファイルには適用されません。
+
+## 権限とコード署名
+
+macOS の権限は署名済み app の identity に紐づきます。リリース成果物には署名・notarize・staple 済みの `Zanei.app` が入り、Homebrew Formula も同じ app を `libexec` に配置して CLI symlink を公開します。どちらも `Zanei.app/Contents/MacOS/zanei` を実行するため、アップグレード後も TCC は `dev.zanei.recorder` に帰属します。
+
+:::warning[ソースからビルドした場合]
+`-` で ad-hoc 署名したローカル bundle は、再ビルドのたびに権限の再付与が必要になることがあります。素の `cargo install` バイナリには app bundle identity がなく、`+` で追加した行が定着しないことがあり、bundle ID の reset コマンドも適用できません。安定して権限を管理するには app bundle 版を使用してください。
+:::
+
+## 範囲
+
+- Zanei はアクセシビリティと入力監視の判断を macOS に要求しますが、権限の付与や TCC データベースの操作は行いません。上の reset コマンドはユーザーが明示的に実行する操作です。オートメーションは初回の実 Apple Event 時に確認されます。
+- recorder は起動時に、必要かつ未付与の権限だけを 1 回要求します。同じ起動中に繰り返し要求しません。
+- バックグラウンド `start` は recorder の権限不足報告後に終了コード 3 を返しますが、デーモンは degraded 状態で動作を継続します。付与後は `zanei stop && zanei start` で再起動します。
