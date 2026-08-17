@@ -4,6 +4,7 @@ mod collectors;
 mod control;
 mod main_thread;
 mod ownership;
+mod permission_worker;
 mod pipeline;
 mod runtime;
 mod runtime_support;

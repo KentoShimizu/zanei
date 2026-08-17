@@ -17,9 +17,11 @@ use super::{
     CollectorSet, Pipeline, ensure_pipeline_running, initialize_permission_dependent_runtime,
     merge_collector_failures, normalize_pause_request,
 };
+use crate::daemon::permission_worker::{PermissionRequestPoll, PermissionRequestWorker};
+use crate::permissions::PermissionRequestOutcome;
 
 #[test]
-fn initial_heartbeat_is_committed_before_blocking_permission_probe() {
+fn initial_heartbeat_is_committed_before_permission_worker_starts() {
     let directory = TempDir::new().expect("temporary directory");
     let store_path = directory.path().join("store.sqlite");
     let worker_store_path = store_path.clone();
@@ -36,15 +38,21 @@ fn initial_heartbeat_is_committed_before_blocking_permission_probe() {
         ..DaemonState::default()
     };
 
-    let worker = thread::spawn(move || {
-        let writer = StoreWriter::open(&worker_store_path).expect("store writer");
-        initialize_permission_dependent_runtime(&writer, &state, || {
+    let writer = StoreWriter::open(&store_path).expect("store writer");
+    let permission_worker = initialize_permission_dependent_runtime(&writer, &state, || {
+        PermissionRequestWorker::start_with(move || {
+            let status = StoreReader::open(&worker_store_path)
+                .expect("worker store reader")
+                .status()
+                .expect("worker store status");
+            assert!(status.running);
+            assert_eq!(status.permissions, None);
             probe_started.send(()).expect("announce blocking probe");
             release_probe_rx.recv().expect("release blocking probe");
-            Ok(())
+            Ok(PermissionRequestOutcome::Completed)
         })
-        .expect("daemon startup sequence");
-    });
+    })
+    .expect("daemon startup sequence");
 
     probe_started_rx.recv().expect("permission probe started");
     let status = StoreReader::open(&store_path)
@@ -59,7 +67,16 @@ fn initial_heartbeat_is_committed_before_blocking_permission_probe() {
     assert_eq!(status.permissions, None);
 
     release_probe.send(()).expect("release permission probe");
-    worker.join().expect("startup worker");
+    loop {
+        match permission_worker.poll() {
+            PermissionRequestPoll::Pending => thread::yield_now(),
+            PermissionRequestPoll::Complete(result) => {
+                assert!(matches!(result, Ok(PermissionRequestOutcome::Completed)));
+                break;
+            }
+            PermissionRequestPoll::Stopped => panic!("worker must report its result"),
+        }
+    }
 }
 
 #[test]
