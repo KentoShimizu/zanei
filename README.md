@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/public/favicon.svg" width="96" alt="Zanei icon">
+  <img src="https://raw.githubusercontent.com/KentoShimizu/zanei/main/docs/public/favicon.svg" width="96" alt="Zanei icon">
   <h1>Zanei</h1>
   <p><strong>Local activity context for AI agents</strong></p>
   <p>
