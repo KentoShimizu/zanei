@@ -80,7 +80,7 @@ zanei doctor --json
 
 ## Remove or reset permissions
 
-If a pane contains a `Zanei` row, switch it OFF to remove that permission. Alternatively, stop Zanei and run the service-specific reset for each decision you want to clear before starting it again:
+If a pane contains a `Zanei` row, delete it to remove that permission. Alternatively, stop Zanei and run the service-specific reset for each decision you want to clear before starting it again:
 
 ```bash
 zanei stop
@@ -89,7 +89,7 @@ tccutil reset ListenEvent dev.zanei.recorder
 zanei start
 ```
 
-These commands affect the signed app bundle identity. They do not address a raw, unbundled `cargo install` executable.
+Run these bundle-ID resets while Zanei is still installed. `tccutil` can resolve only a bundle registered with LaunchServices, so the commands cannot address `dev.zanei.recorder` after uninstalling it. They also do not address a raw, unbundled `cargo install` executable.
 
 ## Permissions and code signing
 

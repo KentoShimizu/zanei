@@ -12,7 +12,7 @@ use crate::error::CliError;
 const CODESIGN: &str = "/usr/bin/codesign";
 const OPEN: &str = "/usr/bin/open";
 
-const BUNDLED_PERMISSION_NOTE: &str = "Accessibility lists the bundled app as `Zanei`. Input Monitoring may omit its row even after the permission-dialog grant takes effect; the recorder-reported `zanei doctor` result is authoritative. To manage a missing Input Monitoring row from System Settings, click `+` and add `Zanei.app`; the bundled entry persists. Remove a listed permission with its row toggle, or stop Zanei and run `tccutil reset Accessibility dev.zanei.recorder` or `tccutil reset ListenEvent dev.zanei.recorder`.\n";
+const BUNDLED_PERMISSION_NOTE: &str = "Accessibility lists the bundled app as `Zanei`. Input Monitoring may omit its row even after the permission-dialog grant takes effect; the recorder-reported `zanei doctor` result is authoritative. To manage a missing Input Monitoring row from System Settings, click `+` and add `Zanei.app`; the bundled entry persists. Remove a listed permission with its row toggle, or, while Zanei is still installed, stop Zanei and run `tccutil reset Accessibility dev.zanei.recorder` or `tccutil reset ListenEvent dev.zanei.recorder`.\n";
 const UNBUNDLED_PERMISSION_NOTE: &str = "A raw `cargo install` executable can be omitted from these lists, and a manual `+` entry may not persist. Bundle-ID `tccutil` resets do not apply to it; use the bundled distribution for manageable, persistent entries.\n";
 
 pub(super) fn print_human(
@@ -313,7 +313,12 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{OPEN, permission_target_path, reveal_in_finder_with};
+    use super::{OPEN, permission_list_note, permission_target_path, reveal_in_finder_with};
+
+    #[test]
+    fn bundled_permission_reset_note_requires_zanei_to_still_be_installed() {
+        assert!(permission_list_note(true).contains("while Zanei is still installed"));
+    }
 
     #[test]
     fn symlinked_executable_resolves_to_app_root_for_finder_reveal() {

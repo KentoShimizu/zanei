@@ -21,6 +21,12 @@ class Zanei < Formula
     bin.install_symlink libexec/"Zanei.app/Contents/MacOS/zanei"
   end
 
+  def post_install
+    # tccutil can resolve only bundles registered with LaunchServices.
+    system "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+           "-f", libexec/"Zanei.app"
+  end
+
   test do
     assert_match version.to_s, shell_output("#{bin}/zanei --version")
   end

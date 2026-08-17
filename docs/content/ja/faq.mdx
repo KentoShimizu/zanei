@@ -50,25 +50,34 @@ Zanei は自分のマシン上の自分の操作を記録するツールです�
 
 ## Zanei をアンインストールするには？
 
-アンインストール前に recorder を停止します。
+bundle ID を指定した権限 reset がインストール済み app を解決できるよう、次の順で操作します。
 
-```bash
-zanei stop
-brew uninstall zanei
-```
-
-Homebrew は設定と記録データを残します。これらも削除する場合は次を実行します。
-
-```bash
-rm -rf ~/.config/zanei ~/.local/state/zanei
-```
-
-アクセシビリティと入力監視の権限は、**システム設定 → プライバシーとセキュリティ**で解除します。`Zanei` の項目がすでに表示されない場合は、次を実行します。
+1. アクセシビリティと入力監視の権限を解除します。**システム設定 → プライバシーとセキュリティ**で `Zanei` の行を削除するか、Zanei がまだインストールされている間に次を実行します。
 
 ```bash
 tccutil reset Accessibility dev.zanei.recorder
 tccutil reset ListenEvent dev.zanei.recorder
 ```
+
+2. recorder を停止します。
+
+```bash
+zanei stop
+```
+
+3. Zanei をアンインストールします。
+
+```bash
+brew uninstall zanei
+```
+
+4. Homebrew は設定と記録データを残します。これらも削除する場合は次を実行します。
+
+```bash
+rm -rf ~/.config/zanei ~/.local/state/zanei
+```
+
+アンインストール後は、bundle ID を指定する `tccutil` コマンドが `dev.zanei.recorder` を解決できません。TCC は bundle ID と署名で付与を照合するため、付与が残っていると同じ app の再インストール時にそのまま復活します。残ったアクセシビリティの判断を完全に消すには、システム設定に `Zanei` の行が残っていればそこから削除するか、bundle ID を付けずに `tccutil reset Accessibility` を実行します。後者は全アプリのアクセシビリティ判断を reset します。
 
 アンインストール前に `zanei stop` を忘れた場合でも、recorder は自身の実行ファイルがなくなったことを検出し、数十秒以内に自動で終了します。
 

@@ -80,7 +80,7 @@ zanei doctor --json
 
 ## 権限を解除・リセットする
 
-ペインに `Zanei` の行があれば、OFF にするとその権限を解除できます。または Zanei を停止し、消去する判断に対応する service の reset を実行してから再起動します。
+ペインに `Zanei` の行があれば、削除するとその権限を解除できます。または Zanei を停止し、消去する判断に対応する service の reset を実行してから再起動します。
 
 ```bash
 zanei stop
@@ -89,7 +89,7 @@ tccutil reset ListenEvent dev.zanei.recorder
 zanei start
 ```
 
-このコマンドが対象にするのは署名済み app bundle の identity です。bundle を持たない素の `cargo install` 実行ファイルには適用されません。
+bundle ID を指定する reset は、Zanei がまだインストールされている間に実行します。`tccutil` が解決できるのは LaunchServices に登録済みの bundle だけなので、アンインストール後は `dev.zanei.recorder` に適用できません。bundle を持たない素の `cargo install` 実行ファイルにも適用されません。
 
 ## 権限とコード署名
 

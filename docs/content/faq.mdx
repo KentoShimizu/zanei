@@ -50,25 +50,34 @@ Yes. A background `start` returns code 3 only after the recorder is alive and it
 
 ## How do I uninstall Zanei?
 
-Stop the recorder before uninstalling it:
+Use this order so the bundle-specific permission reset can still resolve the installed app:
 
-```bash
-zanei stop
-brew uninstall zanei
-```
-
-Homebrew leaves your configuration and recorded data in place. To delete them too:
-
-```bash
-rm -rf ~/.config/zanei ~/.local/state/zanei
-```
-
-Remove the Accessibility and Input Monitoring grants in **System Settings → Privacy & Security**. If the `Zanei` entry is no longer listed there, run:
+1. Remove the Accessibility and Input Monitoring grants. Delete the `Zanei` rows in **System Settings → Privacy & Security**, or run these commands while Zanei is still installed:
 
 ```bash
 tccutil reset Accessibility dev.zanei.recorder
 tccutil reset ListenEvent dev.zanei.recorder
 ```
+
+2. Stop the recorder:
+
+```bash
+zanei stop
+```
+
+3. Uninstall Zanei:
+
+```bash
+brew uninstall zanei
+```
+
+4. Homebrew leaves your configuration and recorded data in place. To delete them too:
+
+```bash
+rm -rf ~/.config/zanei ~/.local/state/zanei
+```
+
+After uninstalling, the bundle-specific `tccutil` commands cannot resolve `dev.zanei.recorder`. TCC matches grants by bundle ID and signature, so a grant left behind can reappear when the same app is reinstalled. To remove a remaining Accessibility decision completely, delete a lingering `Zanei` row in System Settings, or run `tccutil reset Accessibility` without a bundle ID. The service-wide command resets Accessibility decisions for every app.
 
 If you forget to run `zanei stop` before uninstalling, the recorder detects that its own executable is gone and shuts itself down automatically within tens of seconds.
 
