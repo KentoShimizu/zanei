@@ -13,9 +13,9 @@
   </p>
 </div>
 
-Zanei (残映, *zan-ei*) records your activity on macOS as OS-level events rather than screenshots or screen
+Zanei (残映, *zan-ei*) records your activity on computer as OS-level events rather than screenshots or screen
 video, keeps those events in a local SQLite store, and turns them into session-structured,
-deduplicated timelines that AI agents can read through the CLI or read-only MCP server.
+deduplicated timelines that AI agents can read through the CLI or MCP server.
 
 > **Platform support: macOS only, for now.** Zanei currently runs on macOS (Apple Silicon and
 > Intel). Windows and Linux are on the roadmap.
