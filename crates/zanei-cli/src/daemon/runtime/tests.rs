@@ -1,7 +1,11 @@
 use std::{
     collections::BTreeMap,
     fs,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration as StdDuration,
 };
@@ -13,15 +17,18 @@ use zanei_core::{
     normalize::format_timestamp,
     store::{DaemonMode, DaemonState, StoreReader, StoreWriter},
 };
+use zanei_macos::permission::{PermissionError, PermissionStatus};
 
 use super::{
-    CollectorSet, EXECUTABLE_REMOVED_MESSAGE, Pipeline, ensure_pipeline_running,
-    executable_shutdown_requested, initialize_permission_dependent_runtime,
-    merge_collector_failures, normalize_pause_request, shutdown_daemon,
+    CollectorSet, EXECUTABLE_REMOVED_MESSAGE, Pipeline, configure_eventtap_start_gate,
+    ensure_pipeline_running, executable_shutdown_requested,
+    initialize_permission_dependent_runtime, merge_collector_failures, normalize_pause_request,
+    service_permission_request_worker, shutdown_daemon,
 };
 use crate::daemon::{
     executable_guard::ExecutableGuard,
     permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
+    supervisor::EventTapStartGate,
 };
 use crate::permissions::PermissionRequestOutcome;
 
@@ -82,6 +89,111 @@ fn initial_heartbeat_is_committed_before_permission_worker_starts() {
             PermissionRequestPoll::Stopped => panic!("worker must report its result"),
         }
     }
+}
+
+#[test]
+fn initial_input_monitoring_grant_allows_immediate_eventtap_start() {
+    let mut granted_gate = EventTapStartGate::open();
+    let mut denied_gate = EventTapStartGate::open();
+    let mut degraded = BTreeMap::new();
+
+    configure_eventtap_start_gate(
+        Some(Ok(PermissionStatus::Granted)),
+        &mut granted_gate,
+        &mut degraded,
+    );
+    configure_eventtap_start_gate(
+        Some(Ok(PermissionStatus::Denied)),
+        &mut denied_gate,
+        &mut degraded,
+    );
+
+    assert!(granted_gate.allows_start());
+    assert!(!denied_gate.allows_start());
+}
+
+#[test]
+fn permission_worker_error_and_disconnect_release_eventtap_start() {
+    let mut failed_worker = Some(
+        PermissionRequestWorker::start_with(|| {
+            Err(PermissionError::AccessibilityRequestOptionsCreation)
+        })
+        .expect("permission worker"),
+    );
+    let mut degraded = BTreeMap::new();
+    let mut terminal_starts = 0;
+    wait_for_permission_worker(&mut failed_worker, &mut degraded, true, |start_now| {
+        terminal_starts += usize::from(start_now);
+    });
+    assert!(degraded["permission_request"].contains("Accessibility"));
+
+    let mut stopped_worker = Some(
+        PermissionRequestWorker::start_with(|| {
+            panic!("simulated permission worker disconnect");
+        })
+        .expect("permission worker"),
+    );
+    wait_for_permission_worker(&mut stopped_worker, &mut degraded, true, |start_now| {
+        terminal_starts += usize::from(start_now);
+    });
+    assert_eq!(terminal_starts, 2);
+    assert_eq!(
+        degraded.get("permission_request").map(String::as_str),
+        Some(super::PERMISSION_REQUEST_WORKER_STOPPED_MESSAGE),
+    );
+}
+
+#[test]
+fn pending_permission_gate_does_not_block_shutdown() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let (release, release_rx) = mpsc::sync_channel(1);
+    let (ready, ready_rx) = mpsc::sync_channel(1);
+    let (stopped, stopped_rx) = mpsc::sync_channel(1);
+    let runtime = thread::spawn(move || {
+        let mut worker = Some(
+            PermissionRequestWorker::start_with(move || {
+                release_rx.recv().expect("release permission worker");
+                Ok(PermissionRequestOutcome::Completed)
+            })
+            .expect("permission worker"),
+        );
+        let mut degraded = BTreeMap::new();
+        ready.send(()).expect("runtime ready");
+        while !worker_stop.load(Ordering::Relaxed) {
+            service_permission_request_worker(&mut worker, &mut degraded, false, |_| {
+                panic!("pending worker must not complete")
+            });
+            thread::yield_now();
+        }
+        stopped.send(()).expect("runtime stopped");
+    });
+
+    ready_rx.recv().expect("runtime started");
+    stop.store(true, Ordering::Relaxed);
+    stopped_rx
+        .recv_timeout(StdDuration::from_secs(1))
+        .expect("pending gate must observe shutdown");
+    release.send(()).expect("release detached worker");
+    runtime.join().expect("runtime thread");
+}
+
+fn wait_for_permission_worker(
+    worker: &mut Option<PermissionRequestWorker>,
+    degraded: &mut BTreeMap<String, String>,
+    start_now: bool,
+    mut on_complete: impl FnMut(bool),
+) {
+    for _ in 0..1_000 {
+        service_permission_request_worker(worker, degraded, start_now, |start_now| {
+            on_complete(start_now);
+        });
+        if worker.is_none() {
+            return;
+        }
+        thread::sleep(StdDuration::from_millis(1));
+    }
+    panic!("permission worker did not complete");
 }
 
 #[test]

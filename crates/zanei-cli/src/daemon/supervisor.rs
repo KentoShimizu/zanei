@@ -28,10 +28,20 @@ impl CollectorSet {
     pub(crate) fn start(&mut self, sender: &SyncSender<RawEvent>) {
         let now = Instant::now();
         // AX Secure Input probes are served by the EventTap worker.
-        start_collector(&mut self.eventtap, sender, &mut self.start_errors, now);
+        self.start_eventtap(sender, now);
         start_collector(&mut self.ax, sender, &mut self.start_errors, now);
         start_collector(&mut self.chrome, sender, &mut self.start_errors, now);
         start_collector(&mut self.workspace, sender, &mut self.start_errors, now);
+    }
+
+    pub(crate) fn start_eventtap(&mut self, sender: &SyncSender<RawEvent>, now: Instant) {
+        start_collector_if_allowed(
+            &mut self.eventtap,
+            sender,
+            &mut self.start_errors,
+            now,
+            self.eventtap_start_gate,
+        );
     }
 
     pub(crate) fn stop(&mut self) {
@@ -53,18 +63,20 @@ impl CollectorSet {
     pub(crate) fn supervise(
         &mut self,
         sender: &SyncSender<RawEvent>,
-        permissions: &DaemonPermissions,
+        permissions: Option<&DaemonPermissions>,
         now: Instant,
     ) -> Result<(), DaemonError> {
         // Preserve startup ordering because AX Secure Input probes are served
         // by EventTap and browser/AX collectors consume workspace lifecycle.
-        supervise_collector(
-            &mut self.eventtap,
-            sender,
-            permissions,
-            &mut self.start_errors,
-            now,
-        )?;
+        if self.eventtap_start_gate.allows_start() {
+            supervise_collector(
+                &mut self.eventtap,
+                sender,
+                permissions,
+                &mut self.start_errors,
+                now,
+            )?;
+        }
         supervise_collector(
             &mut self.ax,
             sender,
@@ -175,6 +187,29 @@ pub(super) struct Managed<C> {
     pub(super) relay_dropped: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct EventTapStartGate {
+    allowed: bool,
+}
+
+impl EventTapStartGate {
+    pub(super) const fn open() -> Self {
+        Self { allowed: true }
+    }
+
+    pub(super) fn defer(&mut self) {
+        self.allowed = false;
+    }
+
+    pub(super) fn allow(&mut self) {
+        self.allowed = true;
+    }
+
+    pub(super) const fn allows_start(self) -> bool {
+        self.allowed
+    }
+}
+
 impl<C> Managed<C> {
     pub(super) const fn new(collector: C) -> Self {
         Self {
@@ -273,6 +308,18 @@ pub(super) fn start_collector<C: ManagedCollector>(
     start_managed(managed, sender, errors, now, true);
 }
 
+pub(super) fn start_collector_if_allowed<C: ManagedCollector>(
+    managed: &mut Option<Managed<C>>,
+    sender: &SyncSender<RawEvent>,
+    errors: &mut BTreeMap<String, String>,
+    now: Instant,
+    gate: EventTapStartGate,
+) {
+    if gate.allows_start() {
+        start_collector(managed, sender, errors, now);
+    }
+}
+
 fn start_managed<C: ManagedCollector>(
     managed: &mut Managed<C>,
     sender: &SyncSender<RawEvent>,
@@ -337,7 +384,7 @@ fn stop_collector<C: ManagedCollector>(managed: &mut Option<Managed<C>>, mode: S
 pub(super) fn supervise_collector<C: ManagedCollector>(
     managed: &mut Option<Managed<C>>,
     sender: &SyncSender<RawEvent>,
-    permissions: &DaemonPermissions,
+    permissions: Option<&DaemonPermissions>,
     errors: &mut BTreeMap<String, String>,
     now: Instant,
 ) -> Result<(), DaemonError> {
@@ -346,7 +393,9 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
     };
     let name = managed.collector.worker_name().to_owned();
     let required = managed.collector.worker_permissions();
-    let granted = permissions_granted(&required, permissions);
+    let granted = permissions.map_or(required.is_empty(), |permissions| {
+        permissions_granted(&required, permissions)
+    });
 
     if managed.running && managed.relay.as_ref().is_some_and(Relay::is_finished) {
         managed.collector.stop_worker();
@@ -382,6 +431,9 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
         return Ok(());
     }
 
+    if permissions.is_none() && !required.is_empty() {
+        return Ok(());
+    }
     if managed.restart.ready(now, granted) {
         start_managed(managed, sender, errors, now, granted);
     }

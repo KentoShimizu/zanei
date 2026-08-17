@@ -17,6 +17,7 @@ use zanei_core::{
     normalize::format_timestamp,
     store::{DaemonMode, DaemonPermissions, DaemonState, StoreReader, StoreStatus, StoreWriter},
 };
+use zanei_macos::permission::{PermissionError, PermissionStatus, permission_status};
 
 use super::{
     DaemonError, StoreOwner, StoreOwnership,
@@ -71,20 +72,29 @@ pub fn run_daemon(
     let base_collector_failures = initial_status.collector_failures.clone();
     let initial_heartbeat =
         initial_heartbeat(&owner, config.output.retention_hours, &initial_status);
-    let (main_run_loop, mut collectors, permission_request_worker, main_thread_observers) =
-        initialize_permission_dependent_runtime(&writer, &initial_heartbeat, || {
-            let main_run_loop = main_thread::prepare()?;
-            let mut collectors = CollectorSet::new(&config);
-            let permission_request_worker =
-                PermissionRequestWorker::start(collectors.required_permissions())?;
-            let main_thread_observers = collectors.prepare_main_thread();
-            Ok((
-                main_run_loop,
-                collectors,
-                permission_request_worker,
-                main_thread_observers,
-            ))
-        })?;
+    let (
+        main_run_loop,
+        mut collectors,
+        initial_input_monitoring_status,
+        permission_request_worker,
+        main_thread_observers,
+    ) = initialize_permission_dependent_runtime(&writer, &initial_heartbeat, || {
+        let main_run_loop = main_thread::prepare()?;
+        let mut collectors = CollectorSet::new(&config);
+        let initial_input_monitoring_status = collectors
+            .has_eventtap()
+            .then(|| permission_status(&Permission::InputMonitoring));
+        let permission_request_worker =
+            PermissionRequestWorker::start(collectors.required_permissions())?;
+        let main_thread_observers = collectors.prepare_main_thread();
+        Ok((
+            main_run_loop,
+            collectors,
+            initial_input_monitoring_status,
+            permission_request_worker,
+            main_thread_observers,
+        ))
+    })?;
     writer.purge_retention(OffsetDateTime::now_utc(), config.output.retention_hours)?;
     let writer = Arc::new(Mutex::new(writer));
     let mut pipeline = Pipeline::store(&config, Arc::clone(&writer))?;
@@ -109,6 +119,7 @@ pub fn run_daemon(
             degraded: &mut runtime_degraded,
             last_status: initial_status,
             last_permissions: None,
+            initial_input_monitoring_status,
             permission_request_worker: Some(permission_request_worker),
             executable_guard,
         }
@@ -157,6 +168,7 @@ struct ActiveDaemon<'a> {
     degraded: &'a mut BTreeMap<String, String>,
     last_status: StoreStatus,
     last_permissions: Option<DaemonPermissions>,
+    initial_input_monitoring_status: Option<Result<PermissionStatus, PermissionError>>,
     permission_request_worker: Option<PermissionRequestWorker>,
     executable_guard: ExecutableGuard,
 }
@@ -166,9 +178,15 @@ impl ActiveDaemon<'_> {
         let signals = ShutdownSignals::install()?;
         *self.paused =
             normalize_pause_request(self.writer, self.last_status.paused_until.as_deref())?;
+        configure_eventtap_start_gate(
+            self.initial_input_monitoring_status.take(),
+            &mut self.collectors.eventtap_start_gate,
+            self.degraded,
+        );
         if !*self.paused {
             self.collectors.start(self.pipeline.sender());
         }
+        self.poll_permission_request();
         self.publish_heartbeat()?;
         self.run_loop(signals.stop_flag())
     }
@@ -180,6 +198,7 @@ impl ActiveDaemon<'_> {
         let mut retention_purge_deadline = OffsetDateTime::now_utc() + RETENTION_PURGE_INTERVAL;
 
         while !stop.load(Ordering::Relaxed) {
+            self.poll_permission_request();
             self.sync_store_intake()?;
             if last_pause_poll.elapsed() >= PAUSE_POLL_INTERVAL {
                 self.update_pause_state()?;
@@ -220,13 +239,11 @@ impl ActiveDaemon<'_> {
                 ensure_pipeline_running(self.pipeline, self.collectors)?;
                 let permissions = self.refresh_permissions();
                 if !*self.paused && !self.intake_suspended {
-                    if let Some(permissions) = permissions.as_ref() {
-                        self.collectors.supervise(
-                            self.pipeline.sender(),
-                            permissions,
-                            Instant::now(),
-                        )?;
-                    }
+                    self.collectors.supervise(
+                        self.pipeline.sender(),
+                        permissions.as_ref(),
+                        Instant::now(),
+                    )?;
                 }
                 self.publish_heartbeat_with_permissions(permissions)?;
                 last_heartbeat = Instant::now();
@@ -338,7 +355,7 @@ impl ActiveDaemon<'_> {
     }
 
     fn refresh_permissions(&mut self) -> Option<DaemonPermissions> {
-        if !self.permission_request_is_complete() {
+        if self.permission_request_worker.is_some() {
             return None;
         }
         match probe_permissions(&self.collectors.required_permissions()) {
@@ -354,39 +371,20 @@ impl ActiveDaemon<'_> {
         self.last_permissions.clone()
     }
 
-    fn permission_request_is_complete(&mut self) -> bool {
-        let Some(worker) = self.permission_request_worker.as_ref() else {
-            return true;
-        };
-        let result = match worker.poll() {
-            PermissionRequestPoll::Pending => return false,
-            PermissionRequestPoll::Complete(result) => result,
-            PermissionRequestPoll::Stopped => {
-                self.permission_request_worker = None;
-                self.degraded.insert(
-                    "permission_request".to_owned(),
-                    PERMISSION_REQUEST_WORKER_STOPPED_MESSAGE.to_owned(),
-                );
-                return true;
-            }
-        };
-        self.permission_request_worker = None;
-        match result {
-            Ok(PermissionRequestOutcome::Completed) => {
-                self.degraded.remove("permission_request");
-            }
-            Ok(PermissionRequestOutcome::TimedOut) => {
-                self.degraded.insert(
-                    "permission_request".to_owned(),
-                    PERMISSION_REQUEST_TIMEOUT_MESSAGE.to_owned(),
-                );
-            }
-            Err(error) => {
-                self.degraded
-                    .insert("permission_request".to_owned(), error.to_string());
-            }
-        }
-        true
+    fn poll_permission_request(&mut self) {
+        let start_now = !*self.paused && !self.intake_suspended;
+        service_permission_request_worker(
+            &mut self.permission_request_worker,
+            self.degraded,
+            start_now,
+            |start_now| {
+                self.collectors.eventtap_start_gate.allow();
+                if start_now {
+                    self.collectors
+                        .start_eventtap(self.pipeline.sender(), Instant::now());
+                }
+            },
+        );
     }
 
     fn publish_heartbeat_with_permissions(
@@ -429,6 +427,62 @@ impl ActiveDaemon<'_> {
             permissions,
         })
     }
+}
+
+pub(super) fn configure_eventtap_start_gate(
+    status: Option<Result<PermissionStatus, PermissionError>>,
+    gate: &mut super::supervisor::EventTapStartGate,
+    degraded: &mut BTreeMap<String, String>,
+) {
+    let Some(status) = status else {
+        return;
+    };
+    if !matches!(status, Ok(PermissionStatus::Granted)) {
+        gate.defer();
+    }
+    if let Err(error) = status {
+        degraded.insert("permissions".to_owned(), error.to_string());
+    }
+}
+
+pub(super) fn service_permission_request_worker(
+    worker: &mut Option<PermissionRequestWorker>,
+    degraded: &mut BTreeMap<String, String>,
+    start_now: bool,
+    on_complete: impl FnOnce(bool),
+) {
+    let Some(active_worker) = worker.as_ref() else {
+        return;
+    };
+    let result = match active_worker.poll() {
+        PermissionRequestPoll::Pending => return,
+        PermissionRequestPoll::Complete(result) => result,
+        PermissionRequestPoll::Stopped => {
+            *worker = None;
+            degraded.insert(
+                "permission_request".to_owned(),
+                PERMISSION_REQUEST_WORKER_STOPPED_MESSAGE.to_owned(),
+            );
+            on_complete(start_now);
+            return;
+        }
+    };
+    *worker = None;
+    match result {
+        Ok(PermissionRequestOutcome::Completed) => {
+            degraded.remove("permission_request");
+        }
+        Ok(PermissionRequestOutcome::TimedOut) => {
+            degraded.insert(
+                "permission_request".to_owned(),
+                PERMISSION_REQUEST_TIMEOUT_MESSAGE.to_owned(),
+            );
+        }
+        Err(error) => {
+            degraded.insert("permission_request".to_owned(), error.to_string());
+        }
+    }
+    on_complete(start_now);
 }
 
 fn initialize_permission_dependent_runtime<T>(

@@ -21,7 +21,9 @@ use super::supervisor::Managed;
 #[cfg(test)]
 use self::relay::Relay;
 #[cfg(test)]
-use super::supervisor::{ManagedCollector, start_collector, supervise_collector};
+use super::supervisor::{
+    ManagedCollector, start_collector, start_collector_if_allowed, supervise_collector,
+};
 
 pub(crate) struct CollectorSet {
     pub(super) workspace: Option<Managed<WorkspaceCollector>>,
@@ -30,6 +32,7 @@ pub(crate) struct CollectorSet {
     pub(super) chrome: Option<Managed<ChromeCollector>>,
     chrome_eligibility: ChromeEligibilityPublisher,
     pub(super) start_errors: BTreeMap<String, String>,
+    pub(super) eventtap_start_gate: super::supervisor::EventTapStartGate,
 }
 
 impl CollectorSet {
@@ -109,7 +112,12 @@ impl CollectorSet {
             chrome,
             chrome_eligibility,
             start_errors: BTreeMap::new(),
+            eventtap_start_gate: super::supervisor::EventTapStartGate::open(),
         }
+    }
+
+    pub(crate) fn has_eventtap(&self) -> bool {
+        self.eventtap.is_some()
     }
 
     pub(crate) fn replace_filter(&self, filter: FilterConfig) {
