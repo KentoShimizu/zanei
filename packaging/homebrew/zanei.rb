@@ -11,7 +11,13 @@ class Zanei < Formula
   sha256 "@SHA256@"
 
   def install
-    libexec.install "Zanei.app"
+    # Homebrew stages inside the archive's single root directory, so the
+    # bundle usually arrives as a bare Contents/ tree.
+    if File.directory?("Zanei.app")
+      libexec.install "Zanei.app"
+    else
+      (libexec/"Zanei.app").install "Contents"
+    end
     bin.install_symlink libexec/"Zanei.app/Contents/MacOS/zanei"
   end
 
