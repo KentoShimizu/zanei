@@ -32,29 +32,14 @@ limitations.
 
 ## Installation
 
-Homebrew and GitHub Releases distribution are being prepared. Until they are available, build and
-install the app bundle from source:
-
 ```bash
-git clone https://github.com/KentoShimizu/zanei.git
-cd zanei
-cargo build --release
-./packaging/make-app.sh -
-mkdir -p "$HOME/.local/libexec/zanei" "$HOME/.cargo/bin"
-ditto dist/Zanei.app "$HOME/.local/libexec/zanei/Zanei.app"
-ln -sfn "$HOME/.local/libexec/zanei/Zanei.app/Contents/MacOS/zanei" \
-  "$HOME/.cargo/bin/zanei"
+brew install kentoshimizu/tap/zanei
 ```
 
-Make sure `$HOME/.cargo/bin` is on your `PATH`.
-
-> [!WARNING]
-> The `-` identity creates an ad-hoc-signed app for local use, so macOS may require its permissions
-> again after a rebuild. To preserve permissions across rebuilds, pass a persistent development
-> certificate identity to `make-app.sh`; see the
-> [packaging instructions](packaging/README.md).
-> A raw `cargo install` binary is not the distributed app. A row added with `+` may not persist,
-> and bundle-ID resets do not apply. Use the app bundle distribution for stable permission management.
+Signed and notarized. To build from source instead, see the
+[packaging instructions](packaging/README.md) — note that a raw `cargo install`
+binary is not the distributed app bundle and its macOS permission rows may not
+persist; use the app bundle for stable permission management.
 
 ## Quickstart
 

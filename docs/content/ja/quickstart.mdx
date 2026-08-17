@@ -8,31 +8,15 @@ description: インストールから最初のタイムライン取得、agent �
 <Steps>
 <Step title="インストール">
 
-Homebrew と GitHub Releases での配布は準備中です。利用可能になるまでは、ソースから
-app bundle をビルドしてインストールします。
-
 ```bash
-git clone https://github.com/KentoShimizu/zanei.git
-cd zanei
-cargo build --release
-./packaging/make-app.sh -
-mkdir -p "$HOME/.local/libexec/zanei" "$HOME/.cargo/bin"
-ditto dist/Zanei.app "$HOME/.local/libexec/zanei/Zanei.app"
-ln -sfn "$HOME/.local/libexec/zanei/Zanei.app/Contents/MacOS/zanei" \
-  "$HOME/.cargo/bin/zanei"
+brew install kentoshimizu/tap/zanei
 ```
 
-`$HOME/.cargo/bin` が `PATH` に含まれていることを確認してください。
+formula は署名・notarize 済みの `Zanei.app` をインストールし、`zanei` コマンドを `PATH` に配置します。
 
-:::warning[ソースビルドと macOS 権限]
-`-` はローカル利用向けの ad-hoc 署名 app を作るため、再ビルド後に macOS が権限の
-再付与を求めることがあります。再ビルド後も権限を維持するには、永続的な開発用証明書の
-identity を `make-app.sh` に渡してください。詳細は
-[packaging/README.md](https://github.com/KentoShimizu/zanei/blob/main/packaging/README.md)を参照してください。
-
-素の `cargo install` バイナリは配布用 app bundle ではありません。`+` で追加した権限の行が
-定着しないことがあり、`dev.zanei.recorder` 宛ての reset も適用されません。安定して権限を
-管理するには app bundle 版を使用してください。
+:::note[ソースからビルドする場合]
+[packaging の手順](https://github.com/KentoShimizu/zanei/blob/main/packaging/README.md)を参照してください。
+素の `cargo install` バイナリは配布物の app bundle ではありません。「+」で追加した権限の行が定着しないことがあり、`dev.zanei.recorder` 宛の reset も効きません。
 :::
 
 </Step>

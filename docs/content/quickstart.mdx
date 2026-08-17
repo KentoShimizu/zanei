@@ -8,31 +8,16 @@ Requires **macOS** (Apple Silicon or Intel) — currently the only supported pla
 <Steps>
 <Step title="Install">
 
-Homebrew and GitHub Releases distribution are being prepared. Until they are available, build and
-install the app bundle from source:
-
 ```bash
-git clone https://github.com/KentoShimizu/zanei.git
-cd zanei
-cargo build --release
-./packaging/make-app.sh -
-mkdir -p "$HOME/.local/libexec/zanei" "$HOME/.cargo/bin"
-ditto dist/Zanei.app "$HOME/.local/libexec/zanei/Zanei.app"
-ln -sfn "$HOME/.local/libexec/zanei/Zanei.app/Contents/MacOS/zanei" \
-  "$HOME/.cargo/bin/zanei"
+brew install kentoshimizu/tap/zanei
 ```
 
-Make sure `$HOME/.cargo/bin` is on your `PATH`.
+The formula installs a signed, notarized `Zanei.app` and puts the `zanei` command on your `PATH`.
 
-:::warning[Source builds and macOS permissions]
-The `-` identity creates an ad-hoc-signed app for local use, so macOS may require its permissions
-again after a rebuild. To preserve permissions across rebuilds, pass a persistent development
-certificate identity to `make-app.sh`; see the
-[packaging instructions](https://github.com/KentoShimizu/zanei/blob/main/packaging/README.md).
-
-A raw `cargo install` binary is not the distributed app bundle. A permission row added with `+`
-may not persist, and a reset addressed to `dev.zanei.recorder` does not apply to it. Use the app
-bundle distribution for stable permission management.
+:::note[Building from source]
+See the [packaging instructions](https://github.com/KentoShimizu/zanei/blob/main/packaging/README.md).
+A raw `cargo install` binary is not the distributed app bundle: a permission row added with `+`
+may not persist, and a reset addressed to `dev.zanei.recorder` does not apply to it.
 :::
 
 </Step>
