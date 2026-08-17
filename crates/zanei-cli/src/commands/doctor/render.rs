@@ -1,5 +1,7 @@
+use std::ffi::OsStr;
+use std::io;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 use zanei_collector::Permission;
 use zanei_macos::permission::PermissionChecker;
@@ -8,22 +10,22 @@ use super::DoctorReport;
 use crate::error::CliError;
 
 const CODESIGN: &str = "/usr/bin/codesign";
+const OPEN: &str = "/usr/bin/open";
 
 const BUNDLED_PERMISSION_NOTE: &str = "Accessibility lists the bundled app as `Zanei`. Input Monitoring may omit its row even after the permission-dialog grant takes effect; the recorder-reported `zanei doctor` result is authoritative. To manage a missing Input Monitoring row from System Settings, click `+` and add `Zanei.app`; the bundled entry persists. Remove a listed permission with its row toggle, or stop Zanei and run `tccutil reset Accessibility dev.zanei.recorder` or `tccutil reset ListenEvent dev.zanei.recorder`.\n";
 const UNBUNDLED_PERMISSION_NOTE: &str = "A raw `cargo install` executable can be omitted from these lists, and a manual `+` entry may not persist. Bundle-ID `tccutil` resets do not apply to it; use the bundled distribution for manageable, persistent entries.\n";
 
 pub(super) fn print_human(
     report: &DoctorReport,
+    executable: &Path,
     inspect_signature: bool,
     recording: bool,
-) -> Result<(), CliError> {
-    let executable = std::env::current_exe().map_err(CliError::Input)?;
-    let signature_warning = inspect_signature && lacks_persistent_signature(&executable);
+) {
+    let signature_warning = inspect_signature && lacks_persistent_signature(executable);
     print!(
         "{}",
-        render_human(report, &executable, signature_warning, recording)
+        render_human(report, executable, signature_warning, recording)
     );
-    Ok(())
 }
 
 pub(super) fn render_human(
@@ -136,17 +138,13 @@ pub(super) fn render_human(
 // Interactive walkthrough for `doctor --fix`: one pane at a time, with the app
 // or executable path already on the clipboard and its target revealed in Finder,
 // so granting needs no outside knowledge of how macOS permission lists work.
-pub(super) fn guide_granting(missing: &[Permission]) -> Result<(), CliError> {
+pub(super) fn guide_granting(missing: &[Permission], executable: &Path) -> Result<(), CliError> {
     use std::io::{BufRead, Write};
 
-    let executable = std::env::current_exe().map_err(CliError::Input)?;
-    let permission_target = permission_target_path(&executable);
+    let permission_target = permission_target_path(executable);
     let bundled = permission_target != executable;
     copy_to_clipboard(&permission_target.display().to_string());
-    let _ = Command::new("/usr/bin/open")
-        .arg("-R")
-        .arg(permission_target)
-        .status();
+    reveal_in_finder(permission_target)?;
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -156,6 +154,7 @@ pub(super) fn guide_granting(missing: &[Permission]) -> Result<(), CliError> {
     println!(
         "First run `zanei start` (`zanei stop && zanei start` if it is already running) so the recorder asks macOS for the permissions."
     );
+    println!("Finder is showing the app or executable whose path is on your clipboard.");
     for (index, permission) in missing.iter().enumerate() {
         checker.open_settings(permission)?;
         println!();
@@ -250,6 +249,33 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
+fn reveal_in_finder(target: &Path) -> Result<(), CliError> {
+    reveal_in_finder_with(target, |program, arguments| {
+        Command::new(program).args(arguments).status()
+    })
+}
+
+fn reveal_in_finder_with(
+    target: &Path,
+    run: impl FnOnce(&str, &[&OsStr]) -> io::Result<ExitStatus>,
+) -> Result<(), CliError> {
+    let arguments = [OsStr::new("-R"), target.as_os_str()];
+    let status = run(OPEN, &arguments).map_err(|source| CliError::FinderRevealLaunch {
+        program: OPEN,
+        path: target.to_path_buf(),
+        source,
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CliError::FinderRevealFailed {
+            program: OPEN,
+            path: target.to_path_buf(),
+            status,
+        })
+    }
+}
+
 fn lacks_persistent_signature(executable: &Path) -> bool {
     let Ok(output) = Command::new(CODESIGN)
         .args(["-dv"])
@@ -275,4 +301,88 @@ pub(super) fn output_indicates_non_persistent_signature(output: &str) -> bool {
             || line.contains("(adhoc")
             || line.contains("code object is not signed at all")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::Path;
+    use std::process::ExitStatus;
+
+    use tempfile::TempDir;
+
+    use super::{OPEN, permission_target_path, reveal_in_finder_with};
+
+    #[test]
+    fn symlinked_executable_resolves_to_app_root_for_finder_reveal() {
+        let directory = TempDir::new().expect("permission target fixture");
+        let app = directory.path().join("Zanei.app");
+        let executable = app.join("Contents/MacOS/zanei");
+        fs::create_dir_all(executable.parent().expect("bundle executable parent"))
+            .expect("create bundle executable parent");
+        fs::write(&executable, b"fixture").expect("write bundle executable");
+        let symlink_path = directory.path().join("bin/zanei");
+        fs::create_dir_all(symlink_path.parent().expect("symlink parent"))
+            .expect("create symlink parent");
+        symlink(&executable, &symlink_path).expect("create executable symlink");
+
+        let resolved = crate::executable::canonicalize_or_original(&symlink_path);
+        let permission_target = permission_target_path(&resolved);
+        let expected_app = fs::canonicalize(&app).expect("canonical app fixture");
+
+        assert_eq!(permission_target, expected_app);
+        reveal_in_finder_with(permission_target, |program, arguments| {
+            assert_eq!(program, OPEN);
+            assert_eq!(arguments, ["-R".as_ref(), expected_app.as_os_str()]);
+            Ok(ExitStatus::from_raw(0))
+        })
+        .expect("Finder reveal command");
+    }
+
+    #[test]
+    fn symlinked_unbundled_executable_resolves_to_the_executable_itself() {
+        let directory = TempDir::new().expect("raw executable fixture");
+        let executable = directory.path().join("libexec/zanei");
+        fs::create_dir_all(executable.parent().expect("executable parent"))
+            .expect("create executable parent");
+        fs::write(&executable, b"fixture").expect("write executable");
+        let symlink_path = directory.path().join("bin/zanei");
+        fs::create_dir_all(symlink_path.parent().expect("symlink parent"))
+            .expect("create symlink parent");
+        symlink(&executable, &symlink_path).expect("create executable symlink");
+
+        let resolved = crate::executable::canonicalize_or_original(&symlink_path);
+
+        assert_eq!(permission_target_path(&resolved), resolved);
+    }
+
+    #[test]
+    fn finder_reveal_surfaces_command_launch_failure() {
+        let target = Path::new("/Applications/Zanei.app");
+
+        let error = reveal_in_finder_with(target, |_, _| {
+            Err(std::io::Error::other("fixture launch failure"))
+        })
+        .expect_err("Finder reveal must fail");
+
+        assert!(matches!(
+            error,
+            crate::error::CliError::FinderRevealLaunch { .. }
+        ));
+    }
+
+    #[test]
+    fn finder_reveal_surfaces_unsuccessful_exit_status() {
+        let target = Path::new("/Applications/Zanei.app");
+
+        let error = reveal_in_finder_with(target, |_, _| Ok(ExitStatus::from_raw(1 << 8)))
+            .expect_err("Finder reveal must fail");
+
+        assert!(matches!(
+            error,
+            crate::error::CliError::FinderRevealFailed { .. }
+        ));
+    }
 }

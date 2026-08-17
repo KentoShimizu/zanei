@@ -24,7 +24,7 @@ The signed app bundle has the stable TCC identity `dev.zanei.recorder`. Permissi
 
 1. Run `zanei start`. The recorder requests required Accessibility and Input Monitoring permissions once during startup. If `start` exits with code 3, the daemon has started and its heartbeat reported the missing permissions; it remains running. While the first-run permission dialogs are awaiting a response, `zanei doctor` may report Automation as `not_determined`; respond to the dialogs, then run it again.
 2. Open the matching pane below. Switch the automatically added Accessibility row ON. If Input Monitoring lists `Zanei`, switch that row ON; absence of that row alone does not mean the dialog grant failed.
-3. To manage an omitted Input Monitoring permission from the list, click `+` and select the installed `Zanei.app`. While the permission is still reported missing, `zanei doctor --fix` opens the pane and copies the exact `Zanei.app` path. Press Command-Shift-G in the file dialog and paste that path. A manually added bundle entry persists.
+3. To manage an omitted Input Monitoring permission from the list, click `+` and select the installed `Zanei.app`. While the permission is still reported missing, `zanei doctor --fix` opens the pane, copies the exact resolved `Zanei.app` root, and reveals the same app in Finder. Press Command-Shift-G in the file dialog and paste that path. A manually added bundle entry persists.
 4. Run `zanei stop && zanei start` so the recorder picks up the grants.
 5. Run `zanei doctor` to verify the state enforced for the recorder itself. Its recorder-reported result is authoritative even when Input Monitoring has no row.
 
@@ -34,7 +34,7 @@ The signed app bundle has the stable TCC identity `dev.zanei.recorder`. Permissi
 | Input Monitoring | Privacy & Security → Input Monitoring |
 | Automation | Privacy & Security → Automation (macOS asks on the first Apple Event; Zanei does not request it at startup) |
 
-`zanei doctor --fix` opens missing required-permission panes one at a time. When more than one pane is needed, it waits for Return between panes; it does not wait after the final pane. It copies the `Zanei.app` root when running from the bundle and the executable path otherwise. Granting is always your action.
+`zanei doctor --fix` opens missing required-permission panes one at a time. When more than one pane is needed, it waits for Return between panes; it does not wait after the final pane. After resolving symlinks, it copies the `Zanei.app` root when running from the bundle and the executable path otherwise, then reveals the same target in Finder. Granting is always your action.
 
 ## Verify with `doctor`
 
@@ -51,7 +51,9 @@ zanei doctor --fix
 `--fix` opens missing required-permission panes one at a time. When more than one pane is needed,
 it waits for Return between panes and does not wait after the final pane. `--json --fix` is accepted:
 Zanei prints the JSON report first, then runs the same interactive guide when a required permission
-is missing, so stdout is not JSON-only. When nothing required is missing, it prints only JSON.
+is missing, so stdout is not JSON-only. The guide copies the symlink-resolved `Zanei.app` root, or
+the executable for an unbundled installation, and reveals that same target in Finder. When nothing
+required is missing, it prints only JSON.
 
 ### For agents and scripts: `--json`
 

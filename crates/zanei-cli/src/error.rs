@@ -8,6 +8,19 @@ pub enum CliError {
     MissingEnvironment(&'static str),
     #[error("failed to read input: {0}")]
     Input(#[source] std::io::Error),
+    #[error("failed to reveal {path} in Finder using {program}: {source}")]
+    FinderRevealLaunch {
+        program: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{program} failed to reveal {path} in Finder with status {status}")]
+    FinderRevealFailed {
+        program: &'static str,
+        path: PathBuf,
+        status: std::process::ExitStatus,
+    },
     #[error("failed to access {path}: {source}")]
     Io {
         path: PathBuf,

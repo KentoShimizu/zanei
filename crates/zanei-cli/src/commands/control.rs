@@ -32,14 +32,14 @@ pub fn start(paths: &Paths, foreground: bool, quiet: bool) -> Result<u8, CliErro
     if let Some(owner) = crate::daemon::StoreOwnership::probe(&paths.store)? {
         return Err(crate::daemon::DaemonError::StoreOwned { pid: owner.pid }.into());
     }
-    let executable = std::env::current_exe().map_err(CliError::Input)?;
+    let executable = crate::executable::current().map_err(CliError::Input)?;
     start_background_with(
         quiet,
         || {
             crate::daemon::start_launch_agent(&executable, &paths.config, &paths.store)
                 .map_err(CliError::from)
         },
-        || require_recorder_for_start(&config, &paths.store),
+        || require_recorder_for_start(&config, &paths.store, &executable),
         |message| println!("{message}"),
     )
 }

@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod daemon;
 mod error;
+mod executable;
 mod paths;
 mod permissions;
 mod setup;

@@ -65,11 +65,12 @@ fn build_launch_agent_plist(
     config_path: &Path,
     store_path: &Path,
 ) -> Result<String, DaemonError> {
-    let executable = fs::canonicalize(executable).map_err(|source| DaemonError::File {
-        operation: "canonicalize",
-        path: executable.to_path_buf(),
-        source,
-    })?;
+    let executable =
+        crate::executable::canonicalize(executable).map_err(|source| DaemonError::File {
+            operation: "canonicalize",
+            path: executable.to_path_buf(),
+            source,
+        })?;
     Ok(render_launch_agent_plist(
         &executable,
         config_path,

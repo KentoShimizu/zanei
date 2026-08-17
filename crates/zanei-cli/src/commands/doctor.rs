@@ -33,14 +33,15 @@ pub fn run(config_path: &Path, store_path: &Path, fix: bool, json: bool) -> Resu
     let config = Config::load(config_path)?;
     let status = store_status(store_path)?;
     let report = evaluate(&config, status.as_ref())?;
+    let executable = crate::executable::current().map_err(CliError::Input)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         let recording = status.is_some_and(|status| status.running);
-        print_human(&report, true, recording)?;
+        print_human(&report, &executable, true, recording);
     }
     if fix && !report.missing_permissions.is_empty() {
-        guide_granting(&report.missing_permissions)?;
+        guide_granting(&report.missing_permissions, &executable)?;
     }
     Ok(if report.ok {
         EXIT_SUCCESS
@@ -57,16 +58,18 @@ pub(crate) fn permissions_ok(config: &Config) -> Result<bool, CliError> {
 pub(crate) fn require_recorder_for_start(
     config: &Config,
     store_path: &Path,
+    executable: &Path,
 ) -> Result<StartPermissionState, CliError> {
     let status = store_status(store_path)?.ok_or_else(|| {
         CliError::InvalidValue("running recorder did not publish a heartbeat".to_owned())
     })?;
-    evaluate_recorder_for_start(config, &status)
+    evaluate_recorder_for_start(config, &status, executable)
 }
 
 fn evaluate_recorder_for_start(
     config: &Config,
     status: &StoreStatus,
+    executable: &Path,
 ) -> Result<StartPermissionState, CliError> {
     if !status.running {
         return Err(CliError::InvalidValue(
@@ -80,7 +83,7 @@ fn evaluate_recorder_for_start(
     let report = build_report(config, &required, snapshot, true)?;
     if !report.ok {
         println!("{STARTED_WITH_MISSING_PERMISSIONS}");
-        print_human(&report, false, true)?;
+        print_human(&report, executable, false, true);
     }
     Ok(if report.ok {
         StartPermissionState::Ready
@@ -285,9 +288,7 @@ mod tests {
     use zanei_core::config::Config;
     use zanei_core::store::{DaemonPermissions, PermissionState, StoreStatus};
 
-    use super::render::{
-        output_indicates_non_persistent_signature, permission_target_path, render_human,
-    };
+    use super::render::{output_indicates_non_persistent_signature, render_human};
     use super::{
         AutomationDetail, DoctorReport, PermissionReport, StatusDetail, build_report,
         evaluate_recorder_for_start, permissions_for_status,
@@ -302,7 +303,7 @@ mod tests {
         };
 
         assert_eq!(
-            evaluate_recorder_for_start(&Config::default(), &status)
+            evaluate_recorder_for_start(&Config::default(), &status, Path::new("/tmp/zanei"))
                 .expect("pending recorder permission snapshot"),
             super::StartPermissionState::PendingSnapshot
         );
@@ -368,18 +369,6 @@ mod tests {
         assert!(rendered.contains("the bundled entry persists"));
         assert!(rendered.contains("tccutil reset Accessibility dev.zanei.recorder"));
         assert!(rendered.contains("tccutil reset ListenEvent dev.zanei.recorder"));
-    }
-
-    #[test]
-    fn manual_permission_target_is_the_app_bundle_when_available() {
-        let bundled = Path::new("/Applications/Zanei.app/Contents/MacOS/zanei");
-        let unbundled = Path::new("/tmp/zanei");
-
-        assert_eq!(
-            permission_target_path(bundled),
-            Path::new("/Applications/Zanei.app")
-        );
-        assert_eq!(permission_target_path(unbundled), unbundled);
     }
 
     #[test]

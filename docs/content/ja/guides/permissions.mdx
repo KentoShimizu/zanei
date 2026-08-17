@@ -24,7 +24,7 @@ description: Zanei が要求する TCC 権限の一覧、付与手順、zanei do
 
 1. `zanei start` を実行します。recorder は起動時に、必要なアクセシビリティと入力監視を 1 回だけ要求します。`start` が終了コード 3 を返した場合も、デーモンは起動済みで、heartbeat が権限不足を報告しています。デーモンは動作を継続します。初回の権限ダイアログが応答待ちの間は、`zanei doctor` がオートメーションを `not_determined` と報告することがあるため、ダイアログに応答してからもう一度実行してください。
 2. 下表のペインを開きます。自動追加されたアクセシビリティの行を ON にします。入力監視に `Zanei` があればその行を ON にしますが、行がないことだけではダイアログでの付与失敗を意味しません。
-3. 一覧から入力監視の権限を操作する場合は、`+` でインストール済みの `Zanei.app` を選択します。まだ権限不足と報告されている間は、`zanei doctor --fix` がペインを開いて正確な `Zanei.app` の path をコピーします。ファイル選択ダイアログで Command-Shift-G を押してその path を貼り付けます。手動追加した bundle の行は定着します。
+3. 一覧から入力監視の権限を操作する場合は、`+` でインストール済みの `Zanei.app` を選択します。まだ権限不足と報告されている間は、`zanei doctor --fix` がペインを開き、symlink 解決後の正確な `Zanei.app` のルート path をコピーして、同じ app を Finder に表示します。ファイル選択ダイアログで Command-Shift-G を押してその path を貼り付けます。手動追加した bundle の行は定着します。
 4. `zanei stop && zanei start` を実行し、付与結果を recorder に反映します。
 5. `zanei doctor` を実行し、recorder 自身に適用されている状態を確認します。入力監視に行がなくても、recorder 由来の結果を正とします。
 
@@ -34,7 +34,7 @@ description: Zanei が要求する TCC 権限の一覧、付与手順、zanei do
 | 入力監視 | Privacy & Security → Input Monitoring |
 | オートメーション | Privacy & Security → Automation（初回の実 Apple Event 時に macOS が確認。起動時には要求しない） |
 
-`zanei doctor --fix` は不足している必要権限のペインを 1 つずつ開きます。複数のペインが必要な場合はペイン間で Return キー入力を待ち、最後のペイン後には待機しません。バンドル実行時は `Zanei.app` のルート、その他は実行ファイルの path をコピーします。付与操作は必ずユーザーが行います。
+`zanei doctor --fix` は不足している必要権限のペインを 1 つずつ開きます。複数のペインが必要な場合はペイン間で Return キー入力を待ち、最後のペイン後には待機しません。symlink を解決したうえで、バンドル実行時は `Zanei.app` のルート、その他は実行ファイルの path をコピーし、同じ対象を Finder に表示します。付与操作は必ずユーザーが行います。
 
 ## `doctor` で確認する
 
@@ -51,7 +51,9 @@ zanei doctor --fix
 `--fix` は不足している必要権限のペインを 1 つずつ開きます。複数のペインが必要な場合は
 ペイン間で Return キー入力を待ち、最後のペイン後には待機しません。`--json --fix` も指定でき、
 最初に JSON report を出力した後、必要権限が不足していれば同じ対話フローを実行します。
-この場合の stdout は JSON のみではありません。不足がなければ JSON だけを出力します。
+この場合の stdout は JSON のみではありません。対話フローでは、symlink 解決後の `Zanei.app`
+のルート、またはバンドル外の実行ファイルをコピーし、同じ対象を Finder に表示します。不足が
+なければ JSON だけを出力します。
 
 ### agent・スクリプト向け：`--json`
 
