@@ -4,11 +4,12 @@ use std::ptr;
 
 use crate::focused_field::{FieldClass, field_class, observed_field_class};
 
-use super::{NativeAxError, NativeElement, NativeWindow, cf::*, native_error};
+use super::{
+    AX_ERROR_ATTRIBUTE_UNSUPPORTED, NativeAxError, NativeElement, NativeWindow, cf::*, native_error,
+};
 
 const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 0.5;
 const AX_ERROR_SUCCESS: i32 = 0;
-const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
 const AX_ERROR_NO_VALUE: i32 = -25_212;
 const AX_VALUE_ATTRIBUTE: &str = "AXValue";
 const AX_NUMBER_OF_CHARACTERS_ATTRIBUTE: &str = "AXNumberOfCharacters";
@@ -316,11 +317,15 @@ pub(super) fn set_timeout(element: CfRef) -> Result<(), NativeAxError> {
     }
 }
 
-pub(super) fn set_boolean_attribute(element: CfRef, attribute: &str) -> Result<(), NativeAxError> {
+pub(super) fn set_boolean_attribute(
+    element: CfRef,
+    attribute: &str,
+    value: bool,
+) -> Result<(), NativeAxError> {
     let attribute =
         cf_string(attribute).ok_or_else(|| native_error("CFStringCreateWithCString", -1))?;
     let status =
-        unsafe { AXUIElementSetAttributeValue(element, attribute.as_ptr(), boolean_true()) };
+        unsafe { AXUIElementSetAttributeValue(element, attribute.as_ptr(), boolean_value(value)) };
     if status == AX_ERROR_SUCCESS {
         Ok(())
     } else {

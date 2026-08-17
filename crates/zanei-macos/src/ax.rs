@@ -385,8 +385,7 @@ fn attach_app(
         return Vec::new();
     };
     builder.add_app(app.clone());
-    let quirk = app_quirk(app.bundle_id.as_deref());
-    match api.attach(pid, quirk) {
+    match api.attach(pid) {
         Ok(observations) => {
             observer_health.mark_available(app.pid);
             observations
@@ -448,11 +447,7 @@ trait AxApi {
     type AttachError;
 
     fn running_applications(&self) -> Vec<ApplicationInfo>;
-    fn attach(
-        &mut self,
-        pid: i32,
-        quirk: AppQuirk,
-    ) -> Result<Vec<NativeAxEvent>, Self::AttachError>;
+    fn attach(&mut self, pid: i32) -> Result<Vec<NativeAxEvent>, Self::AttachError>;
     fn detach(&mut self, pid: i32) -> Vec<NativeAxEvent>;
     fn poll(&mut self, timeout: Duration) -> Vec<NativeAxEvent>;
     fn flush_pending(&mut self) -> Vec<NativeAxEvent>;
@@ -491,12 +486,8 @@ impl AxApi for SystemAxApi {
             .collect()
     }
 
-    fn attach(&mut self, pid: i32, quirk: AppQuirk) -> Result<Vec<NativeAxEvent>, NativeAxError> {
-        self.native.attach(
-            pid,
-            quirk.manual_accessibility,
-            quirk.enhanced_user_interface,
-        )
+    fn attach(&mut self, pid: i32) -> Result<Vec<NativeAxEvent>, NativeAxError> {
+        self.native.attach(pid)
     }
 
     fn detach(&mut self, pid: i32) -> Vec<NativeAxEvent> {
@@ -522,40 +513,6 @@ impl AxApi for SystemAxApi {
     fn take_degraded_operations(&self) -> u64 {
         self.native.take_degraded_operations()
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct AppQuirk {
-    manual_accessibility: bool,
-    enhanced_user_interface: bool,
-}
-
-struct AppQuirkEntry {
-    bundle_id: &'static str,
-    quirk: AppQuirk,
-}
-
-const APP_QUIRKS: &[AppQuirkEntry] = &[
-    AppQuirkEntry {
-        bundle_id: "com.microsoft.VSCode",
-        quirk: AppQuirk {
-            manual_accessibility: true,
-            enhanced_user_interface: false,
-        },
-    },
-    AppQuirkEntry {
-        bundle_id: "com.tinyspeck.slackmacgap",
-        quirk: AppQuirk {
-            manual_accessibility: true,
-            enhanced_user_interface: false,
-        },
-    },
-];
-
-fn app_quirk(bundle_id: Option<&str>) -> AppQuirk {
-    bundle_id
-        .and_then(|bundle_id| APP_QUIRKS.iter().find(|entry| entry.bundle_id == bundle_id))
-        .map_or_else(AppQuirk::default, |entry| entry.quirk)
 }
 
 #[cfg(test)]

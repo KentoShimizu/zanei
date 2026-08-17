@@ -1,5 +1,6 @@
 //! Safe ownership boundary around the macOS Accessibility C API.
 
+mod accessibility;
 mod cf;
 mod element;
 mod observer;
@@ -21,8 +22,8 @@ use crate::{InputAuthorizations, SecureInputProbe, secure_input::SecureInputProb
 
 use cf::{CfRef, OwnedCf, add_current_run_loop_source, cf_string, run_loop_tick, string_value};
 use element::{
-    create_application, element_at_position, element_role, element_snapshot, set_boolean_attribute,
-    set_timeout, window_snapshot,
+    create_application, element_at_position, element_role, element_snapshot, set_timeout,
+    window_snapshot,
 };
 use observer::AppObserver;
 use value_context::{DeferredResolution, DeferredValueContext};
@@ -30,6 +31,7 @@ use value_context::{DeferredResolution, DeferredValueContext};
 const CALLBACK_QUEUE_CAPACITY: usize = 1_024;
 const MAX_NOTIFICATIONS_PER_POLL: usize = 1;
 const AX_ERROR_SUCCESS: i32 = 0;
+const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeWindow {
@@ -101,6 +103,10 @@ impl NativeAxError {
     pub(super) const fn code(&self) -> i32 {
         self.code
     }
+
+    pub(super) const fn is_attribute_unsupported(&self) -> bool {
+        self.code == AX_ERROR_ATTRIBUTE_UNSUPPORTED
+    }
 }
 
 pub(crate) struct NativeAx {
@@ -135,12 +141,7 @@ impl NativeAx {
         }
     }
 
-    pub(crate) fn attach(
-        &mut self,
-        pid: i32,
-        manual_accessibility: bool,
-        enhanced_user_interface: bool,
-    ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
+    pub(crate) fn attach(&mut self, pid: i32) -> Result<Vec<NativeAxEvent>, NativeAxError> {
         let secure_input = secure_input_active(
             self.capture_text_content,
             self.secure_input_probe.as_ref(),
@@ -157,12 +158,6 @@ impl NativeAx {
 
         let application = create_application(pid)?;
         set_timeout(application.as_ptr())?;
-        if manual_accessibility {
-            set_boolean_attribute(application.as_ptr(), "AXManualAccessibility")?;
-        }
-        if enhanced_user_interface {
-            set_boolean_attribute(application.as_ptr(), "AXEnhancedUserInterface")?;
-        }
 
         let context = Box::new(ObserverContext {
             pid,
@@ -204,6 +199,7 @@ impl NativeAx {
             Arc::clone(&self.degraded),
             self.capture_text_content,
         );
+        app_observer.set_manual_accessibility(true);
         app_observer.refresh_window_target();
         let focused = app_observer.focused_element_or_clear(
             Instant::now(),

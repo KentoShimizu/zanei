@@ -16,7 +16,9 @@ use crate::{
 };
 
 use super::{
-    NativeAxError, NativeAxEvent, ObserverContext, TargetKind, add_notification,
+    NativeAxError, NativeAxEvent, ObserverContext, TargetKind,
+    accessibility::set_manual_accessibility,
+    add_notification,
     cf::{CfRef, OwnedCf, remove_current_run_loop_source},
     element::{
         FocusedElementSnapshot, cf_equal, copy_element, focused_element_snapshot, window_snapshot,
@@ -85,6 +87,15 @@ impl AppObserver {
             degraded,
             capture_text_content,
         }
+    }
+
+    pub(super) fn set_manual_accessibility(&self, enabled: bool) {
+        set_manual_accessibility(
+            self.application.as_ptr(),
+            self.context.pid,
+            self.capture_text_content,
+            enabled,
+        );
     }
 
     pub(super) fn is_current_target(&self, kind: TargetKind, element: CfRef) -> bool {
@@ -423,5 +434,6 @@ impl Drop for AppObserver {
                 target.notification,
             );
         }
+        self.set_manual_accessibility(false);
     }
 }

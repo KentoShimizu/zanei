@@ -26,13 +26,11 @@ These are capture-time filters: matching events are discarded before being writt
 
 ## I opted in, but typed text from Slack / Claude / VS Code is missing
 
-Electron and other Chromium-based apps build their accessibility tree lazily, so their input
-fields often report as *unknown* to macOS Accessibility. Zanei refuses to capture text from a
-field it cannot classify — the same safeguard that keeps password fields out — so typed
-differences from those apps are absent by design. Text you *copy* there is still captured
-(clipboard events don't depend on field classification), and everything else about the app —
-focus, titles, clicks, the fact of typing — is recorded normally. A future release may activate
-the accessibility tree for these apps to make their typed text capturable.
+Electron apps build their accessibility tree lazily, so their input fields can otherwise report as
+*unknown* to macOS Accessibility. With `capture.text_content` enabled, Zanei requests the tree when
+it attaches its observer so eligible typed text can be captured. Zanei still refuses to capture
+text from any field it cannot classify, preserving the same safeguard that keeps password fields
+out. Restart Zanei after changing `capture.text_content`.
 
 ## Can I read the store directly?
 

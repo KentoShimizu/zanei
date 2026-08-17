@@ -14,9 +14,9 @@ use zanei_core::{
 };
 
 use super::{
-    AppQuirk, ApplicationActivationPolicy, ApplicationInfo, AxApi, AxEventBuilder,
-    ClickObservation, NativeAxEvent, NativeHitTest, ObserverHealth, WorkspaceEvent, app_quirk,
-    attach_app, click_channel, publish_focus_observation, run_ax_loop,
+    ApplicationActivationPolicy, ApplicationInfo, AxApi, AxEventBuilder, ClickObservation,
+    NativeAxEvent, NativeHitTest, ObserverHealth, WorkspaceEvent, attach_app, click_channel,
+    publish_focus_observation, run_ax_loop,
 };
 use crate::{
     chrome::chrome_eligibility_channel,
@@ -62,18 +62,6 @@ fn element(role: &str, subrole: Option<&str>) -> NativeElement {
         value: None,
         value_len: Some(3),
     }
-}
-
-#[test]
-fn quirk_table_is_bundle_id_driven_and_app_scoped() {
-    assert_eq!(
-        app_quirk(Some("com.microsoft.VSCode")),
-        AppQuirk {
-            manual_accessibility: true,
-            enhanced_user_interface: false,
-        }
-    );
-    assert_eq!(app_quirk(Some("dev.example.Native")), AppQuirk::default());
 }
 
 #[test]
@@ -220,11 +208,7 @@ impl AxApi for FakeAxApi {
         self.running_applications.clone()
     }
 
-    fn attach(
-        &mut self,
-        pid: i32,
-        _quirk: AppQuirk,
-    ) -> Result<Vec<NativeAxEvent>, Self::AttachError> {
+    fn attach(&mut self, pid: i32) -> Result<Vec<NativeAxEvent>, Self::AttachError> {
         self.attached_pids.push(pid);
         self.attach_results
             .pop_front()

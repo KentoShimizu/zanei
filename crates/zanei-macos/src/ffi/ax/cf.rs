@@ -100,8 +100,14 @@ pub(super) unsafe fn remove_current_run_loop_source(source: CfRef) {
     }
 }
 
-pub(super) fn boolean_true() -> CfRef {
-    unsafe { kCFBooleanTrue }
+pub(super) fn boolean_value(value: bool) -> CfRef {
+    unsafe {
+        if value {
+            kCFBooleanTrue
+        } else {
+            kCFBooleanFalse
+        }
+    }
 }
 
 const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
@@ -110,6 +116,7 @@ const CF_NUMBER_SINT64_TYPE: isize = 4;
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     static kCFRunLoopDefaultMode: CfRef;
+    static kCFBooleanFalse: CfRef;
     static kCFBooleanTrue: CfRef;
     fn CFRetain(value: CfRef) -> CfRef;
     fn CFRelease(value: CfRef);
