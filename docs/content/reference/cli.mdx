@@ -80,7 +80,7 @@ Diagnostic/state commands use a separate fixed-output convention:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success. Background `start` also uses this code when the recorder is alive but its heartbeat does not yet contain a permission snapshot; it prints guidance to respond to the macOS permission dialogs and then run `zanei doctor` |
+| `0` | Success. Background `start` also uses this code when the recorder is alive but its permission snapshot remains pending after the 20-second wait; it notes that dialogs may take a moment to appear and advises running `zanei doctor --fix` if none are visible |
 | `1` | General error |
 | `2` | Usage error (invalid arguments) |
 | `3` | **Confirmed missing permissions**. Background `start` uses this code only after the running recorder reports a permission snapshot with a missing required TCC permission; `doctor` uses the same code for its diagnostic result |
@@ -147,7 +147,7 @@ build also produces a warning that rebuilding will reset granted permissions.
 
 Registers Zanei with launchd and starts background recording.
 If an agent is already registered, Zanei waits up to 10 seconds for launchd to finish unregistering it before registering the agent again.
-For background starts, Zanei waits up to 10 seconds for the daemon to report that it is alive before returning.
+For background starts, Zanei first waits up to 10 seconds for the daemon to report that it is alive. After that, the permission check described below may take up to another 20 seconds.
 At recorder startup, required missing Accessibility and Input Monitoring permissions are requested once. Automation remains deferred until the first real Apple Event to Chrome.
 
 ```bash
@@ -159,7 +159,7 @@ zanei start --foreground # run in the foreground instead (dev/debug)
 | --- | --- |
 | `--foreground` | Don't daemonize; run in the foreground |
 
-If the first fresh heartbeat does not yet contain a permission snapshot, background `start` reports that the recorder is still waiting for the macOS permission dialogs, asks you to respond and then run `zanei doctor`, and exits with **code 0** because the recorder is alive. Once the recorder reports a permission snapshot, missing required permissions make `start` print the same granting guidance as `doctor` and exit with **code 3**. The recorder remains running; grant the permissions, run `zanei stop && zanei start`, and confirm with `zanei doctor`. `--foreground` runs the same recorder startup request logic in the foreground process.
+After the recorder reports that it is alive, background `start` rereads the recorder's permission snapshot once per second for up to 20 seconds while it remains pending. At the 5-second mark, it prints `Waiting for the recorder's permission check...` once to stderr unless `--quiet` is set. If the snapshot becomes available with all required permissions granted, `start` prints the normal success message and, when eligible, asks the `capture.text_content` opt-in question. If it reports missing required permissions, `start` prints the same granting guidance as `doctor` and exits with **code 3**. Only when the snapshot is still pending after 20 seconds does `start` report that the recorder is still waiting for the macOS permission dialogs. It notes that dialogs may take a moment to appear and advises running `zanei doctor --fix` if none are visible, then exits with **code 0** because the recorder is alive. The recorder remains running; after granting permissions, run `zanei stop && zanei start` and confirm with `zanei doctor`. `--foreground` runs the same recorder startup request logic in the foreground process.
 
 When `capture.text_content` is not explicitly present in `config.toml`, the first successful interactive background `start` for which the recorder has reported all required permissions as granted asks:
 

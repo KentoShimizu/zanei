@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use zanei_core::config::Config;
 use zanei_core::store::{StoreReader, StoreStatus};
@@ -6,6 +7,15 @@ use zanei_core::store::{StoreReader, StoreStatus};
 use super::super::doctor::StartPermissionState;
 use crate::error::CliError;
 use crate::permissions::permission_snapshot_ready;
+
+pub(super) const WAITING_FOR_PERMISSION_CHECK: &str =
+    "Waiting for the recorder's permission check...";
+const PERMISSION_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const PERMISSION_SNAPSHOT_PROGRESS_AFTER: Duration = Duration::from_secs(5);
+// The Automation probe can take 2 seconds and permission snapshots are published on a 5-second
+// heartbeat. A 20-second budget covers both plus scheduling margin without hiding an unanswered
+// macOS permission dialog indefinitely.
+const PERMISSION_SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(super) fn before_bootstrap(
     config: &Config,
@@ -20,6 +30,34 @@ pub(super) fn before_bootstrap(
         None
     };
     Ok(permission_state(config, status.as_ref()))
+}
+
+pub(super) fn after_bootstrap(
+    quiet: bool,
+    mut permission_state: impl FnMut() -> Result<StartPermissionState, CliError>,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+    mut print_progress: impl FnMut(&str),
+) -> Result<StartPermissionState, CliError> {
+    let started_at = now();
+    let deadline = started_at + PERMISSION_SNAPSHOT_WAIT_TIMEOUT;
+    let progress_at = started_at + PERMISSION_SNAPSHOT_PROGRESS_AFTER;
+    let mut progress_printed = false;
+    let mut state = permission_state()?;
+    while state == StartPermissionState::PendingSnapshot && now() < deadline {
+        let remaining = deadline.saturating_duration_since(now());
+        sleep(PERMISSION_SNAPSHOT_POLL_INTERVAL.min(remaining));
+        state = permission_state()?;
+        if !quiet
+            && !progress_printed
+            && state == StartPermissionState::PendingSnapshot
+            && now() >= progress_at
+        {
+            print_progress(WAITING_FOR_PERMISSION_CHECK);
+            progress_printed = true;
+        }
+    }
+    Ok(state)
 }
 
 fn permission_state(config: &Config, status: Option<&StoreStatus>) -> StartPermissionState {

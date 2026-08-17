@@ -80,7 +80,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 
 | コード | 意味 |
 | --- | --- |
-| `0` | 正常。バックグラウンド `start` も、recorder は生存しているが heartbeat に権限 snapshot がまだない場合はこのコードを使い、macOS の権限ダイアログに応答してから `zanei doctor` を実行するよう案内します |
+| `0` | 正常。バックグラウンド `start` も、recorder は生存しているが 20 秒待っても権限 snapshot が Pending の場合はこのコードを使います。ダイアログの表示には時間がかかる場合があり、何も表示されていなければ `zanei doctor --fix` を実行するよう案内します |
 | `1` | 一般エラー |
 | `2` | 使用法エラー（引数不正） |
 | `3` | **確定した権限不足**。バックグラウンド `start` は、起動済みの recorder が権限 snapshot で必要な TCC 権限の不足を報告した場合だけこのコードを使います。`doctor` も診断結果に同じコードを使います |
@@ -146,7 +146,7 @@ zanei doctor --json     # agent 向け機械可読
 
 launchd に登録し、バックグラウンド記録を開始します。
 既に agent が登録されている場合は、launchd による登録解除の完了を最大 10 秒待ってから再登録します。
-バックグラウンド起動では、デーモンが生存報告するまで最大 10 秒待ってから戻ります。
+バックグラウンド起動では、まずデーモンが生存報告するまで最大 10 秒待ちます。その後、下記の権限確認にさらに最大 20 秒かかる場合があります。
 recorder は起動時に、必要かつ未付与のアクセシビリティと入力監視を 1 回要求します。オートメーションは Chrome への初回の実 Apple Event まで要求しません。
 
 ```bash
@@ -158,7 +158,7 @@ zanei start --foreground # デーモン化せず前面で実行（開発・デ�
 | --- | --- |
 | `--foreground` | デーモン化せず前面で実行 |
 
-最初の fresh heartbeat に権限 snapshot がまだない場合、バックグラウンド `start` は recorder が macOS の権限ダイアログへの応答を待っていることと、応答後に `zanei doctor` を実行することを案内します。recorder は生存しているため、**終了コード 0** で終了します。recorder が権限 snapshot を報告した後は、必要権限が不足していれば `start` が `doctor` と同じ付与手順を表示し、**終了コード 3** で終了します。recorder は動作を継続します。権限を付与し、`zanei stop && zanei start` してから `zanei doctor` で確認してください。`--foreground` も同じ recorder 起動時の要求ロジックを前面プロセスで実行します。
+recorder が生存を報告した後、バックグラウンド `start` は権限 snapshot が Pending の間、1 秒間隔で最大 20 秒再読み込みします。5 秒経過時点で、`--quiet` でなければ stderr に `Waiting for the recorder's permission check...` を 1 回だけ表示します。snapshot が確定した場合、必要権限がすべて granted なら通常の成功メッセージを表示し、条件を満たせば `capture.text_content` の opt-in を確認します。必要権限が不足していれば `doctor` と同じ付与手順を表示し、**終了コード 3** で終了します。20 秒後も snapshot が Pending の場合に限り、recorder が macOS の権限ダイアログへの応答を待っていると案内します。ダイアログの表示には時間がかかる場合があり、何も表示されていなければ `zanei doctor --fix` を実行するよう案内し、recorder は生存しているため **終了コード 0** で終了します。recorder は動作を継続します。権限を付与した後、`zanei stop && zanei start` を実行し、`zanei doctor` で確認してください。`--foreground` も同じ recorder 起動時の要求ロジックを前面プロセスで実行します。
 
 `config.toml` に `capture.text_content` が明示されていない場合、recorder が必要な権限をすべて granted と報告した最初の対話式バックグラウンド `start` は、次を確認します。
 

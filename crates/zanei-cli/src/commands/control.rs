@@ -24,7 +24,7 @@ const BACKGROUND_START_CONFIRMATION: &str = concat!(
     "A raw executable may not keep a manually added row; use the bundled distribution for stable permission management."
 );
 const TEXT_CONTENT_OPT_IN_GUIDANCE: &str = "Typed and clipboard content is not recorded by default. To opt in: zanei config set capture.text_content true";
-const PENDING_PERMISSION_SNAPSHOT_GUIDANCE: &str = "recorder is still waiting for macOS permission dialogs — respond to them, then check `zanei doctor`";
+const PENDING_PERMISSION_SNAPSHOT_GUIDANCE: &str = "recorder is still waiting for macOS permission dialogs — dialogs may take a moment to appear; if none are visible, run `zanei doctor --fix`; respond to any dialogs, then check `zanei doctor`";
 const RESTARTING_RECORDER: &str = "Restarting the recorder to apply text content capture...";
 
 pub fn start(paths: &Paths, foreground: bool, quiet: bool, json: bool) -> Result<u8, CliError> {
@@ -50,7 +50,15 @@ pub fn start(paths: &Paths, foreground: bool, quiet: bool, json: bool) -> Result
             crate::daemon::start_launch_agent(&executable, &paths.config, &paths.store)
                 .map_err(CliError::from)
         },
-        || require_recorder_for_start(&config, &paths.store, &executable),
+        || {
+            start_permissions::after_bootstrap(
+                quiet,
+                || require_recorder_for_start(&config, &paths.store, &executable),
+                Instant::now,
+                thread::sleep,
+                |message| eprintln!("{message}"),
+            )
+        },
         |message| println!("{message}"),
     )?;
     let permission_state = background.permission_state;
@@ -287,9 +295,12 @@ pub(super) fn daemon_running(store_path: &Path) -> Result<bool, CliError> {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
 
     use zanei_core::store::DaemonMode;
 
+    use super::start_permissions::{WAITING_FOR_PERMISSION_CHECK, after_bootstrap};
     use super::{
         BACKGROUND_START_CONFIRMATION, BackgroundStartOutcome, EXIT_MISSING_PERMISSIONS,
         EXIT_SUCCESS, PENDING_PERMISSION_SNAPSHOT_GUIDANCE, RESTARTING_RECORDER,
@@ -298,69 +309,176 @@ mod tests {
     };
 
     #[test]
-    fn background_start_succeeds_when_recorder_reports_permissions_ready() {
-        let permission_check_called = Cell::new(false);
+    fn pending_snapshots_then_ready_succeed_and_run_post_start_prompt() {
+        let states = RefCell::new(VecDeque::from([
+            StartPermissionState::PendingSnapshot,
+            StartPermissionState::PendingSnapshot,
+            StartPermissionState::Ready,
+        ]));
+        let sleeps = RefCell::new(Vec::new());
+        let clock = Cell::new(Instant::now());
+        let prompted = Cell::new(false);
 
-        let exit = start_background_with(
-            true,
+        let background = start_background_with(
+            false,
             false,
             || Ok(false),
             || {
-                permission_check_called.set(true);
-                Ok(StartPermissionState::Ready)
+                after_bootstrap(
+                    false,
+                    || Ok(states.borrow_mut().pop_front().expect("permission state")),
+                    || clock.get(),
+                    |duration| {
+                        sleeps.borrow_mut().push(duration);
+                        clock.set(clock.get() + duration);
+                    },
+                    |_| panic!("a two-second wait must not print progress"),
+                )
             },
             |_| {},
         )
         .expect("background start");
+        let exit = complete_background_start_with(
+            background,
+            false,
+            || {
+                prompted.set(true);
+                Ok(Some(false))
+            },
+            || panic!("declining text capture must not restart"),
+            |_| panic!("declining text capture must not print a restart notice"),
+        )
+        .expect("complete background start");
 
-        assert_eq!(exit.exit_code, EXIT_SUCCESS);
-        assert_eq!(exit.permission_state, StartPermissionState::Ready);
-        assert!(permission_check_called.get());
+        assert_eq!(exit, EXIT_SUCCESS);
+        assert_eq!(sleeps.into_inner(), [Duration::from_secs(1); 2]);
+        assert!(prompted.get());
     }
 
     #[test]
     fn missing_permissions_leave_the_started_recorder_running() {
         let recorder_running = Cell::new(false);
 
-        let exit = start_background_with(
+        let background = start_background_with(
             true,
             false,
             || {
                 recorder_running.set(true);
                 Ok(false)
             },
-            || Ok(StartPermissionState::Missing),
+            || {
+                after_bootstrap(
+                    true,
+                    || Ok(StartPermissionState::Missing),
+                    Instant::now,
+                    |_| panic!("a ready permission snapshot must not sleep"),
+                    |_| panic!("a ready permission snapshot must not print progress"),
+                )
+            },
             |_| {},
         )
         .expect("degraded background start");
 
-        assert_eq!(exit.exit_code, EXIT_MISSING_PERMISSIONS);
-        assert_eq!(exit.permission_state, StartPermissionState::Missing);
+        assert_eq!(background.exit_code, EXIT_MISSING_PERMISSIONS);
+        assert_eq!(background.permission_state, StartPermissionState::Missing);
         assert!(
             recorder_running.get(),
             "the recorder must not be booted out"
         );
+        let exit = complete_background_start_with(
+            background,
+            false,
+            || panic!("missing permissions must not run the text content prompt"),
+            || panic!("missing permissions must not restart the recorder"),
+            |_| panic!("missing permissions must not print a restart notice"),
+        )
+        .expect("complete missing-permission start");
+        assert_eq!(exit, EXIT_MISSING_PERMISSIONS);
     }
 
     #[test]
-    fn pending_permission_snapshot_keeps_start_successful_and_guides_user() {
+    fn pending_snapshot_timeout_keeps_start_successful_and_guides_user() {
+        let checks = Cell::new(0);
+        let sleeps = RefCell::new(Vec::new());
+        let started_at = Instant::now();
+        let clock = Cell::new(started_at);
         let output = RefCell::new(Vec::new());
+        let progress = RefCell::new(Vec::new());
 
         let exit = start_background_with(
-            true,
+            false,
             false,
             || Ok(false),
-            || Ok(StartPermissionState::PendingSnapshot),
+            || {
+                after_bootstrap(
+                    false,
+                    || {
+                        checks.set(checks.get() + 1);
+                        Ok(StartPermissionState::PendingSnapshot)
+                    },
+                    || clock.get(),
+                    |duration| {
+                        sleeps.borrow_mut().push(duration);
+                        clock.set(clock.get() + duration);
+                    },
+                    |message| {
+                        progress
+                            .borrow_mut()
+                            .push((clock.get().duration_since(started_at), message.to_owned()));
+                    },
+                )
+            },
             |message| output.borrow_mut().push(message.to_owned()),
         )
         .expect("pending background start");
 
         assert_eq!(exit.exit_code, EXIT_SUCCESS);
         assert_eq!(exit.permission_state, StartPermissionState::PendingSnapshot);
+        assert_eq!(checks.get(), 21, "initial read plus 20 one-second polls");
+        assert_eq!(sleeps.borrow().as_slice(), [Duration::from_secs(1); 20]);
+        assert_eq!(
+            clock.get().duration_since(started_at),
+            Duration::from_secs(20)
+        );
         assert_eq!(
             output.into_inner(),
             [PENDING_PERMISSION_SNAPSHOT_GUIDANCE.to_owned()]
         );
+        assert_eq!(
+            progress.into_inner(),
+            [(
+                Duration::from_secs(5),
+                WAITING_FOR_PERMISSION_CHECK.to_owned()
+            )]
+        );
+        assert!(
+            PENDING_PERMISSION_SNAPSHOT_GUIDANCE.contains("dialogs may take a moment to appear")
+        );
+        assert!(PENDING_PERMISSION_SNAPSHOT_GUIDANCE.contains("`zanei doctor --fix`"));
+    }
+
+    #[test]
+    fn quiet_pending_snapshot_wait_suppresses_progress() {
+        let clock = Cell::new(Instant::now());
+        let exit = start_background_with(
+            true,
+            false,
+            || Ok(false),
+            || {
+                after_bootstrap(
+                    true,
+                    || Ok(StartPermissionState::PendingSnapshot),
+                    || clock.get(),
+                    |duration| clock.set(clock.get() + duration),
+                    |_| panic!("quiet start must not print progress"),
+                )
+            },
+            |_| {},
+        )
+        .expect("quiet pending background start");
+
+        assert_eq!(exit.exit_code, EXIT_SUCCESS);
+        assert_eq!(exit.permission_state, StartPermissionState::PendingSnapshot);
     }
 
     #[test]
