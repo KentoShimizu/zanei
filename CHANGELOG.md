@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 — 2026-08-18
+
+- The recorder shuts itself down within about 15 seconds when its
+  executable disappears, so `brew uninstall` (or an upgrade replacing
+  the Cellar path) no longer leaves a recorder running from memory.
+- The FAQ documents uninstalling, deleting recorded data, and removing
+  the macOS permission grants.
+
 ## 0.1.2 — 2026-08-18
 
 - The first-run text-content question keys off the recorder's own

@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-collector"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "thiserror",
  "zanei-core",
@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "jsonschema",
  "rusqlite",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-macos"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "thiserror",
  "zanei-collector",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-mcp"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "rmcp",
  "serde",
