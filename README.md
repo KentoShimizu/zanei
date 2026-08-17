@@ -13,7 +13,7 @@
   </p>
 </div>
 
-Zanei (残映, *zan-ei*) records your computer activity as OS-level events — no screenshots —
+Zanei (残映, *zan-ei*) records your computer activity as OS-level events — not screenshots —
 into a local SQLite store and turns it into session-structured, deduplicated timelines that
 AI agents read through the CLI or an MCP server. macOS only (Apple Silicon and Intel);
 Windows and Linux are planned.
