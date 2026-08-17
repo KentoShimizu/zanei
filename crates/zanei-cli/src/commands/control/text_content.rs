@@ -19,14 +19,14 @@ pub(super) fn maybe_prompt(
     permission_state: impl FnOnce() -> Option<StartPermissionState>,
     read_answer: impl FnOnce() -> io::Result<String>,
     mut write_stderr: impl FnMut(&str) -> io::Result<()>,
-) -> Result<bool, CliError> {
+) -> Result<Option<bool>, CliError> {
     if capture_text_content_is_explicit(config_path)?
         || output_suppressed
         || !stdin_is_terminal()
         || !stderr_is_terminal()
         || permission_state() != Some(StartPermissionState::Ready)
     {
-        return Ok(false);
+        return Ok(None);
     }
 
     write_stderr(PROMPT).map_err(CliError::PromptOutput)?;
@@ -38,7 +38,7 @@ pub(super) fn maybe_prompt(
         DISABLED_RESULT
     })
     .map_err(CliError::PromptOutput)?;
-    Ok(true)
+    Ok(Some(enabled))
 }
 
 #[cfg(test)]
@@ -63,7 +63,7 @@ mod tests {
             || Ok("y\n".to_owned()),
         );
 
-        assert!(prompted);
+        assert_eq!(prompted, Some(true));
         assert_eq!(output, format!("{PROMPT}{ENABLED_RESULT}"));
         assert!(
             Config::load(&fixture.config)
@@ -91,7 +91,7 @@ mod tests {
                 StartPermissionState::Ready,
                 || Ok(answer.to_owned()),
             );
-            assert!(prompted);
+            assert_eq!(prompted, Some(false));
             assert_eq!(output, format!("{PROMPT}{DISABLED_RESULT}"));
             assert!(
                 !Config::load(&fixture.config)
@@ -113,7 +113,7 @@ mod tests {
                     Ok("y\n".to_owned())
                 },
             );
-            assert!(!prompted_again);
+            assert_eq!(prompted_again, None);
             assert!(output_again.is_empty());
             assert!(!read_again.get());
         }
@@ -135,7 +135,7 @@ mod tests {
                     Ok("y\n".to_owned())
                 },
             );
-            assert!(!prompted);
+            assert_eq!(prompted, None);
             assert!(output.is_empty());
             assert!(!read.get());
         }
@@ -164,7 +164,7 @@ mod tests {
                     read.set(true);
                     Ok("y\n".to_owned())
                 });
-            assert!(!prompted);
+            assert_eq!(prompted, None);
             assert!(output.is_empty());
             assert!(!read.get());
             assert!(!capture_text_content_is_explicit(&fixture.config).expect("undetermined"));
@@ -182,7 +182,7 @@ mod tests {
             let fixture = PromptFixture::undetermined();
             let (prompted, output) =
                 fixture.run(false, false, true, true, StartPermissionState::Ready, read);
-            assert!(prompted);
+            assert_eq!(prompted, Some(false));
             assert_eq!(output, format!("{PROMPT}{DISABLED_RESULT}"));
             assert!(
                 !Config::load(&fixture.config)
@@ -231,7 +231,7 @@ mod tests {
             stderr_tty: bool,
             permissions: StartPermissionState,
             read: impl FnOnce() -> io::Result<String>,
-        ) -> (bool, String) {
+        ) -> (Option<bool>, String) {
             let output = RefCell::new(String::new());
             let prompted = maybe_prompt(
                 &self.config,

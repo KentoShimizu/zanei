@@ -415,6 +415,60 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
 }
 
 #[test]
+fn stopped_state_retains_last_known_permissions_without_reporting_them_as_current() {
+    let database = TestDatabase::new("stopped-last-known-permissions");
+    let writer = StoreWriter::open(database.path()).expect("open writer");
+    let permissions = permission_snapshot(true);
+    let mut running = running_state(OffsetDateTime::now_utc(), 48);
+    running.permissions = Some(permissions.clone());
+    writer
+        .write_daemon_state(&running)
+        .expect("write recorder permission report");
+
+    writer
+        .write_daemon_state(&DaemonState::default())
+        .expect("write stopped state");
+
+    let status = StoreReader::open(database.path())
+        .and_then(|reader| reader.status())
+        .expect("read stopped status");
+    assert!(!status.running);
+    assert_eq!(status.heartbeat_at, None);
+    assert_eq!(status.instance_id, None);
+    assert_eq!(status.permissions, None);
+    assert_eq!(status.reported_permissions(), None);
+    assert_eq!(status.last_reported_permissions(), Some(&permissions));
+}
+
+#[test]
+fn new_heartbeat_does_not_expose_last_known_permissions_as_current() {
+    let database = TestDatabase::new("new-heartbeat-last-known-permissions");
+    let writer = StoreWriter::open(database.path()).expect("open writer");
+    let now = OffsetDateTime::now_utc();
+    let permissions = permission_snapshot(true);
+    let mut previous = running_state(now, 48);
+    previous.permissions = Some(permissions.clone());
+    writer
+        .write_daemon_state(&previous)
+        .expect("write previous recorder report");
+
+    let mut current = running_state(now, 48);
+    current.pid = Some(43);
+    current.started_at = Some("2026-08-17T11:00:00Z".to_owned());
+    current.instance_id = Some("43@2026-08-17T11:00:00Z".to_owned());
+    writer
+        .write_daemon_state(&current)
+        .expect("write new recorder heartbeat");
+
+    let status = StoreReader::open(database.path())
+        .and_then(|reader| reader.status_at(now + time::Duration::seconds(1)))
+        .expect("read new recorder status");
+    assert!(status.running);
+    assert_eq!(status.reported_permissions(), None);
+    assert_eq!(status.last_reported_permissions(), Some(&permissions));
+}
+
+#[test]
 fn status_rejects_a_corrupt_last_event_timestamp() {
     let database = TestDatabase::new("corrupt-last-event-timestamp");
     let now = OffsetDateTime::now_utc();
@@ -578,11 +632,12 @@ fn readers_handle_retention_and_failure_metrics_from_prior_schemas() {
 }
 
 #[test]
-fn writer_migrates_prior_daemon_state_schemas_to_v4() {
+fn writer_migrates_prior_daemon_state_schemas_to_v5() {
     for version in [
         super::LEGACY_STORE_SCHEMA_VERSION,
         super::DAEMON_IDENTITY_STORE_SCHEMA_VERSION,
         super::RETENTION_STORE_SCHEMA_VERSION,
+        super::COLLECTOR_FAILURES_STORE_SCHEMA_VERSION,
     ] {
         let database = TestDatabase::new(&format!("v{version}-migration"));
         let connection = rusqlite::Connection::open(database.path()).expect("open legacy store");
@@ -615,7 +670,48 @@ fn writer_migrates_prior_daemon_state_schemas_to_v4() {
                 .iter()
                 .any(|column| column == "collector_failures_json")
         );
+        assert!(
+            columns
+                .iter()
+                .any(|column| column == "last_known_permissions_json")
+        );
     }
+}
+
+#[test]
+fn v4_migration_copies_the_existing_permission_snapshot_to_last_known() {
+    let database = TestDatabase::new("v4-permissions-migration");
+    let permissions = permission_snapshot(false);
+    let permissions_json = serde_json::to_string(&permissions).expect("serialize permissions");
+    let connection = rusqlite::Connection::open(database.path()).expect("open v4 store");
+    connection
+        .execute_batch(&legacy_daemon_schema(
+            super::COLLECTOR_FAILURES_STORE_SCHEMA_VERSION,
+        ))
+        .expect("create v4 schema");
+    connection
+        .execute_batch(
+            "CREATE TABLE daemon_permissions (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                snapshot_json TEXT NOT NULL
+            );",
+        )
+        .expect("create v4 permission table");
+    connection
+        .execute(
+            "INSERT INTO daemon_permissions(id, snapshot_json) VALUES (1, ?1)",
+            [&permissions_json],
+        )
+        .expect("write v4 permission snapshot");
+    drop(connection);
+
+    StoreWriter::open(database.path()).expect("migrate v4 writer");
+
+    let status = StoreReader::open(database.path())
+        .and_then(|reader| reader.status())
+        .expect("read migrated status");
+    assert_eq!(status.reported_permissions(), None);
+    assert_eq!(status.last_reported_permissions(), Some(&permissions));
 }
 
 fn app_launch(id: &str, ts: &str, app_name: &str, bundle_id: &str) -> Event {
@@ -713,6 +809,19 @@ fn running_state(heartbeat_at: OffsetDateTime, retention_hours: u64) -> DaemonSt
     }
 }
 
+fn permission_snapshot(permissions_ok: bool) -> DaemonPermissions {
+    DaemonPermissions {
+        permissions_ok,
+        accessibility: PermissionState::Granted,
+        input_monitoring: if permissions_ok {
+            PermissionState::Granted
+        } else {
+            PermissionState::Denied
+        },
+        automation: BTreeMap::new(),
+    }
+}
+
 fn legacy_daemon_schema(version: i64) -> String {
     let identity_columns = if version >= super::DAEMON_IDENTITY_STORE_SCHEMA_VERSION {
         "instance_id TEXT, mode TEXT,"
@@ -721,6 +830,11 @@ fn legacy_daemon_schema(version: i64) -> String {
     };
     let retention_column = if version >= super::RETENTION_STORE_SCHEMA_VERSION {
         "retention_hours INTEGER CHECK (retention_hours > 0),"
+    } else {
+        ""
+    };
+    let collector_failures_column = if version >= super::COLLECTOR_FAILURES_STORE_SCHEMA_VERSION {
+        ", collector_failures_json TEXT NOT NULL DEFAULT '{}'"
     } else {
         ""
     };
@@ -737,6 +851,7 @@ fn legacy_daemon_schema(version: i64) -> String {
             events_dropped INTEGER NOT NULL DEFAULT 0,
             last_event_ts TEXT,
             degraded_json TEXT
+            {collector_failures_column}
         );
         INSERT INTO daemon_state(id) VALUES (1);
         CREATE TABLE meta(schema_version INTEGER NOT NULL);

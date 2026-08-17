@@ -25,6 +25,7 @@ const BACKGROUND_START_CONFIRMATION: &str = concat!(
 );
 const TEXT_CONTENT_OPT_IN_GUIDANCE: &str = "Typed and clipboard content is not recorded by default. To opt in: zanei config set capture.text_content true";
 const PENDING_PERMISSION_SNAPSHOT_GUIDANCE: &str = "recorder is still waiting for macOS permission dialogs — respond to them, then check `zanei doctor`";
+const RESTARTING_RECORDER: &str = "Restarting the recorder to apply text content capture...";
 
 pub fn start(paths: &Paths, foreground: bool, quiet: bool, json: bool) -> Result<u8, CliError> {
     let config = Config::load(&paths.config)?;
@@ -37,26 +38,12 @@ pub fn start(paths: &Paths, foreground: bool, quiet: bool, json: bool) -> Result
         return Err(crate::daemon::DaemonError::StoreOwned { pid: owner.pid }.into());
     }
     let executable = crate::executable::current().map_err(CliError::Input)?;
-    let stdin_is_terminal = io::stdin().is_terminal();
-    let stderr_is_terminal = io::stderr().is_terminal();
-    let mut stderr = io::stderr().lock();
-    text_content::maybe_prompt(
-        &paths.config,
-        quiet || json,
-        || stdin_is_terminal,
-        || stderr_is_terminal,
-        || start_permissions::before_bootstrap(&config, &paths.store).ok(),
-        || {
-            let mut answer = String::new();
-            io::stdin().read_line(&mut answer).map(|_| answer)
-        },
-        |message| {
-            stderr.write_all(message.as_bytes())?;
-            stderr.flush()
-        },
-    )?;
+    let prompted_before = prompt_text_content(paths, quiet || json, || {
+        start_permissions::before_bootstrap(&config, &paths.store).ok()
+    })?
+    .is_some();
     let config = Config::load(&paths.config)?;
-    start_background_with(
+    let background = start_background_with(
         quiet,
         config.capture.text_content,
         || {
@@ -65,7 +52,55 @@ pub fn start(paths: &Paths, foreground: bool, quiet: bool, json: bool) -> Result
         },
         || require_recorder_for_start(&config, &paths.store, &executable),
         |message| println!("{message}"),
+    )?;
+    let permission_state = background.permission_state;
+    complete_background_start_with(
+        background,
+        prompted_before,
+        || prompt_text_content(paths, quiet || json, || Some(permission_state)),
+        || restart_background(paths),
+        |message| eprintln!("{message}"),
     )
+}
+
+fn prompt_text_content(
+    paths: &Paths,
+    output_suppressed: bool,
+    permission_state: impl FnOnce() -> Option<StartPermissionState>,
+) -> Result<Option<bool>, CliError> {
+    let stdin_is_terminal = io::stdin().is_terminal();
+    let stderr_is_terminal = io::stderr().is_terminal();
+    let mut stderr = io::stderr().lock();
+    text_content::maybe_prompt(
+        &paths.config,
+        output_suppressed,
+        || stdin_is_terminal,
+        || stderr_is_terminal,
+        permission_state,
+        || {
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer).map(|_| answer)
+        },
+        |message| {
+            stderr.write_all(message.as_bytes())?;
+            stderr.flush()
+        },
+    )
+}
+
+fn restart_background(paths: &Paths) -> Result<u8, CliError> {
+    let stop_exit = stop(&paths.store, true)?;
+    if stop_exit == EXIT_SUCCESS {
+        start(paths, false, true, false)
+    } else {
+        Ok(stop_exit)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BackgroundStartOutcome {
+    exit_code: u8,
+    permission_state: StartPermissionState,
 }
 
 fn start_background_with(
@@ -74,24 +109,45 @@ fn start_background_with(
     start_launch_agent: impl FnOnce() -> Result<bool, CliError>,
     recorder_permission_state: impl FnOnce() -> Result<StartPermissionState, CliError>,
     mut print: impl FnMut(&str),
-) -> Result<u8, CliError> {
+) -> Result<BackgroundStartOutcome, CliError> {
     let was_bootstrapped = start_launch_agent()?;
-    match recorder_permission_state()? {
+    let permission_state = recorder_permission_state()?;
+    let exit_code = match permission_state {
         StartPermissionState::PendingSnapshot => {
             print(PENDING_PERMISSION_SNAPSHOT_GUIDANCE);
-            return Ok(EXIT_SUCCESS);
+            EXIT_SUCCESS
         }
-        StartPermissionState::Missing => return Ok(EXIT_MISSING_PERMISSIONS),
-        StartPermissionState::Ready => {}
-    }
-    if !quiet {
+        StartPermissionState::Missing => EXIT_MISSING_PERMISSIONS,
+        StartPermissionState::Ready => EXIT_SUCCESS,
+    };
+    if permission_state == StartPermissionState::Ready && !quiet {
         if was_bootstrapped {
             print("Zanei recording restarted");
         } else {
             print(&background_start_confirmation(text_content_enabled));
         }
     }
-    Ok(EXIT_SUCCESS)
+    Ok(BackgroundStartOutcome {
+        exit_code,
+        permission_state,
+    })
+}
+
+fn complete_background_start_with(
+    background: BackgroundStartOutcome,
+    prompted_before: bool,
+    prompt_after: impl FnOnce() -> Result<Option<bool>, CliError>,
+    restart: impl FnOnce() -> Result<u8, CliError>,
+    mut print: impl FnMut(&str),
+) -> Result<u8, CliError> {
+    if prompted_before || background.permission_state != StartPermissionState::Ready {
+        return Ok(background.exit_code);
+    }
+    if prompt_after()? == Some(true) {
+        print(RESTARTING_RECORDER);
+        return restart();
+    }
+    Ok(background.exit_code)
 }
 
 fn background_start_confirmation(text_content_enabled: bool) -> String {
@@ -235,9 +291,10 @@ mod tests {
     use zanei_core::store::DaemonMode;
 
     use super::{
-        BACKGROUND_START_CONFIRMATION, EXIT_MISSING_PERMISSIONS, EXIT_SUCCESS,
-        PENDING_PERMISSION_SNAPSHOT_GUIDANCE, StartPermissionState, TEXT_CONTENT_OPT_IN_GUIDANCE,
-        background_start_confirmation, start_background_with, wait_for_stop_completion,
+        BACKGROUND_START_CONFIRMATION, BackgroundStartOutcome, EXIT_MISSING_PERMISSIONS,
+        EXIT_SUCCESS, PENDING_PERMISSION_SNAPSHOT_GUIDANCE, RESTARTING_RECORDER,
+        StartPermissionState, TEXT_CONTENT_OPT_IN_GUIDANCE, background_start_confirmation,
+        complete_background_start_with, start_background_with, wait_for_stop_completion,
     };
 
     #[test]
@@ -256,7 +313,8 @@ mod tests {
         )
         .expect("background start");
 
-        assert_eq!(exit, EXIT_SUCCESS);
+        assert_eq!(exit.exit_code, EXIT_SUCCESS);
+        assert_eq!(exit.permission_state, StartPermissionState::Ready);
         assert!(permission_check_called.get());
     }
 
@@ -276,7 +334,8 @@ mod tests {
         )
         .expect("degraded background start");
 
-        assert_eq!(exit, EXIT_MISSING_PERMISSIONS);
+        assert_eq!(exit.exit_code, EXIT_MISSING_PERMISSIONS);
+        assert_eq!(exit.permission_state, StartPermissionState::Missing);
         assert!(
             recorder_running.get(),
             "the recorder must not be booted out"
@@ -296,11 +355,59 @@ mod tests {
         )
         .expect("pending background start");
 
-        assert_eq!(exit, EXIT_SUCCESS);
+        assert_eq!(exit.exit_code, EXIT_SUCCESS);
+        assert_eq!(exit.permission_state, StartPermissionState::PendingSnapshot);
         assert_eq!(
             output.into_inner(),
             [PENDING_PERMISSION_SNAPSHOT_GUIDANCE.to_owned()]
         );
+    }
+
+    #[test]
+    fn post_start_yes_restarts_through_the_injected_canonical_path() {
+        let prompted = Cell::new(false);
+        let restarted = Cell::new(false);
+        let output = RefCell::new(Vec::new());
+
+        let exit = complete_background_start_with(
+            BackgroundStartOutcome {
+                exit_code: EXIT_SUCCESS,
+                permission_state: StartPermissionState::Ready,
+            },
+            false,
+            || {
+                prompted.set(true);
+                Ok(Some(true))
+            },
+            || {
+                restarted.set(true);
+                Ok(EXIT_SUCCESS)
+            },
+            |message| output.borrow_mut().push(message.to_owned()),
+        )
+        .expect("complete background start");
+
+        assert_eq!(exit, EXIT_SUCCESS);
+        assert!(prompted.get());
+        assert!(restarted.get());
+        assert_eq!(output.into_inner(), [RESTARTING_RECORDER.to_owned()]);
+    }
+
+    #[test]
+    fn post_start_no_keeps_the_running_recorder() {
+        let exit = complete_background_start_with(
+            BackgroundStartOutcome {
+                exit_code: EXIT_SUCCESS,
+                permission_state: StartPermissionState::Ready,
+            },
+            false,
+            || Ok(Some(false)),
+            || panic!("a false decision must not restart the recorder"),
+            |_| panic!("a false decision must not print a restart notice"),
+        )
+        .expect("complete background start");
+
+        assert_eq!(exit, EXIT_SUCCESS);
     }
 
     #[test]

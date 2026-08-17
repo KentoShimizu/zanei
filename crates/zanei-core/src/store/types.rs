@@ -62,6 +62,7 @@ pub struct StoreStatus {
     pub degraded: BTreeMap<String, String>,
     pub collector_failures: BTreeMap<String, u64>,
     pub permissions: Option<DaemonPermissions>,
+    pub last_known_permissions: Option<DaemonPermissions>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -99,12 +100,10 @@ impl StoreStatus {
         self.running.then_some(self.permissions.as_ref()).flatten()
     }
 
-    /// Returns the permission snapshot bound to the last persisted heartbeat, even if stale.
-    /// A clean shutdown clears both fields. A heartbeat without a snapshot remains unknown and
-    /// must not be replaced by a local probe.
+    /// Returns the last permission snapshot reported by the recorder, even after it stops.
     #[must_use]
     pub fn last_reported_permissions(&self) -> Option<&DaemonPermissions> {
-        self.heartbeat_at.as_ref().and(self.permissions.as_ref())
+        self.last_known_permissions.as_ref()
     }
 }
 

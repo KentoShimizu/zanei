@@ -22,7 +22,7 @@ const AUTOMATION_PANE: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation";
 const STARTED_WITH_MISSING_PERMISSIONS: &str = "Zanei recording started with missing permissions — grant them, then run `zanei stop && zanei start`.";
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StartPermissionState {
     PendingSnapshot,
     Ready,

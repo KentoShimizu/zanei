@@ -9,8 +9,9 @@ use time::format_description::well_known::Rfc3339;
 use crate::schema::Event;
 
 use super::{
-    DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode, DaemonState, LEGACY_STORE_SCHEMA_VERSION,
-    RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, retention_cutoff,
+    COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
+    DaemonState, LEGACY_STORE_SCHEMA_VERSION, RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION,
+    StoreError, retention_cutoff,
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
@@ -52,7 +53,8 @@ CREATE TABLE IF NOT EXISTS daemon_state (
     events_dropped INTEGER NOT NULL DEFAULT 0,
     last_event_ts TEXT,
     degraded_json TEXT,
-    collector_failures_json TEXT NOT NULL DEFAULT '{}'
+    collector_failures_json TEXT NOT NULL DEFAULT '{}',
+    last_known_permissions_json TEXT
 );
 INSERT OR IGNORE INTO daemon_state(id) VALUES (1);
 
@@ -65,7 +67,7 @@ CREATE TABLE IF NOT EXISTS meta (
     schema_version INTEGER NOT NULL
 );
 INSERT INTO meta(schema_version)
-SELECT 4 WHERE NOT EXISTS (SELECT 1 FROM meta);
+SELECT 5 WHERE NOT EXISTS (SELECT 1 FROM meta);
 ";
 
 pub struct StoreWriter {
@@ -353,7 +355,11 @@ fn write_permissions(transaction: &Transaction<'_>, state: &DaemonState) -> Resu
         transaction.execute(
             "INSERT INTO daemon_permissions(id, snapshot_json) VALUES (1, ?1) \
              ON CONFLICT(id) DO UPDATE SET snapshot_json = excluded.snapshot_json",
-            [permissions_json],
+            [&permissions_json],
+        )?;
+        transaction.execute(
+            "UPDATE daemon_state SET last_known_permissions_json = ?1 WHERE id = 1",
+            [&permissions_json],
         )?;
     } else {
         transaction.execute("DELETE FROM daemon_permissions WHERE id = 1", [])?;
@@ -448,7 +454,7 @@ fn serialize_permissions(permissions: &super::DaemonPermissions) -> Result<Strin
 
 fn migrate_schema(connection: &Connection) -> Result<(), StoreError> {
     let version = connection.query_row("SELECT schema_version FROM meta", [], |row| row.get(0))?;
-    let statements = match version {
+    let prior_statements = match version {
         STORE_SCHEMA_VERSION => return Ok(()),
         LEGACY_STORE_SCHEMA_VERSION => {
             "ALTER TABLE daemon_state ADD COLUMN instance_id TEXT; \
@@ -468,10 +474,17 @@ fn migrate_schema(connection: &Connection) -> Result<(), StoreError> {
             "ALTER TABLE daemon_state ADD COLUMN collector_failures_json TEXT NOT NULL \
              DEFAULT '{}';"
         }
+        COLLECTOR_FAILURES_STORE_SCHEMA_VERSION => "",
         _ => return Err(StoreError::UnsupportedSchemaVersion(version)),
     };
     let transaction = connection.unchecked_transaction()?;
-    transaction.execute_batch(statements)?;
+    transaction.execute_batch(prior_statements)?;
+    transaction.execute_batch(
+        "ALTER TABLE daemon_state ADD COLUMN last_known_permissions_json TEXT; \
+         UPDATE daemon_state SET last_known_permissions_json = \
+             (SELECT snapshot_json FROM daemon_permissions WHERE id = 1) \
+         WHERE id = 1;",
+    )?;
     transaction.execute(
         "UPDATE meta SET schema_version = ?1",
         [STORE_SCHEMA_VERSION],

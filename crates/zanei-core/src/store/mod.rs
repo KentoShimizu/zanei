@@ -20,7 +20,8 @@ pub use writer::StoreWriter;
 const LEGACY_STORE_SCHEMA_VERSION: i64 = 1;
 const DAEMON_IDENTITY_STORE_SCHEMA_VERSION: i64 = 2;
 const RETENTION_STORE_SCHEMA_VERSION: i64 = 3;
-const STORE_SCHEMA_VERSION: i64 = 4;
+const COLLECTOR_FAILURES_STORE_SCHEMA_VERSION: i64 = 4;
+const STORE_SCHEMA_VERSION: i64 = 5;
 
 fn retention_cutoff(now: time::OffsetDateTime, retention_hours: u64) -> Result<String, StoreError> {
     let seconds = retention_hours

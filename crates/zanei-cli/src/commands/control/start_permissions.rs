@@ -1,11 +1,11 @@
 use std::path::Path;
 
 use zanei_core::config::Config;
-use zanei_core::store::{DaemonPermissions, StoreReader, StoreStatus};
+use zanei_core::store::{StoreReader, StoreStatus};
 
 use super::super::doctor::StartPermissionState;
 use crate::error::CliError;
-use crate::permissions::{permission_snapshot_ready, probe_permissions};
+use crate::permissions::permission_snapshot_ready;
 
 pub(super) fn before_bootstrap(
     config: &Config,
@@ -19,116 +19,108 @@ pub(super) fn before_bootstrap(
     } else {
         None
     };
-    permission_state_with(config, status.as_ref(), || {
-        let required = crate::daemon::required_permissions_for(config);
-        probe_permissions(&required).map_err(CliError::from)
-    })
+    Ok(permission_state(config, status.as_ref()))
 }
 
-fn permission_state_with<E>(
-    config: &Config,
-    status: Option<&StoreStatus>,
-    local_probe: impl FnOnce() -> Result<DaemonPermissions, E>,
-) -> Result<StartPermissionState, E> {
+fn permission_state(config: &Config, status: Option<&StoreStatus>) -> StartPermissionState {
     let required = crate::daemon::required_permissions_for(config);
-    let snapshot = match status {
-        Some(status) if status.heartbeat_at.is_some() => {
-            let Some(snapshot) = status.last_reported_permissions() else {
-                return Ok(StartPermissionState::PendingSnapshot);
-            };
-            snapshot.clone()
-        }
-        Some(_) | None => local_probe()?,
+    // Never fall back to a CLI-local probe here: the CLI inherits the terminal's TCC identity,
+    // not the recorder's, so its result cannot authorize a recorder-specific opt-in prompt.
+    let Some(snapshot) = status.and_then(StoreStatus::last_reported_permissions) else {
+        return StartPermissionState::PendingSnapshot;
     };
-    Ok(match permission_snapshot_ready(&required, &snapshot) {
+    match permission_snapshot_ready(&required, snapshot) {
         Some(true) => StartPermissionState::Ready,
         Some(false) => StartPermissionState::Missing,
         None => StartPermissionState::PendingSnapshot,
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::collections::BTreeMap;
 
-    use zanei_core::normalize::format_timestamp;
-    use zanei_core::store::PermissionState;
+    use tempfile::TempDir;
+    use zanei_core::store::{
+        DaemonMode, DaemonPermissions, DaemonState, PermissionState, StoreWriter,
+    };
 
     use super::*;
 
     #[test]
-    fn prior_heartbeat_snapshot_is_used_without_a_local_probe() {
-        let probed = Cell::new(false);
+    fn persisted_last_report_is_used_before_bootstrap() {
         let status = StoreStatus {
-            heartbeat_at: Some("2020-01-01T00:00:00Z".to_owned()),
-            permissions: Some(granted_permissions()),
+            last_known_permissions: Some(granted_permissions()),
             ..StoreStatus::default()
         };
 
-        let state = permission_state_with(&Config::default(), Some(&status), || {
-            probed.set(true);
-            Ok::<_, ()>(denied_permissions())
-        })
-        .expect("permission state");
+        let state = permission_state(&Config::default(), Some(&status));
 
         assert_eq!(state, StartPermissionState::Ready);
-        assert!(!probed.get());
     }
 
     #[test]
-    fn missing_heartbeat_uses_the_local_probe() {
-        let probed = Cell::new(false);
-        let status = StoreStatus {
-            permissions: Some(denied_permissions()),
-            ..StoreStatus::default()
-        };
+    fn stopped_store_last_report_is_ready_before_bootstrap() {
+        let directory = TempDir::new().expect("temporary directory");
+        let store = directory.path().join("events.sqlite");
+        let writer = StoreWriter::open(&store).expect("open fake store");
+        let started_at = "2026-08-17T10:00:00Z";
+        writer
+            .write_daemon_state(&DaemonState {
+                pid: Some(42),
+                started_at: Some(started_at.to_owned()),
+                instance_id: Some(format!("42@{started_at}")),
+                mode: Some(DaemonMode::Launchd),
+                heartbeat_at: Some("2026-08-17T10:00:01Z".to_owned()),
+                retention_hours: Some(48),
+                permissions: Some(granted_permissions()),
+                ..DaemonState::default()
+            })
+            .expect("write recorder report");
+        writer
+            .write_daemon_state(&DaemonState::default())
+            .expect("clear fake recorder heartbeat");
 
-        let state = permission_state_with(&Config::default(), Some(&status), || {
-            probed.set(true);
-            Ok::<_, ()>(granted_permissions())
-        })
-        .expect("permission state");
-
-        assert_eq!(state, StartPermissionState::Ready);
-        assert!(probed.get());
+        assert_eq!(
+            before_bootstrap(&Config::default(), &store).expect("bootstrap permission state"),
+            StartPermissionState::Ready
+        );
     }
 
     #[test]
-    fn heartbeat_without_a_snapshot_is_unknown_and_does_not_probe() {
-        let probed = Cell::new(false);
+    fn terminal_tcc_grants_cannot_replace_an_absent_recorder_report() {
+        let terminal_tcc_snapshot = granted_permissions();
+
+        let state = permission_state(&Config::default(), None);
+
+        assert!(terminal_tcc_snapshot.permissions_ok);
+        assert_eq!(state, StartPermissionState::PendingSnapshot);
+    }
+
+    #[test]
+    fn incomplete_recorder_report_is_pending() {
+        let mut incomplete = granted_permissions();
+        incomplete.automation.clear();
         let status = StoreStatus {
-            heartbeat_at: Some(format_timestamp(time::OffsetDateTime::now_utc())),
+            last_known_permissions: Some(incomplete),
             ..StoreStatus::default()
         };
 
-        let state = permission_state_with(&Config::default(), Some(&status), || {
-            probed.set(true);
-            Ok::<_, ()>(granted_permissions())
-        })
-        .expect("permission state");
+        let state = permission_state(&Config::default(), Some(&status));
 
         assert_eq!(state, StartPermissionState::PendingSnapshot);
-        assert!(!probed.get());
     }
 
     #[test]
-    fn denied_prior_snapshot_is_missing_without_probe_fallback() {
-        let probed = Cell::new(false);
+    fn denied_persisted_report_is_missing() {
         let status = StoreStatus {
-            heartbeat_at: Some(format_timestamp(time::OffsetDateTime::now_utc())),
-            permissions: Some(denied_permissions()),
+            last_known_permissions: Some(denied_permissions()),
             ..StoreStatus::default()
         };
 
-        let state = permission_state_with(&Config::default(), Some(&status), || {
-            probed.set(true);
-            Ok::<_, ()>(granted_permissions())
-        })
-        .expect("permission state");
+        let state = permission_state(&Config::default(), Some(&status));
 
         assert_eq!(state, StartPermissionState::Missing);
-        assert!(!probed.get());
     }
 
     fn granted_permissions() -> DaemonPermissions {
