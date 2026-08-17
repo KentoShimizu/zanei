@@ -110,6 +110,31 @@ pub(crate) fn probe_permissions(
     probe_permissions_with(required, |permission| checker.permission_status(permission))
 }
 
+pub(crate) fn permission_snapshot_ready(
+    required: &BTreeSet<Permission>,
+    snapshot: &DaemonPermissions,
+) -> Option<bool> {
+    required
+        .iter()
+        .map(|permission| match permission {
+            Permission::Accessibility => Some(snapshot.accessibility == PermissionState::Granted),
+            Permission::InputMonitoring => {
+                Some(snapshot.input_monitoring == PermissionState::Granted)
+            }
+            Permission::Automation { bundle_id } => {
+                snapshot.automation.get(bundle_id).map(|state| {
+                    matches!(
+                        state,
+                        PermissionState::Granted | PermissionState::NotDetermined
+                    )
+                })
+            }
+        })
+        .try_fold(true, |ready, permission_ready| {
+            permission_ready.map(|permission_ready| ready && permission_ready)
+        })
+}
+
 fn probe_permissions_with<E>(
     required: &BTreeSet<Permission>,
     mut status_for: impl FnMut(&Permission) -> Result<PermissionStatus, E>,

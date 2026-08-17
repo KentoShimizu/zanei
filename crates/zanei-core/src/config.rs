@@ -1,6 +1,7 @@
 //! Configuration loading and shared CLI value parsing.
 
 mod edit;
+mod scalar_file;
 mod time_expression;
 #[path = "config/validation.rs"]
 mod validation;
@@ -16,6 +17,7 @@ pub use edit::{
     ConfigSetError, FilterEdit, FilterEditResult, FilterList, ScalarEditResult, apply_scalar_edit,
     edit_filter, save,
 };
+pub use scalar_file::{capture_text_content_is_explicit, save_capture_text_content};
 pub use time_expression::{TimeExpressionError, parse_duration_expression, parse_time_expression};
 
 pub const CONFIG_WATCH_INTERVAL: StdDuration = StdDuration::from_secs(2);

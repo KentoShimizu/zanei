@@ -239,7 +239,7 @@ impl PersistedStatus {
             last_event_ts: self.last_event_ts,
             degraded,
             collector_failures,
-            permissions: running.then_some(permissions).flatten(),
+            permissions,
         })
     }
 }

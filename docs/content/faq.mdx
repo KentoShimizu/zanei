@@ -5,7 +5,7 @@ description: Common questions about privacy, browser support, data access, platf
 
 ## Is this a keylogger?
 
-No. Keystroke content is not captured unless you opt in (`text_content = true`); by default only the fact of typing and the field type are recorded. Password fields are excluded even if you opt in, redactors scrub recognizable secrets, and data does not leave your machine. See the [privacy model](/guides/privacy).
+No. Keystroke content is not captured unless you opt in (`text_content = true`); by default only the fact of typing and the field type are recorded. If no choice is already saved, the first successful interactive background `start` asks you to choose, with `N` as the default, and saves the answer so it does not ask again. You can change the decision later with `zanei config set capture.text_content <true|false>`. Password fields are excluded even if you opt in, redactors scrub recognizable secrets, and data does not leave your machine. See the [privacy model](/guides/privacy).
 
 ## Where does my data go?
 
@@ -46,7 +46,7 @@ Toggling a permission sometimes requires the recorded process to restart before 
 
 ## `zanei start` exits with code 3. Is the recorder running?
 
-Yes. A background `start` returns code 3 only after the recorder is alive and its heartbeat reports missing permissions. Accessibility adds the bundled app's `Zanei` row automatically, while Input Monitoring may omit it even after the dialog grant takes effect. Restart, then trust the recorder-reported `zanei doctor` result. To manage an omitted row from the list, use `+` and select the installed `Zanei.app`; while the permission is still reported missing, `zanei doctor --fix` opens the pane and copies that exact path. See the [permissions guide](/guides/permissions#first-time-setup). The daemon stays alive while permission-dependent collectors are degraded. While the first-run permission dialogs are awaiting a response, `zanei doctor` may report Automation as `not_determined`; respond to the dialogs, then run it again.
+Yes. A background `start` returns code 3 only after the recorder is alive and its heartbeat reports missing permissions. Accessibility adds the bundled app's `Zanei` row automatically, while Input Monitoring may omit it even after the dialog grant takes effect. Restart, then trust the recorder-reported `zanei doctor` result. To manage an omitted row from the list, use `+` and select the installed `Zanei.app`; while the permission is still reported missing, `zanei doctor --fix` opens the pane and copies that exact path. See the [permissions guide](/guides/permissions#first-time-setup). The daemon stays alive while permission-dependent collectors are degraded. While the first-run permission dialogs are awaiting a response, `zanei doctor` may report Automation as `not_determined`; respond to the dialogs, then run it again. The text-content choice is not shown on this missing-permission path; after granting permissions, run `zanei stop && zanei start` and the first successful interactive start asks you to choose.
 
 ## How do I remove Zanei's permissions completely?
 
@@ -87,7 +87,14 @@ Replace the path when using `--store`. This does not repair or delete the moved 
 
 ## Text content is not captured
 
-Run a short foreground session with privacy-safe diagnostics enabled:
+If no choice is already saved, the first successful interactive background `start` asks whether to enable content capture, and Enter accepts the default `N`. Check `zanei status`; if `TEXT CONTENT` is off, enable it explicitly and restart recording:
+
+```bash
+zanei config set capture.text_content true
+zanei stop && zanei start
+```
+
+If content is enabled but still missing, run a short foreground session with privacy-safe diagnostics enabled:
 
 ```bash
 zanei stop

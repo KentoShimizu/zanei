@@ -180,6 +180,14 @@ pub fn edit_filter(
 
 pub fn save(config: &Config, path: impl AsRef<Path>) -> Result<(), ConfigError> {
     config.validate()?;
+    let mut encoded = toml::to_string_pretty(config)?;
+    if !encoded.ends_with('\n') {
+        encoded.push('\n');
+    }
+    save_encoded(&encoded, path)
+}
+
+pub(super) fn save_encoded(encoded: &str, path: impl AsRef<Path>) -> Result<(), ConfigError> {
     let path = path.as_ref();
     let parent = path
         .parent()
@@ -201,7 +209,7 @@ pub fn save(config: &Config, path: impl AsRef<Path>) -> Result<(), ConfigError> 
         }
     };
     let temporary = temporary_path(path)?;
-    let result = write_and_replace(config, path, &temporary, permissions);
+    let result = write_and_replace(encoded, path, &temporary, permissions);
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -293,16 +301,11 @@ fn temporary_path(path: &Path) -> Result<PathBuf, ConfigError> {
 }
 
 fn write_and_replace(
-    config: &Config,
+    encoded: &str,
     path: &Path,
     temporary: &Path,
     permissions: Option<fs::Permissions>,
 ) -> Result<(), ConfigError> {
-    let mut encoded = toml::to_string_pretty(config)?;
-    if !encoded.ends_with('\n') {
-        encoded.push('\n');
-    }
-
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)

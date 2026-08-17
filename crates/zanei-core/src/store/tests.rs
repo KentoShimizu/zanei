@@ -367,6 +367,10 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
     assert_eq!(fresh.degraded, state.degraded);
     assert_eq!(fresh.collector_failures, state.collector_failures);
     assert_eq!(fresh.reported_permissions(), state.permissions.as_ref());
+    assert_eq!(
+        fresh.last_reported_permissions(),
+        state.permissions.as_ref()
+    );
     assert_eq!(fresh.effective_retention_hours(48), 72);
 
     let stale = reader
@@ -377,6 +381,10 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
     assert!(stale.degraded.is_empty());
     assert_eq!(stale.collector_failures, state.collector_failures);
     assert_eq!(stale.reported_permissions(), None);
+    assert_eq!(
+        stale.last_reported_permissions(),
+        state.permissions.as_ref()
+    );
     assert_eq!(stale.effective_retention_hours(48), 48);
 
     let future = reader

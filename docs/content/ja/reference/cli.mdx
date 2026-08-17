@@ -160,6 +160,16 @@ zanei start --foreground # デーモン化せず前面で実行（開発・デ�
 
 最初の fresh heartbeat に権限 snapshot がまだない場合、バックグラウンド `start` は recorder が macOS の権限ダイアログへの応答を待っていることと、応答後に `zanei doctor` を実行することを案内します。recorder は生存しているため、**終了コード 0** で終了します。recorder が権限 snapshot を報告した後は、必要権限が不足していれば `start` が `doctor` と同じ付与手順を表示し、**終了コード 3** で終了します。recorder は動作を継続します。権限を付与し、`zanei stop && zanei start` してから `zanei doctor` で確認してください。`--foreground` も同じ recorder 起動時の要求ロジックを前面プロセスで実行します。
 
+`config.toml` に `capture.text_content` が明示されておらず、前回の recorder heartbeat が必要な権限をすべて granted と報告している場合、最初に成功する対話式のバックグラウンド `start` は、新しい launch agent を bootstrap する前に次を確認します。
+
+```text
+Record typed text and clipboard contents too? They stay in the local store like everything else (48-hour retention), password fields are always excluded, and Chrome Incognito text is never captured. You can change this anytime: zanei config set capture.text_content <true|false>  [y/N]
+```
+
+stop 後に recorder heartbeat が残っていない場合はローカルの権限 probe を使用でき、その probe が必要権限をすべて granted と報告したときだけ確認します。`y` または `Y` のみが内容記録を有効にし、Enter、その他の回答、EOF、読取エラーは `false` を選びます。Zanei は `config set` と同じ経路で明示値を保存してファイルのその他の内容を維持し、`Text content will be recorded.` または `Text content stays off.` を表示してから、その値でデーモンを起動します。どちらの回答でもキーを書き込むため、確認は繰り返しません。
+
+`--foreground`、stdin または stderr が非 TTY、`--quiet`、`--json`、権限不足、権限状態を判定できない場合には確認しません。スキップした `start` は設定を未決定のままにして、従来の opt-in 案内を表示します。キーが明示的に `true` または `false` なら確認しません。
+
 1 つのストアを所有できる recorder は 1 instance だけです。同じストアに対して foreground
 または launchd recorder を二重起動すると終了コード 1 となり、現在の owner PID を表示します。
 

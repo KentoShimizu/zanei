@@ -161,6 +161,16 @@ zanei start --foreground # run in the foreground instead (dev/debug)
 
 If the first fresh heartbeat does not yet contain a permission snapshot, background `start` reports that the recorder is still waiting for the macOS permission dialogs, asks you to respond and then run `zanei doctor`, and exits with **code 0** because the recorder is alive. Once the recorder reports a permission snapshot, missing required permissions make `start` print the same granting guidance as `doctor` and exit with **code 3**. The recorder remains running; grant the permissions, run `zanei stop && zanei start`, and confirm with `zanei doctor`. `--foreground` runs the same recorder startup request logic in the foreground process.
 
+When `capture.text_content` is not explicitly present in `config.toml` and the previous recorder heartbeat reports all required permissions as granted, the first successful interactive background `start` asks before bootstrapping the new launch agent:
+
+```text
+Record typed text and clipboard contents too? They stay in the local store like everything else (48-hour retention), password fields are always excluded, and Chrome Incognito text is never captured. You can change this anytime: zanei config set capture.text_content <true|false>  [y/N]
+```
+
+If no recorder heartbeat remains after a stop, `start` may use its local permission probe and asks only when that probe reports every required permission as granted. Only `y` or `Y` enables capture; Enter, any other answer, EOF, or a read error selects `false`. Zanei saves the explicit value through the same path as `config set`, preserves the rest of the file, prints `Text content will be recorded.` or `Text content stays off.`, and starts the daemon with that value. Because either answer writes the key, the question is not repeated.
+
+The question is not shown by `--foreground`, with non-TTY stdin or stderr, with `--quiet` or `--json`, while permissions are missing, or when permission state cannot be determined. A skipped start leaves the setting undecided and keeps the existing opt-in guidance. If the key is already explicitly `true` or `false`, `start` does not ask.
+
 Only one recorder can own a store at a time. A second foreground or launchd recorder for the same
 store exits with code 1 and reports the PID of the current owner.
 

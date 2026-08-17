@@ -98,6 +98,14 @@ impl StoreStatus {
     pub fn reported_permissions(&self) -> Option<&DaemonPermissions> {
         self.running.then_some(self.permissions.as_ref()).flatten()
     }
+
+    /// Returns the permission snapshot bound to the last persisted heartbeat, even if stale.
+    /// A clean shutdown clears both fields. A heartbeat without a snapshot remains unknown and
+    /// must not be replaced by a local probe.
+    #[must_use]
+    pub fn last_reported_permissions(&self) -> Option<&DaemonPermissions> {
+        self.heartbeat_at.as_ref().and(self.permissions.as_ref())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

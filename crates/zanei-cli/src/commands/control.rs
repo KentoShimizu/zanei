@@ -1,3 +1,4 @@
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::thread;
 use std::time::Instant;
@@ -12,17 +13,20 @@ use super::{EXIT_MISSING_PERMISSIONS, EXIT_NO_DAEMON, EXIT_SUCCESS};
 use crate::error::CliError;
 use crate::paths::Paths;
 
+mod start_permissions;
+mod text_content;
+
 const BACKGROUND_START_CONFIRMATION: &str = concat!(
     "Zanei recording started\n",
     "Registered as a launchd background item. macOS notifications and an entry in Login Items & Extensions are expected.\n",
     "For the bundled distribution, Accessibility lists Zanei. Input Monitoring may omit its row even when permission is granted; the recorder-reported `zanei doctor` result is authoritative.\n",
     "To manage a missing Input Monitoring row in System Settings, add Zanei.app with +; the bundled entry persists.\n",
-    "A raw executable may not keep a manually added row; use the bundled distribution for stable permission management.\n",
-    "Typed and clipboard content is not recorded by default. To opt in: zanei config set capture.text_content true"
+    "A raw executable may not keep a manually added row; use the bundled distribution for stable permission management."
 );
+const TEXT_CONTENT_OPT_IN_GUIDANCE: &str = "Typed and clipboard content is not recorded by default. To opt in: zanei config set capture.text_content true";
 const PENDING_PERMISSION_SNAPSHOT_GUIDANCE: &str = "recorder is still waiting for macOS permission dialogs — respond to them, then check `zanei doctor`";
 
-pub fn start(paths: &Paths, foreground: bool, quiet: bool) -> Result<u8, CliError> {
+pub fn start(paths: &Paths, foreground: bool, quiet: bool, json: bool) -> Result<u8, CliError> {
     let config = Config::load(&paths.config)?;
     if foreground {
         crate::daemon::run_daemon(&paths.config, &paths.store, DaemonMode::Foreground)?;
@@ -33,8 +37,28 @@ pub fn start(paths: &Paths, foreground: bool, quiet: bool) -> Result<u8, CliErro
         return Err(crate::daemon::DaemonError::StoreOwned { pid: owner.pid }.into());
     }
     let executable = crate::executable::current().map_err(CliError::Input)?;
+    let stdin_is_terminal = io::stdin().is_terminal();
+    let stderr_is_terminal = io::stderr().is_terminal();
+    let mut stderr = io::stderr().lock();
+    text_content::maybe_prompt(
+        &paths.config,
+        quiet || json,
+        || stdin_is_terminal,
+        || stderr_is_terminal,
+        || start_permissions::before_bootstrap(&config, &paths.store).ok(),
+        || {
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer).map(|_| answer)
+        },
+        |message| {
+            stderr.write_all(message.as_bytes())?;
+            stderr.flush()
+        },
+    )?;
+    let config = Config::load(&paths.config)?;
     start_background_with(
         quiet,
+        config.capture.text_content,
         || {
             crate::daemon::start_launch_agent(&executable, &paths.config, &paths.store)
                 .map_err(CliError::from)
@@ -46,6 +70,7 @@ pub fn start(paths: &Paths, foreground: bool, quiet: bool) -> Result<u8, CliErro
 
 fn start_background_with(
     quiet: bool,
+    text_content_enabled: bool,
     start_launch_agent: impl FnOnce() -> Result<bool, CliError>,
     recorder_permission_state: impl FnOnce() -> Result<StartPermissionState, CliError>,
     mut print: impl FnMut(&str),
@@ -63,10 +88,18 @@ fn start_background_with(
         if was_bootstrapped {
             print("Zanei recording restarted");
         } else {
-            print(BACKGROUND_START_CONFIRMATION);
+            print(&background_start_confirmation(text_content_enabled));
         }
     }
     Ok(EXIT_SUCCESS)
+}
+
+fn background_start_confirmation(text_content_enabled: bool) -> String {
+    if text_content_enabled {
+        BACKGROUND_START_CONFIRMATION.to_owned()
+    } else {
+        format!("{BACKGROUND_START_CONFIRMATION}\n{TEXT_CONTENT_OPT_IN_GUIDANCE}")
+    }
 }
 
 pub fn stop(store_path: &Path, quiet: bool) -> Result<u8, CliError> {
@@ -203,8 +236,8 @@ mod tests {
 
     use super::{
         BACKGROUND_START_CONFIRMATION, EXIT_MISSING_PERMISSIONS, EXIT_SUCCESS,
-        PENDING_PERMISSION_SNAPSHOT_GUIDANCE, StartPermissionState, start_background_with,
-        wait_for_stop_completion,
+        PENDING_PERMISSION_SNAPSHOT_GUIDANCE, StartPermissionState, TEXT_CONTENT_OPT_IN_GUIDANCE,
+        background_start_confirmation, start_background_with, wait_for_stop_completion,
     };
 
     #[test]
@@ -213,6 +246,7 @@ mod tests {
 
         let exit = start_background_with(
             true,
+            false,
             || Ok(false),
             || {
                 permission_check_called.set(true);
@@ -232,6 +266,7 @@ mod tests {
 
         let exit = start_background_with(
             true,
+            false,
             || {
                 recorder_running.set(true);
                 Ok(false)
@@ -254,6 +289,7 @@ mod tests {
 
         let exit = start_background_with(
             true,
+            false,
             || Ok(false),
             || Ok(StartPermissionState::PendingSnapshot),
             |message| output.borrow_mut().push(message.to_owned()),
@@ -277,9 +313,9 @@ mod tests {
         assert!(BACKGROUND_START_CONFIRMATION.contains("add Zanei.app with +"));
         assert!(BACKGROUND_START_CONFIRMATION.contains("bundled entry persists"));
         assert!(BACKGROUND_START_CONFIRMATION.contains("raw executable may not keep"));
-        assert!(BACKGROUND_START_CONFIRMATION.ends_with(
-            "Typed and clipboard content is not recorded by default. To opt in: zanei config set capture.text_content true"
-        ));
+        assert!(!BACKGROUND_START_CONFIRMATION.contains(TEXT_CONTENT_OPT_IN_GUIDANCE));
+        assert!(background_start_confirmation(false).ends_with(TEXT_CONTENT_OPT_IN_GUIDANCE));
+        assert!(!background_start_confirmation(true).contains(TEXT_CONTENT_OPT_IN_GUIDANCE));
     }
 
     #[test]

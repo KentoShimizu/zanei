@@ -29,17 +29,28 @@ Start the background recorder so macOS can register it and ask for the Accessibi
 zanei start
 ```
 
-On first setup, `start` may exit with code 3 after the recorder starts and reports missing permissions. The daemon remains running so you can grant them. Automation is requested separately by macOS the first time Zanei contacts Chrome.
+On first setup, macOS asks for permissions one at a time: **Accessibility first, then Input Monitoring**. Respond to each dialog before continuing. `start` may exit with code 3 after the recorder starts and reports a missing permission. The daemon remains running so you can grant it. Automation is requested separately by macOS the first time Zanei contacts Chrome.
 
 </Step>
-<Step title="Grant and verify permissions">
+<Step title="Grant permissions and choose content capture">
 
 Permission dialogs identify the bundled app as `Zanei`, and **Privacy & Security → Accessibility** adds its row automatically. **Input Monitoring** may omit the row even after the dialog grant takes effect. After restarting, trust the recorder-reported `zanei doctor` result. To manage that permission from the list, use `+` and select the installed `Zanei.app`; while the permission is still reported missing, `zanei doctor --fix` opens the pane and copies that exact path.
 
-Restart the recorder so it picks up the new grants, then verify its own report:
+If `start` reports a missing permission, grant it and restart the recorder so it picks up the new decision:
 
 ```bash
 zanei stop && zanei start
+```
+
+Once all required permissions are granted, the first successful interactive `start` asks whether to record typed text and clipboard contents, unless this setting is already explicit in `config.toml`. Type `y` to enable it, or press Enter (the default `N`) to keep it off. The answer is saved before the recorder starts, so the question appears only once. You can change the decision later with:
+
+```bash
+zanei config set capture.text_content <true|false>
+```
+
+Then verify the recorder's own permission report:
+
+```bash
 zanei doctor
 ```
 
@@ -76,8 +87,9 @@ From now on, telling your agent "check what I was just working on and continue" 
 
 - Data is stored in a local SQLite database (`~/.local/state/zanei/store.sqlite`) and is not sent anywhere.
 - Keystroke content is not recorded by default — only the fact that typing happened and the
-  field type. To opt in explicitly, run `zanei config set capture.text_content true`, then
-  restart recording with `zanei stop && zanei start`.
+  field type. If no choice is already saved, the first successful interactive `start` asks you to
+  choose, with `N` as the default.
+  Change the saved decision later with `zanei config set capture.text_content <true|false>`.
 - Events are deleted automatically after 48 hours by default (configurable in [settings](/reference/config)).
 - Apps and sites you don't want recorded can be excluded before they are written with [filters](/guides/filters).
 

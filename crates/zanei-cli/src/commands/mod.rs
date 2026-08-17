@@ -32,7 +32,7 @@ pub fn run(cli: Cli) -> Result<u8, CliError> {
 
     match cli.command {
         Command::Doctor(args) => doctor::run(&paths.config, &paths.store, args.fix, cli.json),
-        Command::Start(args) => control::start(&paths, args.foreground, cli.quiet),
+        Command::Start(args) => control::start(&paths, args.foreground, cli.quiet, cli.json),
         Command::Stop => control::stop(&paths.store, cli.quiet),
         Command::Pause(args) => control::pause(&paths.store, args.duration.as_deref(), cli.quiet),
         Command::Resume => control::resume(&paths.store, cli.quiet),

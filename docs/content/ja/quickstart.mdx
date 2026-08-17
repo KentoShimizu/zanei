@@ -28,17 +28,28 @@ formula は署名・notarize 済みの `Zanei.app` をインストールし、`z
 zanei start
 ```
 
-初回は recorder の起動後に権限不足が報告され、`start` が終了コード 3 を返すことがあります。デーモンは動いたままなので、その状態で権限を付与できます。オートメーションは、Zanei が初めて Chrome に問い合わせるときに macOS が別途確認します。
+初回は macOS が権限を 1 つずつ、**アクセシビリティ、入力監視**の順に確認します。各ダイアログに応答してから次へ進んでください。recorder の起動後に権限不足が報告され、`start` が終了コード 3 を返すことがあります。デーモンは動いたままなので、その状態で権限を付与できます。オートメーションは、Zanei が初めて Chrome に問い合わせるときに macOS が別途確認します。
 
 </Step>
-<Step title="権限を付与して確認する">
+<Step title="権限を付与して内容記録を選ぶ">
 
 権限ダイアログはバンドル版を `Zanei` 名義で表示し、**Privacy & Security → Accessibility** にはその行が自動追加されます。**Input Monitoring** はダイアログでの付与が有効でも、行が自動追加されないことがあります。再起動後は recorder 由来の `zanei doctor` の結果を正とします。一覧からその権限を操作する場合は、`+` でインストール済みの `Zanei.app` を選択します。まだ権限不足と報告されている間は、`zanei doctor --fix` がペインを開いて正確な path をコピーします。
 
-付与結果を recorder に反映するため再起動し、recorder 自身の報告を確認します。
+`start` が権限不足を報告した場合は、不足している権限を付与し、その判断を recorder に反映するため再起動します。
 
 ```bash
 zanei stop && zanei start
+```
+
+必要な権限がすべて揃うと、`config.toml` にこの設定がまだ明示されていない場合に限り、対話式の `start` が最初に成功する 1 回だけ、入力したテキストとクリップボードの内容を記録するか確認します。有効にする場合は `y`、オフのままにする場合は Enter（既定の `N`）を入力してください。回答は recorder の起動前に保存されるため、この確認は一度しか表示されません。後から変更するには次を実行します。
+
+```bash
+zanei config set capture.text_content <true|false>
+```
+
+続いて、recorder 自身の権限報告を確認します。
+
+```bash
 zanei doctor
 ```
 
@@ -75,8 +86,8 @@ zanei setup --agent claude
 
 - データはローカルの SQLite（`~/.local/state/zanei/store.sqlite`）に保存され、外部には送信されません。
 - キー入力の内容は既定で記録されません。記録されるのは「入力があった事実とフィールド種別」までです。
-  明示的に opt-in するには `zanei config set capture.text_content true` を実行し、
-  `zanei stop && zanei start` で記録を再起動します。
+  判断がまだ保存されていなければ、最初に成功した対話式 `start` が選択を求め、既定は `N` です。
+  保存した判断は、後から `zanei config set capture.text_content <true|false>` で変更できます。
 - 記録は既定 48 時間で自動削除されます（[設定](/ja/reference/config)で変更可能）。
 - 記録したくないアプリやサイトは、[フィルタ](/ja/guides/filters)で書き込まれる前に除外できます。
 

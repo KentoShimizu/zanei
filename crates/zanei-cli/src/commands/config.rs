@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use zanei_core::config::{Config, apply_scalar_edit, save};
+use zanei_core::config::{Config, apply_scalar_edit, save, save_capture_text_content};
 
 use super::EXIT_SUCCESS;
 use crate::cli::{ConfigArgs, ConfigCommand};
@@ -92,16 +92,12 @@ fn set(
     value: &str,
     quiet: bool,
 ) -> Result<(), CliError> {
-    let config = Config::load(config_path)?;
-    let result = apply_scalar_edit(&config, dotted_key, value)?;
-    if result.changed {
-        save(&result.config, config_path)?;
-    }
+    let (result, file_changed) = persist_scalar(config_path, dotted_key, value)?;
 
     if quiet {
         return Ok(());
     }
-    if result.changed {
+    if file_changed {
         println!("Updated {}", config_path.display());
     } else {
         println!("No change: {dotted_key}");
@@ -110,6 +106,36 @@ fn set(
         println!("Restart recording with `zanei stop && zanei start` for this to take effect.");
     }
     Ok(())
+}
+
+pub(super) fn persist_capture_text_content(
+    config_path: &Path,
+    enabled: bool,
+) -> Result<(), CliError> {
+    persist_scalar(
+        config_path,
+        "capture.text_content",
+        if enabled { "true" } else { "false" },
+    )
+    .map(|_| ())
+}
+
+fn persist_scalar(
+    config_path: &Path,
+    dotted_key: &str,
+    value: &str,
+) -> Result<(zanei_core::config::ScalarEditResult, bool), CliError> {
+    let config = Config::load(config_path)?;
+    let result = apply_scalar_edit(&config, dotted_key, value)?;
+    let file_changed = if dotted_key == "capture.text_content" {
+        save_capture_text_content(&result.config, config_path)?
+    } else if result.changed {
+        save(&result.config, config_path)?;
+        true
+    } else {
+        false
+    };
+    Ok((result, file_changed))
 }
 
 fn init(config_path: &Path) -> Result<(), CliError> {

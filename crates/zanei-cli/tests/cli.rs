@@ -367,6 +367,35 @@ fn config_set_persists_a_valid_scalar_value() {
 }
 
 #[test]
+fn config_set_records_an_explicit_false_without_losing_comments() {
+    let directory = TempDir::new().expect("config set fixture");
+    let config = directory.path().join("config.toml");
+    let store = directory.path().join("store.sqlite");
+    fs::write(
+        &config,
+        "# retained comment\n[capture]\nsources = [\"app\"]\n",
+    )
+    .expect("undetermined config");
+
+    let output = command(&config, &store)
+        .args(["config", "set", "capture.text_content", "false"])
+        .output()
+        .expect("config set output");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Updated"));
+    assert_eq!(
+        fs::read_to_string(&config).expect("updated config"),
+        concat!(
+            "# retained comment\n",
+            "[capture]\n",
+            "text_content = false\n",
+            "sources = [\"app\"]\n",
+        )
+    );
+}
+
+#[test]
 fn config_set_rejects_unknown_keys_and_invalid_values_without_writing() {
     let fixture = Fixture::empty();
     let original = fs::read_to_string(&fixture.config).expect("original config");
