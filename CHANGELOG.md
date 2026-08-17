@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2 — 2026-08-18
+
+- The first-run text-content question keys off the recorder's own
+  permission report, never the CLI's local probe (which reflects the
+  terminal's permissions). The report survives a stop, so the question
+  arrives right after permissions are granted — and asks after startup,
+  restarting the recorder, when that is the first moment everything is
+  granted.
+- Documentation reflects that the Input Monitoring dialog may not
+  appear even when requested; `zanei doctor --fix` is the reliable
+  path.
+
 ## 0.1.1 — 2026-08-18
 
 First-run experience fixes found during on-device QA of 0.1.0.
