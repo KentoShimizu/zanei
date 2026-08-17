@@ -13,72 +13,57 @@
   </p>
 </div>
 
-Zanei (残映, *zan-ei*) records your activity on computer as OS-level events rather than screenshots or screen
-video, keeps those events in a local SQLite store, and turns them into session-structured,
-deduplicated timelines that AI agents can read through the CLI or MCP server.
-
-> **Platform support: macOS only, for now.** Zanei currently runs on macOS (Apple Silicon and
-> Intel). Windows and Linux are on the roadmap.
+Zanei (残映, *zan-ei*) records your computer activity as OS-level events — no screenshots —
+into a local SQLite store and turns it into session-structured, deduplicated timelines that
+AI agents read through the CLI or an MCP server. macOS only (Apple Silicon and Intel);
+Windows and Linux are planned.
 
 ## Privacy by default
 
-- Zanei has no network egress path; recorded data stays in the local SQLite store.
-- Typed and field content is captured only when `capture.text_content = true`; the default is off.
-- Secure text fields are excluded at capture time. Chrome Incognito suppresses URL events and text-content bodies; titles and interaction metadata can remain.
-- Events are deleted automatically after 48 hours by default.
+- No network egress path: recorded data never leaves the local store.
+- Typed and clipboard content is recorded only if you opt in; the first fully-granted
+  `start` asks once, and the default is no.
+- Password fields are dropped at capture time. Chrome Incognito produces no URL events
+  and no text bodies (window titles can remain).
+- Events are deleted after 48 hours by default.
 
-See the [privacy model](https://zanei.dev/guides/privacy) for the full guarantees and
-limitations.
+Full guarantees and limits: [privacy model](https://zanei.dev/guides/privacy).
 
-## Installation
+## Install
 
 ```bash
 brew install kentoshimizu/tap/zanei
 ```
 
-Signed and notarized. To build from source instead, see the
-[packaging instructions](packaging/README.md) — note that a raw `cargo install`
-binary is not the distributed app bundle and its macOS permission rows may not
-persist; use the app bundle for stable permission management.
+Signed and notarized. Building from source: [packaging](packaging/README.md).
 
 ## Quickstart
-
-Start the recorder so macOS can ask for the required permissions, grant them in System Settings,
-restart the recorder, then verify and retrieve a recent timeline:
 
 ```bash
 zanei start
 ```
 
-On first setup, `start` may exit with code 3 after the recorder starts and reports missing
-permissions. The permission dialogs identify the bundled app as `Zanei`, and Accessibility adds
-its row automatically. Input Monitoring may omit the row even after the dialog grant takes effect;
-to manage that permission from the list, use `+` and select the installed `Zanei.app`. While the
-permission is still reported missing, `zanei doctor --fix` opens the pane and copies that exact
-path. Then restart and trust the recorder-reported `doctor` result before reading the timeline:
+Grant the permissions macOS asks for. If a System Settings row is missing, `zanei doctor --fix`
+opens the right pane with the `Zanei.app` path copied and revealed in Finder. Then:
 
 ```bash
-zanei stop && zanei start
-zanei doctor
+zanei stop && zanei start   # asks once whether to record typed text; default no
 zanei timeline --since 15m
 ```
 
-After the restart, `doctor` verifies the permission state enforced for the recorder itself. You can
-remove access later from an existing `Zanei` row or with the service-specific reset commands in the
-[permissions guide](https://zanei.dev/guides/permissions#remove-or-reset-permissions).
+`zanei doctor` reports the permission state of the recorder itself, and how to revoke it.
 
 ## Agent integration
-
-Install the agent skill and print the MCP registration command with `setup`:
 
 ```bash
 zanei setup --agent claude
 ```
 
-See [agent setup](https://zanei.dev/agents/setup) for Codex, opencode, Hermes Agent, pi,
-Claude Desktop, scope selection, and dry-run instructions.
+Installs the skill and prints the MCP registration command. See
+[agent setup](https://zanei.dev/agents/setup) for Codex, opencode, Hermes Agent, pi, and
+Claude Desktop.
 
 ## License
 
-Zanei is licensed under either the [MIT License](LICENSE-MIT) or the
+Licensed under either the [MIT License](LICENSE-MIT) or the
 [Apache License 2.0](LICENSE-APACHE), at your option.

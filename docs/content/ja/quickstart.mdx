@@ -22,40 +22,26 @@ formula は署名・notarize 済みの `Zanei.app` をインストールし、`z
 </Step>
 <Step title="記録を開始する">
 
-設定に応じて必要なアクセシビリティと入力監視の権限を macOS に要求させるため、まずバックグラウンド recorder を起動します。
-
 ```bash
 zanei start
 ```
 
-初回は macOS がまず**アクセシビリティ**を確認します。応答後に**入力監視**のダイアログが続くこともありますが、表示されない機体も少なくありません。表示されない場合は `zanei doctor --fix` を実行してください。入力監視のペインを開き、インストール済み `Zanei.app` の正確な path をコピーして Finder に表示するので、`+` から追加できます。recorder の起動後に権限不足が報告され、`start` が終了コード 3 を返すことがあります。デーモンは動いたままなので、その状態で権限を付与できます。オートメーションは、Zanei が初めて Chrome に問い合わせるときに macOS が別途確認します。
+macOS はまず**アクセシビリティ**を確認します。続けて**入力監視**のダイアログが出ることもありますが、出ない機体も少なくありません。その場合は `zanei doctor --fix` — ペインを開き、インストール済み `Zanei.app` の path をコピーし、Finder に表示するので「+」から追加できます。権限が不足している間、`start` は終了コード 3 を返しますが recorder は動いたままなので、そのまま付与できます。オートメーションは Zanei が初めて Chrome に問い合わせるときに別途確認されます。
 
 </Step>
-<Step title="権限を付与して内容記録を選ぶ">
+<Step title="再起動して内容記録を選ぶ">
 
-権限ダイアログはバンドル版を `Zanei` 名義で表示し、**Privacy & Security → Accessibility** にはその行が自動追加されます。**Input Monitoring** はダイアログでの付与が有効でも、行が自動追加されないことがあります。再起動後は recorder 由来の `zanei doctor` の結果を正とします。一覧からその権限を操作する場合は、`+` でインストール済みの `Zanei.app` を選択します。まだ権限不足と報告されている間は、`zanei doctor --fix` がペインを開いて正確な path をコピーします。
-
-`start` が権限不足を報告した場合は、不足している権限を付与し、その判断を recorder に反映するため再起動します。
+付与できたら、判断を反映するため再起動します。
 
 ```bash
 zanei stop && zanei start
 ```
 
-必要な権限がすべて揃うと、`config.toml` にこの設定がまだ明示されていない場合に限り、対話式の `start` が最初に成功する 1 回だけ、入力したテキストとクリップボードの内容を記録するか確認します。有効にする場合は `y`、オフのままにする場合は Enter（既定の `N`）を入力してください。回答は保存されるため、この確認は一度しか表示されません。後から変更するには次を実行します。
-
-```bash
-zanei config set capture.text_content <true|false>
-```
-
-続いて、recorder 自身の権限報告を確認します。
+権限がすべて揃った最初の対話式 `start` が、入力テキストとクリップボードの内容を記録するか一度だけ確認します。オフのままなら Enter（既定）、有効にするなら `y`。回答は `config.toml` に保存され、後から `zanei config set capture.text_content <true|false>` で変更できます。最後に recorder 自身の報告を確認します — System Settings に行が見えなくてもこちらが正です（詳細は[権限ガイド](/ja/guides/permissions)）。
 
 ```bash
 zanei doctor
 ```
-
-:::note
-`zanei doctor --fix` は不足権限の System Settings ペインを開き、fallback で使う path をクリップボードへコピーします。付与そのものは必ずユーザーが行い、`doctor` は recorder 自身に適用されている状態を検証します。手動追加と解除の詳細は[権限ガイド](/ja/guides/permissions)を参照してください。
-:::
 
 </Step>
 <Step title="タイムラインを取得する">
@@ -85,9 +71,8 @@ zanei setup --agent claude
 ## 記録の既定値
 
 - データはローカルの SQLite（`~/.local/state/zanei/store.sqlite`）に保存され、外部には送信されません。
-- キー入力の内容は既定で記録されません。記録されるのは「入力があった事実とフィールド種別」までです。
-  判断がまだ保存されていなければ、最初に成功した対話式 `start` が選択を求め、既定は `N` です。
-  保存した判断は、後から `zanei config set capture.text_content <true|false>` で変更できます。
+- キー入力の内容は、初回 `start` で選んだ場合にのみ記録されます（既定はオフ。
+  `zanei config set capture.text_content <true|false>` で変更可能）。
 - 記録は既定 48 時間で自動削除されます（[設定](/ja/reference/config)で変更可能）。
 - 記録したくないアプリやサイトは、[フィルタ](/ja/guides/filters)で書き込まれる前に除外できます。
 

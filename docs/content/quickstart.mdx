@@ -23,40 +23,34 @@ may not persist, and a reset addressed to `dev.zanei.recorder` does not apply to
 </Step>
 <Step title="Start recording">
 
-Start the background recorder so macOS can register it and ask for the Accessibility and Input Monitoring permissions required by your capture configuration:
-
 ```bash
 zanei start
 ```
 
-On first setup, macOS asks for **Accessibility** first. An **Input Monitoring** dialog may follow after you respond, but on many systems it does not appear. If it does not, run `zanei doctor --fix`; it opens the Input Monitoring pane, copies the exact installed `Zanei.app` path, and reveals the app in Finder so you can add it with `+`. `start` may exit with code 3 after the recorder starts and reports a missing permission. The daemon remains running so you can grant it. Automation is requested separately by macOS the first time Zanei contacts Chrome.
+macOS asks for **Accessibility** first; an **Input Monitoring** dialog may follow, but on many
+systems it never appears. In that case run `zanei doctor --fix` — it opens the pane, copies the
+installed `Zanei.app` path, and reveals the app in Finder so you can add it with `+`. While a
+permission is missing, `start` exits with code 3 and the recorder keeps running so you can grant
+it. Chrome Automation is a separate dialog that appears the first time Zanei contacts Chrome.
 
 </Step>
-<Step title="Grant permissions and choose content capture">
+<Step title="Restart and choose content capture">
 
-Permission dialogs identify the bundled app as `Zanei`, and **Privacy & Security → Accessibility** adds its row automatically. **Input Monitoring** may omit the row even after the dialog grant takes effect. After restarting, trust the recorder-reported `zanei doctor` result. To manage that permission from the list, use `+` and select the installed `Zanei.app`; while the permission is still reported missing, `zanei doctor --fix` opens the pane and copies that exact path.
-
-If `start` reports a missing permission, grant it and restart the recorder so it picks up the new decision:
+After granting, restart so the recorder picks up the decision:
 
 ```bash
 zanei stop && zanei start
 ```
 
-Once all required permissions are granted, the first successful interactive `start` asks whether to record typed text and clipboard contents, unless this setting is already explicit in `config.toml`. Type `y` to enable it, or press Enter (the default `N`) to keep it off. The answer is saved, so the question appears only once. You can change the decision later with:
-
-```bash
-zanei config set capture.text_content <true|false>
-```
-
-Then verify the recorder's own permission report:
+The first fully-granted interactive `start` asks once whether to record typed text and clipboard
+contents. Press Enter to keep it off (the default) or type `y`; the answer is saved to
+`config.toml`, and `zanei config set capture.text_content <true|false>` changes it later. Confirm
+with the recorder's own report — it is the source of truth even when a System Settings row is
+missing (details in the [permissions guide](/guides/permissions)):
 
 ```bash
 zanei doctor
 ```
-
-:::note
-`zanei doctor --fix` opens a missing permission's System Settings pane and copies the path needed by the fallback. Granting is always a user action; `doctor` verifies the state enforced for the recorder itself. See the [permissions guide](/guides/permissions) for manual addition and removal details.
-:::
 
 </Step>
 <Step title="Get your first timeline">
@@ -86,10 +80,8 @@ From now on, telling your agent "check what I was just working on and continue" 
 ## Recording defaults
 
 - Data is stored in a local SQLite database (`~/.local/state/zanei/store.sqlite`) and is not sent anywhere.
-- Keystroke content is not recorded by default — only the fact that typing happened and the
-  field type. If no choice is already saved, the first successful interactive `start` asks you to
-  choose, with `N` as the default.
-  Change the saved decision later with `zanei config set capture.text_content <true|false>`.
+- Keystroke content is recorded only if you opted in at first start (default no;
+  `zanei config set capture.text_content <true|false>` changes it).
 - Events are deleted automatically after 48 hours by default (configurable in [settings](/reference/config)).
 - Apps and sites you don't want recorded can be excluded before they are written with [filters](/guides/filters).
 
