@@ -220,5 +220,19 @@ fn extend_permissions<C: Collector>(
     }
 }
 
+pub(crate) fn merge_collector_failures(
+    base: &BTreeMap<String, u64>,
+    current: &BTreeMap<String, u64>,
+) -> BTreeMap<String, u64> {
+    let mut merged = base.clone();
+    for (collector, failures) in current {
+        merged
+            .entry(collector.clone())
+            .and_modify(|total| *total = total.saturating_add(*failures))
+            .or_insert(*failures);
+    }
+    merged
+}
+
 #[cfg(test)]
 mod tests;

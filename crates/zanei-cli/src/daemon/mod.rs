@@ -2,12 +2,14 @@
 
 mod collectors;
 mod control;
+mod executable_guard;
 mod main_thread;
 mod ownership;
 mod permission_worker;
 mod pipeline;
 mod runtime;
 mod runtime_support;
+mod shutdown;
 mod supervisor;
 
 use std::{io, path::PathBuf, process::ExitStatus};
@@ -59,6 +61,8 @@ pub enum DaemonError {
         #[source]
         source: io::Error,
     },
+    #[error("failed to resolve the current executable: {0}")]
+    CurrentExecutable(#[source] io::Error),
     #[error("failed to spawn {thread} thread: {source}")]
     ThreadSpawn {
         thread: &'static str,

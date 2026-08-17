@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fs,
     sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration as StdDuration,
@@ -14,10 +15,14 @@ use zanei_core::{
 };
 
 use super::{
-    CollectorSet, Pipeline, ensure_pipeline_running, initialize_permission_dependent_runtime,
-    merge_collector_failures, normalize_pause_request,
+    CollectorSet, EXECUTABLE_REMOVED_MESSAGE, Pipeline, ensure_pipeline_running,
+    executable_shutdown_requested, initialize_permission_dependent_runtime,
+    merge_collector_failures, normalize_pause_request, shutdown_daemon,
 };
-use crate::daemon::permission_worker::{PermissionRequestPoll, PermissionRequestWorker};
+use crate::daemon::{
+    executable_guard::ExecutableGuard,
+    permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
+};
 use crate::permissions::PermissionRequestOutcome;
 
 #[test]
@@ -135,4 +140,106 @@ fn pipeline_panic_makes_the_daemon_tick_fail() {
         Err(super::DaemonError::ThreadTerminated { thread: "pipeline" })
     ));
     assert!(pipeline.shutdown().is_err());
+}
+
+#[test]
+fn three_missing_executable_checks_trigger_shutdown_and_clear_heartbeat() {
+    let directory = TempDir::new().expect("executable removal fixture");
+    let executable = directory.path().join("zanei");
+    fs::write(&executable, b"fake executable").expect("fake executable");
+    let executable = fs::canonicalize(executable).expect("canonical fake executable");
+    let mut guard = ExecutableGuard::new(executable.clone());
+    fs::remove_file(&executable).expect("remove fake executable");
+
+    let store_path = directory.path().join("store.sqlite");
+    let writer = StoreWriter::open(&store_path).expect("store writer");
+    writer
+        .write_daemon_state(&DaemonState {
+            pid: Some(42),
+            started_at: Some("2026-08-17T10:00:00.000Z".to_owned()),
+            instance_id: Some("42@2026-08-17T10:00:00.000Z".to_owned()),
+            mode: Some(DaemonMode::Launchd),
+            heartbeat_at: Some(format_timestamp(time::OffsetDateTime::now_utc())),
+            retention_hours: Some(48),
+            ..DaemonState::default()
+        })
+        .expect("initial heartbeat");
+    let writer = Arc::new(Mutex::new(writer));
+    let reader = StoreReader::open(&store_path).expect("store reader");
+    let config = Config::from_toml("[capture]\nsources = []\n").expect("daemon config");
+    let mut pipeline = Pipeline::store(&config, Arc::clone(&writer)).expect("pipeline");
+    let mut collectors = CollectorSet::new(&config);
+    let mut notifications = Vec::new();
+
+    for _ in 0..2 {
+        assert!(!executable_shutdown_requested(
+            &mut guard,
+            |path| fs::metadata(path).is_ok(),
+            |message| notifications.push(message.to_owned()),
+        ));
+    }
+    assert!(executable_shutdown_requested(
+        &mut guard,
+        |path| fs::metadata(path).is_ok(),
+        |message| notifications.push(message.to_owned()),
+    ));
+    assert_eq!(notifications, [EXECUTABLE_REMOVED_MESSAGE]);
+
+    shutdown_daemon(
+        Ok(()),
+        &writer,
+        &reader,
+        &mut collectors,
+        &mut pipeline,
+        0,
+        &BTreeMap::new(),
+    )
+    .expect("daemon shutdown");
+
+    let status = reader.status().expect("cleared daemon status");
+    assert!(!status.running);
+    assert_eq!(status.pid, None);
+    assert_eq!(status.instance_id, None);
+    assert_eq!(status.heartbeat_at, None);
+}
+
+#[test]
+fn one_or_two_missing_executable_checks_do_not_trigger_shutdown() {
+    let directory = TempDir::new().expect("missing executable fixture");
+    let executable = directory.path().join("zanei");
+    let mut guard = ExecutableGuard::new(executable.clone());
+    let mut notifications = 0;
+    let mut check = |exists| {
+        executable_shutdown_requested(
+            &mut guard,
+            |path| {
+                assert_eq!(path, executable);
+                exists
+            },
+            |_| notifications += 1,
+        )
+    };
+
+    assert!(!check(false));
+    assert!(!check(false));
+    assert!(!check(true));
+    assert!(!check(false));
+    assert!(!check(false));
+    assert_eq!(notifications, 0);
+}
+
+#[test]
+fn continuously_existing_executable_does_not_trigger_shutdown() {
+    let executable = NamedTempFile::new().expect("existing executable fixture");
+    let mut guard = ExecutableGuard::new(executable.path().to_owned());
+    let mut notifications = 0;
+
+    for _ in 0..10 {
+        assert!(!executable_shutdown_requested(
+            &mut guard,
+            |path| fs::metadata(path).is_ok(),
+            |_| notifications += 1,
+        ));
+    }
+    assert_eq!(notifications, 0);
 }

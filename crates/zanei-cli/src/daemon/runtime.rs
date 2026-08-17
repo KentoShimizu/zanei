@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -19,11 +20,13 @@ use zanei_core::{
 
 use super::{
     DaemonError, StoreOwner, StoreOwnership,
-    collectors::CollectorSet,
+    collectors::{CollectorSet, merge_collector_failures},
+    executable_guard::ExecutableGuard,
     main_thread,
     permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
     pipeline::{Pipeline, SharedStoreWriter},
     runtime_support::{ShutdownSignals, StdinEofWatcher, ensure_store_parent, record_writer},
+    shutdown::shutdown_daemon,
 };
 use crate::permissions::{PermissionRequestOutcome, probe_permissions};
 
@@ -35,6 +38,8 @@ const PERMISSION_REQUEST_TIMEOUT_MESSAGE: &str =
     "permission request timed out before macOS reported a decision";
 const PERMISSION_REQUEST_WORKER_STOPPED_MESSAGE: &str =
     "permission request worker terminated without a result";
+const EXECUTABLE_REMOVED_MESSAGE: &str =
+    "zanei: executable removed (uninstalled?); recorder shutting down.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordOutput {
@@ -53,6 +58,8 @@ pub fn run_daemon(
 ) -> Result<(), DaemonError> {
     let config = Config::load(config_path)?;
     let mut config_watcher = ConfigWatcher::new(config_path.to_owned())?;
+    let executable_guard =
+        ExecutableGuard::new(crate::executable::current().map_err(DaemonError::CurrentExecutable)?);
     ensure_store_parent(store_path)?;
     let started_at = format_timestamp(OffsetDateTime::now_utc());
     let owner = StoreOwner::new(mode, started_at);
@@ -103,27 +110,19 @@ pub fn run_daemon(
             last_status: initial_status,
             last_permissions: None,
             permission_request_worker: Some(permission_request_worker),
+            executable_guard,
         }
         .run();
 
-        let store_accepts_intake = pipeline
-            .store_health()
-            .is_ok_and(|health| health.accepts_intake());
-        if pipeline.is_finished() || !store_accepts_intake {
-            collectors.suspend();
-        } else {
-            collectors.stop();
-        }
-        let pipeline_result = pipeline.shutdown();
-        let clear_result = clear_heartbeat(
+        shutdown_daemon(
+            loop_result,
             &writer,
             &reader,
-            &collectors,
-            &pipeline,
+            &mut collectors,
+            &mut pipeline,
             base_dropped,
             &base_collector_failures,
-        );
-        loop_result.and(pipeline_result).and(clear_result)
+        )
     })?
 }
 
@@ -159,6 +158,7 @@ struct ActiveDaemon<'a> {
     last_status: StoreStatus,
     last_permissions: Option<DaemonPermissions>,
     permission_request_worker: Option<PermissionRequestWorker>,
+    executable_guard: ExecutableGuard,
 }
 
 impl ActiveDaemon<'_> {
@@ -210,6 +210,13 @@ impl ActiveDaemon<'_> {
                 retention_purge_deadline = now + RETENTION_PURGE_INTERVAL;
             }
             if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                if executable_shutdown_requested(
+                    &mut self.executable_guard,
+                    |path| fs::metadata(path).is_ok(),
+                    |message| eprintln!("{message}"),
+                ) {
+                    return Ok(());
+                }
                 ensure_pipeline_running(self.pipeline, self.collectors)?;
                 let permissions = self.refresh_permissions();
                 if !*self.paused && !self.intake_suspended {
@@ -512,52 +519,16 @@ fn normalize_pause_request(
     Ok(false)
 }
 
-fn clear_heartbeat(
-    writer: &SharedStoreWriter,
-    reader: &StoreReader,
-    collectors: &CollectorSet,
-    pipeline: &Pipeline,
-    base_dropped: u64,
-    base_collector_failures: &BTreeMap<String, u64>,
-) -> Result<(), DaemonError> {
-    let writer = lock_writer(writer)?;
-    let status = reader.status()?;
-    let collector_health = collectors.health();
-    writer.write_daemon_state(&DaemonState {
-        pid: None,
-        started_at: None,
-        instance_id: None,
-        mode: None,
-        heartbeat_at: None,
-        retention_hours: None,
-        paused_until: status.paused_until,
-        events_captured: status.events_captured,
-        events_dropped: base_dropped
-            .saturating_add(collector_health.dropped)
-            .saturating_add(pipeline.dropped()),
-        last_event_ts: status.last_event_ts,
-        degraded: BTreeMap::new(),
-        collector_failures: merge_collector_failures(
-            base_collector_failures,
-            &collector_health.collector_failures,
-        ),
-        permissions: None,
-    })?;
-    Ok(())
-}
-
-fn merge_collector_failures(
-    base: &BTreeMap<String, u64>,
-    current: &BTreeMap<String, u64>,
-) -> BTreeMap<String, u64> {
-    let mut merged = base.clone();
-    for (collector, failures) in current {
-        merged
-            .entry(collector.clone())
-            .and_modify(|total| *total = total.saturating_add(*failures))
-            .or_insert(*failures);
+fn executable_shutdown_requested(
+    guard: &mut ExecutableGuard,
+    exists: impl FnOnce(&Path) -> bool,
+    notify: impl FnOnce(&str),
+) -> bool {
+    if !guard.check_with(exists) {
+        return false;
     }
-    merged
+    notify(EXECUTABLE_REMOVED_MESSAGE);
+    true
 }
 
 fn lock_writer(

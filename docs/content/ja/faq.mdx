@@ -48,17 +48,31 @@ Zanei は自分のマシン上の自分の操作を記録するツールです�
 
 動いています。バックグラウンド `start` は recorder の生存確認後、heartbeat で権限不足が報告された場合に終了コード 3 を返します。アクセシビリティにはバンドル版の `Zanei` 行が自動追加されますが、入力監視はダイアログでの付与が有効でも行がないことがあります。再起動後は recorder 由来の `zanei doctor` の結果を正とします。一覧から行を操作する場合は、`+` でインストール済みの `Zanei.app` を選択します。まだ権限不足と報告されている間は、`zanei doctor --fix` がペインを開いて正確な path をコピーします。詳細は[権限ガイド](/ja/guides/permissions#初回セットアップ)を参照してください。権限を必要とする collector が degraded の間も、デーモンは動作を継続します。初回の権限ダイアログが応答待ちの間は、`zanei doctor` がオートメーションを `not_determined` と報告することがあるため、ダイアログに応答してからもう一度実行してください。この権限不足パスでは内容記録の選択を求めません。権限の付与後に `zanei stop && zanei start` を実行すると、最初に成功した対話式 `start` が選択を求めます。
 
-## Zanei の権限を完全に解除するには？
+## Zanei をアンインストールするには？
 
-ペインに `Zanei` の行があれば OFF にします。または Zanei を停止し、消去する判断に対応する service の reset を実行します。
+アンインストール前に recorder を停止します。
 
 ```bash
 zanei stop
+brew uninstall zanei
+```
+
+Homebrew は設定と記録データを残します。これらも削除する場合は次を実行します。
+
+```bash
+rm -rf ~/.config/zanei ~/.local/state/zanei
+```
+
+アクセシビリティと入力監視の権限は、**システム設定 → プライバシーとセキュリティ**で解除します。`Zanei` の項目がすでに表示されない場合は、次を実行します。
+
+```bash
 tccutil reset Accessibility dev.zanei.recorder
 tccutil reset ListenEvent dev.zanei.recorder
 ```
 
-この bundle ID のコマンドは配布版 `Zanei.app` が対象で、素の `cargo install` バイナリには適用されません。素のバイナリは `+` で追加した行も定着しないことがあるため、app bundle 版を使用してください。詳細は[権限ガイド](/ja/guides/permissions#権限を解除リセットする)。
+アンインストール前に `zanei stop` を忘れた場合でも、recorder は自身の実行ファイルがなくなったことを検出し、数十秒以内に自動で終了します。
+
+`brew upgrade` の後は、新しいバージョンへ切り替えるため `zanei stop && zanei start` を実行してください。旧 recorder がすでに自動終了し、`stop` が停止中と報告した場合は、代わりに `zanei start` を実行してください。
 
 ## `zanei start` で `Bootstrap failed: 5: Input/output error` が表示されます
 
