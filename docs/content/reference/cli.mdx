@@ -80,10 +80,10 @@ Diagnostic/state commands use a separate fixed-output convention:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success |
+| `0` | Success. Background `start` also uses this code when the recorder is alive but its heartbeat does not yet contain a permission snapshot; it prints guidance to respond to the macOS permission dialogs and then run `zanei doctor` |
 | `1` | General error |
 | `2` | Usage error (invalid arguments) |
-| `3` | **Missing permissions**. For background `start`, the recorder is already running and reported the missing TCC permission through its heartbeat; `doctor` uses the same code for its diagnostic result |
+| `3` | **Confirmed missing permissions**. Background `start` uses this code only after the running recorder reports a permission snapshot with a missing required TCC permission; `doctor` uses the same code for its diagnostic result |
 | `4` | No daemon (nothing to act on for `status`, `stop`, ...) |
 
 ---
@@ -159,7 +159,7 @@ zanei start --foreground # run in the foreground instead (dev/debug)
 | --- | --- |
 | `--foreground` | Don't daemonize; run in the foreground |
 
-After a background recorder reports that required permissions are missing, `start` prints the same granting guidance as `doctor` and exits with **code 3**. The recorder remains running; grant the permissions, run `zanei stop && zanei start`, and confirm with `zanei doctor`. `--foreground` runs the same recorder startup request logic in the foreground process.
+If the first fresh heartbeat does not yet contain a permission snapshot, background `start` reports that the recorder is still waiting for the macOS permission dialogs, asks you to respond and then run `zanei doctor`, and exits with **code 0** because the recorder is alive. Once the recorder reports a permission snapshot, missing required permissions make `start` print the same granting guidance as `doctor` and exit with **code 3**. The recorder remains running; grant the permissions, run `zanei stop && zanei start`, and confirm with `zanei doctor`. `--foreground` runs the same recorder startup request logic in the foreground process.
 
 Only one recorder can own a store at a time. A second foreground or launchd recorder for the same
 store exits with code 1 and reports the PID of the current owner.

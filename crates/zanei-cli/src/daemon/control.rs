@@ -6,9 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zanei_core::store::StoreReader;
+use zanei_core::store::{StoreReader, StoreStatus};
 
-use super::{DaemonError, StoreOwnership};
+use super::{DaemonError, StoreOwner, StoreOwnership};
 
 const LABEL: &str = "dev.zanei.agent";
 const PLIST_FILE_NAME: &str = "dev.zanei.agent.plist";
@@ -211,7 +211,11 @@ fn daemon_is_alive(store_path: &Path) -> Result<bool, DaemonError> {
     let Ok(status) = StoreReader::open(store_path).and_then(|reader| reader.status()) else {
         return Ok(false);
     };
-    Ok(status.running && status.instance_id.as_deref() == Some(owner.instance_id.as_str()))
+    Ok(owner_has_fresh_heartbeat(&owner, &status))
+}
+
+fn owner_has_fresh_heartbeat(owner: &StoreOwner, status: &StoreStatus) -> bool {
+    status.running && status.instance_id.as_deref() == Some(owner.instance_id.as_str())
 }
 
 fn wait_for_daemon_start_with(
@@ -344,10 +348,30 @@ mod tests {
     };
 
     use tempfile::TempDir;
+    use zanei_core::store::{DaemonMode, StoreStatus};
 
     use super::{
-        DaemonError, build_launch_agent_plist, render_launch_agent_plist, start_launch_agent_with,
+        DaemonError, StoreOwner, build_launch_agent_plist, owner_has_fresh_heartbeat,
+        render_launch_agent_plist, start_launch_agent_with,
     };
+
+    #[test]
+    fn liveness_does_not_require_a_permission_snapshot() {
+        let owner = StoreOwner {
+            pid: 42,
+            instance_id: "42@2026-08-17T10:00:00.000Z".to_owned(),
+            mode: DaemonMode::Launchd,
+            started_at: "2026-08-17T10:00:00.000Z".to_owned(),
+        };
+        let status = StoreStatus {
+            running: true,
+            instance_id: Some(owner.instance_id.clone()),
+            permissions: None,
+            ..StoreStatus::default()
+        };
+
+        assert!(owner_has_fresh_heartbeat(&owner, &status));
+    }
 
     #[test]
     fn plist_uses_the_hidden_daemon_contract_and_escapes_paths() {

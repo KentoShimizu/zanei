@@ -1,6 +1,16 @@
 //! macOS TCC permission diagnostics and System Settings navigation.
 
-use std::{io, process::Command};
+use std::{
+    collections::HashSet,
+    io,
+    process::Command,
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock,
+        mpsc::{RecvTimeoutError, sync_channel},
+    },
+    thread,
+    time::Duration,
+};
 
 use thiserror::Error;
 use zanei_collector::Permission;
@@ -19,6 +29,10 @@ const AE_PERMISSION_GRANTED: i32 = 0;
 const AE_PERMISSION_DENIED: i32 = -1_743;
 const AE_PERMISSION_NOT_DETERMINED: i32 = -1_744;
 const AE_TARGET_NOT_RUNNING: i32 = -600;
+
+// macOS permission dialogs are user-paced and can stall TCC indefinitely. Two seconds leaves
+// ample time for normal local IPC while keeping the probe below the CLI's 10-second liveness wait.
+const AUTOMATION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 const ACCESSIBILITY_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
@@ -47,6 +61,14 @@ pub enum PermissionError {
     AutomationTargetCreation { bundle_id: String, status: i16 },
     #[error("automation permission check for {bundle_id} returned OSStatus {status}")]
     UnexpectedAutomationStatus { bundle_id: String, status: i32 },
+    #[error("failed to start automation permission probe for {bundle_id}: {source}")]
+    AutomationProbeThreadSpawn {
+        bundle_id: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("automation permission probe for {bundle_id} stopped without a result")]
+    AutomationProbeWorkerStopped { bundle_id: String },
     #[error("failed to launch System Settings for {settings_url}: {source}")]
     SettingsLaunch {
         settings_url: &'static str,
@@ -102,7 +124,7 @@ pub fn request_input_monitoring() {
 trait PermissionProbe {
     fn accessibility_is_trusted(&self) -> bool;
     fn input_monitoring_status(&self) -> i32;
-    fn automation_status(&self, bundle_id: &str) -> Result<i32, AutomationTargetError>;
+    fn automation_status(&self, bundle_id: &str) -> Result<i32, PermissionError>;
 }
 
 struct NativePermissionProbe;
@@ -116,8 +138,101 @@ impl PermissionProbe for NativePermissionProbe {
         input_monitoring_status()
     }
 
-    fn automation_status(&self, bundle_id: &str) -> Result<i32, AutomationTargetError> {
-        AutomationTarget::new(bundle_id).map(|target| target.permission_status())
+    fn automation_status(&self, bundle_id: &str) -> Result<i32, PermissionError> {
+        let worker_bundle_id = bundle_id.to_owned();
+        automation_status_with_timeout(
+            native_automation_probe_state(),
+            bundle_id,
+            AUTOMATION_PROBE_TIMEOUT,
+            move || {
+                AutomationTarget::new(&worker_bundle_id).map(|target| target.permission_status())
+            },
+        )
+    }
+}
+
+#[derive(Clone, Default)]
+struct AutomationProbeState {
+    in_flight: Arc<Mutex<HashSet<String>>>,
+}
+
+impl AutomationProbeState {
+    fn begin(&self, bundle_id: &str) -> Option<AutomationProbeGuard> {
+        let mut in_flight = self.lock_in_flight();
+        in_flight
+            .insert(bundle_id.to_owned())
+            .then(|| AutomationProbeGuard {
+                state: self.clone(),
+                bundle_id: bundle_id.to_owned(),
+            })
+    }
+
+    fn finish(&self, bundle_id: &str) {
+        self.lock_in_flight().remove(bundle_id);
+    }
+
+    fn lock_in_flight(&self) -> MutexGuard<'_, HashSet<String>> {
+        // The native probe never runs while this lock is held. If a membership operation panics,
+        // the safe HashSet remains usable, so recovering the guard prevents a bundle from being
+        // stranded in-flight for the rest of the process.
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    fn is_in_flight(&self, bundle_id: &str) -> bool {
+        self.lock_in_flight().contains(bundle_id)
+    }
+}
+
+struct AutomationProbeGuard {
+    state: AutomationProbeState,
+    bundle_id: String,
+}
+
+impl Drop for AutomationProbeGuard {
+    fn drop(&mut self) {
+        self.state.finish(&self.bundle_id);
+    }
+}
+
+fn native_automation_probe_state() -> &'static AutomationProbeState {
+    static STATE: OnceLock<AutomationProbeState> = OnceLock::new();
+    STATE.get_or_init(AutomationProbeState::default)
+}
+
+fn automation_status_with_timeout(
+    state: &AutomationProbeState,
+    bundle_id: &str,
+    timeout: Duration,
+    probe: impl FnOnce() -> Result<i32, AutomationTargetError> + Send + 'static,
+) -> Result<i32, PermissionError> {
+    let Some(in_flight) = state.begin(bundle_id) else {
+        return Ok(AE_PERMISSION_NOT_DETERMINED);
+    };
+    let (result_sender, result_receiver) = sync_channel(1);
+
+    drop(
+        thread::Builder::new()
+            .name("zanei-automation-permission".to_owned())
+            .spawn(move || {
+                let result = probe();
+                drop(in_flight);
+                let _ = result_sender.send(result);
+            })
+            .map_err(|source| PermissionError::AutomationProbeThreadSpawn {
+                bundle_id: bundle_id.to_owned(),
+                source,
+            })?,
+    );
+
+    match result_receiver.recv_timeout(timeout) {
+        Ok(result) => result.map_err(|error| automation_target_error(bundle_id, error)),
+        Err(RecvTimeoutError::Timeout) => Ok(AE_PERMISSION_NOT_DETERMINED),
+        Err(RecvTimeoutError::Disconnected) => Err(PermissionError::AutomationProbeWorkerStopped {
+            bundle_id: bundle_id.to_owned(),
+        }),
     }
 }
 
@@ -140,9 +255,7 @@ fn permission_status_with(
             status => Err(PermissionError::UnexpectedInputMonitoringStatus { status }),
         },
         Permission::Automation { bundle_id } => {
-            let status = probe
-                .automation_status(bundle_id)
-                .map_err(|error| automation_target_error(bundle_id, error))?;
+            let status = probe.automation_status(bundle_id)?;
             match status {
                 AE_PERMISSION_GRANTED => Ok(PermissionStatus::Granted),
                 AE_PERMISSION_DENIED => Ok(PermissionStatus::Denied),
@@ -213,12 +326,20 @@ fn open_settings_with(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, io};
+    use std::{
+        cell::RefCell,
+        io,
+        sync::mpsc::sync_channel,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use super::{
-        ACCESSIBILITY_SETTINGS_URL, AUTOMATION_SETTINGS_URL, AutomationTargetError,
+        ACCESSIBILITY_SETTINGS_URL, AE_PERMISSION_GRANTED, AE_PERMISSION_NOT_DETERMINED,
+        AUTOMATION_SETTINGS_URL, AutomationProbeState, AutomationTargetError,
         INPUT_MONITORING_SETTINGS_URL, Permission, PermissionError, PermissionProbe,
-        PermissionStatus, SettingsOpener, open_settings_with, permission_status_with,
+        PermissionStatus, SettingsOpener, automation_status_with_timeout, automation_target_error,
+        open_settings_with, permission_status_with,
     };
 
     struct StubPermissionProbe {
@@ -236,8 +357,9 @@ mod tests {
             self.input_status
         }
 
-        fn automation_status(&self, _bundle_id: &str) -> Result<i32, AutomationTargetError> {
+        fn automation_status(&self, bundle_id: &str) -> Result<i32, PermissionError> {
             self.automation_status
+                .map_err(|error| automation_target_error(bundle_id, error))
         }
     }
 
@@ -323,6 +445,57 @@ mod tests {
         assert_eq!(
             permission_status_with(&probe_with(false, 0, Ok(-600)), &permission).unwrap(),
             PermissionStatus::NotDetermined
+        );
+    }
+
+    #[test]
+    fn timed_out_automation_probe_is_pending_without_duplicate_workers() {
+        const BUNDLE_ID: &str = "com.google.Chrome";
+        let state = AutomationProbeState::default();
+        let (started_sender, started_receiver) = sync_channel(1);
+        let (release_sender, release_receiver) = sync_channel(1);
+
+        let status = automation_status_with_timeout(
+            &state,
+            BUNDLE_ID,
+            Duration::from_millis(10),
+            move || {
+                started_sender.send(()).expect("test should be listening");
+                release_receiver.recv().expect("test should release probe");
+                Ok(AE_PERMISSION_GRANTED)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(status, AE_PERMISSION_NOT_DETERMINED);
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("probe worker should start");
+        assert_eq!(
+            automation_status_with_timeout(&state, BUNDLE_ID, Duration::from_secs(1), || panic!(
+                "an in-flight bundle must not start another worker"
+            ),)
+            .unwrap(),
+            AE_PERMISSION_NOT_DETERMINED
+        );
+
+        release_sender
+            .send(())
+            .expect("probe should still be running");
+        let release_deadline = Instant::now() + Duration::from_secs(1);
+        while state.is_in_flight(BUNDLE_ID) {
+            assert!(
+                Instant::now() < release_deadline,
+                "completed worker should release its bundle"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(
+            automation_status_with_timeout(&state, BUNDLE_ID, Duration::from_secs(1), || Ok(
+                AE_PERMISSION_GRANTED
+            ),)
+            .unwrap(),
+            AE_PERMISSION_GRANTED
         );
     }
 

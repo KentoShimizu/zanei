@@ -22,6 +22,13 @@ const AUTOMATION_PANE: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation";
 const STARTED_WITH_MISSING_PERMISSIONS: &str = "Zanei recording started with missing permissions — grant them, then run `zanei stop && zanei start`.";
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum StartPermissionState {
+    PendingSnapshot,
+    Ready,
+    Missing,
+}
+
 pub fn run(config_path: &Path, store_path: &Path, fix: bool, json: bool) -> Result<u8, CliError> {
     let config = Config::load(config_path)?;
     let status = store_status(store_path)?;
@@ -50,22 +57,36 @@ pub(crate) fn permissions_ok(config: &Config) -> Result<bool, CliError> {
 pub(crate) fn require_recorder_for_start(
     config: &Config,
     store_path: &Path,
-) -> Result<bool, CliError> {
+) -> Result<StartPermissionState, CliError> {
     let status = store_status(store_path)?.ok_or_else(|| {
         CliError::InvalidValue("running recorder did not publish a heartbeat".to_owned())
     })?;
-    let snapshot = status.reported_permissions().cloned().ok_or_else(|| {
-        CliError::InvalidValue(
-            "running recorder heartbeat did not include its permission status".to_owned(),
-        )
-    })?;
+    evaluate_recorder_for_start(config, &status)
+}
+
+fn evaluate_recorder_for_start(
+    config: &Config,
+    status: &StoreStatus,
+) -> Result<StartPermissionState, CliError> {
+    if !status.running {
+        return Err(CliError::InvalidValue(
+            "running recorder did not publish a fresh heartbeat".to_owned(),
+        ));
+    }
+    let Some(snapshot) = status.reported_permissions().cloned() else {
+        return Ok(StartPermissionState::PendingSnapshot);
+    };
     let required = crate::daemon::required_permissions_for(config);
     let report = build_report(config, &required, snapshot, true)?;
     if !report.ok {
         println!("{STARTED_WITH_MISSING_PERMISSIONS}");
         print_human(&report, false, true)?;
     }
-    Ok(report.ok)
+    Ok(if report.ok {
+        StartPermissionState::Ready
+    } else {
+        StartPermissionState::Missing
+    })
 }
 
 fn store_status(store_path: &Path) -> Result<Option<StoreStatus>, CliError> {
@@ -269,8 +290,23 @@ mod tests {
     };
     use super::{
         AutomationDetail, DoctorReport, PermissionReport, StatusDetail, build_report,
-        permissions_for_status,
+        evaluate_recorder_for_start, permissions_for_status,
     };
+
+    #[test]
+    fn fresh_heartbeat_without_permission_snapshot_is_pending_for_start() {
+        let status = StoreStatus {
+            running: true,
+            permissions: None,
+            ..StoreStatus::default()
+        };
+
+        assert_eq!(
+            evaluate_recorder_for_start(&Config::default(), &status)
+                .expect("pending recorder permission snapshot"),
+            super::StartPermissionState::PendingSnapshot
+        );
+    }
 
     #[test]
     fn denied_report_asks_for_a_recorder_start_before_the_manual_add_fallback() {

@@ -7,7 +7,7 @@ use zanei_core::config::{Config, parse_duration_expression};
 use zanei_core::normalize::format_timestamp;
 use zanei_core::store::{DaemonMode, StoreWriter};
 
-use super::doctor::require_recorder_for_start;
+use super::doctor::{StartPermissionState, require_recorder_for_start};
 use super::{EXIT_MISSING_PERMISSIONS, EXIT_NO_DAEMON, EXIT_SUCCESS};
 use crate::error::CliError;
 use crate::paths::Paths;
@@ -20,6 +20,8 @@ const BACKGROUND_START_CONFIRMATION: &str = concat!(
     "A raw executable may not keep a manually added row; use the bundled distribution for stable permission management.\n",
     "Typed and clipboard content is not recorded by default. To opt in: zanei config set capture.text_content true"
 );
+const PENDING_PERMISSION_SNAPSHOT_GUIDANCE: &str = "recorder is still waiting for macOS permission dialogs — respond to them, then check `zanei doctor`";
+
 pub fn start(paths: &Paths, foreground: bool, quiet: bool) -> Result<u8, CliError> {
     let config = Config::load(&paths.config)?;
     if foreground {
@@ -38,23 +40,30 @@ pub fn start(paths: &Paths, foreground: bool, quiet: bool) -> Result<u8, CliErro
                 .map_err(CliError::from)
         },
         || require_recorder_for_start(&config, &paths.store),
+        |message| println!("{message}"),
     )
 }
 
 fn start_background_with(
     quiet: bool,
     start_launch_agent: impl FnOnce() -> Result<bool, CliError>,
-    recorder_permissions_ok: impl FnOnce() -> Result<bool, CliError>,
+    recorder_permission_state: impl FnOnce() -> Result<StartPermissionState, CliError>,
+    mut print: impl FnMut(&str),
 ) -> Result<u8, CliError> {
     let was_bootstrapped = start_launch_agent()?;
-    if !recorder_permissions_ok()? {
-        return Ok(EXIT_MISSING_PERMISSIONS);
+    match recorder_permission_state()? {
+        StartPermissionState::PendingSnapshot => {
+            print(PENDING_PERMISSION_SNAPSHOT_GUIDANCE);
+            return Ok(EXIT_SUCCESS);
+        }
+        StartPermissionState::Missing => return Ok(EXIT_MISSING_PERMISSIONS),
+        StartPermissionState::Ready => {}
     }
     if !quiet {
         if was_bootstrapped {
-            println!("Zanei recording restarted");
+            print("Zanei recording restarted");
         } else {
-            println!("{BACKGROUND_START_CONFIRMATION}");
+            print(BACKGROUND_START_CONFIRMATION);
         }
     }
     Ok(EXIT_SUCCESS)
@@ -194,7 +203,8 @@ mod tests {
 
     use super::{
         BACKGROUND_START_CONFIRMATION, EXIT_MISSING_PERMISSIONS, EXIT_SUCCESS,
-        start_background_with, wait_for_stop_completion,
+        PENDING_PERMISSION_SNAPSHOT_GUIDANCE, StartPermissionState, start_background_with,
+        wait_for_stop_completion,
     };
 
     #[test]
@@ -206,8 +216,9 @@ mod tests {
             || Ok(false),
             || {
                 permission_check_called.set(true);
-                Ok(true)
+                Ok(StartPermissionState::Ready)
             },
+            |_| {},
         )
         .expect("background start");
 
@@ -225,7 +236,8 @@ mod tests {
                 recorder_running.set(true);
                 Ok(false)
             },
-            || Ok(false),
+            || Ok(StartPermissionState::Missing),
+            |_| {},
         )
         .expect("degraded background start");
 
@@ -233,6 +245,25 @@ mod tests {
         assert!(
             recorder_running.get(),
             "the recorder must not be booted out"
+        );
+    }
+
+    #[test]
+    fn pending_permission_snapshot_keeps_start_successful_and_guides_user() {
+        let output = RefCell::new(Vec::new());
+
+        let exit = start_background_with(
+            true,
+            || Ok(false),
+            || Ok(StartPermissionState::PendingSnapshot),
+            |message| output.borrow_mut().push(message.to_owned()),
+        )
+        .expect("pending background start");
+
+        assert_eq!(exit, EXIT_SUCCESS);
+        assert_eq!(
+            output.into_inner(),
+            [PENDING_PERMISSION_SNAPSHOT_GUIDANCE.to_owned()]
         );
     }
 

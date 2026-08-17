@@ -46,7 +46,7 @@ Toggling a permission sometimes requires the recorded process to restart before 
 
 ## `zanei start` exits with code 3. Is the recorder running?
 
-Yes. A background `start` returns code 3 only after the recorder is alive and its heartbeat reports missing permissions. Accessibility adds the bundled app's `Zanei` row automatically, while Input Monitoring may omit it even after the dialog grant takes effect. Restart, then trust the recorder-reported `zanei doctor` result. To manage an omitted row from the list, use `+` and select the installed `Zanei.app`; while the permission is still reported missing, `zanei doctor --fix` opens the pane and copies that exact path. See the [permissions guide](/guides/permissions#first-time-setup). The daemon stays alive while permission-dependent collectors are degraded.
+Yes. A background `start` returns code 3 only after the recorder is alive and its heartbeat reports missing permissions. Accessibility adds the bundled app's `Zanei` row automatically, while Input Monitoring may omit it even after the dialog grant takes effect. Restart, then trust the recorder-reported `zanei doctor` result. To manage an omitted row from the list, use `+` and select the installed `Zanei.app`; while the permission is still reported missing, `zanei doctor --fix` opens the pane and copies that exact path. See the [permissions guide](/guides/permissions#first-time-setup). The daemon stays alive while permission-dependent collectors are degraded. While the first-run permission dialogs are awaiting a response, `zanei doctor` may report Automation as `not_determined`; respond to the dialogs, then run it again.
 
 ## How do I remove Zanei's permissions completely?
 

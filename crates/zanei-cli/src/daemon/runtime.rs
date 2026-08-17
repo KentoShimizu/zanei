@@ -47,33 +47,47 @@ pub fn run_daemon(
     mode: DaemonMode,
 ) -> Result<(), DaemonError> {
     let config = Config::load(config_path)?;
+    let mut config_watcher = ConfigWatcher::new(config_path.to_owned())?;
     ensure_store_parent(store_path)?;
     let started_at = format_timestamp(OffsetDateTime::now_utc());
     let owner = StoreOwner::new(mode, started_at);
-    let ownership = StoreOwnership::acquire(store_path, owner.clone())?;
-    let main_run_loop = main_thread::prepare()?;
     let mut writer = StoreWriter::open(store_path)?;
-    writer.purge_retention(OffsetDateTime::now_utc(), config.output.retention_hours)?;
-    let writer = Arc::new(Mutex::new(writer));
+    let ownership = StoreOwnership::acquire(store_path, owner.clone())?;
     let reader = StoreReader::open(store_path)?;
     let initial_status = reader.status()?;
     let base_dropped = initial_status.events_dropped;
     let base_collector_failures = initial_status.collector_failures.clone();
+    let initial_heartbeat =
+        initial_heartbeat(&owner, config.output.retention_hours, &initial_status);
+    let (main_run_loop, mut collectors, permission_request_error, main_thread_observers) =
+        initialize_permission_dependent_runtime(&writer, &initial_heartbeat, || {
+            let main_run_loop = main_thread::prepare()?;
+            let mut collectors = CollectorSet::new(&config);
+            let permission_request_error =
+                request_missing_permissions(&collectors.required_permissions())
+                    .err()
+                    .map(|error| error.to_string());
+            let main_thread_observers = collectors.prepare_main_thread();
+            Ok((
+                main_run_loop,
+                collectors,
+                permission_request_error,
+                main_thread_observers,
+            ))
+        })?;
+    writer.purge_retention(OffsetDateTime::now_utc(), config.output.retention_hours)?;
+    let writer = Arc::new(Mutex::new(writer));
     let mut pipeline = Pipeline::store(&config, Arc::clone(&writer))?;
-    let mut collectors = CollectorSet::new(&config);
-    let permission_request_error = request_missing_permissions(&collectors.required_permissions())
-        .err()
-        .map(|error| error.to_string());
-    let _main_thread_observers = collectors.prepare_main_thread();
     let mut runtime_degraded = BTreeMap::new();
     if let Some(error) = permission_request_error {
         runtime_degraded.insert("permission_request".to_owned(), error);
     }
     let mut paused = false;
+    let _main_thread_observers = main_thread_observers;
     main_thread::run(main_run_loop, "daemon-runtime", move || {
         let _ownership = ownership;
         let loop_result = ActiveDaemon {
-            config_path,
+            config_watcher: &mut config_watcher,
             active_retention_hours: config.output.retention_hours,
             pending_retention_hours: None,
             writer: &writer,
@@ -128,7 +142,7 @@ pub fn run_record(config_path: &Path, output: RecordOutput) -> Result<(), Daemon
 }
 
 struct ActiveDaemon<'a> {
-    config_path: &'a Path,
+    config_watcher: &'a mut ConfigWatcher,
     active_retention_hours: u64,
     pending_retention_hours: Option<u64>,
     writer: &'a SharedStoreWriter,
@@ -158,7 +172,6 @@ impl ActiveDaemon<'_> {
     }
 
     fn run_loop(&mut self, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
-        let mut watcher = ConfigWatcher::new(self.config_path.to_owned())?;
         let mut last_heartbeat = Instant::now();
         let mut last_pause_poll = Instant::now();
         let mut last_config_poll = Instant::now();
@@ -172,7 +185,7 @@ impl ActiveDaemon<'_> {
             }
             let now = OffsetDateTime::now_utc();
             if last_config_poll.elapsed() >= CONFIG_WATCH_INTERVAL {
-                let retention_promoted = match watcher.reload_if_changed() {
+                let retention_promoted = match self.config_watcher.reload_if_changed() {
                     Ok(Some(config)) => {
                         self.collectors.replace_filter(config.filter.clone());
                         self.pipeline.replace_filter(&config.filter)?;
@@ -371,6 +384,37 @@ impl ActiveDaemon<'_> {
     }
 }
 
+fn initialize_permission_dependent_runtime<T>(
+    writer: &StoreWriter,
+    initial_heartbeat: &DaemonState,
+    initialize: impl FnOnce() -> Result<T, DaemonError>,
+) -> Result<T, DaemonError> {
+    writer.write_daemon_state(initial_heartbeat)?;
+    initialize()
+}
+
+fn initial_heartbeat(
+    owner: &StoreOwner,
+    retention_hours: u64,
+    status: &StoreStatus,
+) -> DaemonState {
+    DaemonState {
+        pid: Some(i64::from(owner.pid)),
+        started_at: Some(owner.started_at.clone()),
+        instance_id: Some(owner.instance_id.clone()),
+        mode: Some(owner.mode),
+        heartbeat_at: Some(format_timestamp(OffsetDateTime::now_utc())),
+        retention_hours: Some(retention_hours),
+        paused_until: status.paused_until.clone(),
+        events_captured: status.events_captured,
+        events_dropped: status.events_dropped,
+        last_event_ts: status.last_event_ts.clone(),
+        degraded: BTreeMap::new(),
+        collector_failures: status.collector_failures.clone(),
+        permissions: None,
+    }
+}
+
 fn ensure_pipeline_running(
     pipeline: &Pipeline,
     collectors: &mut CollectorSet,
@@ -487,83 +531,4 @@ fn lock_writer(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, Mutex},
-        thread,
-        time::Duration as StdDuration,
-    };
-
-    use tempfile::NamedTempFile;
-    use time::Duration;
-    use zanei_core::{
-        config::Config,
-        normalize::format_timestamp,
-        store::DaemonState,
-        store::{StoreReader, StoreWriter},
-    };
-
-    use super::{
-        CollectorSet, Pipeline, ensure_pipeline_running, merge_collector_failures,
-        normalize_pause_request,
-    };
-
-    #[test]
-    fn collector_failures_accumulate_across_daemon_instances() {
-        let base = BTreeMap::from([("eventtap".to_owned(), 2), ("ax".to_owned(), u64::MAX)]);
-        let current = BTreeMap::from([("eventtap".to_owned(), 3), ("ax".to_owned(), 1)]);
-
-        assert_eq!(
-            merge_collector_failures(&base, &current),
-            BTreeMap::from([("ax".to_owned(), u64::MAX), ("eventtap".to_owned(), 5),])
-        );
-    }
-
-    #[test]
-    fn expired_pause_is_cleared_atomically() {
-        let store = NamedTempFile::new().expect("temporary store");
-        let writer = Arc::new(Mutex::new(
-            StoreWriter::open(store.path()).expect("store writer"),
-        ));
-        let expired = format_timestamp(time::OffsetDateTime::now_utc() - Duration::seconds(1));
-        writer
-            .lock()
-            .expect("writer lock")
-            .set_paused_until(Some(&expired))
-            .expect("pause state");
-
-        assert!(!normalize_pause_request(&writer, Some(&expired)).expect("pause request"));
-        assert_eq!(
-            StoreReader::open(store.path())
-                .expect("store reader")
-                .status()
-                .expect("store status")
-                .paused_until,
-            None
-        );
-    }
-
-    #[test]
-    fn pipeline_panic_makes_the_daemon_tick_fail() {
-        let config = Config::default();
-        let mut pipeline = Pipeline::panicking_store(&config).expect("pipeline");
-        pipeline
-            .heartbeat(DaemonState::default())
-            .expect("trigger writer panic");
-        for _ in 0..100 {
-            if pipeline.is_finished() {
-                break;
-            }
-            thread::sleep(StdDuration::from_millis(1));
-        }
-        assert!(pipeline.is_finished());
-
-        let mut collectors = CollectorSet::new(&config);
-        assert!(matches!(
-            ensure_pipeline_running(&pipeline, &mut collectors),
-            Err(super::DaemonError::ThreadTerminated { thread: "pipeline" })
-        ));
-        assert!(pipeline.shutdown().is_err());
-    }
-}
+mod tests;
