@@ -24,13 +24,15 @@ zanei filter exclude-site add example.com
 
 これらは capture-time フィルタです：該当イベントはストアに書き込まれる前に破棄されるため、後から掃除する必要がありません。パスワードマネージャは既定で除外済みです。[フィルタ](/ja/guides/filters)参照。
 
-## opt-in したのに Slack / Claude / VS Code で打った本文が残りません
+## opt-in すれば Claude / Slack / VS Code などの Electron アプリでも本文は取れますか？
 
-Electron アプリはアクセシビリティツリーを遅延構築するため、入力欄が macOS
-Accessibility からは「種類不明」に見えることがあります。`capture.text_content` が有効な
-場合、Zanei は observer の attach 時にツリー構築を要求し、条件を満たす打鍵本文を捕捉できる
-ようにします。種類を確認できない欄の本文は引き続き記録しないため、パスワード欄を誤って
-拾わない安全装置は維持されます。設定変更後は Zanei を再起動してください。
+たいてい取れます。Electron などの Chromium 系アプリはアクセシビリティツリーを遅延構築するため、
+入力欄が macOS Accessibility からは「種類不明」に見えることがあります。`capture.text_content` を
+有効にすると、Zanei は observer を attach する際にツリーの構築を要求するので、対象の打鍵本文が
+他と同様に記録されます。ただし一部の非標準アプリはそれでも入力欄を公開せず、その場合は打鍵本文は
+残りません（コピーした本文と、入力したという事実は残ります）。Zanei は種類を確認できない欄の本文は
+記録しないため、パスワード欄は除外されたままです。`capture.text_content` を変更したら Zanei を
+再起動してください。
 
 ## ストアを直接読んでもいいですか？
 

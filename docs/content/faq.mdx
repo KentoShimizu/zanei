@@ -24,13 +24,15 @@ zanei filter exclude-site add example.com
 
 These are capture-time filters: matching events are discarded before being written, so there is nothing to clean up afterwards. Password managers are excluded by default. See [filters](/guides/filters).
 
-## I opted in, but typed text from Slack / Claude / VS Code is missing
+## I opted in — does typed text get captured in Electron apps like Claude, Slack, or VS Code?
 
-Electron apps build their accessibility tree lazily, so their input fields can otherwise report as
-*unknown* to macOS Accessibility. With `capture.text_content` enabled, Zanei requests the tree when
-it attaches its observer so eligible typed text can be captured. Zanei still refuses to capture
-text from any field it cannot classify, preserving the same safeguard that keeps password fields
-out. Restart Zanei after changing `capture.text_content`.
+Usually yes. Electron and other Chromium apps build their accessibility tree lazily, so their input
+fields would otherwise report as *unknown* to macOS Accessibility. With `capture.text_content`
+enabled, Zanei requests the tree when it attaches its observer, so eligible typed text is captured
+like anywhere else. A few non-standard apps still don't expose their fields even then, so their
+typed text is not captured — but text you copy there, and the fact of typing, are still recorded.
+Zanei never captures a field it cannot classify, which keeps password fields out. Restart Zanei
+after changing `capture.text_content`.
 
 ## Can I read the store directly?
 
