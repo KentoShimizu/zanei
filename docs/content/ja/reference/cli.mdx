@@ -286,7 +286,8 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | `store.size_bytes` | integer \| null | file metadata を取得できる場合の byte 数。取得不能または file 不在なら null |
 | `store.retention_hours` | integer \| null | store を読める場合、owner に一致する heartbeat が fresh なら recorder の active 値、それ以外は現在の設定値。database 内容を読めない場合は null |
 | `store.oldest_event_ts` | string \| null | 保持中の最古 event timestamp。event がない場合または database 内容を読めない場合は null |
-\g<0>| `store.retired_plaintext` | string[] | 暗号化へのアップグレード時に退避した平文ストアのうち、読み取りがまだ含めているもの（古い順）。保持期間を外れると空になります。人間向け出力では `PREVIOUS STORE` 行として表示。読めないものはスキップし `degraded.retired_store` に報告します |
+| `store.encryption` | `"sqlcipher"` \| `"plaintext"` \| null | 暗号化されたストアは `sqlcipher`。暗号化以前に書かれたストアは `plaintext` で、recorder が次回起動時に退避する。ストアがない、または読めない場合は null |
+| `store.retired_plaintext` | string[] | 暗号化へのアップグレード時に退避した平文ストアのうち、読み取りがまだ含めているもの（古い順）。保持期間を外れると空になります。人間向け出力では `PREVIOUS STORE` 行として表示。読めないものはスキップし `degraded.retired_store` に報告します |
 | `capture.sources` | `string[]` | 現在の設定の source。null にならない |
 | `capture.text_content` | boolean | 現在の設定の text-content opt-in。null にならない |
 | `permissions_ok` | boolean | 現在の owner と instance が一致する fresh heartbeat の permission snapshot があればその値。snapshot がない場合、または heartbeat が stale・future・missing な場合はローカル probe。null にならない |

@@ -288,7 +288,8 @@ The JSON object always has the following fields. `integer` values are non-negati
 | `store.size_bytes` | integer \| null | File size when metadata is available; null when unavailable or the file does not exist |
 | `store.retention_hours` | integer \| null | With a readable store, the recorder's value when its matching heartbeat is fresh, otherwise the current configuration value. Null when database contents cannot be read |
 | `store.oldest_event_ts` | string \| null | Oldest retained event timestamp; null when there are no events or database contents cannot be read |
-\g<0>| `store.retired_plaintext` | string[] | Plaintext stores set aside at the encryption upgrade that reads still include, oldest first; empty once they have aged out. Human-readable output shows each as a `PREVIOUS STORE` line. One that cannot be read is skipped and reported under `degraded.retired_store` |
+| `store.encryption` | `"sqlcipher"` \| `"plaintext"` \| null | `sqlcipher` for an encrypted store; `plaintext` for a store written before encryption existed, which the recorder sets aside on its next start; null when the store is missing or unreadable |
+| `store.retired_plaintext` | string[] | Plaintext stores set aside at the encryption upgrade that reads still include, oldest first; empty once they have aged out. Human-readable output shows each as a `PREVIOUS STORE` line. One that cannot be read is skipped and reported under `degraded.retired_store` |
 | `capture.sources` | `string[]` | Sources from the current configuration. Never null |
 | `capture.text_content` | boolean | Text-content opt-in from the current configuration. Never null |
 | `permissions_ok` | boolean | Available permission snapshot from a fresh heartbeat whose instance matches the current owner; otherwise, including when the snapshot is absent or the heartbeat is stale, future, or missing, a local probe. Never null |

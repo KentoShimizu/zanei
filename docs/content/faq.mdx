@@ -113,7 +113,7 @@ After `brew upgrade`, run `zanei stop && zanei start` to switch the recorder to 
 
 Stores written by earlier versions are plaintext SQLite. The recorder never rewrites such a file. On the first `zanei start` after upgrading it renames the old store to `store.sqlite.plaintext-<timestamp>` next to the new, encrypted `store.sqlite`, and logs `zanei: kept the previous plaintext store as …`. Every read — `zanei query`, `zanei timeline`, `zanei export`, and the MCP server — returns the events from both files as one history, so nothing recorded before the upgrade disappears from your timeline. `zanei status` lists the set-aside file under `store.retired_plaintext`.
 
-The set-aside file stays plaintext. It only holds events older than the moment it was set aside, so the recorder deletes it as soon as that moment leaves the retention window (`output.retention_hours`, 48 hours by default); a longer retention keeps it longer, a shorter one removes it sooner. `zanei purge --all` deletes it immediately, and so does deleting the file yourself.
+The set-aside file stays plaintext. It only holds events older than the moment it was set aside, so the recorder deletes it as soon as that moment leaves the retention window (`output.retention_hours`, 48 hours by default); a longer retention keeps it longer, a shorter one removes it sooner. Until then, events inside it that leave the window are purged from it on the same schedule as the live store. An active `zanei pause` and the event counters carry over to the new store. `zanei purge --all` deletes it immediately, and so does deleting the file yourself.
 
 ## `zanei start` fails with `Bootstrap failed: 5: Input/output error`
 

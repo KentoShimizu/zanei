@@ -30,9 +30,31 @@ pub struct RetiredPlaintext {
     pub set_aside_at: OffsetDateTime,
 }
 
+/// The file a store path really names: symlinks are followed, so a store
+/// reached through a link keeps its set-aside siblings next to the real file
+/// and the link itself is never renamed. The result is canonical whether or
+/// not the store file exists yet, so listings agree before and after a store
+/// is created.
+pub(super) fn resolve_store_path(store_path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(store_path) {
+        return real;
+    }
+    // The file may not exist yet (or the link may dangle); the directory does.
+    let parent = store_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    match (fs::canonicalize(parent), store_path.file_name()) {
+        (Ok(real_parent), Some(name)) => real_parent.join(name),
+        _ => store_path.to_path_buf(),
+    }
+}
+
 /// Lists the set-aside plaintext stores next to `store_path`, oldest first.
 /// Companion `-wal` / `-shm` files are not stores and are left out.
 pub fn retired_plaintext_stores(store_path: &Path) -> Result<Vec<RetiredPlaintext>, StoreError> {
+    let store_path = resolve_store_path(store_path);
+    let store_path = store_path.as_path();
     let Some(store_name) = store_path.file_name().and_then(OsStr::to_str) else {
         return Ok(Vec::new());
     };
@@ -81,7 +103,13 @@ fn parse_retired_name(store_name: &str, candidate: &str) -> Option<OffsetDateTim
         return None;
     }
     let (timestamp, tail) = rest.split_at(TIMESTAMP_LENGTH);
-    if !tail.is_empty() && !tail.starts_with('-') {
+    // Only the recorder's own collision suffix (`-1`, `-2`, …) is accepted. Any
+    // other tail is a file the user made (`-backup`) and must never be touched.
+    let generated_suffix = match tail.strip_prefix('-') {
+        None => tail.is_empty(),
+        Some(digits) => !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()),
+    };
+    if !generated_suffix {
         return None;
     }
     parse_timestamp(timestamp)
@@ -121,11 +149,15 @@ mod write {
     use rusqlite::Connection;
     use time::OffsetDateTime;
 
+    use super::resolve_store_path;
     use super::{
         COMPANION_SUFFIXES, MAX_NAME_ATTEMPTS, RETIRED_INFIX, RetiredPlaintext, format_timestamp,
         parse_timestamp, remove_retired, retired_plaintext_stores,
     };
-    use crate::store::{StoreError, StoreFormat, retention_boundary, sibling, store_uri};
+    use crate::store::{
+        StoreError, StoreFormat, StoreWriter, retention_boundary, retention_cutoff, sibling,
+        store_uri,
+    };
 
     /// Renames the plaintext store at `store_path` (and its WAL companions) to
     /// `<store>.plaintext-<timestamp>` so a fresh encrypted store can take its
@@ -138,6 +170,10 @@ mod write {
         if StoreFormat::probe(store_path)? != StoreFormat::Plaintext {
             return Ok(None);
         }
+        // Work on the real file: a symlinked store keeps its link, which then
+        // points at the fresh encrypted store created in the target's place.
+        let store_path = resolve_store_path(store_path);
+        let store_path = store_path.as_path();
         // Fold the WAL into the main file so the set-aside store is one file;
         // leftover companions are renamed along with it below.
         {
@@ -186,19 +222,30 @@ mod write {
         }))
     }
 
-    /// Deletes set-aside stores whose timestamp has left the retention window,
-    /// since every event inside them is older than that. Returns what was removed.
+    /// Applies retention to set-aside stores: a store whose timestamp has left
+    /// the window is deleted outright (every event inside is older than that),
+    /// and the events that have expired inside a newer one are purged, so a
+    /// store that sat idle before the upgrade does not keep expired rows
+    /// readable in plaintext. Returns the files that were removed.
     pub fn purge_retired_plaintext(
         store_path: &Path,
         now: OffsetDateTime,
         retention_hours: u64,
     ) -> Result<Vec<RetiredPlaintext>, StoreError> {
         let boundary = retention_boundary(now, retention_hours)?;
+        let cutoff = retention_cutoff(now, retention_hours)?;
         let mut removed = Vec::new();
         for retired in retired_plaintext_stores(store_path)? {
             if retired.set_aside_at < boundary {
                 remove_retired(&retired)?;
                 removed.push(retired);
+                continue;
+            }
+            // Probe before opening: this process holds no connection to the
+            // retired file yet, so the lock rule from `StoreFormat::probe` holds.
+            if StoreFormat::probe(&retired.path)? == StoreFormat::Plaintext {
+                StoreWriter::open_known(&retired.path, StoreFormat::Plaintext, None)?
+                    .purge_before(&cutoff)?;
             }
         }
         Ok(removed)
@@ -246,6 +293,22 @@ mod tests {
         assert!(parse_retired_name("store.sqlite", "store.sqlite.plaintext-garbage").is_none());
         assert!(
             parse_retired_name("store.sqlite", "store.sqlite.plaintext-20260823T031500Zx")
+                .is_none()
+        );
+        assert!(
+            parse_retired_name(
+                "store.sqlite",
+                "store.sqlite.plaintext-20260823T031500Z-backup"
+            )
+            .is_none(),
+            "a user's copy must never be mistaken for a generated name"
+        );
+        assert!(
+            parse_retired_name("store.sqlite", "store.sqlite.plaintext-20260823T031500Z-")
+                .is_none()
+        );
+        assert!(
+            parse_retired_name("store.sqlite", "store.sqlite.plaintext-20260823T031500Z-1x")
                 .is_none()
         );
     }

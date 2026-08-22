@@ -176,7 +176,21 @@ impl KeyStore for FileKeyStore {
         }
     }
 
+    /// Writes the key to a private temporary file in the same directory, syncs
+    /// it, and links it into place. The final name therefore never holds a
+    /// half-written key, and two creators racing each other cannot both win:
+    /// the link fails with `AlreadyExists` for the loser, who then adopts the
+    /// winner's key.
     fn store(&self, key: &StoreKey) -> Result<(), KeyStoreError> {
+        let unavailable = |operation: &str, error: io::Error| {
+            KeyStoreError::Unavailable(format!(
+                "failed to {operation} the store key file {}: {error}",
+                self.path.display()
+            ))
+        };
+        let mut staging = self.path.as_os_str().to_os_string();
+        staging.push(format!(".tmp-{}", std::process::id()));
+        let staging = PathBuf::from(staging);
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -184,26 +198,23 @@ impl KeyStore for FileKeyStore {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = match options.open(&self.path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(KeyStoreError::AlreadyExists);
-            }
-            Err(error) => {
-                return Err(KeyStoreError::Unavailable(format!(
-                    "failed to create the store key file {}: {error}",
-                    self.path.display()
-                )));
-            }
-        };
-        writeln!(file, "{}", key.to_hex().as_str())
-            .and_then(|()| file.sync_all())
-            .map_err(|error| {
-                KeyStoreError::Unavailable(format!(
-                    "failed to write the store key file {}: {error}",
-                    self.path.display()
-                ))
+        let written = options
+            .open(&staging)
+            .map_err(|error| unavailable("create", error))
+            .and_then(|mut file| {
+                writeln!(file, "{}", key.to_hex().as_str())
+                    .and_then(|()| file.sync_all())
+                    .map_err(|error| unavailable("write", error))
             })
+            .and_then(|()| match fs::hard_link(&staging, &self.path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    Err(KeyStoreError::AlreadyExists)
+                }
+                Err(error) => Err(unavailable("publish", error)),
+            });
+        let _ = fs::remove_file(&staging);
+        written
     }
 
     fn delete(&self) -> Result<bool, KeyStoreError> {

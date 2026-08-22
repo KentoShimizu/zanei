@@ -20,6 +20,9 @@ use super::{
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
+/// SQLite allows ten attached databases by default; the live store is `main`,
+/// so at most this many set-aside stores are attached and the rest are skipped.
+const MAX_ATTACHED_RETIRED: usize = 9;
 
 pub struct StoreReader {
     connection: Connection,
@@ -92,6 +95,13 @@ impl StoreReader {
     /// out of retention.
     fn attach_retired(&mut self, store_path: &Path) -> Result<(), StoreError> {
         for candidate in retired_plaintext_stores(store_path)? {
+            if self.retired.len() >= MAX_ATTACHED_RETIRED {
+                self.skip_retired(
+                    candidate.path,
+                    format!("more than {MAX_ATTACHED_RETIRED} set-aside stores; not attached"),
+                );
+                continue;
+            }
             // Probing opens the retired file only, never the live store, so the
             // lock rule from `StoreFormat::probe` is respected.
             let format = match StoreFormat::probe(&candidate.path) {

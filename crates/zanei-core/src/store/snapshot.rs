@@ -57,7 +57,11 @@ pub fn export_plain_sqlite(
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    let mut sources = Vec::new();
+    snapshot.execute_batch(STORE_TABLES)?;
+    let conditions = RangeConditions::new(&cutoff, since.as_deref(), until.as_deref());
+
+    // Sources are attached one at a time: SQLite allows ten attached databases,
+    // and the number of set-aside stores is not bounded.
     let source_uri = file_uri(store, "mode=ro")?;
     match key {
         Some(key) => snapshot.execute(
@@ -66,67 +70,69 @@ pub fn export_plain_sqlite(
         )?,
         None => snapshot.execute("ATTACH DATABASE ?1 AS src", [source_uri])?,
     };
-    sources.push("src".to_owned());
-    for (index, retired) in retired_plaintext_stores(store)?.into_iter().enumerate() {
+    let main_copy = snapshot
+        .execute(
+            "UPDATE meta SET schema_version = (SELECT schema_version FROM src.meta)",
+            [],
+        )
+        .map_err(StoreError::from)
+        .and_then(|_| copy_events(&snapshot, "src", &conditions));
+    snapshot.execute_batch("DETACH DATABASE src;")?;
+    let mut events = main_copy?;
+
+    for retired in retired_plaintext_stores(store)? {
         if StoreFormat::probe(&retired.path)? != StoreFormat::Plaintext {
             continue;
         }
-        let alias = format!("retired{index}");
         // `KEY ''` keeps SQLCipher from applying any key to this plaintext file.
         snapshot.execute(
-            &format!("ATTACH DATABASE ?1 AS {alias} KEY ''"),
+            "ATTACH DATABASE ?1 AS retired KEY ''",
             [file_uri(&retired.path, "mode=ro")?],
         )?;
-        sources.push(alias);
+        let copied = copy_events(&snapshot, "retired", &conditions);
+        snapshot.execute_batch("DETACH DATABASE retired;")?;
+        events += copied?;
     }
-    let result = copy_range(
-        &snapshot,
-        &sources,
-        &cutoff,
-        since.as_deref(),
-        until.as_deref(),
-    );
-    for alias in sources.iter().rev() {
-        snapshot.execute_batch(&format!("DETACH DATABASE {alias};"))?;
-    }
-    let events = result?;
     Ok(SnapshotReport { events })
 }
 
-fn copy_range(
+struct RangeConditions {
+    sql: String,
+    parameters: Vec<SqlValue>,
+}
+
+impl RangeConditions {
+    fn new(cutoff: &str, since: Option<&str>, until: Option<&str>) -> Self {
+        let mut conditions = vec!["ts >= ?".to_owned()];
+        let mut parameters = vec![SqlValue::Text(cutoff.to_owned())];
+        if let Some(since) = since {
+            conditions.push("ts >= ?".to_owned());
+            parameters.push(SqlValue::Text(since.to_owned()));
+        }
+        if let Some(until) = until {
+            conditions.push("ts <= ?".to_owned());
+            parameters.push(SqlValue::Text(until.to_owned()));
+        }
+        Self {
+            sql: conditions.join(" AND "),
+            parameters,
+        }
+    }
+}
+
+fn copy_events(
     snapshot: &Connection,
-    sources: &[String],
-    cutoff: &str,
-    since: Option<&str>,
-    until: Option<&str>,
+    alias: &str,
+    conditions: &RangeConditions,
 ) -> Result<u64, StoreError> {
-    snapshot.execute_batch(STORE_TABLES)?;
-    snapshot.execute(
-        "UPDATE meta SET schema_version = (SELECT schema_version FROM src.meta)",
-        [],
-    )?;
-    let mut conditions = vec!["ts >= ?".to_owned()];
-    let mut parameters = vec![SqlValue::Text(cutoff.to_owned())];
-    if let Some(since) = since {
-        conditions.push("ts >= ?".to_owned());
-        parameters.push(SqlValue::Text(since.to_owned()));
-    }
-    if let Some(until) = until {
-        conditions.push("ts <= ?".to_owned());
-        parameters.push(SqlValue::Text(until.to_owned()));
-    }
-    let mut inserted = 0_u64;
-    for alias in sources {
-        let sql = format!(
-            "INSERT INTO events(id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
-             window_title, window_id, element_json, data_json, redaction_json) \
-             SELECT id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
-             window_title, window_id, element_json, data_json, redaction_json \
-             FROM {alias}.events WHERE {}",
-            conditions.join(" AND ")
-        );
-        let count = snapshot.execute(&sql, params_from_iter(parameters.iter()))?;
-        inserted += u64::try_from(count).map_err(|_| StoreError::NumericOverflow("events"))?;
-    }
-    Ok(inserted)
+    let sql = format!(
+        "INSERT INTO events(id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
+         window_title, window_id, element_json, data_json, redaction_json) \
+         SELECT id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
+         window_title, window_id, element_json, data_json, redaction_json \
+         FROM {alias}.events WHERE {}",
+        conditions.sql
+    );
+    let count = snapshot.execute(&sql, params_from_iter(conditions.parameters.iter()))?;
+    u64::try_from(count).map_err(|_| StoreError::NumericOverflow("events"))
 }

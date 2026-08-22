@@ -113,7 +113,7 @@ security delete-generic-password -s dev.zanei.store
 
 以前のバージョンが書いたストアは平文の SQLite です。recorder はこのファイルを書き換えません。アップグレード後に最初に `zanei start` したとき、旧ストアを `store.sqlite.plaintext-<日時>` という名前に変えて新しい暗号化ストア `store.sqlite` の隣に残し、`zanei: kept the previous plaintext store as …` とログに出します。`zanei query`・`zanei timeline`・`zanei export`・MCP サーバーのすべての読み取りは、両方のファイルのイベントを一つの履歴として返すので、アップグレード前に記録したものがタイムラインから消えることはありません。`zanei status` は退避したファイルを `store.retired_plaintext` に表示します。
 
-退避したファイルは平文のままです。中身は退避した時点より前のイベントだけなので、その時点が保持期間（`output.retention_hours`、既定 48 時間）を外れた時点で recorder がファイルごと削除します。保持期間が長ければ長く残り、短ければ早く消えます。`zanei purge --all` はすぐに削除し、ファイルを自分で削除しても構いません。
+退避したファイルは平文のままです。中身は退避した時点より前のイベントだけなので、その時点が保持期間（`output.retention_hours`、既定 48 時間）を外れた時点で recorder がファイルごと削除します。保持期間が長ければ長く残り、短ければ早く消えます。それまでの間も、保持期間を外れたイベントは稼働中のストアと同じタイミングでファイル内から削除されます。`zanei pause` 中であればその状態とイベント数のカウンタは新しいストアに引き継がれます。`zanei purge --all` はすぐに削除し、ファイルを自分で削除しても構いません。
 
 ## `zanei start` で `Bootstrap failed: 5: Input/output error` が表示されます
 

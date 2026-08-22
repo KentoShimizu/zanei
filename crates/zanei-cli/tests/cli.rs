@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use zanei_core::config::Config;
 use zanei_core::normalize::normalize;
 use zanei_core::schema::{App, EmptyData, EventData, KNOWN_EVENT_TYPES, RawEvent};
-use zanei_core::store::{QueryFilter, StoreFormat, StoreReader, StoreWriter};
+use zanei_core::store::{DaemonState, QueryFilter, StoreFormat, StoreReader, StoreWriter};
 use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
 
 mod support;
@@ -1165,8 +1165,16 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
     )
     .expect("normalize legacy fixture");
     StoreWriter::open(&store)
-        .and_then(|mut writer| writer.append(&legacy))
-        .expect("plaintext legacy store");
+        .and_then(|mut writer| {
+            writer.append(&legacy)?;
+            // An indefinite pause must survive the upgrade.
+            writer.write_daemon_state(&DaemonState {
+                paused_until: Some("infinity".to_owned()),
+                events_captured: 1,
+                ..DaemonState::default()
+            })
+        })
+        .expect("paused plaintext legacy store");
 
     let mut child = spawn_foreground_daemon(&config, &store);
     wait_for_daemon_ready(&mut child, &store);
@@ -1213,10 +1221,18 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
     assert!(status.status.success());
     let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");
     assert_eq!(value["state"], "running");
+    assert_eq!(
+        value["paused"], true,
+        "the pause carried over to the new store"
+    );
     assert_eq!(value["store"]["encryption"], "sqlcipher");
     assert_eq!(
         value["store"]["retired_plaintext"][0],
-        retired[0].display().to_string()
+        fs::canonicalize(&retired[0])
+            .expect("canonical retired path")
+            .display()
+            .to_string(),
+        "status lists the set-aside store by its real path"
     );
     #[cfg(unix)]
     {

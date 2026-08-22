@@ -196,6 +196,38 @@ impl StoreWriter {
         Ok(())
     }
 
+    /// Carries the parts of the previous store's daemon state that outlive a
+    /// store swap into this one: an active pause request (so an upgrade never
+    /// silently resumes recording), the cumulative counters, the last event
+    /// time, collector failure history, and the last permission report. The
+    /// recorder identity and heartbeat are left to the next heartbeat.
+    pub fn adopt_daemon_state(&self, previous: &super::StoreStatus) -> Result<(), StoreError> {
+        validate_paused_until(previous.paused_until.as_deref())?;
+        validate_optional_timestamp("last_event_ts", previous.last_event_ts.as_deref())?;
+        let events_captured = signed("events_captured", previous.events_captured)?;
+        let events_dropped = signed("events_dropped", previous.events_dropped)?;
+        let collector_failures_json = serialize_collector_failures(&previous.collector_failures)?;
+        let last_known_permissions_json = previous
+            .last_known_permissions
+            .as_ref()
+            .map(serialize_permissions)
+            .transpose()?;
+        self.connection.execute(
+            "UPDATE daemon_state SET paused_until = ?1, events_captured = ?2, \
+             events_dropped = ?3, last_event_ts = ?4, collector_failures_json = ?5, \
+             last_known_permissions_json = ?6 WHERE id = 1",
+            params![
+                previous.paused_until,
+                events_captured,
+                events_dropped,
+                previous.last_event_ts,
+                collector_failures_json,
+                last_known_permissions_json,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn increment_events_dropped(&self, count: u64) -> Result<(), StoreError> {
         let count = signed("events_dropped", count)?;
         self.connection.execute(

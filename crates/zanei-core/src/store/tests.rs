@@ -1302,7 +1302,10 @@ fn retired_stores_leave_with_the_retention_window_and_unreadable_ones_are_skippe
     let reader = StoreReader::open_with_key(database.path(), Some(&key)).expect("reader");
     assert_eq!(reader.retired_stores(), std::slice::from_ref(&retired));
     assert_eq!(reader.skipped_retired().len(), 1);
-    assert_eq!(reader.skipped_retired()[0].path, garbage);
+    assert_eq!(
+        reader.skipped_retired()[0].path,
+        std::fs::canonicalize(&garbage).expect("canonical garbage path")
+    );
     assert!(
         reader
             .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
@@ -1382,4 +1385,226 @@ fn plaintext_snapshot_includes_set_aside_stores_and_takes_the_output_path_litera
         vec![old, new]
     );
     remove_retired(&retired).expect("remove retired");
+}
+
+#[cfg(unix)]
+#[test]
+fn set_aside_follows_a_symlinked_store_and_keeps_the_link() {
+    let target = TestDatabase::new("retire-symlink-target");
+    let link = TestDatabase::new("retire-symlink-link");
+    let old = app_launch(
+        "evt_01K00000000000000000000901",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    StoreWriter::open(target.path())
+        .and_then(|mut writer| writer.append(&old))
+        .expect("plaintext target store");
+    std::os::unix::fs::symlink(target.path(), link.path()).expect("symlink to the store");
+    let at = OffsetDateTime::parse("2026-08-23T00:00:00Z", &Rfc3339).expect("time");
+
+    let retired = set_aside_plaintext(link.path(), at)
+        .expect("set aside through the link")
+        .expect("set aside");
+    let real_parent = std::fs::canonicalize(target.path().parent().expect("target directory"))
+        .expect("canonical target directory");
+    assert_eq!(
+        retired.path.parent(),
+        Some(real_parent.as_path()),
+        "the set-aside file sits next to the real target"
+    );
+    assert!(
+        retired
+            .path
+            .file_name()
+            .expect("retired file name")
+            .to_string_lossy()
+            .starts_with(
+                &*target
+                    .path()
+                    .file_name()
+                    .expect("target name")
+                    .to_string_lossy()
+            ),
+        "the real file is what gets set aside"
+    );
+    assert!(!target.path().exists());
+    assert!(
+        std::fs::symlink_metadata(link.path())
+            .expect("link metadata")
+            .file_type()
+            .is_symlink(),
+        "the link itself is untouched"
+    );
+
+    let key = StoreKey::generate().expect("generate key");
+    let new = browser_navigate("evt_01K00000000000000000000902", "2026-08-16T09:01:00.000Z");
+    StoreWriter::open_with_key(link.path(), Some(&key))
+        .and_then(|mut writer| writer.append(&new))
+        .expect("new store created through the link");
+    assert_eq!(
+        StoreFormat::probe(target.path()).expect("probe target"),
+        StoreFormat::Encrypted,
+        "the link now points at the encrypted store"
+    );
+    let reader = StoreReader::open_with_key(link.path(), Some(&key)).expect("reader via link");
+    assert_eq!(reader.retired_stores(), std::slice::from_ref(&retired));
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("merged query via link"),
+        vec![old, new]
+    );
+    drop(reader);
+    remove_retired(&retired).expect("remove retired");
+}
+
+#[test]
+fn set_aside_store_state_is_adopted_by_the_new_store() {
+    let database = TestDatabase::new("retire-adopt");
+    StoreWriter::open(database.path())
+        .and_then(|writer| {
+            writer.write_daemon_state(&DaemonState {
+                paused_until: Some("infinity".to_owned()),
+                events_captured: 7,
+                events_dropped: 2,
+                last_event_ts: Some("2026-08-16T09:00:00.000Z".to_owned()),
+                collector_failures: BTreeMap::from([("eventtap".to_owned(), 3)]),
+                permissions: Some(DaemonPermissions {
+                    permissions_ok: false,
+                    accessibility: PermissionState::Granted,
+                    input_monitoring: PermissionState::Denied,
+                    automation: BTreeMap::new(),
+                }),
+                ..DaemonState::default()
+            })
+        })
+        .expect("paused plaintext store");
+    let at = OffsetDateTime::parse("2026-08-23T00:00:00Z", &Rfc3339).expect("time");
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("set aside");
+    let key = StoreKey::generate().expect("generate key");
+    let writer = StoreWriter::open_with_key(database.path(), Some(&key)).expect("new store");
+    let previous = StoreReader::open_known(&retired.path, StoreFormat::Plaintext, None)
+        .expect("open previous store")
+        .status()
+        .expect("previous status");
+    writer
+        .adopt_daemon_state(&previous)
+        .expect("adopt previous state");
+    drop(writer);
+
+    let status = StoreReader::open_with_key(database.path(), Some(&key))
+        .expect("reader")
+        .status()
+        .expect("status");
+    assert_eq!(status.paused_until.as_deref(), Some("infinity"));
+    assert_eq!(status.events_captured, 7);
+    assert_eq!(status.events_dropped, 2);
+    assert_eq!(
+        status.last_event_ts.as_deref(),
+        Some("2026-08-16T09:00:00.000Z")
+    );
+    assert_eq!(status.collector_failures.get("eventtap"), Some(&3));
+    assert_eq!(
+        status
+            .last_known_permissions
+            .as_ref()
+            .map(|permissions| permissions.input_monitoring),
+        Some(PermissionState::Denied)
+    );
+    assert!(!status.running);
+    remove_retired(&retired).expect("remove retired");
+}
+
+#[test]
+fn retention_purges_expired_rows_inside_a_kept_set_aside_store() {
+    let database = TestDatabase::new("retire-rows");
+    let old = app_launch(
+        "evt_01K00000000000000000001001",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| writer.append(&old))
+        .expect("plaintext store");
+    let at = OffsetDateTime::now_utc();
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("set aside");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key)).expect("new store");
+
+    let removed = purge_retired_plaintext(database.path(), at + time::Duration::minutes(10), 1)
+        .expect("purge");
+    assert!(
+        removed.is_empty(),
+        "the file itself is still within retention"
+    );
+    assert!(retired.path.exists());
+    let remaining: i64 = rusqlite::Connection::open(&retired.path)
+        .expect("open retired store")
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(
+        remaining, 0,
+        "expired rows are gone from the plaintext file"
+    );
+    remove_retired(&retired).expect("remove retired");
+}
+
+#[test]
+fn many_set_aside_stores_are_exported_but_only_nine_are_attached_for_reads() {
+    let database = TestDatabase::new("retire-many");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key)).expect("encrypted store");
+    for index in 0..11 {
+        let name = format!(
+            "{}.plaintext-20260823T0000{index:02}Z",
+            database.path().display()
+        );
+        StoreWriter::open(&name)
+            .and_then(|mut writer| {
+                writer.append(&app_launch(
+                    &format!("evt_01K0000000000000000000{:04}", 1100 + index),
+                    &format!("2026-08-16T09:{index:02}:00.000Z"),
+                    "Safari",
+                    "com.apple.Safari",
+                ))
+            })
+            .expect("set-aside store");
+    }
+
+    let reader = StoreReader::open_with_key(database.path(), Some(&key)).expect("reader");
+    assert_eq!(reader.retired_stores().len(), 9);
+    assert_eq!(reader.skipped_retired().len(), 2);
+    assert!(reader.skipped_retired()[0].reason.contains("more than 9"));
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("merged query")
+            .len(),
+        9
+    );
+    drop(reader);
+
+    let snapshot = TestDatabase::new("retire-many-output");
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export with many set-aside stores");
+    assert_eq!(
+        report.events, 11,
+        "the snapshot copies every set-aside store"
+    );
+    for retired in retired_plaintext_stores(database.path()).expect("list") {
+        remove_retired(&retired).expect("remove retired");
+    }
 }

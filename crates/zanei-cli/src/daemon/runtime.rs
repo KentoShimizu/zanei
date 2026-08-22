@@ -104,8 +104,8 @@ pub fn run_daemon(
             main_thread_observers,
         ))
     })?;
-    writer.purge_retention(OffsetDateTime::now_utc(), config.output.retention_hours)?;
-    purge_retired_stores(
+    apply_retention(
+        &mut writer,
         store_path,
         OffsetDateTime::now_utc(),
         config.output.retention_hours,
@@ -152,12 +152,18 @@ pub fn run_daemon(
     })?
 }
 
-/// Deletes set-aside plaintext stores that have left the retention window.
-fn purge_retired_stores(
+/// Applies the retention window everywhere it matters: expired events in the
+/// live store, expired events inside set-aside plaintext stores, and set-aside
+/// stores whose timestamp has left the window (deleted whole). Every purge the
+/// recorder runs — at startup, periodically, and when retention changes — goes
+/// through here.
+fn apply_retention(
+    writer: &mut StoreWriter,
     store_path: &Path,
     now: OffsetDateTime,
     retention_hours: u64,
-) -> Result<(), DaemonError> {
+) -> Result<(), StoreError> {
+    writer.purge_retention(now, retention_hours)?;
     for retired in purge_retired_plaintext(store_path, now, retention_hours)? {
         eprintln!(
             "zanei: removed the set-aside plaintext store {} (older than the retention window)",
@@ -174,20 +180,12 @@ fn purge_retired_stores(
 /// recorder never shows key store dialogs: a locked or inaccessible key store
 /// fails the start with a message.
 fn open_encrypted_store(store_path: &Path) -> Result<(StoreWriter, StoreReader), DaemonError> {
-    let mut format = StoreFormat::probe(store_path)?;
-    if format == StoreFormat::Plaintext {
-        if let Some(retired) = set_aside_plaintext(store_path, OffsetDateTime::now_utc())? {
-            eprintln!(
-                "zanei: kept the previous plaintext store as {}; its events stay readable \
-                 next to the new encrypted store until they age out of retention",
-                retired.path.display()
-            );
-        }
-        format = StoreFormat::Missing;
-    }
+    let format = StoreFormat::probe(store_path)?;
     // An encrypted store only ever gets its existing key: generating a fresh one
     // would turn "key missing" into "key mismatch" and collide with the original
-    // item if it is restored later. A new store gets a key created for it.
+    // item if it is restored later. A new or plaintext store gets a key created.
+    // The key comes first so a locked or denied key store leaves a plaintext
+    // store exactly where it was, still readable by every command.
     let key = match format {
         StoreFormat::Encrypted => Some(
             store_access::load_store_key(KeyAccess::Existing, KeyPrompt::Suppressed)?
@@ -200,10 +198,30 @@ fn open_encrypted_store(store_path: &Path) -> Result<(StoreWriter, StoreReader),
         // Let the open below report the damage instead of touching any key.
         StoreFormat::Unrecognized => None,
     };
+    let (format, retired) = if format == StoreFormat::Plaintext {
+        let retired = set_aside_plaintext(store_path, OffsetDateTime::now_utc())?;
+        if let Some(retired) = &retired {
+            eprintln!(
+                "zanei: kept the previous plaintext store as {}; its events stay readable \
+                 next to the new encrypted store until they age out of retention",
+                retired.path.display()
+            );
+        }
+        (StoreFormat::Missing, retired)
+    } else {
+        (format, None)
+    };
     // The format was probed before any connection existed; probing again while
     // the writer is open would drop its WAL-mode file lock (see
     // `StoreFormat::probe`).
     let writer = StoreWriter::open_known(store_path, format, key.as_ref())?;
+    if let Some(retired) = &retired {
+        // An active pause, the counters, and the last permission report belong
+        // to the user, not to the file: carry them into the new store.
+        let previous =
+            StoreReader::open_known(&retired.path, StoreFormat::Plaintext, None)?.status()?;
+        writer.adopt_daemon_state(&previous)?;
+    }
     let reader = StoreReader::open_known(store_path, writer.format(), key.as_ref())?;
     restrict_store_permissions(store_path)?;
     Ok((writer, reader))
@@ -344,11 +362,12 @@ impl ActiveDaemon<'_> {
         let Some(retention_hours) = self.pending_retention_hours else {
             return Ok(false);
         };
-        let purge_result = lock_writer(self.writer)?
-            .purge_retention(now, retention_hours)
-            .and_then(|deleted| {
-                purge_retired_plaintext(self.store_path, now, retention_hours).map(|_| deleted)
-            });
+        let purge_result = apply_retention(
+            &mut *lock_writer(self.writer)?,
+            self.store_path,
+            now,
+            retention_hours,
+        );
         match purge_result {
             Ok(_) => {
                 self.active_retention_hours = retention_hours;
@@ -366,12 +385,12 @@ impl ActiveDaemon<'_> {
     }
 
     fn purge_active_retention(&mut self, now: OffsetDateTime) -> Result<(), DaemonError> {
-        let purge_result = lock_writer(self.writer)?
-            .purge_retention(now, self.active_retention_hours)
-            .and_then(|deleted| {
-                purge_retired_plaintext(self.store_path, now, self.active_retention_hours)
-                    .map(|_| deleted)
-            });
+        let purge_result = apply_retention(
+            &mut *lock_writer(self.writer)?,
+            self.store_path,
+            now,
+            self.active_retention_hours,
+        );
         match purge_result {
             Ok(_) if self.pending_retention_hours.is_none() => {
                 self.degraded.remove("retention");
