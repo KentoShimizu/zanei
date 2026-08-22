@@ -28,38 +28,34 @@ pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliErr
             OffsetDateTime::now_utc(),
         )?))
     };
-    if !store_path
+    // The live store and the set-aside plaintext stores are purged
+    // independently: either may exist without the other (a set-aside store
+    // outlives a crash before the encrypted store was created), and none of
+    // them is created just to be purged.
+    let live_store_exists = store_path
         .try_exists()
-        .map_err(|source| CliError::io(store_path, source))?
-    {
-        if !quiet {
-            println!("Purged 0 events");
-        }
-        return Ok(EXIT_SUCCESS);
+        .map_err(|source| CliError::io(store_path, source))?;
+    let retired = retired_plaintext_stores(store_path)?;
+    let mut deleted = 0;
+    if live_store_exists {
+        let mut writer =
+            store_access::open_writer(store_path, KeyAccess::Existing, KeyPrompt::Allowed)?;
+        deleted += match cutoff.as_deref() {
+            Some(cutoff) => writer.purge_before(cutoff)?,
+            None => writer.purge_all()?,
+        };
     }
-    let mut writer =
-        store_access::open_writer(store_path, KeyAccess::Existing, KeyPrompt::Allowed)?;
-    // Set-aside plaintext stores hold events too: purge them the same way, and
-    // drop the whole file when everything goes.
-    let deleted = match cutoff {
-        Some(cutoff) => {
-            let mut deleted = writer.purge_before(&cutoff)?;
-            for retired in retired_plaintext_stores(store_path)? {
-                deleted += StoreWriter::open(&retired.path)?.purge_before(&cutoff)?;
-            }
-            deleted
-        }
-        None => {
-            let mut deleted = writer.purge_all()?;
-            for retired in retired_plaintext_stores(store_path)? {
+    for retired in retired {
+        match cutoff.as_deref() {
+            Some(cutoff) => deleted += StoreWriter::open(&retired.path)?.purge_before(cutoff)?,
+            None => {
                 deleted += StoreWriter::open(&retired.path)
                     .and_then(|mut retired_writer| retired_writer.purge_all())
                     .unwrap_or(0);
                 remove_retired(&retired)?;
             }
-            deleted
         }
-    };
+    }
     if !quiet {
         println!("Purged {deleted} events");
     }

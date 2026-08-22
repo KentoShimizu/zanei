@@ -70,13 +70,9 @@ pub fn export_plain_sqlite(
         )?,
         None => snapshot.execute("ATTACH DATABASE ?1 AS src", [source_uri])?,
     };
-    let main_copy = snapshot
-        .execute(
-            "UPDATE meta SET schema_version = (SELECT schema_version FROM src.meta)",
-            [],
-        )
-        .map_err(StoreError::from)
-        .and_then(|_| copy_events(&snapshot, "src", &conditions));
+    // The snapshot's tables were just created at the current schema version,
+    // which is what `meta` already says; a source's older version is not copied.
+    let main_copy = copy_events(&snapshot, "src", &conditions);
     snapshot.execute_batch("DETACH DATABASE src;")?;
     let mut events = main_copy?;
 

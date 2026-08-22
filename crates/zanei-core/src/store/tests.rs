@@ -1193,6 +1193,12 @@ fn set_aside_renames_the_plaintext_store_and_readers_merge_it_back() {
         .expect("a plaintext store is set aside");
     assert!(!database.path().exists());
     assert!(retired.path.exists());
+    for suffix in ["-wal", "-shm"] {
+        assert!(
+            !PathBuf::from(format!("{}{suffix}", database.path().display())).exists(),
+            "nothing is left under the live store's name"
+        );
+    }
     assert_eq!(retired.set_aside_at, at);
     assert!(
         retired
@@ -1607,4 +1613,41 @@ fn many_set_aside_stores_are_exported_but_only_nine_are_attached_for_reads() {
     for retired in retired_plaintext_stores(database.path()).expect("list") {
         remove_retired(&retired).expect("remove retired");
     }
+}
+
+#[test]
+fn plaintext_snapshot_keeps_the_current_schema_version_for_older_sources() {
+    let database = TestDatabase::new("snapshot-legacy-version");
+    let snapshot = TestDatabase::new("snapshot-legacy-version-output");
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| {
+            writer.append(&app_launch(
+                "evt_01K00000000000000000001201",
+                "2026-08-16T09:00:00.000Z",
+                "Safari",
+                "com.apple.Safari",
+            ))
+        })
+        .expect("plaintext store");
+    rusqlite::Connection::open(database.path())
+        .expect("open store")
+        .execute("UPDATE meta SET schema_version = 4", [])
+        .expect("label the source as an older schema version");
+
+    let report = export_plain_sqlite(
+        database.path(),
+        None,
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export from an older-version source");
+    assert_eq!(report.events, 1);
+    let version: i64 = rusqlite::Connection::open(snapshot.path())
+        .expect("open snapshot")
+        .query_row("SELECT schema_version FROM meta", [], |row| row.get(0))
+        .expect("snapshot schema version");
+    assert_eq!(version, super::STORE_SCHEMA_VERSION);
+    // A write-capable open runs the schema migration; it must find nothing to do.
+    StoreWriter::open(snapshot.path()).expect("snapshot opens for writing");
 }

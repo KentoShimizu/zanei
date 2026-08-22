@@ -1257,3 +1257,55 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
     signal_child(&mut child, "TERM");
     assert!(wait_for_child(&mut child).success());
 }
+
+#[test]
+fn purge_covers_set_aside_stores_even_without_a_live_store() {
+    let fixture = Fixture::populated();
+    let directory = fixture.directory.path();
+    // Simulate a crash between setting the plaintext store aside and creating
+    // the encrypted replacement: only the set-aside file remains.
+    let retired = directory.join("store.sqlite.plaintext-20260823T000000Z");
+    StoreWriter::open(&retired)
+        .and_then(|mut writer| {
+            writer.append(
+                &normalize(
+                    RawEvent {
+                        source: "macos.workspace".to_owned(),
+                        event_type: "app.launch".to_owned(),
+                        app: App {
+                            name: "Leftover".to_owned(),
+                            bundle_id: None,
+                            pid: None,
+                        },
+                        window: None,
+                        element: None,
+                        data: EventData::AppLaunch(EmptyData::default()),
+                    },
+                    OffsetDateTime::now_utc() - time::Duration::minutes(5),
+                    1,
+                )
+                .expect("normalize leftover event"),
+            )
+        })
+        .expect("set-aside store");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", fixture.store.display()));
+    }
+    assert!(!fixture.store.exists());
+
+    let output = fixture
+        .command()
+        .args(["purge", "--all", "--quiet"])
+        .output()
+        .expect("purge output");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!retired.exists(), "purge --all removes the set-aside store");
+    assert!(
+        !fixture.store.exists(),
+        "purge must not create a live store"
+    );
+}

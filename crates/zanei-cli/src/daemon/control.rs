@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zanei_core::store::StoreStatus;
+use zanei_core::store::{StoreError, StoreStatus};
 
 use crate::store_access::KeyPrompt;
 
@@ -222,12 +222,16 @@ fn daemon_is_alive(store_path: &Path) -> Result<bool, DaemonError> {
     let Some(owner) = StoreOwnership::probe(store_path)? else {
         return Ok(false);
     };
-    // Ownership is acquired before store creation and migration. Until the reader can observe a
-    // complete heartbeat, a store read failure is a not-ready observation for this bounded wait.
-    let Ok(status) = crate::store_access::open_reader(store_path, KeyPrompt::Suppressed)
+    // Ownership is acquired before the store is created or set aside. Until the reader can
+    // observe a complete heartbeat, a store read failure is a not-ready observation for this
+    // bounded wait — except a locked store, which the recorder cannot unlock either: waiting
+    // would only let launchd relaunch it until the timeout hides the real cause.
+    let status = match crate::store_access::open_reader(store_path, KeyPrompt::Suppressed)
         .and_then(|reader| reader.status())
-    else {
-        return Ok(false);
+    {
+        Ok(status) => status,
+        Err(error @ StoreError::Locked(_)) => return Err(DaemonError::Store(error)),
+        Err(_) => return Ok(false),
     };
     Ok(owner_has_fresh_heartbeat(&owner, &status))
 }
@@ -582,5 +586,35 @@ mod tests {
         assert_eq!(crate::error::CliError::from(error).exit_code(), 1);
         assert!(bootstrap_called.get());
         assert!(!bootout_called.get());
+    }
+
+    #[test]
+    fn locked_store_aborts_the_startup_wait_instead_of_timing_out() {
+        use zanei_core::store::{LockedReason, StoreError};
+
+        let mut sleeps = 0;
+        let error = super::start_launch_agent_with(
+            false,
+            std::time::Duration::from_secs(10),
+            || Ok(()),
+            || Ok(false),
+            |_| sleeps += 1,
+            || Ok(()),
+            || {
+                Err(crate::daemon::DaemonError::Store(StoreError::Locked(
+                    LockedReason::KeyMissing,
+                )))
+            },
+        )
+        .expect_err("a locked store is not a not-ready observation");
+
+        assert!(matches!(
+            error,
+            crate::daemon::DaemonError::Store(StoreError::Locked(LockedReason::KeyMissing))
+        ));
+        assert_eq!(
+            sleeps, 0,
+            "the wait must stop at the first locked observation"
+        );
     }
 }

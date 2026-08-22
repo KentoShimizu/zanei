@@ -174,13 +174,14 @@ mod write {
         // points at the fresh encrypted store created in the target's place.
         let store_path = resolve_store_path(store_path);
         let store_path = store_path.as_path();
-        // Fold the WAL into the main file so the set-aside store is one file;
-        // leftover companions are renamed along with it below.
-        {
-            let connection = Connection::open(store_uri(store_path)?)?;
-            connection.busy_timeout(StdDuration::from_millis(5_000))?;
-            connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        }
+        // Hold the plaintext store exclusively from the checkpoint through the
+        // renames: no other process can commit to it in between, so nothing
+        // written by a concurrent `pause` / `purge` can end up in a journal
+        // named after the live store. The lock is released before the new store
+        // is created, since readers must be able to attach the set-aside file.
+        let guard = Connection::open(store_uri(store_path)?)?;
+        guard.busy_timeout(StdDuration::from_millis(5_000))?;
+        guard.execute_batch("PRAGMA locking_mode = EXCLUSIVE; PRAGMA wal_checkpoint(TRUNCATE);")?;
         let stamp = format_timestamp(now)?;
         let set_aside_at = parse_timestamp(&stamp).ok_or(StoreError::NumericOverflow("time"))?;
         let mut target = None;
@@ -215,6 +216,12 @@ mod write {
                     StoreError::io("set the plaintext store's journal aside", error)
                 })?;
             }
+        }
+        drop(guard);
+        // Nothing may be left under the live store's name for the encrypted
+        // store to mistake for its own journal.
+        for suffix in COMPANION_SUFFIXES {
+            crate::store::remove_if_exists(&sibling(store_path, suffix))?;
         }
         Ok(Some(RetiredPlaintext {
             path: target,
