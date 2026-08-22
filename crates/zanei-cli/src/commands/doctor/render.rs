@@ -57,6 +57,7 @@ pub(super) fn render_human(
             "\n(probed from this process — start the recorder to see its own permissions)\n",
         );
     }
+    output.push_str(&format!("Store key: {}\n", report.store_key.describe()));
 
     let automation_pending = report
         .permissions

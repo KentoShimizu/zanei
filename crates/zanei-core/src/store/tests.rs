@@ -11,8 +11,9 @@ use crate::schema::{
 };
 
 use super::{
-    DaemonMode, DaemonPermissions, DaemonState, PermissionState, QueryFilter, StoreError,
-    StoreFailureKind, StoreReader, StoreStatus, StoreWriter,
+    DaemonMode, DaemonPermissions, DaemonState, LockedReason, MigrationOutcome, PermissionState,
+    QueryFilter, StoreError, StoreFailureKind, StoreFormat, StoreKey, StoreReader, StoreStatus,
+    StoreWriter, export_plain_sqlite, migrate_to_encrypted,
 };
 
 static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
@@ -914,4 +915,306 @@ impl Drop for TestDatabase {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+#[test]
+fn encrypted_store_round_trips_through_keyed_reader_and_writer() {
+    let database = TestDatabase::new("encrypted");
+    let key = StoreKey::generate().expect("generate key");
+    let first = app_launch(
+        "evt_01K00000000000000000000101",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    {
+        let mut writer = StoreWriter::open_with_key(database.path(), Some(&key))
+            .expect("create encrypted store");
+        assert_eq!(writer.format(), StoreFormat::Encrypted);
+        writer.append(&first).expect("append event");
+    }
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe"),
+        StoreFormat::Encrypted
+    );
+    let header = std::fs::read(database.path()).expect("read store")[..16].to_vec();
+    assert_ne!(header.as_slice(), b"SQLite format 3\0");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(database.path())
+            .expect("store metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    let reader =
+        StoreReader::open_with_key(database.path(), Some(&key)).expect("open encrypted reader");
+    assert_eq!(reader.format(), StoreFormat::Encrypted);
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query encrypted store"),
+        vec![first.clone()]
+    );
+
+    let Err(locked) = StoreReader::open(database.path()) else {
+        panic!("reader without key must fail");
+    };
+    assert!(matches!(
+        locked,
+        StoreError::Locked(LockedReason::KeyMissing)
+    ));
+    assert_eq!(locked.failure_kind(), StoreFailureKind::Locked);
+    let other = StoreKey::generate().expect("generate other key");
+    let Err(mismatch) = StoreReader::open_with_key(database.path(), Some(&other)) else {
+        panic!("wrong key must fail");
+    };
+    assert!(matches!(
+        mismatch,
+        StoreError::Locked(LockedReason::KeyMismatch)
+    ));
+    assert_eq!(mismatch.failure_kind(), StoreFailureKind::Locked);
+    let Err(writer_locked) = StoreWriter::open(database.path()) else {
+        panic!("writer without key must fail");
+    };
+    assert!(matches!(
+        writer_locked,
+        StoreError::Locked(LockedReason::KeyMissing)
+    ));
+
+    let mut writer =
+        StoreWriter::open_with_key(database.path(), Some(&key)).expect("reopen encrypted writer");
+    assert_eq!(writer.format(), StoreFormat::Encrypted);
+    writer
+        .append(&browser_navigate(
+            "evt_01K00000000000000000000102",
+            "2026-08-16T09:01:00.000Z",
+        ))
+        .expect("append second event");
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query after second write")
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn plaintext_store_ignores_a_supplied_key() {
+    let database = TestDatabase::new("plaintext-key");
+    StoreWriter::open(database.path()).expect("plaintext store");
+    let key = StoreKey::generate().expect("generate key");
+
+    let reader = StoreReader::open_with_key(database.path(), Some(&key))
+        .expect("plaintext store opens with a key on hand");
+    assert_eq!(reader.format(), StoreFormat::Plaintext);
+    let writer = StoreWriter::open_with_key(database.path(), Some(&key))
+        .expect("plaintext writer with a key on hand");
+    assert_eq!(writer.format(), StoreFormat::Plaintext);
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe"),
+        StoreFormat::Plaintext
+    );
+}
+
+#[test]
+fn format_probe_distinguishes_missing_plaintext_and_encrypted() {
+    let database = TestDatabase::new("probe");
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe missing"),
+        StoreFormat::Missing
+    );
+    std::fs::write(database.path(), b"").expect("write empty file");
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe empty"),
+        StoreFormat::Missing
+    );
+    std::fs::write(database.path(), b"definitely not a database").expect("write garbage");
+    // A foreign header that is not a whole number of pages is damage, not ciphertext.
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe garbage"),
+        StoreFormat::Unrecognized
+    );
+    assert_eq!(
+        StoreReader::open(database.path())
+            .err()
+            .expect("garbage store must not open")
+            .failure_kind(),
+        StoreFailureKind::Corrupt
+    );
+    std::fs::write(database.path(), vec![0xA5_u8; 8192]).expect("write page-aligned noise");
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe page-aligned noise"),
+        StoreFormat::Encrypted
+    );
+    std::fs::remove_file(database.path()).expect("remove garbage");
+    StoreWriter::open(database.path()).expect("plaintext store");
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe plaintext"),
+        StoreFormat::Plaintext
+    );
+}
+
+#[test]
+fn migration_encrypts_a_plaintext_store_in_place_and_is_idempotent() {
+    let database = TestDatabase::new("migrate");
+    let first = app_launch(
+        "evt_01K00000000000000000000201",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    let second = browser_navigate("evt_01K00000000000000000000202", "2026-08-16T09:01:00.000Z");
+    let heartbeat = OffsetDateTime::parse("2026-08-16T09:02:00Z", &Rfc3339).expect("heartbeat");
+    {
+        let mut writer = StoreWriter::open(database.path()).expect("plaintext store");
+        writer
+            .append_batch(&[first.clone(), second.clone()])
+            .expect("append events");
+        writer
+            .write_daemon_state(&running_state(heartbeat, 48))
+            .expect("write daemon state");
+    }
+    let key = StoreKey::generate().expect("generate key");
+
+    let outcome = migrate_to_encrypted(database.path(), &key).expect("migrate");
+    assert_eq!(outcome, MigrationOutcome::Migrated { events: 2 });
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe migrated"),
+        StoreFormat::Encrypted
+    );
+    assert!(!PathBuf::from(format!("{}.migrating", database.path().display())).exists());
+
+    let reader =
+        StoreReader::open_with_key(database.path(), Some(&key)).expect("open migrated store");
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query migrated store"),
+        vec![first, second]
+    );
+    let status = reader
+        .status_at(heartbeat)
+        .expect("status of migrated store");
+    assert!(status.running);
+    assert_eq!(status.pid, Some(42));
+    assert_eq!(status.retention_hours, Some(48));
+
+    assert_eq!(
+        migrate_to_encrypted(database.path(), &key).expect("second migration"),
+        MigrationOutcome::Unchanged
+    );
+    let mut writer =
+        StoreWriter::open_with_key(database.path(), Some(&key)).expect("writer after migration");
+    writer
+        .append(&app_launch(
+            "evt_01K00000000000000000000203",
+            "2026-08-16T09:03:00.000Z",
+            "Finder",
+            "com.apple.finder",
+        ))
+        .expect("append after migration");
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query after post-migration write")
+            .len(),
+        3
+    );
+
+    let missing = TestDatabase::new("migrate-missing");
+    assert_eq!(
+        migrate_to_encrypted(missing.path(), &key).expect("migrate missing store"),
+        MigrationOutcome::Unchanged
+    );
+    assert!(!missing.path().exists());
+}
+
+#[test]
+fn plaintext_snapshot_copies_the_requested_range_into_a_regular_sqlite_file() {
+    let database = TestDatabase::new("snapshot-source");
+    let snapshot = TestDatabase::new("snapshot-output");
+    let key = StoreKey::generate().expect("generate key");
+    let events = [
+        app_launch(
+            "evt_01K00000000000000000000301",
+            "2026-08-16T09:00:00.000Z",
+            "Safari",
+            "com.apple.Safari",
+        ),
+        browser_navigate("evt_01K00000000000000000000302", "2026-08-16T09:01:00.000Z"),
+        app_launch(
+            "evt_01K00000000000000000000303",
+            "2026-08-16T09:02:00.000Z",
+            "Finder",
+            "com.apple.finder",
+        ),
+    ];
+    {
+        let mut writer =
+            StoreWriter::open_with_key(database.path(), Some(&key)).expect("encrypted store");
+        writer.append_batch(&events).expect("append events");
+    }
+
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter {
+            since: Some("2026-08-16T09:00:30Z".to_owned()),
+            until: Some("2026-08-16T09:01:30Z".to_owned()),
+            ..QueryFilter::default()
+        },
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export snapshot");
+    assert_eq!(report.events, 1);
+    assert_eq!(
+        StoreFormat::probe(snapshot.path()).expect("probe snapshot"),
+        StoreFormat::Plaintext
+    );
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe source"),
+        StoreFormat::Encrypted
+    );
+
+    let plain = rusqlite::Connection::open(snapshot.path()).expect("open snapshot without a key");
+    let count: i64 = plain
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .expect("count snapshot events");
+    assert_eq!(count, 1);
+    let version: i64 = plain
+        .query_row("SELECT schema_version FROM meta", [], |row| row.get(0))
+        .expect("snapshot schema version");
+    assert_eq!(version, super::STORE_SCHEMA_VERSION);
+    drop(plain);
+
+    let reader = StoreReader::open(snapshot.path()).expect("reader opens the snapshot");
+    assert_eq!(reader.format(), StoreFormat::Plaintext);
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query snapshot"),
+        vec![events[1].clone()]
+    );
+
+    let plain_source = TestDatabase::new("snapshot-plain-source");
+    let plain_snapshot = TestDatabase::new("snapshot-plain-output");
+    {
+        let mut writer = StoreWriter::open(plain_source.path()).expect("plaintext store");
+        writer.append_batch(&events).expect("append events");
+    }
+    let report = export_plain_sqlite(
+        plain_source.path(),
+        None,
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        plain_snapshot.path(),
+    )
+    .expect("export plaintext snapshot");
+    assert_eq!(report.events, 3);
 }

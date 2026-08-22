@@ -126,6 +126,7 @@ An agent that sees `running: false` can tell the user that activity is not curre
 | --- | --- |
 | Store not initialized / nothing recorded yet | `get_status` returns `running: false` (not an error); `get_timeline` / `query_events` return empty results |
 | Empty because of missing permissions | Empty results; distinguishable via `permissions_ok: false` in `get_status` |
+| Encrypted store whose key cannot be obtained (missing, mismatched, login Keychain locked, or access denied) | JSON-RPC `-32603` (Internal error) with a `store is locked: ...` message, for all three tools; never reported as nothing recorded. A missing store file still follows the first row |
 | Invalid tool parameters, such as a malformed time or range, an invalid event-type pattern, `limit` outside 1 through 1000, or `token_budget` below 34 | JSON-RPC `-32602` (Invalid params) |
 | Internal processing failure, such as a configuration, store, permission-check, timeline-build, or serialization failure | JSON-RPC `-32603` (Internal error) |
 

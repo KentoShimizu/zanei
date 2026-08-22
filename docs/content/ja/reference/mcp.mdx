@@ -126,6 +126,7 @@ agent 向けの軽量チェック：記録は動いているか。`zanei status`
 | --- | --- |
 | ストア未初期化 / 記録未実施 | `get_status` が `running: false` を返す（エラーにしない）。`get_timeline` / `query_events` は空結果 |
 | 権限不足による空 | 空結果。`get_status` の `permissions_ok: false` で判別可能 |
+| 暗号化されたストアの鍵を取得できない（鍵がない・一致しない・ログインキーチェーンがロック中・アクセス拒否） | 3 ツールとも JSON-RPC `-32603`（Internal error）と `store is locked: ...` のメッセージ。「記録なし」としては報告しない。ストアファイル自体がない場合は引き続き 1 行目の挙動 |
 | 不正な時間・範囲・イベント型pattern、1〜1000の範囲外の `limit`、34未満の `token_budget` など、ツール引数が不正 | JSON-RPC `-32602`（Invalid params） |
 | 設定・store・権限確認・timeline構築・serializeなどの内部処理に失敗 | JSON-RPC `-32603`（Internal error） |
 

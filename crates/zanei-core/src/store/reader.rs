@@ -14,8 +14,8 @@ use crate::schema::{
 use super::{
     COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
     DaemonPermissions, HEARTBEAT_STALE_AFTER_SECONDS, LEGACY_STORE_SCHEMA_VERSION, QueryFilter,
-    RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreStatus,
-    retention_cutoff,
+    RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreFormat, StoreKey,
+    StoreStatus, retention_cutoff, unlock,
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
@@ -23,17 +23,63 @@ const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
 pub struct StoreReader {
     connection: Connection,
     schema_version: i64,
+    format: StoreFormat,
 }
 
 impl StoreReader {
+    /// Opens a store without a key. Encrypted stores fail with
+    /// [`super::LockedReason::KeyMissing`]; use [`Self::open_with_key`] for those.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_key(path, None)
+    }
+
+    /// Opens a store read-only. The file's [`StoreFormat`] decides whether `key`
+    /// is used: plaintext stores ignore it, encrypted stores require it.
+    pub fn open_with_key(
+        path: impl AsRef<Path>,
+        key: Option<&StoreKey>,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let format = StoreFormat::probe(path)?;
+        Self::open_known(path, format, key)
+    }
+
+    /// Like [`Self::open_with_key`] for a caller that already probed the format.
+    /// Required when this process holds another connection to the store: a
+    /// fresh probe would release that connection's file lock (see
+    /// [`StoreFormat::probe`]).
+    pub fn open_known(
+        path: impl AsRef<Path>,
+        format: StoreFormat,
+        key: Option<&StoreKey>,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         connection.busy_timeout(StdDuration::from_millis(BUSY_TIMEOUT_MILLISECONDS))?;
+        unlock(&connection, format, key)?;
         let schema_version = readable_schema_version(&connection)?;
         Ok(Self {
             connection,
             schema_version,
+            format,
         })
+    }
+
+    /// The on-disk format the store was opened as.
+    #[must_use]
+    pub const fn format(&self) -> StoreFormat {
+        self.format
+    }
+
+    /// Oldest timestamp a read at `now` may return, honoring the recorder's
+    /// retention when it is alive and the configured value otherwise.
+    pub(super) fn retention_cutoff_at(
+        &self,
+        now: OffsetDateTime,
+        configured_retention_hours: u64,
+    ) -> Result<String, StoreError> {
+        let retention_hours = self.effective_retention_hours_at(now, configured_retention_hours)?;
+        retention_cutoff(now, retention_hours)
     }
 
     pub fn query(
@@ -358,14 +404,21 @@ fn add_optional_bound(
     field: &'static str,
     value: Option<&str>,
 ) -> Result<(), StoreError> {
-    if let Some(value) = value {
-        let timestamp = parse_timestamp(field, value)?;
+    if let Some(value) = normalized_bound(field, value)? {
         conditions.push(condition.to_owned());
-        parameters.push(SqlValue::Text(crate::normalize::format_timestamp(
-            timestamp,
-        )));
+        parameters.push(SqlValue::Text(value));
     }
     Ok(())
+}
+
+/// Validates an optional RFC3339 bound and normalizes it to the store's timestamp form.
+pub(super) fn normalized_bound(
+    field: &'static str,
+    value: Option<&str>,
+) -> Result<Option<String>, StoreError> {
+    value
+        .map(|value| parse_timestamp(field, value).map(crate::normalize::format_timestamp))
+        .transpose()
 }
 
 fn add_optional_text(

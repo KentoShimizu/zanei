@@ -4,11 +4,11 @@ use std::path::Path;
 use time::OffsetDateTime;
 use zanei_core::config::parse_time_expression;
 use zanei_core::normalize::format_timestamp;
-use zanei_core::store::StoreWriter;
 
 use super::EXIT_SUCCESS;
 use crate::cli::PurgeArgs;
 use crate::error::CliError;
+use crate::store_access::{self, KeyAccess, KeyPrompt};
 
 pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliError> {
     let cutoff = if args.all {
@@ -27,7 +27,17 @@ pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliErr
             OffsetDateTime::now_utc(),
         )?))
     };
-    let mut writer = StoreWriter::open(store_path)?;
+    if !store_path
+        .try_exists()
+        .map_err(|source| CliError::io(store_path, source))?
+    {
+        if !quiet {
+            println!("Purged 0 events");
+        }
+        return Ok(EXIT_SUCCESS);
+    }
+    let mut writer =
+        store_access::open_writer(store_path, KeyAccess::Existing, KeyPrompt::Allowed)?;
     let deleted = match cutoff {
         Some(cutoff) => writer.purge_before(&cutoff)?,
         None => writer.purge_all()?,

@@ -4,7 +4,7 @@ use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zanei_core::{
     config::Config,
-    store::{HEARTBEAT_STALE_AFTER_SECONDS, StoreFailureKind, StoreReader, StoreStatus},
+    store::{HEARTBEAT_STALE_AFTER_SECONDS, StoreFailureKind, StoreFormat, StoreStatus},
 };
 
 use super::doctor::permissions_ok;
@@ -13,6 +13,7 @@ use crate::{
     daemon::{StoreOwner, StoreOwnership, mode_name},
     error::CliError,
     paths::Paths,
+    store_access::{self, KeyPrompt},
 };
 
 const EXIT_STORE_FAILURE: u8 = 1;
@@ -61,7 +62,7 @@ fn inspect(
             );
         }
     };
-    let reader = match StoreReader::open(&paths.store) {
+    let reader = match store_access::open_reader(&paths.store, KeyPrompt::Allowed) {
         Ok(reader) => reader,
         Err(error) => return store_error_report(paths, config, owner, &error),
     };
@@ -73,7 +74,15 @@ fn inspect(
         Ok(timestamp) => timestamp,
         Err(error) => return store_error_report(paths, config, owner, &error),
     };
-    StatusReport::readable(paths, config, &status, owner, size_bytes, oldest_event_ts)
+    StatusReport::readable(
+        paths,
+        config,
+        &status,
+        owner,
+        size_bytes,
+        oldest_event_ts,
+        reader.format(),
+    )
 }
 
 fn missing_report(
@@ -112,6 +121,7 @@ fn store_error_report(
             let state = match error.failure_kind() {
                 StoreFailureKind::Unavailable => StatusState::StoreUnavailable,
                 StoreFailureKind::Corrupt => StatusState::StoreCorrupt,
+                StoreFailureKind::Locked => StatusState::StoreLocked,
             };
             StatusReport::unreadable(paths, config, owner, state, error.to_string())
         }
@@ -126,6 +136,7 @@ enum StatusState {
     StoreMissing,
     StoreUnavailable,
     StoreCorrupt,
+    StoreLocked,
 }
 
 impl StatusState {
@@ -136,6 +147,7 @@ impl StatusState {
             Self::StoreMissing => "store_missing",
             Self::StoreUnavailable => "store_unavailable",
             Self::StoreCorrupt => "store_corrupt",
+            Self::StoreLocked => "store_locked",
         }
     }
 
@@ -143,7 +155,10 @@ impl StatusState {
         match self {
             Self::Running => EXIT_SUCCESS,
             Self::Stopped => EXIT_NO_DAEMON,
-            Self::StoreMissing | Self::StoreUnavailable | Self::StoreCorrupt => EXIT_STORE_FAILURE,
+            Self::StoreMissing
+            | Self::StoreUnavailable
+            | Self::StoreCorrupt
+            | Self::StoreLocked => EXIT_STORE_FAILURE,
         }
     }
 }
@@ -179,6 +194,7 @@ impl StatusReport {
         owner: Option<&StoreOwner>,
         size_bytes: u64,
         oldest_event_ts: Option<String>,
+        format: StoreFormat,
     ) -> Result<Self, CliError> {
         let now = OffsetDateTime::now_utc();
         let heartbeat = parse_status_timestamp("heartbeat_at", status.heartbeat_at.as_deref())?;
@@ -252,6 +268,7 @@ impl StatusReport {
                     },
                 ),
                 oldest_event_ts,
+                encryption: encryption_name(format),
             },
             capture: CaptureReport::new(config),
             permissions_ok,
@@ -295,10 +312,23 @@ impl StatusReport {
                     .map(|metadata| metadata.len()),
                 retention_hours: None,
                 oldest_event_ts: None,
+                encryption: StoreFormat::probe(&paths.store)
+                    .ok()
+                    .and_then(encryption_name),
             },
             capture: CaptureReport::new(config),
             permissions_ok: permissions_ok(config)?,
         })
+    }
+}
+
+/// `store.encryption` value: `sqlcipher`, `plaintext` for a store written
+/// before encryption existed (the recorder migrates it on its next start), or
+/// null when there is no store to inspect.
+const fn encryption_name(format: StoreFormat) -> Option<&'static str> {
+    match format {
+        StoreFormat::Missing | StoreFormat::Unrecognized => None,
+        StoreFormat::Plaintext | StoreFormat::Encrypted => Some(format.as_str()),
     }
 }
 
@@ -418,6 +448,7 @@ struct StoreReport {
     size_bytes: Option<u64>,
     retention_hours: Option<u64>,
     oldest_event_ts: Option<String>,
+    encryption: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -474,7 +505,15 @@ fn print_human(report: &StatusReport) {
             .store_write_state
             .map_or("-", StoreWriteState::as_str)
     );
-    println!("STORE             {}", report.store.path);
+    println!(
+        "STORE             {}{}",
+        report.store.path,
+        match report.store.encryption {
+            Some("sqlcipher") => " (encrypted)",
+            Some(_) => " (plaintext; the recorder encrypts it on its next start)",
+            None => "",
+        }
+    );
     print_text_content(report.capture.text_content);
     println!("PERMISSIONS OK    {}", report.permissions_ok);
     if report.degraded.is_empty() {

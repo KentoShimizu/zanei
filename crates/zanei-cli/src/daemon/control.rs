@@ -6,7 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zanei_core::store::{StoreReader, StoreStatus};
+use zanei_core::store::StoreStatus;
+
+use crate::store_access::KeyPrompt;
 
 use super::{DaemonError, StoreOwner, StoreOwnership};
 
@@ -209,7 +211,9 @@ fn daemon_is_alive(store_path: &Path) -> Result<bool, DaemonError> {
     };
     // Ownership is acquired before store creation and migration. Until the reader can observe a
     // complete heartbeat, a store read failure is a not-ready observation for this bounded wait.
-    let Ok(status) = StoreReader::open(store_path).and_then(|reader| reader.status()) else {
+    let Ok(status) = crate::store_access::open_reader(store_path, KeyPrompt::Suppressed)
+        .and_then(|reader| reader.status())
+    else {
         return Ok(false);
     };
     Ok(owner_has_fresh_heartbeat(&owner, &status))

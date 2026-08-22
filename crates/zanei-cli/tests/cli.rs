@@ -10,12 +10,12 @@ use time::OffsetDateTime;
 use zanei_core::config::Config;
 use zanei_core::normalize::normalize;
 use zanei_core::schema::{App, EmptyData, EventData, KNOWN_EVENT_TYPES, RawEvent};
-use zanei_core::store::{QueryFilter, StoreReader, StoreWriter};
+use zanei_core::store::{QueryFilter, StoreFormat, StoreReader, StoreWriter};
 use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
 
 mod support;
 
-use support::Fixture;
+use support::{Fixture, STORE_KEY_FILE_ENV, read_key, write_key_file};
 
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -480,8 +480,8 @@ fn purge_all_quiet_deletes_fixture_events_without_prompt() {
         .assert()
         .success();
 
-    let events = StoreReader::open(&fixture.store)
-        .expect("reader")
+    let events = fixture
+        .open_reader()
         .query(&QueryFilter::default(), 48)
         .expect("remaining events");
     assert!(events.is_empty());
@@ -783,7 +783,7 @@ fn daemon_hot_reloads_retention_purges_immediately_and_reports_the_active_value(
         1,
     )
     .expect("normalize expired fixture");
-    StoreWriter::open(&store)
+    StoreWriter::open_with_key(&store, Some(&read_key(&key_file_for(&store))))
         .and_then(|mut writer| writer.append(&expired))
         .expect("store expired fixture");
 
@@ -794,7 +794,7 @@ fn daemon_hot_reloads_retention_purges_immediately_and_reports_the_active_value(
     .expect("reload daemon config");
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
     loop {
-        if let Ok(reader) = StoreReader::open(&store) {
+        if let Ok(reader) = open_store(&store) {
             let applied = reader
                 .status()
                 .is_ok_and(|status| status.running && status.retention_hours == Some(1));
@@ -859,7 +859,7 @@ fn stop_terminates_only_the_foreground_instance_owning_the_selected_store() {
     );
     assert!(wait_for_child(&mut first).success());
     assert_eq!(second.try_wait().expect("poll other recorder"), None);
-    let other_status = StoreReader::open(&second_store)
+    let other_status = open_store(&second_store)
         .and_then(|reader| reader.status())
         .expect("other recorder status");
     assert_eq!(other_status.pid, Some(i64::from(second.id())));
@@ -875,6 +875,7 @@ fn assert_daemon_shutdown(signal: &str) {
     let store = directory.path().join("store.sqlite");
     fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
     let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_zanei"))
+        .env(STORE_KEY_FILE_ENV, key_file_for(&store))
         .arg("--config")
         .arg(&config)
         .arg("--store")
@@ -895,7 +896,7 @@ fn assert_daemon_shutdown(signal: &str) {
         "daemon failed after SIG{signal}: {status}"
     );
     assert_eq!(
-        StoreReader::open(&store)
+        open_store(&store)
             .expect("daemon store reader")
             .status()
             .expect("daemon status")
@@ -904,8 +905,24 @@ fn assert_daemon_shutdown(signal: &str) {
     );
 }
 
+/// The key file the recorder and the test share for stores under `store`'s directory.
+fn key_file_for(store: &Path) -> std::path::PathBuf {
+    let directory = store.parent().expect("store directory");
+    let key_file = directory.join("store.key");
+    if key_file.exists() {
+        key_file
+    } else {
+        write_key_file(directory)
+    }
+}
+
+fn open_store(store: &Path) -> Result<StoreReader, zanei_core::store::StoreError> {
+    StoreReader::open_with_key(store, Some(&read_key(&key_file_for(store))))
+}
+
 fn spawn_foreground_daemon(config: &Path, store: &Path) -> Child {
     ProcessCommand::new(env!("CARGO_BIN_EXE_zanei"))
+        .env(STORE_KEY_FILE_ENV, key_file_for(store))
         .arg("--config")
         .arg(config)
         .arg("--store")
@@ -933,7 +950,7 @@ fn wait_for_daemon_ready(child: &mut Child, store: &Path) {
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
     loop {
         if store.exists()
-            && StoreReader::open(store)
+            && open_store(store)
                 .and_then(|reader| reader.status())
                 .is_ok_and(|status| status.pid.is_some())
         {
@@ -972,9 +989,190 @@ fn stop_child(child: &mut Child) {
 fn command(config: &Path, store: &Path) -> Command {
     let mut command = Command::cargo_bin("zanei").expect("zanei binary");
     command
+        .env(STORE_KEY_FILE_ENV, key_file_for(store))
         .arg("--config")
         .arg(config)
         .arg("--store")
         .arg(store);
     command
+}
+
+#[test]
+fn status_reports_a_locked_store_when_the_key_is_missing_or_wrong() {
+    let fixture = Fixture::populated();
+    let missing_key = fixture.directory.path().join("missing.key");
+    let output = fixture
+        .command()
+        .env(STORE_KEY_FILE_ENV, &missing_key)
+        .args(["status", "--json"])
+        .output()
+        .expect("status output");
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+    assert_eq!(value["state"], "store_locked");
+    assert_eq!(value["running"], false);
+    assert_eq!(value["store"]["encryption"], "sqlcipher");
+    assert!(
+        value["degraded"]["store"]
+            .as_str()
+            .expect("store degradation reason")
+            .contains("key")
+    );
+    assert!(!missing_key.exists(), "readers must never create a key");
+
+    let other_directory = fixture.directory.path().join("other");
+    fs::create_dir_all(&other_directory).expect("other key directory");
+    let other_key = write_key_file(&other_directory);
+    let query = fixture
+        .command()
+        .env(STORE_KEY_FILE_ENV, &other_key)
+        .args(["query", "--since", "1h"])
+        .output()
+        .expect("query output");
+    assert_eq!(query.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&query.stderr).contains("does not decrypt"));
+
+    let doctor = fixture
+        .command()
+        .env(STORE_KEY_FILE_ENV, &missing_key)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("doctor output");
+    let value: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor JSON");
+    assert_eq!(value["store_key"]["state"], "missing");
+
+    let intact = fixture.open_reader().status().expect("store is untouched");
+    assert_eq!(intact.events_captured, KNOWN_EVENT_TYPES.len() as u64);
+    assert_eq!(
+        StoreFormat::probe(&fixture.store).expect("probe"),
+        StoreFormat::Encrypted
+    );
+}
+
+#[test]
+fn export_sqlite_writes_a_plaintext_snapshot_any_sqlite_client_can_open() {
+    let fixture = Fixture::populated();
+    let out = fixture.directory.path().join("snapshot.sqlite");
+    let exported = fixture
+        .command()
+        .args(["export", "--since", "1h", "--format", "sqlite", "--out"])
+        .arg(&out)
+        .output()
+        .expect("export output");
+    assert!(exported.status.success());
+    assert!(String::from_utf8_lossy(&exported.stdout).contains("plaintext SQLite snapshot"));
+
+    assert_eq!(
+        StoreFormat::probe(&out).expect("probe snapshot"),
+        StoreFormat::Plaintext
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&out)
+            .expect("snapshot metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    let events = StoreReader::open(&out)
+        .expect("snapshot opens without a key")
+        .query(&QueryFilter::default(), 48)
+        .expect("snapshot events");
+    assert_eq!(events.len(), KNOWN_EVENT_TYPES.len());
+
+    let via_cli = command(&fixture.config, &out)
+        .args(["query", "--since", "1h", "--format", "json"])
+        .output()
+        .expect("query the snapshot through the CLI");
+    assert!(via_cli.status.success());
+    assert!(String::from_utf8_lossy(&via_cli.stdout).contains("app.launch"));
+
+    let refused = fixture
+        .command()
+        .args(["export", "--format", "sqlite", "--out"])
+        .arg(&out)
+        .output()
+        .expect("refused export output");
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("already exists"));
+    let usage = fixture
+        .command()
+        .args(["export", "--format", "sqlite"])
+        .output()
+        .expect("usage error output");
+    assert_eq!(usage.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&usage.stderr).contains("--out is required"));
+    assert_eq!(
+        StoreFormat::probe(&fixture.store).expect("probe source"),
+        StoreFormat::Encrypted
+    );
+}
+
+#[test]
+fn foreground_daemon_encrypts_a_plaintext_store_on_start() {
+    let directory = TempDir::new().expect("migration fixture");
+    let config = directory.path().join("config.toml");
+    let store = directory.path().join("store.sqlite");
+    fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
+    let legacy = normalize(
+        RawEvent {
+            source: "macos.workspace".to_owned(),
+            event_type: "app.launch".to_owned(),
+            app: App {
+                name: "LegacyFixture".to_owned(),
+                bundle_id: Some("com.example.LegacyFixture".to_owned()),
+                pid: Some(42),
+            },
+            window: None,
+            element: None,
+            data: EventData::AppLaunch(EmptyData::default()),
+        },
+        OffsetDateTime::now_utc() - time::Duration::minutes(5),
+        1,
+    )
+    .expect("normalize legacy fixture");
+    StoreWriter::open(&store)
+        .and_then(|mut writer| writer.append(&legacy))
+        .expect("plaintext legacy store");
+    assert_eq!(
+        StoreFormat::probe(&store).expect("probe legacy"),
+        StoreFormat::Plaintext
+    );
+
+    let mut child = spawn_foreground_daemon(&config, &store);
+    wait_for_daemon_ready(&mut child, &store);
+
+    assert_eq!(
+        StoreFormat::probe(&store).expect("probe migrated"),
+        StoreFormat::Encrypted
+    );
+    assert!(!directory.path().join("store.sqlite.migrating").exists());
+    let events = open_store(&store)
+        .expect("open migrated store")
+        .query(&QueryFilter::default(), 48)
+        .expect("migrated events");
+    assert_eq!(events, vec![legacy]);
+    let status = command(&config, &store)
+        .args(["status", "--json"])
+        .output()
+        .expect("status output");
+    assert!(status.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");
+    assert_eq!(value["state"], "running");
+    assert_eq!(value["store"]["encryption"], "sqlcipher");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&store)
+            .expect("store metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    signal_child(&mut child, "TERM");
+    assert!(wait_for_child(&mut child).success());
 }

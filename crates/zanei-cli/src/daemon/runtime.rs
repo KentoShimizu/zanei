@@ -15,7 +15,10 @@ use zanei_collector::Permission;
 use zanei_core::{
     config::{CONFIG_WATCH_INTERVAL, Config, ConfigWatcher},
     normalize::format_timestamp,
-    store::{DaemonMode, DaemonPermissions, DaemonState, StoreReader, StoreStatus, StoreWriter},
+    store::{
+        DaemonMode, DaemonPermissions, DaemonState, LockedReason, MigrationOutcome, StoreError,
+        StoreFormat, StoreReader, StoreStatus, StoreWriter, migrate_to_encrypted,
+    },
 };
 use zanei_macos::permission::{PermissionError, PermissionStatus, permission_status};
 
@@ -26,10 +29,14 @@ use super::{
     main_thread,
     permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
     pipeline::{Pipeline, SharedStoreWriter},
-    runtime_support::{ShutdownSignals, StdinEofWatcher, ensure_store_parent, record_writer},
+    runtime_support::{
+        ShutdownSignals, StdinEofWatcher, ensure_store_parent, record_writer,
+        restrict_store_permissions,
+    },
     shutdown::shutdown_daemon,
 };
 use crate::permissions::{PermissionRequestOutcome, probe_permissions};
+use crate::store_access::{self, KeyAccess, KeyPrompt};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const PAUSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -62,11 +69,13 @@ pub fn run_daemon(
     let executable_guard =
         ExecutableGuard::new(crate::executable::current().map_err(DaemonError::CurrentExecutable)?);
     ensure_store_parent(store_path)?;
+    restrict_store_permissions(store_path)?;
     let started_at = format_timestamp(OffsetDateTime::now_utc());
     let owner = StoreOwner::new(mode, started_at);
-    let mut writer = StoreWriter::open(store_path)?;
+    // Ownership comes first: the migration below rewrites the store file, and
+    // only the single recorder that owns the store may do that.
     let ownership = StoreOwnership::acquire(store_path, owner.clone())?;
-    let reader = StoreReader::open(store_path)?;
+    let (mut writer, reader) = open_encrypted_store(store_path)?;
     let initial_status = reader.status()?;
     let base_dropped = initial_status.events_dropped;
     let base_collector_failures = initial_status.collector_failures.clone();
@@ -135,6 +144,25 @@ pub fn run_daemon(
             &base_collector_failures,
         )
     })?
+}
+
+/// Opens the recorder's store, creating its key on first use and converting a
+/// store written before encryption existed. The recorder never shows Keychain
+/// dialogs: a locked or inaccessible Keychain fails the start with a message.
+fn open_encrypted_store(store_path: &Path) -> Result<(StoreWriter, StoreReader), DaemonError> {
+    let key = store_access::load_store_key(KeyAccess::CreateIfMissing, KeyPrompt::Suppressed)?
+        .ok_or(StoreError::Locked(LockedReason::KeyMissing))?;
+    if let MigrationOutcome::Migrated { events } = migrate_to_encrypted(store_path, &key)? {
+        eprintln!("zanei: encrypted the existing store ({events} events)");
+    }
+    // Probe exactly once, before any connection exists: probing again while the
+    // writer is open would drop its WAL-mode file lock (see `StoreFormat::probe`),
+    // letting another process delete the WAL out from under the recorder.
+    let format = StoreFormat::probe(store_path)?;
+    let writer = StoreWriter::open_known(store_path, format, Some(&key))?;
+    let reader = StoreReader::open_known(store_path, writer.format(), Some(&key))?;
+    restrict_store_permissions(store_path)?;
+    Ok((writer, reader))
 }
 
 pub fn run_record(config_path: &Path, output: RecordOutput) -> Result<(), DaemonError> {

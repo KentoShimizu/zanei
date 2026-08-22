@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+The store is encrypted at rest.
+
+- The store file is now a SQLCipher database (AES-256). The recorder
+  generates a random key on its first start and keeps it in the login
+  Keychain as "Zanei store key"; it is not synced to iCloud Keychain
+  and never leaves the Mac. The CLI, the launchd recorder, and the MCP
+  server read it without dialogs, and `brew upgrade` keeps access.
+- On the first `zanei start` after upgrading, the recorder converts an
+  existing plaintext store in place and logs
+  `zanei: encrypted the existing store (N events)`. Until then,
+  readers still read the plaintext store.
+- The store, its `-wal`/`-shm` companions, and a store directory that
+  Zanei creates are owner-only (0600 / 0700).
+- `status` reports `store_locked` (exit code 1) when the store is
+  encrypted but cannot be opened with the key, and `status --json`
+  adds `store.encryption` (`sqlcipher`, `plaintext`, or null).
+- `doctor` reports where the store key is — a `Store key:` line and a
+  `store_key` object in `--json` — and no longer fails on a locked
+  store.
+- `export --format sqlite --out FILE` writes a plaintext SQLite
+  snapshot of the range with the same tables as the live store. It
+  never overwrites, and the file is owner-only.
+- `purge` on a store that does not exist prints `Purged 0 events`
+  instead of creating one.
+- `ZANEI_STORE_KEY_FILE=<path>` reads the key from a file instead of
+  the Keychain, for builds from source and CI.
+- SQLCipher (BSD-3-Clause) is compiled in; see `THIRD_PARTY_NOTICES.md`.
+
 ## 0.2.0 — 2026-08-18
 
 Typed-text capture now works in Electron and Chromium apps.

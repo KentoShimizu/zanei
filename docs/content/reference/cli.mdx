@@ -41,6 +41,12 @@ Valid for every subcommand.
 | `-v, --verbose` | Verbose logging to stderr |
 | `--version` / `--help` | Version / help |
 
+### Environment
+
+| Variable | Description |
+| --- | --- |
+| `ZANEI_STORE_KEY_FILE=<path>` | Read the store's encryption key from this file (64 hexadecimal characters) instead of the login Keychain; the recorder creates the file (mode 0600) if it is missing. A development override for builds from source, whose ad-hoc code signature changes on every build and would otherwise trigger Keychain dialogs. Not for everyday use: the key sits on disk |
+
 ## Shared conventions
 
 ### Time expressions
@@ -69,6 +75,7 @@ Commands with a `--format` option support these values:
 | `json` | `query`, `export`, `timeline` | Single JSON document; for `timeline`, the structured timeline |
 | `md` | `timeline` | LLM-ready Markdown (default) |
 | `table` | `query` | Human-readable table |
+| `sqlite` | `export` | Plaintext SQLite snapshot of the store for the range; requires `--out` |
 
 Diagnostic/state commands use a separate fixed-output convention:
 
@@ -81,7 +88,7 @@ Diagnostic/state commands use a separate fixed-output convention:
 | Code | Meaning |
 | --- | --- |
 | `0` | Success. Background `start` also uses this code when the recorder is alive but its permission snapshot remains pending after the 20-second wait; it notes that dialogs may take a moment to appear and advises running `zanei doctor --fix` if none are visible |
-| `1` | General error |
+| `1` | General error. `status` also uses this code for every `store_*` state, including `store_locked` |
 | `2` | Usage error (invalid arguments) |
 | `3` | **Confirmed missing permissions**. Background `start` uses this code only after the running recorder reports a permission snapshot with a missing required TCC permission; `doctor` uses the same code for its diagnostic result |
 | `4` | No daemon (nothing to act on for `status`, `stop`, ...) |
@@ -125,11 +132,14 @@ required permission is missing. In that combination, stdout is therefore not JSO
     "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
   },
   "missing_required": ["input_monitoring"],
-  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+  "store_key": { "state": "keychain" }
 }
 ```
 
 `status` values: `granted` / `denied` / `not_determined`. `reported_by_recorder` is `true` when the result came from a fresh recorder heartbeat. Without one, `doctor` probes from its own process, sets this field to `false`, and the human output notes that the recorder must be started to see its own permissions.
+
+`store_key` reports where the store's encryption key is. `state` is `keychain` (found in the login Keychain), `file` (read from the `ZANEI_STORE_KEY_FILE` development override), `not_needed` (the store is missing, plaintext, or not recognized), `missing` (the store is encrypted but there is no key item), `mismatch` (the key does not decrypt this store), `keychain_locked`, `keychain_denied`, or `unavailable`; `detail` is present only when there is more to report. Human-readable output adds a `Store key: ...` line after the permission table. `doctor` does not fail when the store is locked: it reports the key state and probes permissions from its own process instead.
 
 Human-readable output always ends with the next action. When a required permission is denied, it
 walks through granting it: run `zanei start` so the recorder asks macOS for the permission, then
@@ -172,6 +182,8 @@ Before bootstrapping, `start` uses the persisted last-known recorder permission 
 Only `y` or `Y` enables capture; Enter, any other answer, EOF, or a read error selects `false`. Zanei saves the explicit value through the same path as `config set`, preserves the rest of the file, and prints `Text content will be recorded.` or `Text content stays off.`. If the question was asked after bootstrap, a `y` answer also prints `Restarting the recorder to apply text content capture...` and restarts through the canonical stop-then-start path. A false answer needs no restart because it preserves the recorder's default-off behavior. Because either answer writes the key, the question is not repeated.
 
 The question is not shown by `--foreground`, with non-TTY stdin or stderr, with `--quiet` or `--json`, while permissions are missing, or when permission state cannot be determined. A skipped start leaves the setting undecided and keeps the existing opt-in guidance. If the key is already explicitly `true` or `false`, `start` does not ask.
+
+On its first start, the recorder generates the store's encryption key and saves it in your login Keychain as "Zanei store key". A plaintext store written by an earlier version is converted in place on the first start after upgrading. The recorder never shows Keychain dialogs: if the login Keychain is locked, `start` fails with `store is locked: your login Keychain is locked; unlock it (for example by opening Keychain Access) and try again`.
 
 Only one recorder can own a store at a time. A second foreground or launchd recorder for the same
 store exits with code 1 and reports the PID of the current owner.
@@ -246,7 +258,7 @@ privacy-sensitive opt-in state and its explicit activation command are visible w
   "last_event_age_s": 4,
   "store_write_state": "healthy",
   "degraded": {},
-  "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z" },
+  "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z", "encryption": "sqlcipher" },
   "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
   "permissions_ok": true
 }
@@ -256,7 +268,7 @@ The JSON object always has the following fields. `integer` values are non-negati
 
 | Field | JSON type | Meaning and `null` condition |
 | --- | --- | --- |
-| `state` | string | `running` when the store lock has an owner; `stopped` when it does not. Inspection failures use `store_missing`, `store_unavailable`, or `store_corrupt`. Never null |
+| `state` | string | `running` when the store lock has an owner; `stopped` when it does not. Inspection failures use `store_missing`, `store_unavailable`, `store_corrupt`, or `store_locked` (the store is encrypted but cannot be opened with the key; `degraded.store` holds the reason). Never null |
 | `running` | boolean | Whether the lock has an owner. Never null, including in a `store_*` state |
 | `paused` | boolean \| null | For a readable store, true only when a lock owner exists, its heartbeat is fresh, and its pause request is active. A stale, future, or missing heartbeat and a readable stopped store report false. Null when database contents cannot be read |
 | `since` | string \| null | Current owner's RFC3339 start timestamp; null when there is no owner |
@@ -276,6 +288,7 @@ The JSON object always has the following fields. `integer` values are non-negati
 | `store.size_bytes` | integer \| null | File size when metadata is available; null when unavailable or the file does not exist |
 | `store.retention_hours` | integer \| null | With a readable store, the recorder's value when its matching heartbeat is fresh, otherwise the current configuration value. Null when database contents cannot be read |
 | `store.oldest_event_ts` | string \| null | Oldest retained event timestamp; null when there are no events or database contents cannot be read |
+| `store.encryption` | `"sqlcipher"` \| `"plaintext"` \| null | `sqlcipher` for an encrypted store; `plaintext` for a store written before encryption existed, which the recorder converts on its next start; null when the store is missing or unreadable |
 | `capture.sources` | `string[]` | Sources from the current configuration. Never null |
 | `capture.text_content` | boolean | Text-content opt-in from the current configuration. Never null |
 | `permissions_ok` | boolean | Available permission snapshot from a fresh heartbeat whose instance matches the current owner; otherwise, including when the snapshot is absent or the heartbeat is stale, future, or missing, a local probe. Never null |
@@ -294,7 +307,7 @@ Human-readable output is a fixed set of lines rather than a table selected with 
 | `LAST EVENT` | `last_event_ts`, or `-` when null |
 | `HEARTBEAT` | Freshness plus `(<N>s old)` when age exists; `-` when freshness is null |
 | `STORE WRITES` | `store_write_state`, or `-` when null |
-| `STORE` | `store.path` |
+| `STORE` | `store.path`, followed by ` (encrypted)` or ` (plaintext; the recorder encrypts it on its next start)` when `store.encryption` is not null |
 | `TEXT CONTENT` | `on (opt-in)` or `off (opt-in: zanei config set capture.text_content true)` |
 | `PERMISSIONS OK` | `true` or `false` |
 | `DEGRADED` | `false` for an empty map; otherwise `true` followed by one indented `component: reason` line per entry |
@@ -312,6 +325,8 @@ zanei start
 ```
 
 Use the configured store path instead of the default path when applicable. The moved file remains available for investigation; the new store is empty.
+
+`store_locked` with a missing or mismatched key is recovered the same way: the new store is created with the existing key, or with a new key if none exists. Losing the key loses at most the retention window (48 hours by default) of data. When `degraded.store` says the login Keychain is locked, unlock it and retry instead of moving the store. The recorder never shows Keychain dialogs, so `zanei start` fails while the Keychain is locked; `zanei status` and `zanei query` may show the macOS unlock dialog. `zanei doctor` reports the key state.
 
 ## `record`
 
@@ -390,13 +405,16 @@ Dumps every raw event in range (backup / external processing).
 
 ```bash
 zanei export --since 24h --format jsonl --out dump.jsonl
+zanei export --since 24h --format sqlite --out snapshot.sqlite
 ```
 
 | Flag | Description |
 | --- | --- |
 | `--since` / `--until` | Time range (default `--since 24h`) |
-| `--format` | `jsonl` / `json` |
-| `--out <FILE>` | Output file |
+| `--format` | `jsonl` / `json` / `sqlite` |
+| `--out <FILE>` | Output file; required for `--format sqlite` |
+
+`--format sqlite` writes a plaintext SQLite snapshot with the same tables as the live store (`events`, `daemon_state`, `daemon_permissions`, `meta`) for the requested range; retention applies like every read. `--out` is required (usage error, code 2, without it). The file is created owner-only (mode 0600) and never overwritten: an existing path fails with code 1 and `snapshot file already exists at PATH; choose another --out path`. On success it prints `Wrote a plaintext SQLite snapshot with N events to PATH` (suppressed by `--quiet`). The snapshot is not encrypted — treat it like a JSONL export. It opens in `sqlite3`, DB Browser for SQLite, any language's SQLite bindings, and `zanei query --store snapshot.sqlite`.
 
 ## `purge`
 
@@ -411,6 +429,8 @@ zanei purge --all          # delete everything (confirmation prompt; suppress wi
 | --- | --- |
 | `--before <TIME>` | Delete events older than this |
 | `--all` | Delete everything (asks for confirmation) |
+
+When the store does not exist, `purge` prints `Purged 0 events` and does not create one.
 
 ## `filter`
 

@@ -9,7 +9,7 @@ No. Keystroke content is not captured unless you opt in (`text_content = true`);
 
 ## Where does my data go?
 
-Into one local SQLite file (`~/.local/state/zanei/store.sqlite`) and nowhere else. The binary has no feature that transmits data — there is no endpoint, no telemetry, no account. Data is deleted automatically after 48 hours by default.
+Into one local SQLite file (`~/.local/state/zanei/store.sqlite`) and nowhere else. The file is encrypted, and its key lives in your login Keychain. The binary has no feature that transmits data — there is no endpoint, no telemetry, no account. Data is deleted automatically after 48 hours by default.
 
 ## Which browsers can it capture URLs from?
 
@@ -36,7 +36,15 @@ after changing `capture.text_content`.
 
 ## Can I read the store directly?
 
-Yes — it's a regular SQLite file, and reading it directly is fine (that's also how future language SDKs would work). For most purposes `zanei query --format jsonl` or `zanei export` is easier and keeps you on the stable event envelope rather than internal table layouts, which may change between versions.
+The live store is encrypted with [SQLCipher](https://www.zetetic.net/sqlcipher/) (AES-256). The key lives in your login Keychain as "Zanei store key" and never leaves this Mac, so a copy of the file — in a backup, a sync folder, or on another machine — cannot be read without it.
+
+To look inside with your own tools, export a plain SQLite snapshot:
+
+```bash
+zanei export --format sqlite --since 24h --out snapshot.sqlite
+```
+
+It has the same tables as the live store and opens in `sqlite3`, DB Browser for SQLite, or any language's SQLite bindings — and in `zanei query --store snapshot.sqlite`. The snapshot is not encrypted; treat it like any other export. For most purposes `zanei query --format jsonl` is still easier and keeps you on the stable event envelope rather than internal table layouts, which may change between versions.
 
 ## How is this different from ChatGPT's Computer History?
 
@@ -87,11 +95,25 @@ brew uninstall zanei
 rm -rf ~/.config/zanei ~/.local/state/zanei
 ```
 
+5. Remove the store key from your login Keychain. After this, no backup copy of the store can be read:
+
+```bash
+security delete-generic-password -s dev.zanei.store
+```
+
+Or delete "Zanei store key" in Keychain Access.
+
 After uninstalling, the bundle-specific `tccutil` commands cannot resolve `dev.zanei.recorder`. TCC matches grants by bundle ID and signature, so a grant left behind can reappear when the same app is reinstalled. To remove a remaining Accessibility decision completely, delete a lingering `Zanei` row in System Settings, or run `tccutil reset Accessibility` without a bundle ID. The service-wide command resets Accessibility decisions for every app.
 
 If you forget to run `zanei stop` before uninstalling, the recorder detects that its own executable is gone and shuts itself down automatically within tens of seconds.
 
 After `brew upgrade`, run `zanei stop && zanei start` to switch the recorder to the new version. If the old recorder already shut itself down and `stop` reports that it is not running, run `zanei start` instead.
+
+## What happens to my data after upgrading?
+
+Stores written by earlier versions are plaintext SQLite. On the first `zanei start` after upgrading, the recorder converts the existing store in place: it writes the encrypted copy next to the old file and swaps it in atomically, so a crash leaves either the old file or the new one. The recorder logs `zanei: encrypted the existing store (N events)`. Until then, `zanei query` and the other readers still read the plaintext store, and the `STORE` line of `zanei status` ends with `(plaintext; the recorder encrypts it on its next start)`.
+
+The old plaintext blocks may remain in the disk's free space until they are overwritten; FileVault covers that. To leave nothing behind, run `zanei purge --all` before upgrading.
 
 ## `zanei start` fails with `Bootstrap failed: 5: Input/output error`
 
@@ -117,6 +139,8 @@ zanei start
 ```
 
 Replace the path when using `--store`. This does not repair or delete the moved file; it starts a new empty store.
+
+`store_locked` means the store is encrypted but the key in your login Keychain is missing or does not decrypt it. Recover the same way: the new store uses the existing key, or a new key if none exists. Losing the key loses at most the retention window (48 hours by default) of data. If the message says your login Keychain is locked, do not move the store: unlock the Keychain (for example by opening Keychain Access) and try again. `zanei doctor` shows the key state on its `Store key:` line.
 
 ## Text content is not captured
 

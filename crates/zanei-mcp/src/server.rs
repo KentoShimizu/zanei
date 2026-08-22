@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rmcp::ErrorData;
 use rmcp::handler::server::{
@@ -17,7 +17,7 @@ use zanei_core::timeline::{
     build, serialize,
 };
 
-use crate::PermissionCheck;
+use crate::{KeyProvider, PermissionCheck};
 
 mod output;
 
@@ -34,6 +34,7 @@ pub struct ZaneiServer {
     store_path: PathBuf,
     config_path: PathBuf,
     permission_check: PermissionCheck,
+    key_provider: KeyProvider,
     tool_router: ToolRouter<Self>,
 }
 
@@ -42,17 +43,28 @@ impl ZaneiServer {
         store_path: PathBuf,
         config_path: PathBuf,
         permission_check: PermissionCheck,
+        key_provider: KeyProvider,
     ) -> Self {
         Self {
             store_path,
             config_path,
             permission_check,
+            key_provider,
             tool_router: Self::tool_router(),
         }
     }
 
+    /// Opens the store for this call. A missing store is "nothing recorded yet"
+    /// (`None`); an encrypted store whose key cannot be obtained is an error, so
+    /// "locked" is never mistaken for "empty".
     fn reader(&self) -> Result<Option<StoreReader>, ErrorData> {
-        open_initialized_store(&self.store_path).map_err(internal_error)
+        if !self.store_path.exists() {
+            return Ok(None);
+        }
+        let key = (self.key_provider)(&self.store_path).map_err(internal_error)?;
+        StoreReader::open_with_key(&self.store_path, key.as_ref())
+            .map(Some)
+            .map_err(internal_error)
     }
 
     fn retention_hours(&self) -> Result<u64, ErrorData> {
@@ -304,14 +316,6 @@ impl Default for QueryEventsInput {
             bundle_id: None,
             limit: DEFAULT_QUERY_LIMIT,
         }
-    }
-}
-
-fn open_initialized_store(path: &Path) -> Result<Option<StoreReader>, StoreError> {
-    if path.exists() {
-        StoreReader::open(path).map(Some)
-    } else {
-        Ok(None)
     }
 }
 

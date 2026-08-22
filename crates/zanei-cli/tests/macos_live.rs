@@ -51,6 +51,37 @@ fn record_stream_emits_app_activate_without_tcc() {
     assert!(!store.exists());
 }
 
+#[test]
+#[ignore = "touches the login Keychain under a throwaway service name; run by hand"]
+fn keychain_store_key_round_trips_and_deletes() {
+    use zanei_core::store::StoreKey;
+    use zanei_macos::store_key::{KeychainInteraction, KeychainStoreKey};
+
+    let item =
+        KeychainStoreKey::with_service(format!("dev.zanei.store.test-{}", std::process::id()));
+    assert!(
+        item.load(KeychainInteraction::NoPrompt)
+            .expect("load absent item")
+            .is_none()
+    );
+    let key = StoreKey::generate().expect("generate key");
+    item.store(&key).expect("store key");
+    let loaded = item
+        .load(KeychainInteraction::NoPrompt)
+        .expect("load stored key")
+        .expect("key present");
+    assert_eq!(loaded.to_hex().as_str(), key.to_hex().as_str());
+    let duplicate = item.store(&key).expect_err("second store is a duplicate");
+    assert!(KeychainStoreKey::is_duplicate(&duplicate));
+    assert!(item.delete().expect("delete key"));
+    assert!(!item.delete().expect("delete absent key"));
+    assert!(
+        item.load(KeychainInteraction::NoPrompt)
+            .expect("load deleted item")
+            .is_none()
+    );
+}
+
 fn wait_for_activation(
     receiver: &Receiver<Result<Value, String>>,
     bundle_id: Option<&str>,

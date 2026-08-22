@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
 use rusqlite::{Connection, Transaction, params};
@@ -10,77 +12,89 @@ use crate::schema::Event;
 
 use super::{
     COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
-    DaemonState, LEGACY_STORE_SCHEMA_VERSION, RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION,
-    StoreError, retention_cutoff,
+    DaemonState, LEGACY_STORE_SCHEMA_VERSION, LockedReason, RETENTION_STORE_SCHEMA_VERSION,
+    SQLCIPHER_COMPATIBILITY, STORE_SCHEMA_VERSION, STORE_TABLES, StoreError, StoreFormat, StoreKey,
+    apply_key, retention_cutoff, verify_key,
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
-const DATABASE_SCHEMA: &str = "
+const STORE_PRAGMAS: &str = "
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 PRAGMA busy_timeout=5000;
 PRAGMA auto_vacuum=INCREMENTAL;
-
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    ts TEXT NOT NULL,
-    mono_ns INTEGER NOT NULL,
-    source TEXT NOT NULL,
-    type TEXT NOT NULL,
-    bundle_id TEXT,
-    app_name TEXT,
-    pid INTEGER,
-    window_title TEXT,
-    window_id INTEGER,
-    element_json TEXT,
-    data_json TEXT,
-    redaction_json TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(type, ts);
-CREATE INDEX IF NOT EXISTS idx_events_bundle_ts ON events(bundle_id, ts);
-
-CREATE TABLE IF NOT EXISTS daemon_state (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    pid INTEGER,
-    started_at TEXT,
-    instance_id TEXT,
-    mode TEXT,
-    heartbeat_at TEXT,
-    retention_hours INTEGER CHECK (retention_hours > 0),
-    paused_until TEXT,
-    events_captured INTEGER NOT NULL DEFAULT 0,
-    events_dropped INTEGER NOT NULL DEFAULT 0,
-    last_event_ts TEXT,
-    degraded_json TEXT,
-    collector_failures_json TEXT NOT NULL DEFAULT '{}',
-    last_known_permissions_json TEXT
-);
-INSERT OR IGNORE INTO daemon_state(id) VALUES (1);
-
-CREATE TABLE IF NOT EXISTS daemon_permissions (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    snapshot_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS meta (
-    schema_version INTEGER NOT NULL
-);
-INSERT INTO meta(schema_version)
-SELECT 5 WHERE NOT EXISTS (SELECT 1 FROM meta);
 ";
+const MIGRATION_STAGING_SUFFIX: &str = ".migrating";
 
 pub struct StoreWriter {
     connection: Connection,
+    format: StoreFormat,
 }
 
 impl StoreWriter {
+    /// Opens or creates a plaintext store. Encrypted stores fail with
+    /// [`LockedReason::KeyMissing`]; use [`Self::open_with_key`] for those.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_key(path, None)
+    }
+
+    /// Opens a store for writing, creating it when it does not exist.
+    ///
+    /// A new store is encrypted when `key` is given. An existing store keeps its
+    /// format: plaintext stores ignore the key (the recorder migrates them
+    /// separately with [`migrate_to_encrypted`]), encrypted stores require it.
+    /// New files are created owner-readable only.
+    pub fn open_with_key(
+        path: impl AsRef<Path>,
+        key: Option<&StoreKey>,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let format = StoreFormat::probe(path)?;
+        Self::open_known(path, format, key)
+    }
+
+    /// Like [`Self::open_with_key`] for a caller that already probed the format.
+    /// Required when this process holds another connection to the store: a
+    /// fresh probe would release that connection's file lock (see
+    /// [`StoreFormat::probe`]).
+    pub fn open_known(
+        path: impl AsRef<Path>,
+        format: StoreFormat,
+        key: Option<&StoreKey>,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if format == StoreFormat::Missing {
+            create_private_file(path)?;
+        }
         let connection = Connection::open(path)?;
         connection.busy_timeout(StdDuration::from_millis(BUSY_TIMEOUT_MILLISECONDS))?;
-        connection.execute_batch(DATABASE_SCHEMA)?;
+        let format = match (format, key) {
+            (StoreFormat::Encrypted, Some(key)) => {
+                apply_key(&connection, key)?;
+                verify_key(&connection)?;
+                StoreFormat::Encrypted
+            }
+            (StoreFormat::Encrypted, None) => {
+                return Err(StoreError::Locked(LockedReason::KeyMissing));
+            }
+            (StoreFormat::Missing, Some(key)) => {
+                apply_key(&connection, key)?;
+                StoreFormat::Encrypted
+            }
+            (StoreFormat::Missing, None) | (StoreFormat::Plaintext, _) => StoreFormat::Plaintext,
+            // Opening a damaged file without a key lets SQLite report the corruption.
+            (StoreFormat::Unrecognized, _) => StoreFormat::Unrecognized,
+        };
+        connection.execute_batch(STORE_PRAGMAS)?;
+        connection.execute_batch(STORE_TABLES)?;
         migrate_schema(&connection)?;
-        Ok(Self { connection })
+        Ok(Self { connection, format })
+    }
+
+    /// The on-disk format the store was opened (or created) as.
+    #[must_use]
+    pub const fn format(&self) -> StoreFormat {
+        self.format
     }
 
     pub fn append(&mut self, event: &Event) -> Result<(), StoreError> {
@@ -190,6 +204,115 @@ impl StoreWriter {
             [count],
         )?;
         Ok(())
+    }
+}
+
+/// Result of [`migrate_to_encrypted`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MigrationOutcome {
+    /// The store was already encrypted or does not exist yet.
+    Unchanged,
+    /// A plaintext store was rewritten as an encrypted one.
+    Migrated { events: u64 },
+}
+
+/// Rewrites a plaintext store at `path` as a SQLCipher store keyed with `key`.
+///
+/// The encrypted copy is built in a sibling `.migrating` file and swapped in with
+/// a single rename, so a crash leaves either the old plaintext store or the new
+/// encrypted one, never a mix. Calling it again on the result is a no-op. The
+/// caller must hold the recorder's store ownership; readers may keep reading the
+/// old inode until they close it.
+pub fn migrate_to_encrypted(path: &Path, key: &StoreKey) -> Result<MigrationOutcome, StoreError> {
+    if StoreFormat::probe(path)? != StoreFormat::Plaintext {
+        return Ok(MigrationOutcome::Unchanged);
+    }
+    let staging = migration_staging_path(path);
+    remove_if_exists(&staging)?;
+    create_private_file(&staging)?;
+    let events = match export_to_encrypted(path, &staging, key) {
+        Ok(events) => events,
+        Err(error) => {
+            remove_if_exists(&staging)?;
+            return Err(error);
+        }
+    };
+    File::open(&staging)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| StoreError::io("sync the encrypted store copy", error))?;
+    fs::rename(&staging, path)
+        .map_err(|error| StoreError::io("replace the store with its encrypted copy", error))?;
+    for suffix in ["-wal", "-shm"] {
+        remove_if_exists(&sibling(path, suffix))?;
+    }
+    Ok(MigrationOutcome::Migrated { events })
+}
+
+fn export_to_encrypted(path: &Path, staging: &Path, key: &StoreKey) -> Result<u64, StoreError> {
+    let staging_text = staging.to_str().ok_or_else(|| {
+        StoreError::io(
+            "resolve the store path",
+            io::Error::new(io::ErrorKind::InvalidInput, "store path is not valid UTF-8"),
+        )
+    })?;
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(StdDuration::from_millis(BUSY_TIMEOUT_MILLISECONDS))?;
+    // Fold the WAL into the main file first; the copy reads through this
+    // connection either way, but a truncated WAL leaves less to clean up.
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    let events = connection.query_row("SELECT count(*) FROM events", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    connection.execute(
+        "ATTACH DATABASE ?1 AS enc KEY ?2",
+        params![staging_text, key.sqlcipher_literal().as_str()],
+    )?;
+    let export = (|| {
+        connection.execute_batch(&format!(
+            "PRAGMA enc.cipher_compatibility = {SQLCIPHER_COMPATIBILITY}; \
+             PRAGMA enc.auto_vacuum = INCREMENTAL;"
+        ))?;
+        connection.query_row("SELECT sqlcipher_export('enc')", [], |_| Ok(()))?;
+        Ok::<(), StoreError>(())
+    })();
+    connection.execute_batch("DETACH DATABASE enc;")?;
+    export?;
+    u64::try_from(events).map_err(|_| StoreError::NumericOverflow("events"))
+}
+
+fn migration_staging_path(path: &Path) -> PathBuf {
+    sibling(path, MIGRATION_STAGING_SUFFIX)
+}
+
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut sibling = path.as_os_str().to_os_string();
+    sibling.push(suffix);
+    PathBuf::from(sibling)
+}
+
+fn remove_if_exists(path: &Path) -> Result<(), StoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StoreError::io("remove a stale store file", error)),
+    }
+}
+
+/// Creates `path` as an empty file only the owner can read, leaving an existing
+/// (empty) file alone. SQLite treats an empty file as a new database and copies
+/// its mode to the journal files it creates next to it.
+fn create_private_file(path: &Path) -> Result<(), StoreError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(StoreError::io("create the store file", error)),
     }
 }
 

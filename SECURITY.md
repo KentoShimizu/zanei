@@ -7,6 +7,9 @@ severity as classic security vulnerabilities. That includes:
 - content captured while `capture.text_content = false`
 - any network transmission of recorded data (the design has no egress path at all)
 - the MCP server exposing write access or data outside the documented read-only tools
+- the store key being written anywhere other than the login Keychain (outside the documented
+  `ZANEI_STORE_KEY_FILE` development override), or a plaintext copy of the store being written
+  without an explicit `export`
 
 ## Reporting a vulnerability
 

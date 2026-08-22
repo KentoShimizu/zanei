@@ -105,3 +105,5 @@ store; neither output behavior nor the store backend is configurable.
 | --- | --- | --- |
 | `~/.config/zanei/config.toml` | Configuration | `--config <path>` |
 | `~/.local/state/zanei/store.sqlite` | Event store | `--store <path>` |
+
+The event store is encrypted. Its key is generated on the recorder's first start and kept in your login Keychain; there is no configuration key for encryption. `ZANEI_STORE_KEY_FILE=<path>` makes every Zanei process read the key from that file instead — a development override for builds from source, described in the [CLI reference](/reference/cli#environment).
