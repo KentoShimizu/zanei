@@ -2,12 +2,14 @@
 //!
 //! Stores are SQLCipher databases. A [`StoreKey`] unlocks them; the on-disk
 //! [`StoreFormat`] decides whether a key is needed, so stores written before
-//! encryption existed stay readable until the recorder migrates them.
+//! encryption existed stay readable. The recorder never rewrites such a store:
+//! it sets the file aside (see [`retired`]) and readers merge it back in.
 
 mod error;
 mod key;
 mod key_store;
 mod reader;
+mod retired;
 mod snapshot;
 mod types;
 
@@ -19,7 +21,8 @@ use rusqlite::Connection;
 pub use error::{LockedReason, StoreError, StoreFailureKind};
 pub use key::{STORE_KEY_BYTES, StoreFormat, StoreKey};
 pub use key_store::{KeyStore, KeyStoreError, KeyStoreInteraction, load_or_create};
-pub use reader::StoreReader;
+pub use reader::{SkippedRetired, StoreReader};
+pub use retired::{RetiredPlaintext, remove_retired, retired_plaintext_stores};
 pub use snapshot::{SnapshotReport, export_plain_sqlite};
 pub use types::{
     DaemonMode, DaemonPermissions, DaemonState, HEARTBEAT_STALE_AFTER_SECONDS, PermissionState,
@@ -27,7 +30,9 @@ pub use types::{
 };
 
 #[cfg(feature = "write")]
-pub use writer::{MigrationOutcome, RetiredStore, StoreWriter, migrate_to_encrypted};
+pub use retired::{purge_retired_plaintext, set_aside_plaintext};
+#[cfg(feature = "write")]
+pub use writer::StoreWriter;
 
 const LEGACY_STORE_SCHEMA_VERSION: i64 = 1;
 const DAEMON_IDENTITY_STORE_SCHEMA_VERSION: i64 = 2;
@@ -91,15 +96,39 @@ INSERT INTO meta(schema_version)
 SELECT 5 WHERE NOT EXISTS (SELECT 1 FROM meta);
 ";
 
-fn retention_cutoff(now: time::OffsetDateTime, retention_hours: u64) -> Result<String, StoreError> {
+/// The instant before which events are outside a `retention_hours` window.
+fn retention_boundary(
+    now: time::OffsetDateTime,
+    retention_hours: u64,
+) -> Result<time::OffsetDateTime, StoreError> {
     let seconds = retention_hours
         .checked_mul(60 * 60)
         .and_then(|value| i64::try_from(value).ok())
         .ok_or(StoreError::NumericOverflow("retention_hours"))?;
-    let cutoff = now
-        .checked_sub(time::Duration::seconds(seconds))
-        .ok_or(StoreError::NumericOverflow("retention_hours"))?;
-    Ok(crate::normalize::format_timestamp(cutoff))
+    now.checked_sub(time::Duration::seconds(seconds))
+        .ok_or(StoreError::NumericOverflow("retention_hours"))
+}
+
+fn retention_cutoff(now: time::OffsetDateTime, retention_hours: u64) -> Result<String, StoreError> {
+    Ok(crate::normalize::format_timestamp(retention_boundary(
+        now,
+        retention_hours,
+    )?))
+}
+
+/// `path` with `suffix` appended to its file name (`store.sqlite` → `store.sqlite-wal`).
+fn sibling(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut sibling = path.as_os_str().to_os_string();
+    sibling.push(suffix);
+    std::path::PathBuf::from(sibling)
+}
+
+fn remove_if_exists(path: &std::path::Path) -> Result<(), StoreError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StoreError::io("remove a stale store file", error)),
+    }
 }
 
 /// Applies `key` to a freshly opened connection. Must run before any other
@@ -142,6 +171,15 @@ fn unlock(
         // Damaged files are opened without a key so SQLite reports the corruption.
         (StoreFormat::Plaintext | StoreFormat::Missing | StoreFormat::Unrecognized, _) => Ok(()),
     }
+}
+
+/// The URI to hand SQLite for the store at `path`. The bundled SQLite treats
+/// `file:` names as URIs on every open, so a literal path is always wrapped in
+/// an escaped URI of its own and can never be reinterpreted.
+fn store_uri(path: &std::path::Path) -> Result<String, StoreError> {
+    let absolute = std::path::absolute(path)
+        .map_err(|error| StoreError::io("resolve the store path", error))?;
+    file_uri(&absolute, "")
 }
 
 /// Escapes a path for use inside a `file:` URI filename. SQLite reads the path

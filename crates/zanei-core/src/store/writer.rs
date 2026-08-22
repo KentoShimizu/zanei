@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
-use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration as StdDuration;
 
 use rusqlite::{Connection, Transaction, params};
@@ -14,8 +13,8 @@ use crate::schema::Event;
 use super::{
     COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
     DaemonState, LEGACY_STORE_SCHEMA_VERSION, LockedReason, RETENTION_STORE_SCHEMA_VERSION,
-    SQLCIPHER_COMPATIBILITY, STORE_SCHEMA_VERSION, STORE_TABLES, StoreError, StoreFormat, StoreKey,
-    apply_key, retention_cutoff, verify_key,
+    STORE_SCHEMA_VERSION, STORE_TABLES, StoreError, StoreFormat, StoreKey, apply_key,
+    retention_cutoff, store_uri, verify_key,
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
@@ -25,7 +24,6 @@ PRAGMA synchronous=NORMAL;
 PRAGMA busy_timeout=5000;
 PRAGMA auto_vacuum=INCREMENTAL;
 ";
-const MIGRATION_STAGING_SUFFIX: &str = ".migrating";
 
 pub struct StoreWriter {
     connection: Connection,
@@ -42,9 +40,9 @@ impl StoreWriter {
     /// Opens a store for writing, creating it when it does not exist.
     ///
     /// A new store is encrypted when `key` is given. An existing store keeps its
-    /// format: plaintext stores ignore the key (the recorder migrates them
-    /// separately with [`migrate_to_encrypted`]), encrypted stores require it.
-    /// New files are created owner-readable only.
+    /// format: plaintext stores ignore the key (the recorder sets them aside
+    /// with [`super::set_aside_plaintext`] instead of rewriting them), encrypted
+    /// stores require it. New files are created owner-readable only.
     pub fn open_with_key(
         path: impl AsRef<Path>,
         key: Option<&StoreKey>,
@@ -67,7 +65,7 @@ impl StoreWriter {
         if format == StoreFormat::Missing {
             create_private_file(path)?;
         }
-        let connection = Connection::open(path)?;
+        let connection = Connection::open(store_uri(path)?)?;
         connection.busy_timeout(StdDuration::from_millis(BUSY_TIMEOUT_MILLISECONDS))?;
         let format = match (format, key) {
             (StoreFormat::Encrypted, Some(key)) => {
@@ -205,136 +203,6 @@ impl StoreWriter {
             [count],
         )?;
         Ok(())
-    }
-}
-
-/// Result of [`migrate_to_encrypted`].
-#[derive(Debug)]
-pub enum MigrationOutcome {
-    /// The store was already encrypted or does not exist yet.
-    Unchanged,
-    /// A plaintext store was rewritten as an encrypted one.
-    Migrated { events: u64, retired: RetiredStore },
-}
-
-/// The plaintext store's connection after the encrypted copy replaced the file.
-///
-/// It still holds an exclusive lock on the old, now unlinked inode. Keep it
-/// alive for as long as this process records: any process that opened the old
-/// file before the swap then fails with "database is locked" instead of
-/// committing into an orphaned file that nothing will ever read again.
-pub struct RetiredStore {
-    _connection: Connection,
-}
-
-impl fmt::Debug for RetiredStore {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RetiredStore")
-    }
-}
-
-/// Rewrites a plaintext store at `path` as a SQLCipher store keyed with `key`.
-///
-/// `path` is resolved first, so a symlinked store has its target rewritten and
-/// the link stays intact. The plaintext file is locked exclusively from the
-/// first read until the swap: other processes cannot read or commit to it
-/// meanwhile (their `busy_timeout` covers a migration of ordinary size), so
-/// nothing written during the copy can be lost. The encrypted copy is built in
-/// a sibling `.migrating` file and swapped in with a single rename, so a crash
-/// leaves either the old plaintext store or the new encrypted one, never a
-/// mix. Calling it again on the result is a no-op. The caller must hold the
-/// recorder's store ownership and should keep the returned [`RetiredStore`]
-/// alive while it runs.
-pub fn migrate_to_encrypted(path: &Path, key: &StoreKey) -> Result<MigrationOutcome, StoreError> {
-    if StoreFormat::probe(path)? != StoreFormat::Plaintext {
-        return Ok(MigrationOutcome::Unchanged);
-    }
-    let path =
-        fs::canonicalize(path).map_err(|error| StoreError::io("resolve the store path", error))?;
-    let staging = migration_staging_path(&path);
-    remove_if_exists(&staging)?;
-    create_private_file(&staging)?;
-    let (connection, events) = match export_to_encrypted(&path, &staging, key) {
-        Ok(exported) => exported,
-        Err(error) => {
-            remove_if_exists(&staging)?;
-            return Err(error);
-        }
-    };
-    File::open(&staging)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| StoreError::io("sync the encrypted store copy", error))?;
-    fs::rename(&staging, &path)
-        .map_err(|error| StoreError::io("replace the store with its encrypted copy", error))?;
-    for suffix in ["-wal", "-shm"] {
-        remove_if_exists(&sibling(&path, suffix))?;
-    }
-    Ok(MigrationOutcome::Migrated {
-        events,
-        retired: RetiredStore {
-            _connection: connection,
-        },
-    })
-}
-
-/// Copies the plaintext store into `staging` and returns the source connection,
-/// which keeps its exclusive lock until dropped.
-fn export_to_encrypted(
-    path: &Path,
-    staging: &Path,
-    key: &StoreKey,
-) -> Result<(Connection, u64), StoreError> {
-    let staging_text = staging.to_str().ok_or_else(|| {
-        StoreError::io(
-            "resolve the store path",
-            io::Error::new(io::ErrorKind::InvalidInput, "store path is not valid UTF-8"),
-        )
-    })?;
-    let connection = Connection::open(path)?;
-    connection.busy_timeout(StdDuration::from_millis(BUSY_TIMEOUT_MILLISECONDS))?;
-    // Exclusive locking mode: the first access below takes an exclusive lock on
-    // the file and keeps it until the connection closes, so no other process can
-    // commit to (or read) the plaintext store while its copy is being built.
-    connection.execute_batch("PRAGMA locking_mode = EXCLUSIVE;")?;
-    // Fold the WAL into the main file first; the copy reads through this
-    // connection either way, but a truncated WAL leaves less to clean up.
-    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-    let events = connection.query_row("SELECT count(*) FROM events", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    connection.execute(
-        "ATTACH DATABASE ?1 AS enc KEY ?2",
-        params![staging_text, key.sqlcipher_literal().as_str()],
-    )?;
-    let export = (|| {
-        connection.execute_batch(&format!(
-            "PRAGMA enc.cipher_compatibility = {SQLCIPHER_COMPATIBILITY}; \
-             PRAGMA enc.auto_vacuum = INCREMENTAL;"
-        ))?;
-        connection.query_row("SELECT sqlcipher_export('enc')", [], |_| Ok(()))?;
-        Ok::<(), StoreError>(())
-    })();
-    connection.execute_batch("DETACH DATABASE enc;")?;
-    export?;
-    let events = u64::try_from(events).map_err(|_| StoreError::NumericOverflow("events"))?;
-    Ok((connection, events))
-}
-
-fn migration_staging_path(path: &Path) -> PathBuf {
-    sibling(path, MIGRATION_STAGING_SUFFIX)
-}
-
-fn sibling(path: &Path, suffix: &str) -> PathBuf {
-    let mut sibling = path.as_os_str().to_os_string();
-    sibling.push(suffix);
-    PathBuf::from(sibling)
-}
-
-fn remove_if_exists(path: &Path) -> Result<(), StoreError> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(StoreError::io("remove a stale store file", error)),
     }
 }
 

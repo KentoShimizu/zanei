@@ -1142,8 +1142,8 @@ fn recorder_refuses_an_encrypted_store_without_its_key_and_creates_none() {
 }
 
 #[test]
-fn foreground_daemon_encrypts_a_plaintext_store_on_start() {
-    let directory = TempDir::new().expect("migration fixture");
+fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
+    let directory = TempDir::new().expect("set-aside fixture");
     let config = directory.path().join("config.toml");
     let store = directory.path().join("store.sqlite");
     fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
@@ -1167,24 +1167,45 @@ fn foreground_daemon_encrypts_a_plaintext_store_on_start() {
     StoreWriter::open(&store)
         .and_then(|mut writer| writer.append(&legacy))
         .expect("plaintext legacy store");
-    assert_eq!(
-        StoreFormat::probe(&store).expect("probe legacy"),
-        StoreFormat::Plaintext
-    );
 
     let mut child = spawn_foreground_daemon(&config, &store);
     wait_for_daemon_ready(&mut child, &store);
 
     assert_eq!(
-        StoreFormat::probe(&store).expect("probe migrated"),
+        StoreFormat::probe(&store).expect("probe new store"),
         StoreFormat::Encrypted
     );
-    assert!(!directory.path().join("store.sqlite.migrating").exists());
-    let events = open_store(&store)
-        .expect("open migrated store")
+    let retired: Vec<_> = fs::read_dir(directory.path())
+        .expect("list fixture directory")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            name.starts_with("store.sqlite.plaintext-")
+                && !name.ends_with("-wal")
+                && !name.ends_with("-shm")
+        })
+        .collect();
+    assert_eq!(
+        retired.len(),
+        1,
+        "the previous store is kept under a timestamped name"
+    );
+    assert_eq!(
+        StoreFormat::probe(&retired[0]).expect("probe retired"),
+        StoreFormat::Plaintext
+    );
+
+    let merged = open_store(&store)
+        .expect("open new store")
         .query(&QueryFilter::default(), 48)
-        .expect("migrated events");
-    assert_eq!(events, vec![legacy]);
+        .expect("merged events");
+    assert_eq!(merged, vec![legacy]);
+    let query = command(&config, &store)
+        .args(["query", "--since", "1h", "--format", "json"])
+        .output()
+        .expect("query output");
+    assert!(query.status.success());
+    assert!(String::from_utf8_lossy(&query.stdout).contains("LegacyFixture"));
     let status = command(&config, &store)
         .args(["status", "--json"])
         .output()
@@ -1193,6 +1214,10 @@ fn foreground_daemon_encrypts_a_plaintext_store_on_start() {
     let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");
     assert_eq!(value["state"], "running");
     assert_eq!(value["store"]["encryption"], "sqlcipher");
+    assert_eq!(
+        value["store"]["retired_plaintext"][0],
+        retired[0].display().to_string()
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1203,6 +1228,15 @@ fn foreground_daemon_encrypts_a_plaintext_store_on_start() {
             & 0o777;
         assert_eq!(mode, 0o600);
     }
+
+    command(&config, &store)
+        .args(["purge", "--all", "--quiet"])
+        .assert()
+        .success();
+    assert!(
+        !retired[0].exists(),
+        "purge --all removes the set-aside store"
+    );
 
     signal_child(&mut child, "TERM");
     assert!(wait_for_child(&mut child).success());

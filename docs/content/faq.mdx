@@ -111,9 +111,9 @@ After `brew upgrade`, run `zanei stop && zanei start` to switch the recorder to 
 
 ## What happens to my data after upgrading?
 
-Stores written by earlier versions are plaintext SQLite. On the first `zanei start` after upgrading, the recorder converts the existing store in place: it writes the encrypted copy next to the old file and swaps it in atomically, so a crash leaves either the old file or the new one. The recorder logs `zanei: encrypted the existing store (N events)`. Until then, `zanei query` and the other readers still read the plaintext store, and the `STORE` line of `zanei status` ends with `(plaintext; the recorder encrypts it on its next start)`.
+Stores written by earlier versions are plaintext SQLite. The recorder never rewrites such a file. On the first `zanei start` after upgrading it renames the old store to `store.sqlite.plaintext-<timestamp>` next to the new, encrypted `store.sqlite`, and logs `zanei: kept the previous plaintext store as …`. Every read — `zanei query`, `zanei timeline`, `zanei export`, and the MCP server — returns the events from both files as one history, so nothing recorded before the upgrade disappears from your timeline. `zanei status` lists the set-aside file under `store.retired_plaintext`.
 
-The old plaintext blocks may remain in the disk's free space until they are overwritten; FileVault covers that. To leave nothing behind, run `zanei purge --all` before upgrading.
+The set-aside file stays plaintext. It only holds events older than the moment it was set aside, so the recorder deletes it as soon as that moment leaves the retention window (`output.retention_hours`, 48 hours by default); a longer retention keeps it longer, a shorter one removes it sooner. `zanei purge --all` deletes it immediately, and so does deleting the file yourself.
 
 ## `zanei start` fails with `Bootstrap failed: 5: Input/output error`
 

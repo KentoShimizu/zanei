@@ -183,7 +183,7 @@ Only `y` or `Y` enables capture; Enter, any other answer, EOF, or a read error s
 
 The question is not shown by `--foreground`, with non-TTY stdin or stderr, with `--quiet` or `--json`, while permissions are missing, or when permission state cannot be determined. A skipped start leaves the setting undecided and keeps the existing opt-in guidance. If the key is already explicitly `true` or `false`, `start` does not ask.
 
-On its first start, the recorder generates the store's encryption key and saves it in your login Keychain as "Zanei store key". A plaintext store written by an earlier version is converted in place on the first start after upgrading. The recorder never shows Keychain dialogs: if the login Keychain is locked, `start` fails with `store is locked: your login Keychain is locked; unlock it (for example by opening Keychain Access) and try again`.
+On its first start, the recorder generates the store's encryption key and saves it in your login Keychain as "Zanei store key". A plaintext store written by an earlier version is not rewritten: the recorder renames it to `store.sqlite.plaintext-<timestamp>`, starts a fresh encrypted store, and reads keep returning the old events alongside the new ones until they age out of retention (see the [FAQ](/faq#what-happens-to-my-data-after-upgrading)). The recorder never shows Keychain dialogs: if the login Keychain is locked, `start` fails with `store is locked: your login Keychain is locked; unlock it (for example by opening Keychain Access) and try again`.
 
 Only one recorder can own a store at a time. A second foreground or launchd recorder for the same
 store exits with code 1 and reports the PID of the current owner.
@@ -288,7 +288,7 @@ The JSON object always has the following fields. `integer` values are non-negati
 | `store.size_bytes` | integer \| null | File size when metadata is available; null when unavailable or the file does not exist |
 | `store.retention_hours` | integer \| null | With a readable store, the recorder's value when its matching heartbeat is fresh, otherwise the current configuration value. Null when database contents cannot be read |
 | `store.oldest_event_ts` | string \| null | Oldest retained event timestamp; null when there are no events or database contents cannot be read |
-| `store.encryption` | `"sqlcipher"` \| `"plaintext"` \| null | `sqlcipher` for an encrypted store; `plaintext` for a store written before encryption existed, which the recorder converts on its next start; null when the store is missing or unreadable |
+\g<0>| `store.retired_plaintext` | string[] | Plaintext stores set aside at the encryption upgrade that reads still include, oldest first; empty once they have aged out. Human-readable output shows each as a `PREVIOUS STORE` line. One that cannot be read is skipped and reported under `degraded.retired_store` |
 | `capture.sources` | `string[]` | Sources from the current configuration. Never null |
 | `capture.text_content` | boolean | Text-content opt-in from the current configuration. Never null |
 | `permissions_ok` | boolean | Available permission snapshot from a fresh heartbeat whose instance matches the current owner; otherwise, including when the snapshot is absent or the heartbeat is stale, future, or missing, a local probe. Never null |
@@ -430,7 +430,7 @@ zanei purge --all          # delete everything (confirmation prompt; suppress wi
 | `--before <TIME>` | Delete events older than this |
 | `--all` | Delete everything (asks for confirmation) |
 
-When the store does not exist, `purge` prints `Purged 0 events` and does not create one.
+When the store does not exist, `purge` prints `Purged 0 events` and does not create one. Set-aside plaintext stores from the encryption upgrade are purged too: `--before` deletes their matching events, `--all` deletes the files.
 
 ## `filter`
 

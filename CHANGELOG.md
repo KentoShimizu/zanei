@@ -9,10 +9,12 @@ The store is encrypted at rest.
   Keychain as "Zanei store key"; it is not synced to iCloud Keychain
   and never leaves the Mac. The CLI, the launchd recorder, and the MCP
   server read it without dialogs, and `brew upgrade` keeps access.
-- On the first `zanei start` after upgrading, the recorder converts an
-  existing plaintext store in place and logs
-  `zanei: encrypted the existing store (N events)`. Until then,
-  readers still read the plaintext store.
+- A plaintext store from an earlier version is not rewritten. On the
+  first `zanei start` after upgrading, the recorder renames it to
+  `store.sqlite.plaintext-<timestamp>` and starts a fresh encrypted
+  store; every read keeps returning the old events next to the new ones
+  until they age out of retention, then the recorder deletes the file.
+  `status` lists it under `store.retired_plaintext`, and `purge` covers it.
 - The store, its `-wal`/`-shm` companions, and a store directory that
   Zanei creates are owner-only (0600 / 0700).
 - `status` reports `store_locked` (exit code 1) when the store is

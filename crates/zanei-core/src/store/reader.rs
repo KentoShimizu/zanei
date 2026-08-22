@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
 use rusqlite::types::Value as SqlValue;
@@ -11,11 +11,12 @@ use crate::schema::{
     App, ClipboardOrigin, Element, Event, EventData, Redaction, Window, is_known_event_type,
 };
 
+use super::RetiredPlaintext;
 use super::{
     COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
     DaemonPermissions, HEARTBEAT_STALE_AFTER_SECONDS, LEGACY_STORE_SCHEMA_VERSION, QueryFilter,
     RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreFormat, StoreKey,
-    StoreStatus, retention_cutoff, unlock,
+    StoreStatus, file_uri, retention_cutoff, retired_plaintext_stores, store_uri, unlock,
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
@@ -24,6 +25,16 @@ pub struct StoreReader {
     connection: Connection,
     schema_version: i64,
     format: StoreFormat,
+    /// Set-aside plaintext stores attached read-only as `retired0`, `retired1`, …
+    retired: Vec<RetiredPlaintext>,
+    skipped: Vec<SkippedRetired>,
+}
+
+/// A set-aside plaintext store that could not be read alongside the live store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SkippedRetired {
+    pub path: PathBuf,
+    pub reason: String,
 }
 
 impl StoreReader {
@@ -34,27 +45,35 @@ impl StoreReader {
     }
 
     /// Opens a store read-only. The file's [`StoreFormat`] decides whether `key`
-    /// is used: plaintext stores ignore it, encrypted stores require it.
+    /// is used: plaintext stores ignore it, encrypted stores require it. Plaintext
+    /// stores the recorder set aside next to it are attached read-only, so reads
+    /// cover the events recorded before encryption until they age out.
     pub fn open_with_key(
         path: impl AsRef<Path>,
         key: Option<&StoreKey>,
     ) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let format = StoreFormat::probe(path)?;
-        Self::open_known(path, format, key)
+        let mut reader = Self::open_known(path, format, key)?;
+        reader.attach_retired(path)?;
+        Ok(reader)
     }
 
-    /// Like [`Self::open_with_key`] for a caller that already probed the format.
-    /// Required when this process holds another connection to the store: a
-    /// fresh probe would release that connection's file lock (see
-    /// [`StoreFormat::probe`]).
+    /// Like [`Self::open_with_key`] for a caller that already probed the format,
+    /// without attaching set-aside stores. Required when this process holds
+    /// another connection to the store: a fresh probe would release that
+    /// connection's file lock (see [`StoreFormat::probe`]). The recorder uses
+    /// this for its own status reads.
     pub fn open_known(
         path: impl AsRef<Path>,
         format: StoreFormat,
         key: Option<&StoreKey>,
     ) -> Result<Self, StoreError> {
         let path = path.as_ref();
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let connection = Connection::open_with_flags(
+            store_uri(path)?,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?;
         connection.busy_timeout(StdDuration::from_millis(BUSY_TIMEOUT_MILLISECONDS))?;
         unlock(&connection, format, key)?;
         let schema_version = readable_schema_version(&connection)?;
@@ -62,7 +81,85 @@ impl StoreReader {
             connection,
             schema_version,
             format,
+            retired: Vec::new(),
+            skipped: Vec::new(),
         })
+    }
+
+    /// Attaches every readable set-aside plaintext store next to `store_path`.
+    /// Unreadable ones are recorded in [`Self::skipped_retired`] and left out
+    /// rather than failing the whole read: they are temporary files on their way
+    /// out of retention.
+    fn attach_retired(&mut self, store_path: &Path) -> Result<(), StoreError> {
+        for candidate in retired_plaintext_stores(store_path)? {
+            // Probing opens the retired file only, never the live store, so the
+            // lock rule from `StoreFormat::probe` is respected.
+            let format = match StoreFormat::probe(&candidate.path) {
+                Ok(StoreFormat::Plaintext) => StoreFormat::Plaintext,
+                Ok(other) => {
+                    self.skip_retired(
+                        candidate.path,
+                        format!("not a plaintext store ({})", other.as_str()),
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    self.skip_retired(candidate.path, error.to_string());
+                    continue;
+                }
+            };
+            debug_assert_eq!(format, StoreFormat::Plaintext);
+            let alias = retired_alias(self.retired.len());
+            let uri = file_uri(&candidate.path, "mode=ro")?;
+            // `KEY ''` keeps SQLCipher from applying the live store's key to this
+            // plaintext file.
+            if let Err(error) = self
+                .connection
+                .execute(&format!("ATTACH DATABASE ?1 AS {alias} KEY ''"), [uri])
+            {
+                self.skip_retired(candidate.path, error.to_string());
+                continue;
+            }
+            let readable = self.connection.query_row(
+                &format!("SELECT count(*) FROM {alias}.events"),
+                [],
+                |row| row.get::<_, i64>(0),
+            );
+            if let Err(error) = readable {
+                let _ = self
+                    .connection
+                    .execute_batch(&format!("DETACH DATABASE {alias};"));
+                self.skip_retired(candidate.path, error.to_string());
+                continue;
+            }
+            self.retired.push(candidate);
+        }
+        Ok(())
+    }
+
+    fn skip_retired(&mut self, path: PathBuf, reason: String) {
+        self.skipped.push(SkippedRetired { path, reason });
+    }
+
+    /// Set-aside plaintext stores whose events this reader returns alongside the
+    /// live store's, oldest first.
+    #[must_use]
+    pub fn retired_stores(&self) -> &[RetiredPlaintext] {
+        &self.retired
+    }
+
+    /// Set-aside plaintext stores that were found but could not be read.
+    #[must_use]
+    pub fn skipped_retired(&self) -> &[SkippedRetired] {
+        &self.skipped
+    }
+
+    /// Schema names holding an `events` table: the live store and every attached
+    /// set-aside store.
+    fn event_sources(&self) -> Vec<String> {
+        std::iter::once("main".to_owned())
+            .chain((0..self.retired.len()).map(retired_alias))
+            .collect()
     }
 
     /// The on-disk format the store was opened as.
@@ -90,7 +187,7 @@ impl StoreReader {
         let now = OffsetDateTime::now_utc();
         let retention_hours = self.effective_retention_hours_at(now, configured_retention_hours)?;
         let cutoff = retention_cutoff(now, retention_hours)?;
-        let (sql, parameters) = build_query(filter, &cutoff)?;
+        let (sql, parameters) = build_query(filter, &cutoff, &self.event_sources())?;
         let mut statement = self.connection.prepare(&sql)?;
         let mut rows = statement.query(params_from_iter(parameters.iter()))?;
         let mut events = Vec::new();
@@ -146,11 +243,17 @@ impl StoreReader {
     }
 
     pub fn oldest_event_ts(&self) -> Result<Option<String>, StoreError> {
+        let sql = format!(
+            "SELECT MIN(ts) FROM ({})",
+            self.event_sources()
+                .iter()
+                .map(|source| format!("SELECT MIN(ts) AS ts FROM {source}.events"))
+                .collect::<Vec<_>>()
+                .join(" UNION ALL ")
+        );
         let timestamp = self
             .connection
-            .query_row("SELECT MIN(ts) FROM events", [], |row| {
-                row.get::<_, Option<String>>(0)
-            })?;
+            .query_row(&sql, [], |row| row.get::<_, Option<String>>(0))?;
         if let Some(value) = timestamp.as_deref() {
             parse_timestamp("oldest_event_ts", value)?;
         }
@@ -340,9 +443,17 @@ fn deserialize_permissions(
     serde_json::from_str(json).map_err(|error| StoreError::invalid_json(field, error))
 }
 
+fn retired_alias(index: usize) -> String {
+    format!("retired{index}")
+}
+
+/// Builds the event query over `sources` (schema names with an `events` table).
+/// With several sources the per-source selections are combined with
+/// `UNION ALL`, each carrying the same conditions, and ordered as one.
 fn build_query(
     filter: &QueryFilter,
     retention_cutoff: &str,
+    sources: &[String],
 ) -> Result<(String, Vec<SqlValue>), StoreError> {
     filter.validate()?;
     let mut conditions = Vec::new();
@@ -379,13 +490,25 @@ fn build_query(
         filter.bundle_id.as_deref(),
     );
 
-    let mut sql = String::from(
-        "SELECT id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
-         window_title, window_id, element_json, data_json, redaction_json FROM events",
-    );
-    if !conditions.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&conditions.join(" AND "));
+    const COLUMNS: &str = "id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
+                           window_title, window_id, element_json, data_json, redaction_json";
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    let selections = sources
+        .iter()
+        .map(|source| format!("SELECT {COLUMNS} FROM {source}.events{where_clause}"))
+        .collect::<Vec<_>>();
+    let mut sql = if selections.len() == 1 {
+        selections.into_iter().next().unwrap_or_default()
+    } else {
+        format!("SELECT {COLUMNS} FROM ({})", selections.join(" UNION ALL "))
+    };
+    let per_source = parameters.clone();
+    for _ in 1..sources.len() {
+        parameters.extend(per_source.iter().cloned());
     }
     sql.push_str(" ORDER BY ts ASC, mono_ns ASC, id ASC");
     if let Some(limit) = filter.limit {

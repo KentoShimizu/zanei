@@ -4,7 +4,10 @@ use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zanei_core::{
     config::Config,
-    store::{HEARTBEAT_STALE_AFTER_SECONDS, StoreFailureKind, StoreFormat, StoreStatus},
+    store::{
+        HEARTBEAT_STALE_AFTER_SECONDS, StoreFailureKind, StoreFormat, StoreStatus,
+        retired_plaintext_stores,
+    },
 };
 
 use super::doctor::permissions_ok;
@@ -18,6 +21,7 @@ use crate::{
 
 const EXIT_STORE_FAILURE: u8 = 1;
 const STORE_DEGRADED_COMPONENT: &str = "store";
+const RETIRED_STORE_DEGRADED_COMPONENT: &str = "retired_store";
 
 pub fn run(paths: &Paths, json: bool) -> Result<u8, CliError> {
     let owner = StoreOwnership::probe(&paths.store)?;
@@ -74,15 +78,62 @@ fn inspect(
         Ok(timestamp) => timestamp,
         Err(error) => return store_error_report(paths, config, owner, &error),
     };
+    let retired = RetiredReport {
+        paths: reader
+            .retired_stores()
+            .iter()
+            .map(|retired| retired.path.display().to_string())
+            .collect(),
+        skipped: reader
+            .skipped_retired()
+            .iter()
+            .map(|skipped| format!("{}: {}", skipped.path.display(), skipped.reason))
+            .collect(),
+    };
     StatusReport::readable(
         paths,
         config,
         &status,
         owner,
-        size_bytes,
-        oldest_event_ts,
-        reader.format(),
+        StoreInspection {
+            size_bytes,
+            oldest_event_ts,
+            format: reader.format(),
+            retired,
+        },
     )
+}
+
+/// What a successful read of the store file revealed about it.
+struct StoreInspection {
+    size_bytes: u64,
+    oldest_event_ts: Option<String>,
+    format: StoreFormat,
+    retired: RetiredReport,
+}
+
+/// Set-aside plaintext stores next to the live store, as seen by this read.
+#[derive(Debug, Default)]
+struct RetiredReport {
+    paths: Vec<String>,
+    skipped: Vec<String>,
+}
+
+impl RetiredReport {
+    /// Lists set-aside stores by name only, for reports that could not open the store.
+    fn listed(store: &std::path::Path) -> Self {
+        Self {
+            paths: retired_plaintext_stores(store)
+                .map(|retired| {
+                    retired
+                        .into_iter()
+                        .map(|retired| retired.path.display().to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            skipped: Vec::new(),
+        }
+    }
 }
 
 fn missing_report(
@@ -192,10 +243,14 @@ impl StatusReport {
         config: &Config,
         status: &StoreStatus,
         owner: Option<&StoreOwner>,
-        size_bytes: u64,
-        oldest_event_ts: Option<String>,
-        format: StoreFormat,
+        inspection: StoreInspection,
     ) -> Result<Self, CliError> {
+        let StoreInspection {
+            size_bytes,
+            oldest_event_ts,
+            format,
+            retired,
+        } = inspection;
         let now = OffsetDateTime::now_utc();
         let heartbeat = parse_status_timestamp("heartbeat_at", status.heartbeat_at.as_deref())?;
         let last_event = parse_status_timestamp("last_event_ts", status.last_event_ts.as_deref())?;
@@ -250,10 +305,19 @@ impl StatusReport {
             heartbeat_age_s,
             last_event_age_s,
             store_write_state: Some(store_write_state),
-            degraded: if owner_matches_heartbeat {
-                status.degraded.clone()
-            } else {
-                BTreeMap::new()
+            degraded: {
+                let mut degraded = if owner_matches_heartbeat {
+                    status.degraded.clone()
+                } else {
+                    BTreeMap::new()
+                };
+                if !retired.skipped.is_empty() {
+                    degraded.insert(
+                        RETIRED_STORE_DEGRADED_COMPONENT.to_owned(),
+                        retired.skipped.join("; "),
+                    );
+                }
+                degraded
             },
             store: StoreReport {
                 path: paths.store.display().to_string(),
@@ -269,6 +333,7 @@ impl StatusReport {
                 ),
                 oldest_event_ts,
                 encryption: encryption_name(format),
+                retired_plaintext: retired.paths,
             },
             capture: CaptureReport::new(config),
             permissions_ok,
@@ -315,6 +380,7 @@ impl StatusReport {
                 encryption: StoreFormat::probe(&paths.store)
                     .ok()
                     .and_then(encryption_name),
+                retired_plaintext: RetiredReport::listed(&paths.store).paths,
             },
             capture: CaptureReport::new(config),
             permissions_ok: permissions_ok(config)?,
@@ -449,6 +515,8 @@ struct StoreReport {
     retention_hours: Option<u64>,
     oldest_event_ts: Option<String>,
     encryption: Option<&'static str>,
+    /// Plaintext stores set aside at the encryption upgrade, still read alongside this one.
+    retired_plaintext: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -514,6 +582,9 @@ fn print_human(report: &StatusReport) {
             None => "",
         }
     );
+    for retired in &report.store.retired_plaintext {
+        println!("PREVIOUS STORE    {retired} (plaintext; read until it ages out of retention)");
+    }
     print_text_content(report.capture.text_content);
     println!("PERMISSIONS OK    {}", report.permissions_ok);
     if report.degraded.is_empty() {

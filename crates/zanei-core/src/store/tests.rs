@@ -11,9 +11,10 @@ use crate::schema::{
 };
 
 use super::{
-    DaemonMode, DaemonPermissions, DaemonState, LockedReason, MigrationOutcome, PermissionState,
-    QueryFilter, StoreError, StoreFailureKind, StoreFormat, StoreKey, StoreReader, StoreStatus,
-    StoreWriter, export_plain_sqlite, migrate_to_encrypted,
+    DaemonMode, DaemonPermissions, DaemonState, LockedReason, PermissionState, QueryFilter,
+    StoreError, StoreFailureKind, StoreFormat, StoreKey, StoreReader, StoreStatus, StoreWriter,
+    export_plain_sqlite, purge_retired_plaintext, remove_retired, retired_plaintext_stores,
+    set_aside_plaintext,
 };
 
 static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
@@ -1060,199 +1061,6 @@ fn format_probe_distinguishes_missing_plaintext_and_encrypted() {
 }
 
 #[test]
-fn migration_encrypts_a_plaintext_store_in_place_and_is_idempotent() {
-    let database = TestDatabase::new("migrate");
-    let first = app_launch(
-        "evt_01K00000000000000000000201",
-        "2026-08-16T09:00:00.000Z",
-        "Safari",
-        "com.apple.Safari",
-    );
-    let second = browser_navigate("evt_01K00000000000000000000202", "2026-08-16T09:01:00.000Z");
-    let heartbeat = OffsetDateTime::parse("2026-08-16T09:02:00Z", &Rfc3339).expect("heartbeat");
-    {
-        let mut writer = StoreWriter::open(database.path()).expect("plaintext store");
-        writer
-            .append_batch(&[first.clone(), second.clone()])
-            .expect("append events");
-        writer
-            .write_daemon_state(&running_state(heartbeat, 48))
-            .expect("write daemon state");
-    }
-    let key = StoreKey::generate().expect("generate key");
-
-    let MigrationOutcome::Migrated {
-        events,
-        retired: _retired,
-    } = migrate_to_encrypted(database.path(), &key).expect("migrate")
-    else {
-        panic!("plaintext store must be migrated");
-    };
-    assert_eq!(events, 2);
-    assert_eq!(
-        StoreFormat::probe(database.path()).expect("probe migrated"),
-        StoreFormat::Encrypted
-    );
-    assert!(!PathBuf::from(format!("{}.migrating", database.path().display())).exists());
-
-    let reader =
-        StoreReader::open_with_key(database.path(), Some(&key)).expect("open migrated store");
-    assert_eq!(
-        reader
-            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-            .expect("query migrated store"),
-        vec![first, second]
-    );
-    let status = reader
-        .status_at(heartbeat)
-        .expect("status of migrated store");
-    assert!(status.running);
-    assert_eq!(status.pid, Some(42));
-    assert_eq!(status.retention_hours, Some(48));
-
-    assert!(matches!(
-        migrate_to_encrypted(database.path(), &key).expect("second migration"),
-        MigrationOutcome::Unchanged
-    ));
-    let mut writer =
-        StoreWriter::open_with_key(database.path(), Some(&key)).expect("writer after migration");
-    writer
-        .append(&app_launch(
-            "evt_01K00000000000000000000203",
-            "2026-08-16T09:03:00.000Z",
-            "Finder",
-            "com.apple.finder",
-        ))
-        .expect("append after migration");
-    assert_eq!(
-        reader
-            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-            .expect("query after post-migration write")
-            .len(),
-        3
-    );
-
-    let missing = TestDatabase::new("migrate-missing");
-    assert!(matches!(
-        migrate_to_encrypted(missing.path(), &key).expect("migrate missing store"),
-        MigrationOutcome::Unchanged
-    ));
-    assert!(!missing.path().exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn migration_rewrites_the_target_of_a_symlinked_store() {
-    let target = TestDatabase::new("symlink-target");
-    let link = TestDatabase::new("symlink-link");
-    StoreWriter::open(target.path())
-        .and_then(|mut writer| {
-            writer.append(&app_launch(
-                "evt_01K00000000000000000000401",
-                "2026-08-16T09:00:00.000Z",
-                "Safari",
-                "com.apple.Safari",
-            ))
-        })
-        .expect("plaintext target store");
-    std::os::unix::fs::symlink(target.path(), link.path()).expect("symlink to the store");
-    let key = StoreKey::generate().expect("generate key");
-
-    let MigrationOutcome::Migrated {
-        events,
-        retired: _retired,
-    } = migrate_to_encrypted(link.path(), &key).expect("migrate through the symlink")
-    else {
-        panic!("plaintext store must be migrated");
-    };
-    assert_eq!(events, 1);
-    assert!(
-        std::fs::symlink_metadata(link.path())
-            .expect("link metadata")
-            .file_type()
-            .is_symlink(),
-        "the symlink itself must survive"
-    );
-    assert_eq!(
-        StoreFormat::probe(target.path()).expect("probe target"),
-        StoreFormat::Encrypted
-    );
-    assert!(!PathBuf::from(format!("{}.migrating", target.path().display())).exists());
-    assert_eq!(
-        StoreReader::open_with_key(link.path(), Some(&key))
-            .expect("read through the symlink")
-            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-            .expect("query")
-            .len(),
-        1
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn migration_keeps_the_old_file_locked_so_late_writers_fail_instead_of_writing_into_it() {
-    use rusqlite::ffi::ErrorCode;
-
-    let database = TestDatabase::new("retired");
-    let alias = TestDatabase::new("retired-alias");
-    StoreWriter::open(database.path())
-        .and_then(|mut writer| {
-            writer.append(&app_launch(
-                "evt_01K00000000000000000000501",
-                "2026-08-16T09:00:00.000Z",
-                "Safari",
-                "com.apple.Safari",
-            ))
-        })
-        .expect("plaintext store");
-    // A hard link keeps naming the plaintext inode after the swap, like a process
-    // that opened the store just before the encrypted copy replaced it.
-    std::fs::hard_link(database.path(), alias.path()).expect("hard link to the plaintext inode");
-    let key = StoreKey::generate().expect("generate key");
-
-    let MigrationOutcome::Migrated { retired, .. } =
-        migrate_to_encrypted(database.path(), &key).expect("migrate")
-    else {
-        panic!("plaintext store must be migrated");
-    };
-    assert_eq!(
-        StoreFormat::probe(alias.path()).expect("probe old inode"),
-        StoreFormat::Plaintext
-    );
-    let late = rusqlite::Connection::open(alias.path()).expect("open the old inode");
-    late.busy_timeout(std::time::Duration::ZERO)
-        .expect("no busy wait");
-    let locked = late
-        .execute(
-            "INSERT INTO daemon_permissions(id, snapshot_json) VALUES (1, '{}')",
-            [],
-        )
-        .expect_err("the retired store must still be locked");
-    assert!(matches!(
-        locked,
-        rusqlite::Error::SqliteFailure(error, _)
-            if error.code == ErrorCode::DatabaseBusy || error.code == ErrorCode::DatabaseLocked
-    ));
-    assert_eq!(
-        StoreReader::open_with_key(database.path(), Some(&key))
-            .expect("open the encrypted store")
-            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-            .expect("query")
-            .len(),
-        1
-    );
-
-    // Releasing the retired connection is exactly what lets a late writer commit
-    // into the orphaned file, which is why the recorder keeps it for its lifetime.
-    drop(retired);
-    late.execute(
-        "INSERT INTO daemon_permissions(id, snapshot_json) VALUES (1, '{}')",
-        [],
-    )
-    .expect("orphaned inode accepts writes once the lock is gone");
-}
-
-#[test]
 fn plaintext_snapshot_handles_non_ascii_paths() {
     let database = TestDatabase::new("スナップショット-source");
     let snapshot = TestDatabase::new("スナップショット-output");
@@ -1363,4 +1171,215 @@ fn plaintext_snapshot_copies_the_requested_range_into_a_regular_sqlite_file() {
     )
     .expect("export plaintext snapshot");
     assert_eq!(report.events, 3);
+}
+
+#[test]
+fn set_aside_renames_the_plaintext_store_and_readers_merge_it_back() {
+    let database = TestDatabase::new("retire");
+    let old_a = app_launch(
+        "evt_01K00000000000000000000701",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    let old_b = browser_navigate("evt_01K00000000000000000000702", "2026-08-16T09:01:00.000Z");
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| writer.append_batch(&[old_a.clone(), old_b.clone()]))
+        .expect("plaintext store");
+    let at = OffsetDateTime::parse("2026-08-23T03:15:00Z", &Rfc3339).expect("time");
+
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("a plaintext store is set aside");
+    assert!(!database.path().exists());
+    assert!(retired.path.exists());
+    assert_eq!(retired.set_aside_at, at);
+    assert!(
+        retired
+            .path
+            .to_string_lossy()
+            .ends_with(".plaintext-20260823T031500Z")
+    );
+    assert_eq!(
+        StoreFormat::probe(&retired.path).expect("probe retired"),
+        StoreFormat::Plaintext
+    );
+    assert_eq!(
+        retired_plaintext_stores(database.path()).expect("list retired"),
+        vec![retired.clone()]
+    );
+    assert!(
+        set_aside_plaintext(database.path(), at)
+            .expect("nothing to set aside")
+            .is_none()
+    );
+
+    let key = StoreKey::generate().expect("generate key");
+    let new_c = app_launch(
+        "evt_01K00000000000000000000703",
+        "2026-08-16T09:02:00.000Z",
+        "Finder",
+        "com.apple.finder",
+    );
+    StoreWriter::open_with_key(database.path(), Some(&key))
+        .and_then(|mut writer| writer.append(&new_c))
+        .expect("encrypted store");
+    let reader = StoreReader::open_with_key(database.path(), Some(&key)).expect("merged reader");
+    assert_eq!(reader.retired_stores(), std::slice::from_ref(&retired));
+    assert!(reader.skipped_retired().is_empty());
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("merged query"),
+        vec![old_a.clone(), old_b.clone(), new_c]
+    );
+    assert_eq!(
+        reader.oldest_event_ts().expect("oldest"),
+        Some(old_a.ts.clone())
+    );
+    assert_eq!(
+        reader
+            .query(
+                &QueryFilter {
+                    since: Some("2026-08-16T09:00:30Z".to_owned()),
+                    limit: Some(1),
+                    ..QueryFilter::default()
+                },
+                TEST_RETENTION_HOURS,
+            )
+            .expect("filtered merged query"),
+        vec![old_b]
+    );
+    assert!(
+        reader
+            .query(&QueryFilter::default(), 1)
+            .expect("retention applies to set-aside stores")
+            .is_empty()
+    );
+    drop(reader);
+
+    // A second plaintext store set aside in the same second gets a suffix.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", database.path().display()));
+    }
+    StoreWriter::open(database.path()).expect("plaintext store again");
+    let second = set_aside_plaintext(database.path(), at)
+        .expect("set aside again")
+        .expect("second set-aside");
+    assert!(
+        second
+            .path
+            .to_string_lossy()
+            .ends_with(".plaintext-20260823T031500Z-1")
+    );
+    remove_retired(&retired).expect("remove first");
+    remove_retired(&second).expect("remove second");
+}
+
+#[test]
+fn retired_stores_leave_with_the_retention_window_and_unreadable_ones_are_skipped() {
+    let database = TestDatabase::new("retire-purge");
+    StoreWriter::open(database.path()).expect("plaintext store");
+    let at = OffsetDateTime::parse("2026-08-23T00:00:00Z", &Rfc3339).expect("time");
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("set aside");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key)).expect("encrypted store");
+
+    assert!(
+        purge_retired_plaintext(database.path(), at + time::Duration::hours(1), 2)
+            .expect("purge within retention")
+            .is_empty()
+    );
+    assert!(retired.path.exists());
+
+    let garbage = PathBuf::from(format!(
+        "{}.plaintext-20260822T000000Z",
+        database.path().display()
+    ));
+    std::fs::write(&garbage, b"not a store").expect("write garbage");
+    let reader = StoreReader::open_with_key(database.path(), Some(&key)).expect("reader");
+    assert_eq!(reader.retired_stores(), std::slice::from_ref(&retired));
+    assert_eq!(reader.skipped_retired().len(), 1);
+    assert_eq!(reader.skipped_retired()[0].path, garbage);
+    assert!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query still works")
+            .is_empty()
+    );
+    drop(reader);
+
+    let removed = purge_retired_plaintext(database.path(), at + time::Duration::hours(3), 2)
+        .expect("purge past retention");
+    assert_eq!(removed.len(), 2);
+    assert!(!retired.path.exists());
+    assert!(!garbage.exists());
+}
+
+#[test]
+fn plaintext_snapshot_includes_set_aside_stores_and_takes_the_output_path_literally() {
+    let database = TestDatabase::new("snapshot-retired");
+    let old = app_launch(
+        "evt_01K00000000000000000000801",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| writer.append(&old))
+        .expect("plaintext store");
+    let at = OffsetDateTime::parse("2026-08-23T00:00:00Z", &Rfc3339).expect("time");
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("set aside");
+    let key = StoreKey::generate().expect("generate key");
+    let new = browser_navigate("evt_01K00000000000000000000802", "2026-08-16T09:01:00.000Z");
+    StoreWriter::open_with_key(database.path(), Some(&key))
+        .and_then(|mut writer| writer.append(&new))
+        .expect("encrypted store");
+
+    // A relative name starting with `file:` looks like a SQLite URI; the snapshot
+    // must still land in a file of exactly that name.
+    struct Cleanup(Vec<PathBuf>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let literal = PathBuf::from(format!(
+        "file:zanei-snapshot-{}-{}.sqlite?mode=rw",
+        std::process::id(),
+        NEXT_DATABASE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let decoy = PathBuf::from(
+        literal
+            .to_string_lossy()
+            .trim_start_matches("file:")
+            .trim_end_matches("?mode=rw")
+            .to_owned(),
+    );
+    let _cleanup = Cleanup(vec![literal.clone(), decoy.clone()]);
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        &literal,
+    )
+    .expect("export snapshot to a URI-looking name");
+    assert_eq!(report.events, 2);
+    assert!(literal.exists(), "the snapshot must be the literal file");
+    assert!(!decoy.exists(), "the URI must not be interpreted");
+    assert_eq!(
+        StoreReader::open(&literal)
+            .expect("open snapshot")
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("snapshot events"),
+        vec![old, new]
+    );
+    remove_retired(&retired).expect("remove retired");
 }

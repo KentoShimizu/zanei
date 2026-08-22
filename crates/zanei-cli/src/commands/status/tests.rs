@@ -80,9 +80,12 @@ fn active_retention_requires_a_fresh_matching_heartbeat() {
         &config,
         &status,
         Some(&owner),
-        0,
-        None,
-        StoreFormat::Encrypted,
+        super::StoreInspection {
+            size_bytes: 0,
+            oldest_event_ts: None,
+            format: StoreFormat::Encrypted,
+            retired: super::RetiredReport::default(),
+        },
     )
     .expect("stale status report");
     assert_eq!(stale.store.retention_hours, Some(48));
@@ -93,9 +96,12 @@ fn active_retention_requires_a_fresh_matching_heartbeat() {
         &config,
         &status,
         Some(&owner),
-        0,
-        None,
-        StoreFormat::Encrypted,
+        super::StoreInspection {
+            size_bytes: 0,
+            oldest_event_ts: None,
+            format: StoreFormat::Encrypted,
+            retired: super::RetiredReport::default(),
+        },
     )
     .expect("fresh status report");
     assert_eq!(fresh.store.retention_hours, Some(72));
@@ -118,9 +124,12 @@ fn stopped_status_clears_current_degradation_but_retains_failure_counters() {
         &config,
         &status,
         None,
-        0,
-        None,
-        StoreFormat::Encrypted,
+        super::StoreInspection {
+            size_bytes: 0,
+            oldest_event_ts: None,
+            format: StoreFormat::Encrypted,
+            retired: super::RetiredReport::default(),
+        },
     )
     .expect("stopped status report");
 
@@ -154,9 +163,12 @@ fn mismatched_owner_clears_prior_instance_degradation_but_retains_failure_counte
         &config,
         &status,
         Some(&owner),
-        0,
-        None,
-        StoreFormat::Encrypted,
+        super::StoreInspection {
+            size_bytes: 0,
+            oldest_event_ts: None,
+            format: StoreFormat::Encrypted,
+            retired: super::RetiredReport::default(),
+        },
     )
     .expect("mismatched owner status report");
 

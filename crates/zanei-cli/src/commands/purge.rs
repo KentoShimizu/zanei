@@ -4,6 +4,7 @@ use std::path::Path;
 use time::OffsetDateTime;
 use zanei_core::config::parse_time_expression;
 use zanei_core::normalize::format_timestamp;
+use zanei_core::store::{StoreWriter, remove_retired, retired_plaintext_stores};
 
 use super::EXIT_SUCCESS;
 use crate::cli::PurgeArgs;
@@ -38,9 +39,26 @@ pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliErr
     }
     let mut writer =
         store_access::open_writer(store_path, KeyAccess::Existing, KeyPrompt::Allowed)?;
+    // Set-aside plaintext stores hold events too: purge them the same way, and
+    // drop the whole file when everything goes.
     let deleted = match cutoff {
-        Some(cutoff) => writer.purge_before(&cutoff)?,
-        None => writer.purge_all()?,
+        Some(cutoff) => {
+            let mut deleted = writer.purge_before(&cutoff)?;
+            for retired in retired_plaintext_stores(store_path)? {
+                deleted += StoreWriter::open(&retired.path)?.purge_before(&cutoff)?;
+            }
+            deleted
+        }
+        None => {
+            let mut deleted = writer.purge_all()?;
+            for retired in retired_plaintext_stores(store_path)? {
+                deleted += StoreWriter::open(&retired.path)
+                    .and_then(|mut retired_writer| retired_writer.purge_all())
+                    .unwrap_or(0);
+                remove_retired(&retired)?;
+            }
+            deleted
+        }
     };
     if !quiet {
         println!("Purged {deleted} events");

@@ -182,7 +182,7 @@ bootstrap 前は、永続化された recorder の last-known 権限報告を使
 
 `--foreground`、stdin または stderr が非 TTY、`--quiet`、`--json`、権限不足、権限状態を判定できない場合には確認しません。スキップした `start` は設定を未決定のままにして、従来の opt-in 案内を表示します。キーが明示的に `true` または `false` なら確認しません。
 
-recorder は初回起動時にストアの暗号化鍵を生成し、「Zanei store key」としてログインキーチェーンに保存します。以前のバージョンが書いた平文のストアは、アップグレード後の初回起動でその場で変換されます。recorder はキーチェーンのダイアログを表示しないため、ログインキーチェーンがロックされていると `start` は `store is locked: your login Keychain is locked; unlock it (for example by opening Keychain Access) and try again` で失敗します。
+recorder は初回起動時にストアの暗号化鍵を生成し、「Zanei store key」としてログインキーチェーンに保存します。以前のバージョンが書いた平文のストアは書き換えません。recorder はそれを `store.sqlite.plaintext-<日時>` に名前変更し、新しい暗号化ストアを作成します。読み取りは、旧イベントが保持期間を外れるまで新旧両方を返します（[FAQ](/ja/faq#アップグレード後データはどうなりますか) を参照）。recorder はキーチェーンのダイアログを表示しないため、ログインキーチェーンがロックされていると `start` は `store is locked: your login Keychain is locked; unlock it (for example by opening Keychain Access) and try again` で失敗します。
 
 1 つのストアを所有できる recorder は 1 instance だけです。同じストアに対して foreground
 または launchd recorder を二重起動すると終了コード 1 となり、現在の owner PID を表示します。
@@ -286,7 +286,7 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | `store.size_bytes` | integer \| null | file metadata を取得できる場合の byte 数。取得不能または file 不在なら null |
 | `store.retention_hours` | integer \| null | store を読める場合、owner に一致する heartbeat が fresh なら recorder の active 値、それ以外は現在の設定値。database 内容を読めない場合は null |
 | `store.oldest_event_ts` | string \| null | 保持中の最古 event timestamp。event がない場合または database 内容を読めない場合は null |
-| `store.encryption` | `"sqlcipher"` \| `"plaintext"` \| null | 暗号化されたストアは `sqlcipher`。暗号化以前に書かれたストアは `plaintext` で、recorder が次回起動時に変換する。ストアがない、または読めない場合は null |
+\g<0>| `store.retired_plaintext` | string[] | 暗号化へのアップグレード時に退避した平文ストアのうち、読み取りがまだ含めているもの（古い順）。保持期間を外れると空になります。人間向け出力では `PREVIOUS STORE` 行として表示。読めないものはスキップし `degraded.retired_store` に報告します |
 | `capture.sources` | `string[]` | 現在の設定の source。null にならない |
 | `capture.text_content` | boolean | 現在の設定の text-content opt-in。null にならない |
 | `permissions_ok` | boolean | 現在の owner と instance が一致する fresh heartbeat の permission snapshot があればその値。snapshot がない場合、または heartbeat が stale・future・missing な場合はローカル probe。null にならない |
@@ -428,7 +428,7 @@ zanei purge --all          # 全削除（確認プロンプトあり。--quiet �
 | `--before <TIME>` | これより古いイベントを削除 |
 | `--all` | 全削除（確認プロンプトあり） |
 
-store が存在しない場合、`purge` は `Purged 0 events` を表示し、store を作成しません。
+store が存在しない場合、`purge` は `Purged 0 events` を表示し、store を作成しません。暗号化へのアップグレード時に退避した平文ストアも対象です：`--before` は該当イベントを削除し、`--all` はファイルごと削除します。
 
 ## `filter`
 
