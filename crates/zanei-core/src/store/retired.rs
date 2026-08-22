@@ -138,7 +138,7 @@ pub fn remove_retired(retired: &RetiredPlaintext) -> Result<(), StoreError> {
 }
 
 #[cfg(feature = "write")]
-pub use write::{purge_retired_plaintext, set_aside_plaintext};
+pub use write::{RetiredRetention, purge_retired_plaintext, set_aside_plaintext};
 
 #[cfg(feature = "write")]
 mod write {
@@ -155,8 +155,8 @@ mod write {
         parse_timestamp, remove_retired, retired_plaintext_stores,
     };
     use crate::store::{
-        StoreError, StoreFormat, StoreWriter, retention_boundary, retention_cutoff, sibling,
-        store_uri,
+        SkippedRetired, StoreError, StoreFormat, StoreWriter, retention_boundary, retention_cutoff,
+        sibling, store_uri,
     };
 
     /// Renames the plaintext store at `store_path` (and its WAL companions) to
@@ -229,39 +229,103 @@ mod write {
         }))
     }
 
+    /// What applying retention to the set-aside stores did.
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub struct RetiredRetention {
+        /// Stores whose timestamp left the window and that were deleted whole.
+        pub removed: Vec<RetiredPlaintext>,
+        /// Stores that could not be purged or deleted, with the reason. They are
+        /// left in place: a set-aside store that cannot be opened must not keep
+        /// the recorder from writing the live store, and readers skip it too.
+        pub skipped: Vec<SkippedRetired>,
+    }
+
     /// Applies retention to set-aside stores: a store whose timestamp has left
     /// the window is deleted outright (every event inside is older than that),
     /// and the events that have expired inside a newer one are purged, so a
     /// store that sat idle before the upgrade does not keep expired rows
-    /// readable in plaintext. Returns the files that were removed.
+    /// readable in plaintext. A store that fails either step is reported, not
+    /// propagated; only listing the stores can fail.
     pub fn purge_retired_plaintext(
         store_path: &Path,
         now: OffsetDateTime,
         retention_hours: u64,
-    ) -> Result<Vec<RetiredPlaintext>, StoreError> {
+    ) -> Result<RetiredRetention, StoreError> {
         let boundary = retention_boundary(now, retention_hours)?;
         let cutoff = retention_cutoff(now, retention_hours)?;
-        let mut removed = Vec::new();
+        let mut report = RetiredRetention::default();
         for retired in retired_plaintext_stores(store_path)? {
-            if retired.set_aside_at < boundary {
-                remove_retired(&retired)?;
-                removed.push(retired);
-                continue;
-            }
-            // Probe before opening: this process holds no connection to the
-            // retired file yet, so the lock rule from `StoreFormat::probe` holds.
-            if StoreFormat::probe(&retired.path)? == StoreFormat::Plaintext {
-                StoreWriter::open_known(&retired.path, StoreFormat::Plaintext, None)?
-                    .purge_before(&cutoff)?;
+            let expired = retired.set_aside_at < boundary;
+            let outcome = if expired {
+                remove_retired(&retired)
+            } else {
+                purge_inside(&retired.path, &cutoff)
+            };
+            match outcome {
+                Ok(()) if expired => report.removed.push(retired),
+                Ok(()) => {}
+                Err(error) => report.skipped.push(SkippedRetired {
+                    path: retired.path,
+                    reason: error.to_string(),
+                }),
             }
         }
-        Ok(removed)
+        Ok(report)
+    }
+
+    /// Purges the expired events inside one set-aside store.
+    fn purge_inside(path: &Path, cutoff: &str) -> Result<(), StoreError> {
+        // Probe before opening: this process holds no connection to the
+        // retired file yet, so the lock rule from `StoreFormat::probe` holds.
+        if StoreFormat::probe(path)? == StoreFormat::Plaintext {
+            StoreWriter::open_known(path, StoreFormat::Plaintext, None)?.purge_before(cutoff)?;
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::parse_retired_name;
+
+    #[cfg(feature = "write")]
+    #[test]
+    fn retention_reports_a_set_aside_store_it_cannot_purge_instead_of_failing() {
+        use super::{format_timestamp, purge_retired_plaintext};
+        let directory =
+            std::env::temp_dir().join(format!("zanei-retired-retention-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("scratch directory");
+        let store = directory.join("store.sqlite");
+        let now = time::OffsetDateTime::now_utc();
+        let name = |hours_ago: i64| {
+            format!(
+                "store.sqlite.plaintext-{}",
+                format_timestamp(now - time::Duration::hours(hours_ago)).expect("timestamp")
+            )
+        };
+        // A SQLite header over zeroed pages: classified as plaintext, unusable.
+        let mut damaged = b"SQLite format 3\0".to_vec();
+        damaged.resize(4096, 0);
+        let recent = directory.join(name(1));
+        std::fs::write(&recent, &damaged).expect("damaged recent store");
+        let expired = directory.join(name(100));
+        std::fs::write(&expired, &damaged).expect("damaged expired store");
+
+        let report = purge_retired_plaintext(&store, now, 48).expect("retention must not fail");
+
+        assert_eq!(report.removed.len(), 1);
+        assert!(
+            !expired.exists(),
+            "an expired store is deleted without being opened"
+        );
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert_eq!(
+            report.skipped[0].path,
+            std::fs::canonicalize(&recent).expect("canonical recent path")
+        );
+        assert!(recent.exists(), "the damaged store is left in place");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 
     #[test]
     fn retired_names_are_recognized_and_companions_ignored() {

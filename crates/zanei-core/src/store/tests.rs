@@ -1293,10 +1293,11 @@ fn retired_stores_leave_with_the_retention_window_and_unreadable_ones_are_skippe
     let key = StoreKey::generate().expect("generate key");
     StoreWriter::open_with_key(database.path(), Some(&key)).expect("encrypted store");
 
+    let report = purge_retired_plaintext(database.path(), at + time::Duration::hours(1), 2)
+        .expect("purge within retention");
     assert!(
-        purge_retired_plaintext(database.path(), at + time::Duration::hours(1), 2)
-            .expect("purge within retention")
-            .is_empty()
+        report.removed.is_empty() && report.skipped.is_empty(),
+        "{report:?}"
     );
     assert!(retired.path.exists());
 
@@ -1320,9 +1321,10 @@ fn retired_stores_leave_with_the_retention_window_and_unreadable_ones_are_skippe
     );
     drop(reader);
 
-    let removed = purge_retired_plaintext(database.path(), at + time::Duration::hours(3), 2)
+    let report = purge_retired_plaintext(database.path(), at + time::Duration::hours(3), 2)
         .expect("purge past retention");
-    assert_eq!(removed.len(), 2);
+    assert_eq!(report.removed.len(), 2, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
     assert!(!retired.path.exists());
     assert!(!garbage.exists());
 }
@@ -1544,11 +1546,11 @@ fn retention_purges_expired_rows_inside_a_kept_set_aside_store() {
     let key = StoreKey::generate().expect("generate key");
     StoreWriter::open_with_key(database.path(), Some(&key)).expect("new store");
 
-    let removed = purge_retired_plaintext(database.path(), at + time::Duration::minutes(10), 1)
+    let report = purge_retired_plaintext(database.path(), at + time::Duration::minutes(10), 1)
         .expect("purge");
     assert!(
-        removed.is_empty(),
-        "the file itself is still within retention"
+        report.removed.is_empty() && report.skipped.is_empty(),
+        "the file itself is still within retention: {report:?}"
     );
     assert!(retired.path.exists());
     let remaining: i64 = rusqlite::Connection::open(&retired.path)

@@ -21,7 +21,7 @@ use crate::{
 
 const EXIT_STORE_FAILURE: u8 = 1;
 const STORE_DEGRADED_COMPONENT: &str = "store";
-const RETIRED_STORE_DEGRADED_COMPONENT: &str = "retired_store";
+pub(crate) const RETIRED_STORE_DEGRADED_COMPONENT: &str = "retired_store";
 
 pub fn run(paths: &Paths, json: bool) -> Result<u8, CliError> {
     let owner = StoreOwnership::probe(&paths.store)?;

@@ -1175,6 +1175,13 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
             })
         })
         .expect("paused plaintext legacy store");
+    // A 0.2.x store created with the default umask: readable by other accounts.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o644))
+            .expect("loosen the legacy store");
+    }
 
     let mut child = spawn_foreground_daemon(&config, &store);
     wait_for_daemon_ready(&mut child, &store);
@@ -1243,6 +1250,12 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+        let retired_mode = fs::metadata(&retired[0])
+            .expect("retired metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(retired_mode, 0o600, "the set-aside store is owner-only too");
     }
 
     command(&config, &store)
@@ -1403,4 +1416,59 @@ fn symlinked_store_keeps_its_link_and_owner_only_companions() {
 
     signal_child(&mut child, "TERM");
     assert!(wait_for_child(&mut child).success());
+}
+
+#[test]
+fn recorder_starts_despite_a_set_aside_store_it_cannot_purge() {
+    let directory = TempDir::new().expect("damaged retired fixture");
+    let config = directory.path().join("config.toml");
+    let store = directory.path().join("store.sqlite");
+    fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
+    StoreWriter::open_with_key(&store, Some(&read_key(&key_file_for(&store))))
+        .expect("healthy encrypted store");
+    // A SQLite header over zeroed pages: classified as plaintext, unusable.
+    let mut damaged = b"SQLite format 3\0".to_vec();
+    damaged.resize(4096, 0);
+    let retired = directory.path().join(retired_name_hours_ago(1));
+    fs::write(&retired, &damaged).expect("damaged set-aside store");
+
+    let mut child = spawn_foreground_daemon(&config, &store);
+    wait_for_daemon_ready(&mut child, &store);
+
+    let status = command(&config, &store)
+        .args(["status", "--json"])
+        .output()
+        .expect("status output");
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");
+    assert_eq!(
+        value["state"], "running",
+        "the damaged file must not stop the recorder: {value}"
+    );
+    assert!(
+        value["degraded"]["retired_store"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("plaintext-"),
+        "status reports the file: {value}"
+    );
+    assert!(
+        retired.exists(),
+        "the damaged file is left for the user to inspect"
+    );
+
+    signal_child(&mut child, "TERM");
+    assert!(wait_for_child(&mut child).success());
+}
+
+fn retired_name_hours_ago(hours: i64) -> String {
+    let at = OffsetDateTime::now_utc() - time::Duration::hours(hours);
+    format!(
+        "store.sqlite.plaintext-{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    )
 }

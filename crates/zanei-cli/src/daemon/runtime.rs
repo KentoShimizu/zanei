@@ -36,6 +36,7 @@ use super::{
     },
     shutdown::shutdown_daemon,
 };
+use crate::commands::RETIRED_STORE_DEGRADED_COMPONENT;
 use crate::permissions::{PermissionRequestOutcome, probe_permissions};
 use crate::store_access::{self, KeyAccess, KeyPrompt};
 
@@ -105,15 +106,16 @@ pub fn run_daemon(
             main_thread_observers,
         ))
     })?;
+    let mut runtime_degraded = BTreeMap::new();
     apply_retention(
         &mut writer,
         store_path,
         OffsetDateTime::now_utc(),
         config.output.retention_hours,
+        &mut runtime_degraded,
     )?;
     let writer = Arc::new(Mutex::new(writer));
     let mut pipeline = Pipeline::store(&config, Arc::clone(&writer))?;
-    let mut runtime_degraded = BTreeMap::new();
     let mut paused = false;
     let _main_thread_observers = main_thread_observers;
     main_thread::run(main_run_loop, "daemon-runtime", move || {
@@ -163,14 +165,35 @@ fn apply_retention(
     store_path: &Path,
     now: OffsetDateTime,
     retention_hours: u64,
+    degraded: &mut BTreeMap<String, String>,
 ) -> Result<(), StoreError> {
     writer.purge_retention(now, retention_hours)?;
-    for retired in purge_retired_plaintext(store_path, now, retention_hours)? {
+    let retired = purge_retired_plaintext(store_path, now, retention_hours)?;
+    for removed in &retired.removed {
         eprintln!(
             "zanei: removed the set-aside plaintext store {} (older than the retention window)",
-            retired.path.display()
+            removed.path.display()
         );
     }
+    // A set-aside store that cannot be purged is left alone and reported: it
+    // must not keep the recorder from writing the live store. Logged when the
+    // situation changes, not on every periodic purge.
+    if retired.skipped.is_empty() {
+        degraded.remove(RETIRED_STORE_DEGRADED_COMPONENT);
+        return Ok(());
+    }
+    let summary = retired
+        .skipped
+        .iter()
+        .map(|skipped| format!("{}: {}", skipped.path.display(), skipped.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if degraded.get(RETIRED_STORE_DEGRADED_COMPONENT) != Some(&summary) {
+        eprintln!(
+            "zanei: retention left a set-aside plaintext store alone; recording continues: {summary}"
+        );
+    }
+    degraded.insert(RETIRED_STORE_DEGRADED_COMPONENT.to_owned(), summary);
     Ok(())
 }
 
@@ -206,6 +229,9 @@ fn open_encrypted_store(store_path: &Path) -> Result<(StoreWriter, StoreReader),
                  next to the new encrypted store until they age out of retention",
                 retired.path.display()
             );
+            // `rename` kept the previous store's mode, and a 0.2.x store created
+            // with the default umask is readable by every account on the Mac.
+            restrict_store_permissions(&retired.path)?;
         }
         StoreFormat::Missing
     } else {
@@ -396,6 +422,7 @@ impl ActiveDaemon<'_> {
             self.store_path,
             now,
             retention_hours,
+            self.degraded,
         );
         match purge_result {
             Ok(_) => {
@@ -419,6 +446,7 @@ impl ActiveDaemon<'_> {
             self.store_path,
             now,
             self.active_retention_hours,
+            self.degraded,
         );
         match purge_result {
             Ok(_) if self.pending_retention_hours.is_none() => {

@@ -30,7 +30,7 @@ pub use types::{
 };
 
 #[cfg(feature = "write")]
-pub use retired::{purge_retired_plaintext, set_aside_plaintext};
+pub use retired::{RetiredRetention, purge_retired_plaintext, set_aside_plaintext};
 #[cfg(feature = "write")]
 pub use writer::StoreWriter;
 

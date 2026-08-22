@@ -15,6 +15,8 @@ The store is encrypted at rest.
   store; every read keeps returning the old events next to the new ones
   until they age out of retention, then the recorder deletes the file.
   `status` lists it under `store.retired_plaintext`, and `purge` covers it.
+  The set-aside file is made owner-only; one the recorder cannot purge is
+  reported under `degraded.retired_store` instead of stopping the recorder.
 - The store, its `-wal`/`-shm` companions, and a store directory that
   Zanei creates are owner-only (0600 / 0700).
 - `status` reports `store_locked` (exit code 1) when the store is

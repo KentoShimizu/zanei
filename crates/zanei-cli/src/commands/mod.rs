@@ -7,6 +7,7 @@ mod purge;
 mod read;
 mod record;
 mod status;
+pub(crate) use status::RETIRED_STORE_DEGRADED_COMPONENT;
 
 use zanei_core::config::Config;
 use zanei_core::store::DaemonMode;
