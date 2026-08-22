@@ -15,7 +15,7 @@ use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
 
 mod support;
 
-use support::{Fixture, STORE_KEY_FILE_ENV, read_key, write_key_file};
+use support::{Fixture, STORE_KEY_FILE_ENV, damaged_set_aside_store, read_key, write_key_file};
 
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1426,11 +1426,7 @@ fn recorder_starts_despite_a_set_aside_store_it_cannot_purge() {
     fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
     StoreWriter::open_with_key(&store, Some(&read_key(&key_file_for(&store))))
         .expect("healthy encrypted store");
-    // A SQLite header over zeroed pages: classified as plaintext, unusable.
-    let mut damaged = b"SQLite format 3\0".to_vec();
-    damaged.resize(4096, 0);
-    let retired = directory.path().join(retired_name_hours_ago(1));
-    fs::write(&retired, &damaged).expect("damaged set-aside store");
+    let retired = damaged_set_aside_store(&store, 1);
 
     let mut child = spawn_foreground_daemon(&config, &store);
     wait_for_daemon_ready(&mut child, &store);
@@ -1458,17 +1454,4 @@ fn recorder_starts_despite_a_set_aside_store_it_cannot_purge() {
 
     signal_child(&mut child, "TERM");
     assert!(wait_for_child(&mut child).success());
-}
-
-fn retired_name_hours_ago(hours: i64) -> String {
-    let at = OffsetDateTime::now_utc() - time::Duration::hours(hours);
-    format!(
-        "store.sqlite.plaintext-{:04}{:02}{:02}T{:02}{:02}{:02}Z",
-        at.year(),
-        u8::from(at.month()),
-        at.day(),
-        at.hour(),
-        at.minute(),
-        at.second()
-    )
 }

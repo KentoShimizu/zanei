@@ -328,3 +328,25 @@ fn raw_event(event_type: &str, data: EventData) -> RawEvent {
         data,
     }
 }
+
+/// Writes a file next to `store` that looks like a set-aside plaintext store
+/// from `hours_ago` — a SQLite header over zeroed pages: classified as
+/// plaintext, unusable — and returns its path.
+pub fn damaged_set_aside_store(store: &Path, hours_ago: i64) -> PathBuf {
+    let at = OffsetDateTime::now_utc() - Duration::hours(hours_ago);
+    let mut name = store.as_os_str().to_os_string();
+    name.push(format!(
+        ".plaintext-{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    ));
+    let path = PathBuf::from(name);
+    let mut damaged = b"SQLite format 3\0".to_vec();
+    damaged.resize(4096, 0);
+    fs::write(&path, damaged).expect("damaged set-aside store");
+    path
+}

@@ -29,6 +29,10 @@ const DEFAULT_TIMELINE_TOKEN_BUDGET: usize = 4_000;
 const DEFAULT_QUERY_LIMIT: usize = 200;
 const MAX_QUERY_LIMIT: usize = 1_000;
 
+/// `degraded` component naming set-aside stores a read left out; the CLI's
+/// `status` uses the same name.
+const RETIRED_STORE_DEGRADED_COMPONENT: &str = "retired_store";
+
 #[derive(Clone, Debug)]
 pub struct ZaneiServer {
     store_path: PathBuf,
@@ -189,10 +193,24 @@ impl ZaneiServer {
     fn get_status(&self) -> Result<Json<GetStatusOutput>, ErrorData> {
         let config = Config::load(&self.config_path).map_err(internal_error)?;
         let (status, oldest_event_ts) = match self.reader()? {
-            Some(reader) => (
-                reader.status().map_err(internal_error)?,
-                reader.oldest_event_ts().map_err(internal_error)?,
-            ),
+            Some(reader) => {
+                let mut status = reader.status().map_err(internal_error)?;
+                // A set-aside plaintext store this reader could not attach is
+                // missing from every read; say so here, as the CLI's `status` does.
+                if !reader.skipped_retired().is_empty() {
+                    let summary = reader
+                        .skipped_retired()
+                        .iter()
+                        .map(zanei_core::store::SkippedRetired::describe)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    status
+                        .degraded
+                        .insert(RETIRED_STORE_DEGRADED_COMPONENT.to_owned(), summary);
+                }
+                let oldest_event_ts = reader.oldest_event_ts().map_err(internal_error)?;
+                (status, oldest_event_ts)
+            }
             None => (Default::default(), None),
         };
         let permissions_ok = status

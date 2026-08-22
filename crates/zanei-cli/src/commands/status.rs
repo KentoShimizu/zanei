@@ -87,7 +87,7 @@ fn inspect(
         skipped: reader
             .skipped_retired()
             .iter()
-            .map(|skipped| format!("{}: {}", skipped.path.display(), skipped.reason))
+            .map(zanei_core::store::SkippedRetired::describe)
             .collect(),
     };
     StatusReport::readable(

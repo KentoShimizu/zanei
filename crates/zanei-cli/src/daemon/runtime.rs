@@ -185,7 +185,7 @@ fn apply_retention(
     let summary = retired
         .skipped
         .iter()
-        .map(|skipped| format!("{}: {}", skipped.path.display(), skipped.reason))
+        .map(zanei_core::store::SkippedRetired::describe)
         .collect::<Vec<_>>()
         .join("; ");
     if degraded.get(RETIRED_STORE_DEGRADED_COMPONENT) != Some(&summary) {

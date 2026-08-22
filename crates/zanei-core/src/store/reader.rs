@@ -40,6 +40,14 @@ pub struct SkippedRetired {
     pub reason: String,
 }
 
+impl SkippedRetired {
+    /// `path: reason`, the form status reports use.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!("{}: {}", self.path.display(), self.reason)
+    }
+}
+
 impl StoreReader {
     /// Opens a store without a key. Encrypted stores fail with
     /// [`super::LockedReason::KeyMissing`]; use [`Self::open_with_key`] for those.
