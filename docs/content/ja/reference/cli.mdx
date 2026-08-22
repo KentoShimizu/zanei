@@ -182,7 +182,7 @@ bootstrap 前は、永続化された recorder の last-known 権限報告を使
 
 `--foreground`、stdin または stderr が非 TTY、`--quiet`、`--json`、権限不足、権限状態を判定できない場合には確認しません。スキップした `start` は設定を未決定のままにして、従来の opt-in 案内を表示します。キーが明示的に `true` または `false` なら確認しません。
 
-recorder は初回起動時にストアの暗号化鍵を生成し、「Zanei store key」としてログインキーチェーンに保存します。以前のバージョンが書いた平文のストアは書き換えません。recorder はそれを `store.sqlite.plaintext-<日時>` に名前変更し、新しい暗号化ストアを作成します。読み取りは、旧イベントが保持期間を外れるまで新旧両方を返します（[FAQ](/ja/faq#アップグレード後データはどうなりますか) を参照）。recorder はキーチェーンのダイアログを表示しないため、ログインキーチェーンがロックされていると `start` は `store is locked: your login Keychain is locked; unlock it (for example by opening Keychain Access) and try again` で失敗します。
+recorder は初回起動時にストアの暗号化鍵を生成し、「Zanei store key」としてログインキーチェーンに保存します。0.2.x 以前が書いた平文のストアは書き換えません。recorder はそれを `store.sqlite.plaintext-<日時>` に名前変更し、新しい暗号化ストアを作成します。読み取りは、旧イベントが保持期間を外れるまで新旧両方を返します（[FAQ](/ja/faq#アップグレード後データはどうなりますか) を参照）。recorder はキーチェーンのダイアログを表示しないため、ログインキーチェーンがロックされていると `start` は `store is locked: your login Keychain is locked; unlock it (for example by opening Keychain Access) and try again` で失敗します。
 
 1 つのストアを所有できる recorder は 1 instance だけです。同じストアに対して foreground
 または launchd recorder を二重起動すると終了コード 1 となり、現在の owner PID を表示します。
