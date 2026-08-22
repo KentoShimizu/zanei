@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rmcp::ErrorData;
 use rmcp::handler::server::{
@@ -17,7 +17,7 @@ use zanei_core::timeline::{
     build, serialize,
 };
 
-use crate::PermissionCheck;
+use crate::{KeyProvider, PermissionCheck};
 
 mod output;
 
@@ -29,11 +29,16 @@ const DEFAULT_TIMELINE_TOKEN_BUDGET: usize = 4_000;
 const DEFAULT_QUERY_LIMIT: usize = 200;
 const MAX_QUERY_LIMIT: usize = 1_000;
 
+/// `degraded` component naming set-aside stores a read left out; the CLI's
+/// `status` uses the same name.
+const RETIRED_STORE_DEGRADED_COMPONENT: &str = "retired_store";
+
 #[derive(Clone, Debug)]
 pub struct ZaneiServer {
     store_path: PathBuf,
     config_path: PathBuf,
     permission_check: PermissionCheck,
+    key_provider: KeyProvider,
     tool_router: ToolRouter<Self>,
 }
 
@@ -42,17 +47,28 @@ impl ZaneiServer {
         store_path: PathBuf,
         config_path: PathBuf,
         permission_check: PermissionCheck,
+        key_provider: KeyProvider,
     ) -> Self {
         Self {
             store_path,
             config_path,
             permission_check,
+            key_provider,
             tool_router: Self::tool_router(),
         }
     }
 
+    /// Opens the store for this call. A missing store is "nothing recorded yet"
+    /// (`None`); an encrypted store whose key cannot be obtained is an error, so
+    /// "locked" is never mistaken for "empty".
     fn reader(&self) -> Result<Option<StoreReader>, ErrorData> {
-        open_initialized_store(&self.store_path).map_err(internal_error)
+        if !self.store_path.exists() {
+            return Ok(None);
+        }
+        let key = (self.key_provider)(&self.store_path).map_err(internal_error)?;
+        StoreReader::open_with_key(&self.store_path, key.as_ref())
+            .map(Some)
+            .map_err(internal_error)
     }
 
     fn retention_hours(&self) -> Result<u64, ErrorData> {
@@ -177,10 +193,24 @@ impl ZaneiServer {
     fn get_status(&self) -> Result<Json<GetStatusOutput>, ErrorData> {
         let config = Config::load(&self.config_path).map_err(internal_error)?;
         let (status, oldest_event_ts) = match self.reader()? {
-            Some(reader) => (
-                reader.status().map_err(internal_error)?,
-                reader.oldest_event_ts().map_err(internal_error)?,
-            ),
+            Some(reader) => {
+                let mut status = reader.status().map_err(internal_error)?;
+                // A set-aside plaintext store this reader could not attach is
+                // missing from every read; say so here, as the CLI's `status` does.
+                if !reader.skipped_retired().is_empty() {
+                    let summary = reader
+                        .skipped_retired()
+                        .iter()
+                        .map(zanei_core::store::SkippedRetired::describe)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    status
+                        .degraded
+                        .insert(RETIRED_STORE_DEGRADED_COMPONENT.to_owned(), summary);
+                }
+                let oldest_event_ts = reader.oldest_event_ts().map_err(internal_error)?;
+                (status, oldest_event_ts)
+            }
             None => (Default::default(), None),
         };
         let permissions_ok = status
@@ -304,14 +334,6 @@ impl Default for QueryEventsInput {
             bundle_id: None,
             limit: DEFAULT_QUERY_LIMIT,
         }
-    }
-}
-
-fn open_initialized_store(path: &Path) -> Result<Option<StoreReader>, StoreError> {
-    if path.exists() {
-        StoreReader::open(path).map(Some)
-    } else {
-        Ok(None)
     }
 }
 

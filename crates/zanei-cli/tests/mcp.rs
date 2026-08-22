@@ -11,7 +11,7 @@ use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
 
 mod support;
 
-use support::Fixture;
+use support::{Fixture, damaged_set_aside_store};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -298,6 +298,29 @@ fn get_status_prefers_the_running_recorder_retention_snapshot() {
     let status = client.call_tool("get_status", json!({}));
 
     assert_eq!(status["retention_hours"], 48);
+}
+
+#[test]
+fn get_status_reports_a_set_aside_store_the_reader_could_not_attach() {
+    let fixture = Fixture::populated();
+    let retired = damaged_set_aside_store(&fixture.store, 1);
+    let mut client = McpClient::start(&fixture);
+    initialize(&mut client);
+
+    let status = client.call_tool("get_status", json!({}));
+
+    let reported = status["degraded"]["retired_store"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reported.contains(retired.file_name().unwrap().to_str().unwrap()),
+        "status names the skipped file: {status}"
+    );
+    let query = client.call_tool("query_events", json!({}));
+    assert!(
+        query["count"].as_u64().unwrap_or(0) > 0,
+        "the live store is still read: {query}"
+    );
 }
 
 #[test]

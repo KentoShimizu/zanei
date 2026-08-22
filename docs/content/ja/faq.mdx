@@ -9,7 +9,7 @@ description: プライバシー・ブラウザ対応・データアクセス・�
 
 ## データはどこへ行きますか？
 
-ローカルの SQLite ファイル（`~/.local/state/zanei/store.sqlite`）ただ一つに入り、他のどこにも行きません。バイナリにはデータを送信する機能がありません — エンドポイントもテレメトリもアカウントも存在しません。既定では 48 時間で自動削除されます。
+ローカルの SQLite ファイル（`~/.local/state/zanei/store.sqlite`）ただ一つに入り、他のどこにも行きません。このファイルは暗号化されており、鍵はログインキーチェーンにあります。バイナリにはデータを送信する機能がありません — エンドポイントもテレメトリもアカウントも存在しません。既定では 48 時間で自動削除されます。
 
 ## どのブラウザの URL が取れますか？Safari は？
 
@@ -36,7 +36,15 @@ zanei filter exclude-site add example.com
 
 ## ストアを直接読んでもいいですか？
 
-はい — 普通の SQLite ファイルなので直接読んで構いません（将来の言語 SDK もその方式になります）。ただし多くの用途では `zanei query --format jsonl` や `zanei export` のほうが簡単で、バージョン間で変わり得る内部テーブル構造ではなく、安定したイベントエンベロープの上に乗れます。
+稼働中のストアは [SQLCipher](https://www.zetetic.net/sqlcipher/)（AES-256）で暗号化されています。鍵は「Zanei store key」としてログインキーチェーンにあり、この Mac の外には出ません。そのため、バックアップや同期フォルダ、別のマシンにあるファイルのコピーは、鍵なしでは読めません。
+
+自分のツールで中身を見るには、平文の SQLite スナップショットを書き出します：
+
+```bash
+zanei export --format sqlite --since 24h --out snapshot.sqlite
+```
+
+稼働中のストアと同じテーブルを持ち、`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディングで開けます — `zanei query --store snapshot.sqlite` でも読めます。スナップショットは暗号化されていないので、他のエクスポートと同じように扱ってください。多くの用途では引き続き `zanei query --format jsonl` のほうが簡単で、バージョン間で変わり得る内部テーブル構造ではなく、安定したイベントエンベロープの上に乗れます。
 
 ## ChatGPT の Computer History と何が違いますか？
 
@@ -87,11 +95,25 @@ brew uninstall zanei
 rm -rf ~/.config/zanei ~/.local/state/zanei
 ```
 
+5. ログインキーチェーンからストアの鍵を削除します。これ以降、ストアのバックアップコピーは読めなくなります。
+
+```bash
+security delete-generic-password -s dev.zanei.store
+```
+
+または、キーチェーンアクセスで「Zanei store key」を削除します。
+
 アンインストール後は、bundle ID を指定する `tccutil` コマンドが `dev.zanei.recorder` を解決できません。TCC は bundle ID と署名で付与を照合するため、付与が残っていると同じ app の再インストール時にそのまま復活します。残ったアクセシビリティの判断を完全に消すには、システム設定に `Zanei` の行が残っていればそこから削除するか、bundle ID を付けずに `tccutil reset Accessibility` を実行します。後者は全アプリのアクセシビリティ判断を reset します。
 
 アンインストール前に `zanei stop` を忘れた場合でも、recorder は自身の実行ファイルがなくなったことを検出し、数十秒以内に自動で終了します。
 
 `brew upgrade` の後は、新しいバージョンへ切り替えるため `zanei stop && zanei start` を実行してください。旧 recorder がすでに自動終了し、`stop` が停止中と報告した場合は、代わりに `zanei start` を実行してください。
+
+## アップグレード後、データはどうなりますか？
+
+Zanei 0.3.0 以降はストアを暗号化します。0.2.x 以前が書いたストアは平文の SQLite で、recorder はこのファイルを書き換えません。アップグレード後に最初に `zanei start` したとき、旧ストアを `store.sqlite.plaintext-<日時>` という名前に変えて新しい暗号化ストア `store.sqlite` の隣に残し、`zanei: kept the previous plaintext store as …` とログに出します。`zanei query`・`zanei timeline`・`zanei export`・MCP サーバーのすべての読み取りは、両方のファイルのイベントを一つの履歴として返すので、アップグレード前に記録したものがタイムラインから消えることはありません。`zanei status` は退避したファイルを `store.retired_plaintext` に表示します。
+
+退避したファイルは平文のままです。中身は退避した時点より前のイベントだけなので、その時点が保持期間（`output.retention_hours`、既定 48 時間）を外れた時点で recorder がファイルごと削除します。保持期間が長ければ長く残り、短ければ早く消えます。それまでの間も、保持期間を外れたイベントは稼働中のストアと同じタイミングでファイル内から削除されます。`zanei pause` 中であればその状態とイベント数のカウンタは新しいストアに引き継がれます。`zanei purge --all` はすぐに削除し、ファイルを自分で削除しても構いません。
 
 ## `zanei start` で `Bootstrap failed: 5: Input/output error` が表示されます
 
@@ -117,6 +139,8 @@ zanei start
 ```
 
 `--store` を使っている場合は、そのパスに読み替えてください。退避したファイルは修復も削除もされず、新しい空のストアで記録を開始します。
+
+`store_locked` は、ストアが暗号化されているのに、ログインキーチェーンの鍵が見つからないか、このストアを復号できない状態です。復旧手順は同じです。新しいストアは既存の鍵を使い、鍵がなければ新しい鍵を生成します。鍵を失って消えるデータは、最大でも保持期間（既定 48 時間）分です。メッセージがログインキーチェーンのロックを指している場合は、ストアを退避せず、キーチェーンをロック解除して（たとえばキーチェーンアクセスを開く）再試行してください。`zanei doctor` は `Store key:` 行に鍵の状態を表示します。
 
 ## テキスト本文が捕捉されません
 

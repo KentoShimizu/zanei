@@ -2,11 +2,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use zanei_core::config::Config;
-use zanei_core::store::{StoreReader, StoreStatus};
+use zanei_core::store::StoreStatus;
 
 use super::super::doctor::StartPermissionState;
 use crate::error::CliError;
 use crate::permissions::permission_snapshot_ready;
+use crate::store_access::{self, KeyPrompt};
 
 pub(super) const WAITING_FOR_PERMISSION_CHECK: &str =
     "Waiting for the recorder's permission check...";
@@ -25,7 +26,7 @@ pub(super) fn before_bootstrap(
         .try_exists()
         .map_err(|source| CliError::io(store_path, source))?
     {
-        Some(StoreReader::open(store_path)?.status()?)
+        Some(store_access::open_reader(store_path, KeyPrompt::Allowed)?.status()?)
     } else {
         None
     };

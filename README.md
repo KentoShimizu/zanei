@@ -26,6 +26,7 @@ Windows and Linux are planned.
 - Password fields are dropped at capture time. Chrome Incognito produces no URL events
   and no text bodies (window titles can remain).
 - Events are deleted after 48 hours by default.
+- Encrypted at rest: the store is a SQLCipher database; the key lives in your login Keychain.
 
 Full guarantees and limits: [privacy model](https://zanei.dev/guides/privacy).
 
@@ -66,4 +67,5 @@ Claude Desktop.
 ## License
 
 Licensed under either the [MIT License](LICENSE-MIT) or the
-[Apache License 2.0](LICENSE-APACHE), at your option.
+[Apache License 2.0](LICENSE-APACHE), at your option. Third-party components compiled into
+the binary and their licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

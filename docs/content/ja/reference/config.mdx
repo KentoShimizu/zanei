@@ -105,3 +105,5 @@ capture-time フィルタはストア書込**前に**適用されます。アプ
 | --- | --- | --- |
 | `~/.config/zanei/config.toml` | 設定 | `--config <path>` |
 | `~/.local/state/zanei/store.sqlite` | イベントストア | `--store <path>` |
+
+イベントストアは暗号化されています。鍵は recorder の初回起動時に生成され、ログインキーチェーンに保存されます。暗号化に関する設定キーはありません。`ZANEI_STORE_KEY_FILE=<path>` を設定すると、すべての Zanei プロセスが代わりにそのファイルから鍵を読みます — ソースからのビルド向けの開発用上書きで、[CLI リファレンス](/ja/reference/cli#環境変数)に説明があります。

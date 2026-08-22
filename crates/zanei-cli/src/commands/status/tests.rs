@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use zanei_core::{
     config::Config,
     normalize::format_timestamp,
-    store::{DaemonMode, StoreError, StoreStatus, StoreWriter},
+    store::{DaemonMode, StoreError, StoreFormat, StoreStatus, StoreWriter},
 };
 
 use super::{
@@ -75,13 +75,35 @@ fn active_retention_requires_a_fresh_matching_heartbeat() {
         ..StoreStatus::default()
     };
 
-    let stale = StatusReport::readable(&paths, &config, &status, Some(&owner), 0, None)
-        .expect("stale status report");
+    let stale = StatusReport::readable(
+        &paths,
+        &config,
+        &status,
+        Some(&owner),
+        super::StoreInspection {
+            size_bytes: 0,
+            oldest_event_ts: None,
+            format: StoreFormat::Encrypted,
+            retired: super::RetiredReport::default(),
+        },
+    )
+    .expect("stale status report");
     assert_eq!(stale.store.retention_hours, Some(48));
 
     status.heartbeat_at = Some(format_timestamp(OffsetDateTime::now_utc()));
-    let fresh = StatusReport::readable(&paths, &config, &status, Some(&owner), 0, None)
-        .expect("fresh status report");
+    let fresh = StatusReport::readable(
+        &paths,
+        &config,
+        &status,
+        Some(&owner),
+        super::StoreInspection {
+            size_bytes: 0,
+            oldest_event_ts: None,
+            format: StoreFormat::Encrypted,
+            retired: super::RetiredReport::default(),
+        },
+    )
+    .expect("fresh status report");
     assert_eq!(fresh.store.retention_hours, Some(72));
 }
 
@@ -97,8 +119,19 @@ fn stopped_status_clears_current_degradation_but_retains_failure_counters() {
         ..StoreStatus::default()
     };
 
-    let report = StatusReport::readable(&paths, &config, &status, None, 0, None)
-        .expect("stopped status report");
+    let report = StatusReport::readable(
+        &paths,
+        &config,
+        &status,
+        None,
+        super::StoreInspection {
+            size_bytes: 0,
+            oldest_event_ts: None,
+            format: StoreFormat::Encrypted,
+            retired: super::RetiredReport::default(),
+        },
+    )
+    .expect("stopped status report");
 
     assert_eq!(report.state, StatusState::Stopped);
     assert!(report.degraded.is_empty());
@@ -125,8 +158,19 @@ fn mismatched_owner_clears_prior_instance_degradation_but_retains_failure_counte
         ..StoreStatus::default()
     };
 
-    let report = StatusReport::readable(&paths, &config, &status, Some(&owner), 0, None)
-        .expect("mismatched owner status report");
+    let report = StatusReport::readable(
+        &paths,
+        &config,
+        &status,
+        Some(&owner),
+        super::StoreInspection {
+            size_bytes: 0,
+            oldest_event_ts: None,
+            format: StoreFormat::Encrypted,
+            retired: super::RetiredReport::default(),
+        },
+    )
+    .expect("mismatched owner status report");
 
     assert_eq!(report.state, StatusState::Running);
     assert!(report.degraded.is_empty());

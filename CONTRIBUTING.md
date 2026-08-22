@@ -36,6 +36,17 @@ cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
 
+Builds from source carry an ad-hoc code signature that changes on every build, so reading the
+store key from the login Keychain would trigger a Keychain dialog after each build. Set
+`ZANEI_STORE_KEY_FILE` so every Zanei process reads the key from a file instead; the recorder
+creates the file (mode 0600) if it is missing:
+
+```bash
+export ZANEI_STORE_KEY_FILE=~/.config/zanei/dev.key
+```
+
+Tests set it automatically. The override is for development only: the key sits on disk.
+
 The documentation site lives in `docs/` (pnpm + Blume): `pnpm --dir docs dev`.
 
 Where things are defined:
@@ -51,3 +62,6 @@ Where things are defined:
 Zanei is dual-licensed under MIT or Apache-2.0. Unless you explicitly state otherwise,
 any contribution intentionally submitted for inclusion in the work by you shall be dual
 licensed as above, without any additional terms or conditions.
+
+Third-party components compiled into the binary, such as SQLCipher (BSD-3-Clause), are listed
+in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

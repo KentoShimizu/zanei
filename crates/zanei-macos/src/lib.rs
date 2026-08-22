@@ -16,6 +16,8 @@ pub mod permission;
 #[cfg(target_os = "macos")]
 mod secure_input;
 #[cfg(target_os = "macos")]
+pub mod store_key;
+#[cfg(target_os = "macos")]
 mod text_capture;
 #[cfg(target_os = "macos")]
 mod trace;

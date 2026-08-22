@@ -6,7 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zanei_core::store::{StoreReader, StoreStatus};
+use zanei_core::store::{StoreError, StoreStatus};
+
+use crate::store_access::KeyPrompt;
 
 use super::{DaemonError, StoreOwner, StoreOwnership};
 
@@ -26,14 +28,26 @@ pub fn launch_agent_path() -> Result<PathBuf, DaemonError> {
         .join(PLIST_FILE_NAME))
 }
 
+/// Renders the launch agent. launchd does not inherit the invoking shell's
+/// environment, so the `ZANEI_STORE_KEY_FILE` override (when active) is written
+/// into the plist; otherwise the recorder would fall back to the platform key
+/// store while the CLI keeps using the file.
 pub fn render_launch_agent_plist(
     executable: &Path,
     config_path: &Path,
     store_path: &Path,
+    store_key_file: Option<&Path>,
 ) -> String {
     let executable = xml_escape(&executable.to_string_lossy());
     let config_path = xml_escape(&config_path.to_string_lossy());
     let store_path = xml_escape(&store_path.to_string_lossy());
+    let environment = store_key_file.map_or_else(String::new, |path| {
+        format!(
+            "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>{}</key>\n    <string>{}</string>\n  </dict>\n",
+            crate::store_access::STORE_KEY_FILE_ENV,
+            xml_escape(&path.to_string_lossy())
+        )
+    });
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -50,7 +64,7 @@ pub fn render_launch_agent_plist(
     <string>--store</string>
     <string>{store_path}</string>
   </array>
-  <key>RunAtLoad</key>
+{environment}  <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
@@ -75,6 +89,7 @@ fn build_launch_agent_plist(
         &executable,
         config_path,
         store_path,
+        crate::store_access::key_file_override().as_deref(),
     ))
 }
 
@@ -199,17 +214,30 @@ fn start_launch_agent_with(
         wait_for_launch_agent_removal_with(timeout, is_registered, &mut sleep)?;
     }
     bootstrap()?;
-    wait_for_daemon_start_with(timeout, is_daemon_alive, sleep)?;
+    if let Err(error) = wait_for_daemon_start_with(timeout, is_daemon_alive, sleep) {
+        // A store the recorder cannot unlock will not fix itself: leave nothing registered
+        // for launchd to relaunch, then report the cause. A failed boot-out is secondary.
+        if matches!(error, DaemonError::Store(StoreError::Locked(_))) {
+            let _ = bootout();
+        }
+        return Err(error);
+    }
     Ok(registered)
 }
 
 fn daemon_is_alive(store_path: &Path) -> Result<bool, DaemonError> {
-    let Some(owner) = StoreOwnership::probe(store_path)? else {
-        return Ok(false);
+    // The store is inspected before the owner: a recorder that cannot unlock it exits at
+    // once, so its ownership lock is rarely observable, while the locked store itself is.
+    // That failure is fatal for this wait; any other read failure (no store yet, a store
+    // being set aside) is a not-ready observation.
+    let status = match crate::store_access::open_reader(store_path, KeyPrompt::Suppressed)
+        .and_then(|reader| reader.status())
+    {
+        Ok(status) => status,
+        Err(error @ StoreError::Locked(_)) => return Err(DaemonError::Store(error)),
+        Err(_) => return Ok(false),
     };
-    // Ownership is acquired before store creation and migration. Until the reader can observe a
-    // complete heartbeat, a store read failure is a not-ready observation for this bounded wait.
-    let Ok(status) = StoreReader::open(store_path).and_then(|reader| reader.status()) else {
+    let Some(owner) = StoreOwnership::probe(store_path)? else {
         return Ok(false);
     };
     Ok(owner_has_fresh_heartbeat(&owner, &status))
@@ -380,6 +408,7 @@ mod tests {
             Path::new("/Applications/A&B/zanei"),
             Path::new("/tmp/<config>.toml"),
             Path::new("/tmp/store.sqlite"),
+            None,
         );
 
         assert!(plist.contains("<string>__daemon</string>"));
@@ -388,6 +417,21 @@ mod tests {
         assert!(plist.contains("/Applications/A&amp;B/zanei"));
         assert!(plist.contains("/tmp/&lt;config&gt;.toml"));
         assert!(!plist.contains("A&B"));
+        assert!(!plist.contains("EnvironmentVariables"));
+    }
+
+    #[test]
+    fn plist_carries_the_key_file_override_to_the_recorder() {
+        let plist = render_launch_agent_plist(
+            Path::new("/Applications/Zanei.app/Contents/MacOS/zanei"),
+            Path::new("/tmp/config.toml"),
+            Path::new("/tmp/store.sqlite"),
+            Some(Path::new("/tmp/dev <key>.hex")),
+        );
+
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("<key>ZANEI_STORE_KEY_FILE</key>"));
+        assert!(plist.contains("<string>/tmp/dev &lt;key&gt;.hex</string>"));
     }
 
     #[test]
@@ -549,5 +593,43 @@ mod tests {
         assert_eq!(crate::error::CliError::from(error).exit_code(), 1);
         assert!(bootstrap_called.get());
         assert!(!bootout_called.get());
+    }
+
+    #[test]
+    fn locked_store_aborts_the_startup_wait_instead_of_timing_out() {
+        use zanei_core::store::{LockedReason, StoreError};
+
+        let mut sleeps = 0;
+        let mut boot_outs = 0;
+        let error = super::start_launch_agent_with(
+            false,
+            std::time::Duration::from_secs(10),
+            || {
+                boot_outs += 1;
+                Ok(())
+            },
+            || Ok(false),
+            |_| sleeps += 1,
+            || Ok(()),
+            || {
+                Err(crate::daemon::DaemonError::Store(StoreError::Locked(
+                    LockedReason::KeyMissing,
+                )))
+            },
+        )
+        .expect_err("a locked store is not a not-ready observation");
+
+        assert!(matches!(
+            error,
+            crate::daemon::DaemonError::Store(StoreError::Locked(LockedReason::KeyMissing))
+        ));
+        assert_eq!(
+            sleeps, 0,
+            "the wait must stop at the first locked observation"
+        );
+        assert_eq!(
+            boot_outs, 1,
+            "nothing is left registered for launchd to relaunch"
+        );
     }
 }

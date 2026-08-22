@@ -41,6 +41,12 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 | `-v, --verbose` | 詳細ログを stderr へ |
 | `--version` / `--help` | バージョン / ヘルプ |
 
+### 環境変数
+
+| 変数 | 説明 |
+| --- | --- |
+| `ZANEI_STORE_KEY_FILE=<path>` | ストアの暗号化鍵をログインキーチェーンではなくこのファイル（16 進数 64 文字）から読みます。ファイルとそのディレクトリがなければ recorder が作成します（mode 0600）。ソースからのビルド向けの開発用上書きです。ad-hoc 署名はビルドのたびに変わるため、そのままではキーチェーンのダイアログが出ます。常用向けではありません：鍵がディスク上に置かれます |
+
 ## 共通規約
 
 ### 時間表現
@@ -69,6 +75,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 | `json` | `query`・`export`・`timeline` | 単一 JSON。`timeline` では構造化タイムライン |
 | `md` | `timeline` | LLM-ready Markdown（既定） |
 | `table` | `query` | 人間可読の整形テーブル |
+| `sqlite` | `export` | 範囲内のストアの平文 SQLite スナップショット。`--out` が必須 |
 
 診断・状態コマンドは、これとは別の固定出力です。
 
@@ -81,7 +88,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 | コード | 意味 |
 | --- | --- |
 | `0` | 正常。バックグラウンド `start` も、recorder は生存しているが 20 秒待っても権限 snapshot が Pending の場合はこのコードを使います。ダイアログの表示には時間がかかる場合があり、何も表示されていなければ `zanei doctor --fix` を実行するよう案内します |
-| `1` | 一般エラー |
+| `1` | 一般エラー。`status` は `store_locked` を含むすべての `store_*` state にもこのコードを使います |
 | `2` | 使用法エラー（引数不正） |
 | `3` | **確定した権限不足**。バックグラウンド `start` は、起動済みの recorder が権限 snapshot で必要な TCC 権限の不足を報告した場合だけこのコードを使います。`doctor` も診断結果に同じコードを使います |
 | `4` | デーモン未起動（`status`・`stop` 等で対象がない） |
@@ -125,11 +132,14 @@ zanei doctor --json     # agent 向け機械可読
     "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
   },
   "missing_required": ["input_monitoring"],
-  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+  "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" }
 }
 ```
 
 `status` の値：`granted` / `denied` / `not_determined`。`reported_by_recorder` は、新鮮な recorder heartbeat 由来なら `true` です。heartbeat がなければ `doctor` 自身のプロセスから probe して `false` とし、人間向け出力には recorder 自身の権限を見るには起動が必要という注記を加えます。
+
+`store_key` はストアの暗号化鍵の所在を報告します。`state` は `key_store`（鍵が見つかった。`detail` に所在 — ログインキーチェーン、または開発用上書き `ZANEI_STORE_KEY_FILE`）、`not_needed`（ストアがない・平文・認識できない）、`missing`（ストアは暗号化されているが鍵がない）、`mismatch`（鍵でこのストアを復号できない）、`key_store_locked` / `key_store_denied`（`detail` にプラットフォームの案内。例：ログインキーチェーンがロックされている）、`unavailable` のいずれかです。`detail` は補足がある場合だけ含まれます。人間向け出力では権限の表の後に `Store key: ...` の行が加わります。ストアがロックされていても `doctor` は失敗せず、鍵の状態を報告し、権限は自身のプロセスから probe します。
 
 人間向け出力の最終行には、必ず次の操作が表示されます。必要な権限が denied の場合は、
 `zanei start` で recorder に権限を要求させ、ダイアログと System Settings の案内に従います。
@@ -171,6 +181,8 @@ bootstrap 前は、永続化された recorder の last-known 権限報告を使
 `y` または `Y` のみが内容記録を有効にし、Enter、その他の回答、EOF、読取エラーは `false` を選びます。Zanei は `config set` と同じ経路で明示値を保存してファイルのその他の内容を維持し、`Text content will be recorded.` または `Text content stays off.` を表示します。bootstrap 後に確認した場合、`y` ではさらに `Restarting the recorder to apply text content capture...` と表示し、canonical な stop→start 経路で再起動します。`false` の回答は recorder の既定のオフ動作を維持するため、再起動しません。どちらの回答でもキーを書き込むため、確認は繰り返しません。
 
 `--foreground`、stdin または stderr が非 TTY、`--quiet`、`--json`、権限不足、権限状態を判定できない場合には確認しません。スキップした `start` は設定を未決定のままにして、従来の opt-in 案内を表示します。キーが明示的に `true` または `false` なら確認しません。
+
+recorder は初回起動時にストアの暗号化鍵を生成し、「Zanei store key」としてログインキーチェーンに保存します。0.2.x 以前が書いた平文のストアは書き換えません。recorder はそれを `store.sqlite.plaintext-<日時>` に名前変更し、新しい暗号化ストアを作成します。読み取りは、旧イベントが保持期間を外れるまで新旧両方を返します（[FAQ](/ja/faq#アップグレード後データはどうなりますか) を参照）。recorder はキーチェーンのダイアログを表示しないため、ログインキーチェーンがロックされていると `start` は `store is locked: your login Keychain is locked; unlock it (for example by opening Keychain Access) and try again` で失敗します。
 
 1 つのストアを所有できる recorder は 1 instance だけです。同じストアに対して foreground
 または launchd recorder を二重起動すると終了コード 1 となり、現在の owner PID を表示します。
@@ -244,7 +256,7 @@ zanei status --json
   "last_event_age_s": 4,
   "store_write_state": "healthy",
   "degraded": {},
-  "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z" },
+  "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z", "encryption": "sqlcipher" },
   "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
   "permissions_ok": true
 }
@@ -254,7 +266,7 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 
 | フィールド | JSON 型 | 意味と `null` 条件 |
 | --- | --- | --- |
-| `state` | string | store lock に owner がいれば `running`、いなければ `stopped`。検査失敗時は `store_missing` / `store_unavailable` / `store_corrupt`。null にならない |
+| `state` | string | store lock に owner がいれば `running`、いなければ `stopped`。検査失敗時は `store_missing` / `store_unavailable` / `store_corrupt` / `store_locked`（ストアは暗号化されているが鍵で開けない。理由は `degraded.store`）。null にならない |
 | `running` | boolean | lock owner の有無。`store_*` state でも null にならない |
 | `paused` | boolean \| null | store を読める場合、lock owner が存在し、その heartbeat が fresh で pause request が有効な場合だけ true。stale・future・missing heartbeat および読める stopped store は false。database 内容を読めない場合は null |
 | `since` | string \| null | 現在の owner の RFC3339 起動 timestamp。owner がなければ null |
@@ -274,6 +286,8 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | `store.size_bytes` | integer \| null | file metadata を取得できる場合の byte 数。取得不能または file 不在なら null |
 | `store.retention_hours` | integer \| null | store を読める場合、owner に一致する heartbeat が fresh なら recorder の active 値、それ以外は現在の設定値。database 内容を読めない場合は null |
 | `store.oldest_event_ts` | string \| null | 保持中の最古 event timestamp。event がない場合または database 内容を読めない場合は null |
+| `store.encryption` | `"sqlcipher"` \| `"plaintext"` \| null | 暗号化されたストアは `sqlcipher`。暗号化以前に書かれたストアは `plaintext` で、recorder が次回起動時に退避する。ストアがない、または読めない場合は null |
+| `store.retired_plaintext` | string[] | 暗号化へのアップグレード時に退避した平文ストアのうち、読み取りがまだ含めているもの（古い順）。保持期間を外れると空になります。人間向け出力では `PREVIOUS STORE` 行として表示。読めないものはスキップし `degraded.retired_store` に報告します |
 | `capture.sources` | `string[]` | 現在の設定の source。null にならない |
 | `capture.text_content` | boolean | 現在の設定の text-content opt-in。null にならない |
 | `permissions_ok` | boolean | 現在の owner と instance が一致する fresh heartbeat の permission snapshot があればその値。snapshot がない場合、または heartbeat が stale・future・missing な場合はローカル probe。null にならない |
@@ -292,7 +306,7 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | `LAST EVENT` | `last_event_ts`。null は `-` |
 | `HEARTBEAT` | freshness と、age があれば `(<N>s old)`。freshness が null なら `-` |
 | `STORE WRITES` | `store_write_state`。null は `-` |
-| `STORE` | `store.path` |
+| `STORE` | `store.path`。`store.encryption` が null でなければ ` (encrypted)` または ` (plaintext; the recorder encrypts it on its next start)` が続く |
 | `TEXT CONTENT` | `on (opt-in)` または `off (opt-in: zanei config set capture.text_content true)` |
 | `PERMISSIONS OK` | `true` または `false` |
 | `DEGRADED` | 空 map は `false`。それ以外は `true` と、各 entry の indented `component: reason` 行 |
@@ -310,6 +324,8 @@ zanei start
 ```
 
 既定値以外を設定している場合は、その store path に読み替えてください。退避したファイルは調査用に残り、新しい store は空です。
+
+鍵がない、または一致しない `store_locked` も同じ手順で復旧します。新しい store は既存の鍵で作成され、鍵がなければ新しい鍵を生成します。鍵を失って消えるデータは、最大でも保持期間（既定 48 時間）分です。`degraded.store` がログインキーチェーンのロックを示す場合は、store を退避せず、ロック解除してから再試行してください。recorder はキーチェーンのダイアログを表示しないため、キーチェーンがロックされている間は `zanei start` が失敗します。`zanei status` と `zanei query` は macOS のロック解除ダイアログを表示することがあります。鍵の状態は `zanei doctor` が報告します。
 
 ## `record`
 
@@ -388,13 +404,16 @@ session を削除する前に省略されることがあります。
 
 ```bash
 zanei export --since 24h --format jsonl --out dump.jsonl
+zanei export --since 24h --format sqlite --out snapshot.sqlite
 ```
 
 | フラグ | 説明 |
 | --- | --- |
 | `--since` / `--until` | 対象範囲（既定 `--since 24h`） |
-| `--format` | `jsonl` / `json` |
-| `--out <FILE>` | 出力ファイル |
+| `--format` | `jsonl` / `json` / `sqlite` |
+| `--out <FILE>` | 出力ファイル。`--format sqlite` では必須 |
+
+`--format sqlite` は、稼働中のストアと同じテーブル（`events`・`daemon_state`・`daemon_permissions`・`meta`）を持つ平文の SQLite スナップショットを、指定範囲について書き出します。保持期間は他の読み取りと同様に適用されます。`--out` は必須で、省略すると使用法エラー（code 2）です。ファイルは所有者のみ読み書き可（mode 0600）で作成され、上書きはしません。既存のパスを指定すると code 1 で失敗し、`snapshot file already exists at PATH; choose another --out path` を表示します。成功時は `Wrote a plaintext SQLite snapshot with N events to PATH` を表示します（`--quiet` で抑制）。スナップショットは暗号化されていません — JSONL エクスポートと同じように扱ってください。`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディング、および `zanei query --store snapshot.sqlite` で開けます。
 
 ## `purge`
 
@@ -409,6 +428,8 @@ zanei purge --all          # 全削除（確認プロンプトあり。--quiet �
 | --- | --- |
 | `--before <TIME>` | これより古いイベントを削除 |
 | `--all` | 全削除（確認プロンプトあり） |
+
+store が存在しない場合、`purge` は `Purged 0 events` を表示し、store を作成しません。暗号化へのアップグレード時に退避した平文ストアも対象です：`--before` は該当イベントを削除し、`--all` はファイルごと削除します。
 
 ## `filter`
 

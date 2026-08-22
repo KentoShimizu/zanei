@@ -4,11 +4,14 @@ use std::path::Path;
 use serde::Serialize;
 use zanei_collector::Permission;
 use zanei_core::config::{CaptureSource, Config};
-use zanei_core::store::{DaemonPermissions, PermissionState, StoreReader, StoreStatus};
+use zanei_core::store::{
+    DaemonPermissions, LockedReason, PermissionState, StoreError, StoreFormat, StoreStatus,
+};
 
 use super::{EXIT_MISSING_PERMISSIONS, EXIT_SUCCESS};
 use crate::error::CliError;
 use crate::permissions::probe_permissions;
+use crate::store_access::{self, KeyAccess, KeyPrompt};
 
 mod render;
 
@@ -31,8 +34,17 @@ pub(crate) enum StartPermissionState {
 
 pub fn run(config_path: &Path, store_path: &Path, fix: bool, json: bool) -> Result<u8, CliError> {
     let config = Config::load(config_path)?;
-    let status = store_status(store_path)?;
-    let report = evaluate(&config, status.as_ref())?;
+    // A locked store is a diagnosis, not a failure: report the key state and
+    // fall back to probing permissions from this process.
+    let (status, store_key) = match store_status(store_path) {
+        Ok(status) => (status, store_key_report(store_path)),
+        Err(CliError::Store(StoreError::Locked(reason))) => {
+            (None, StoreKeyReport::from_locked(&reason))
+        }
+        Err(error) => return Err(error),
+    };
+    let mut report = evaluate(&config, status.as_ref())?;
+    report.store_key = store_key;
     let executable = crate::executable::current().map_err(CliError::Input)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -96,7 +108,28 @@ fn store_status(store_path: &Path) -> Result<Option<StoreStatus>, CliError> {
     if !store_path.exists() {
         return Ok(None);
     }
-    Ok(Some(StoreReader::open(store_path)?.status()?))
+    Ok(Some(
+        store_access::open_reader(store_path, KeyPrompt::Allowed)?.status()?,
+    ))
+}
+
+fn store_key_report(store_path: &Path) -> StoreKeyReport {
+    match StoreFormat::probe(store_path) {
+        Ok(StoreFormat::Encrypted) => {
+            match store_access::load_store_key(KeyAccess::Existing, KeyPrompt::Allowed) {
+                Ok(Some(_)) => {
+                    StoreKeyReport::new("key_store", Some(store_access::key_store().location()))
+                }
+                Ok(None) => StoreKeyReport::from_locked(&LockedReason::KeyMissing),
+                Err(StoreError::Locked(reason)) => StoreKeyReport::from_locked(&reason),
+                Err(error) => StoreKeyReport::new("unavailable", Some(error.to_string())),
+            }
+        }
+        Ok(StoreFormat::Plaintext | StoreFormat::Missing | StoreFormat::Unrecognized) => {
+            StoreKeyReport::new("not_needed", None)
+        }
+        Err(error) => StoreKeyReport::new("unavailable", Some(error.to_string())),
+    }
 }
 
 fn evaluate(config: &Config, status: Option<&StoreStatus>) -> Result<DoctorReport, CliError> {
@@ -190,6 +223,7 @@ fn build_report(
         settings_pane,
         missing_permissions,
         reported_by_recorder,
+        store_key: StoreKeyReport::default(),
     })
 }
 
@@ -257,6 +291,58 @@ struct DoctorReport {
     #[serde(skip)]
     missing_permissions: Vec<Permission>,
     reported_by_recorder: bool,
+    store_key: StoreKeyReport,
+}
+
+/// Where the store's encryption key is, or why it is not.
+#[derive(Debug, Serialize)]
+pub(crate) struct StoreKeyReport {
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+impl Default for StoreKeyReport {
+    fn default() -> Self {
+        Self::new("not_needed", None)
+    }
+}
+
+impl StoreKeyReport {
+    const fn new(state: &'static str, detail: Option<String>) -> Self {
+        Self { state, detail }
+    }
+
+    fn from_locked(reason: &LockedReason) -> Self {
+        match reason {
+            LockedReason::KeyMissing => Self::new("missing", None),
+            LockedReason::KeyMismatch => Self::new("mismatch", None),
+            LockedReason::KeyStoreLocked(advice) => {
+                Self::new("key_store_locked", Some(advice.clone()))
+            }
+            LockedReason::KeyStoreDenied(advice) => {
+                Self::new("key_store_denied", Some(advice.clone()))
+            }
+            LockedReason::KeyUnavailable(detail) => Self::new("unavailable", Some(detail.clone())),
+        }
+    }
+
+    pub(super) fn describe(&self) -> String {
+        match (self.state, self.detail.as_deref()) {
+            ("key_store", Some(location)) => format!("in {location}"),
+            ("key_store", None) => "in the platform key store".to_owned(),
+            ("not_needed", _) => "not needed yet (the store is not encrypted)".to_owned(),
+            ("missing", _) => {
+                "missing: the store is encrypted but no key for it is available".to_owned()
+            }
+            ("mismatch", _) => "does not decrypt this store".to_owned(),
+            ("key_store_locked" | "key_store_denied", Some(advice)) => {
+                format!("unavailable: {advice}")
+            }
+            (_, Some(detail)) => format!("unavailable ({detail})"),
+            _ => "unavailable".to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -312,6 +398,7 @@ mod tests {
     #[test]
     fn denied_report_asks_for_a_recorder_start_before_the_manual_add_fallback() {
         let report = DoctorReport {
+            store_key: super::StoreKeyReport::default(),
             ok: false,
             capture_sources: vec!["input"],
             permissions: PermissionReport {
@@ -548,6 +635,7 @@ mod tests {
 
     fn granted_report() -> DoctorReport {
         DoctorReport {
+            store_key: super::StoreKeyReport::default(),
             ok: true,
             capture_sources: vec!["app"],
             permissions: PermissionReport {
