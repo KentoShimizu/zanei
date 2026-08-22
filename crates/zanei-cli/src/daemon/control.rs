@@ -28,14 +28,26 @@ pub fn launch_agent_path() -> Result<PathBuf, DaemonError> {
         .join(PLIST_FILE_NAME))
 }
 
+/// Renders the launch agent. launchd does not inherit the invoking shell's
+/// environment, so the `ZANEI_STORE_KEY_FILE` override (when active) is written
+/// into the plist; otherwise the recorder would fall back to the platform key
+/// store while the CLI keeps using the file.
 pub fn render_launch_agent_plist(
     executable: &Path,
     config_path: &Path,
     store_path: &Path,
+    store_key_file: Option<&Path>,
 ) -> String {
     let executable = xml_escape(&executable.to_string_lossy());
     let config_path = xml_escape(&config_path.to_string_lossy());
     let store_path = xml_escape(&store_path.to_string_lossy());
+    let environment = store_key_file.map_or_else(String::new, |path| {
+        format!(
+            "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>{}</key>\n    <string>{}</string>\n  </dict>\n",
+            crate::store_access::STORE_KEY_FILE_ENV,
+            xml_escape(&path.to_string_lossy())
+        )
+    });
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -52,7 +64,7 @@ pub fn render_launch_agent_plist(
     <string>--store</string>
     <string>{store_path}</string>
   </array>
-  <key>RunAtLoad</key>
+{environment}  <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
@@ -77,6 +89,7 @@ fn build_launch_agent_plist(
         &executable,
         config_path,
         store_path,
+        crate::store_access::key_file_override().as_deref(),
     ))
 }
 
@@ -384,6 +397,7 @@ mod tests {
             Path::new("/Applications/A&B/zanei"),
             Path::new("/tmp/<config>.toml"),
             Path::new("/tmp/store.sqlite"),
+            None,
         );
 
         assert!(plist.contains("<string>__daemon</string>"));
@@ -392,6 +406,21 @@ mod tests {
         assert!(plist.contains("/Applications/A&amp;B/zanei"));
         assert!(plist.contains("/tmp/&lt;config&gt;.toml"));
         assert!(!plist.contains("A&B"));
+        assert!(!plist.contains("EnvironmentVariables"));
+    }
+
+    #[test]
+    fn plist_carries_the_key_file_override_to_the_recorder() {
+        let plist = render_launch_agent_plist(
+            Path::new("/Applications/Zanei.app/Contents/MacOS/zanei"),
+            Path::new("/tmp/config.toml"),
+            Path::new("/tmp/store.sqlite"),
+            Some(Path::new("/tmp/dev <key>.hex")),
+        );
+
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("<key>ZANEI_STORE_KEY_FILE</key>"));
+        assert!(plist.contains("<string>/tmp/dev &lt;key&gt;.hex</string>"));
     }
 
     #[test]

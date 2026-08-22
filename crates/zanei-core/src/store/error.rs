@@ -10,16 +10,19 @@ pub enum StoreFailureKind {
 }
 
 /// Why an encrypted store could not be opened.
+///
+/// The platform-specific variants carry the platform's own wording (see
+/// [`super::KeyStoreError`]); core itself does not know what a keychain is.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LockedReason {
-    /// The store is encrypted but no key was found.
+    /// The store is encrypted but no key is available.
     KeyMissing,
     /// A key was supplied but it does not decrypt the store.
     KeyMismatch,
-    /// The key lives in a keychain that is currently locked.
-    KeychainLocked,
-    /// The operating system refused to hand the key to this process.
-    KeychainDenied,
+    /// The key store is locked; the text says how to unlock it.
+    KeyStoreLocked(String),
+    /// The platform refused this process access to the key; the text says what to do.
+    KeyStoreDenied(String),
     /// The key could not be read for another reason.
     KeyUnavailable(String),
 }
@@ -28,23 +31,18 @@ impl Display for LockedReason {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::KeyMissing => formatter.write_str(
-                "the store is encrypted but its key was not found in your login Keychain \
-                 (item \"Zanei store key\"); if the key is gone the recorded data cannot be \
-                 recovered: run `zanei stop`, move the store aside, then `zanei start`",
-            ),
-            Self::KeyMismatch => formatter.write_str(
-                "the key in your login Keychain does not decrypt this store (it was encrypted \
-                 with a different key, or the file is not a Zanei store); move the store \
+                "the store is encrypted but no key for it is available; if the key is gone \
+                 the recorded data cannot be recovered: run `zanei stop`, move the store \
                  aside, then `zanei start`",
             ),
-            Self::KeychainLocked => formatter.write_str(
-                "your login Keychain is locked; unlock it (for example by opening Keychain \
-                 Access) and try again",
+            Self::KeyMismatch => formatter.write_str(
+                "the available key does not decrypt this store (it was encrypted with a \
+                 different key, or the file is not a Zanei store); move the store aside, \
+                 then `zanei start`",
             ),
-            Self::KeychainDenied => formatter.write_str(
-                "macOS denied this process access to the store key in your login Keychain; \
-                 allow Zanei in the Keychain dialog or use the signed Zanei.app build",
-            ),
+            Self::KeyStoreLocked(advice) | Self::KeyStoreDenied(advice) => {
+                formatter.write_str(advice)
+            }
             Self::KeyUnavailable(reason) => {
                 write!(formatter, "the store key is unavailable: {reason}")
             }
@@ -219,9 +217,9 @@ mod tests {
             StoreFailureKind::Locked
         );
         assert!(
-            StoreError::Locked(LockedReason::KeychainLocked)
+            StoreError::Locked(LockedReason::KeyStoreLocked("unlock it first".to_owned()))
                 .to_string()
-                .contains("Keychain is locked")
+                .ends_with("unlock it first")
         );
     }
 }

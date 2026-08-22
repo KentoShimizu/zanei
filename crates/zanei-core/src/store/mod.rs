@@ -6,6 +6,7 @@
 
 mod error;
 mod key;
+mod key_store;
 mod reader;
 mod snapshot;
 mod types;
@@ -17,6 +18,7 @@ use rusqlite::Connection;
 
 pub use error::{LockedReason, StoreError, StoreFailureKind};
 pub use key::{STORE_KEY_BYTES, StoreFormat, StoreKey};
+pub use key_store::{KeyStore, KeyStoreError, KeyStoreInteraction, load_or_create};
 pub use reader::StoreReader;
 pub use snapshot::{SnapshotReport, export_plain_sqlite};
 pub use types::{
@@ -25,7 +27,7 @@ pub use types::{
 };
 
 #[cfg(feature = "write")]
-pub use writer::{MigrationOutcome, StoreWriter, migrate_to_encrypted};
+pub use writer::{MigrationOutcome, RetiredStore, StoreWriter, migrate_to_encrypted};
 
 const LEGACY_STORE_SCHEMA_VERSION: i64 = 1;
 const DAEMON_IDENTITY_STORE_SCHEMA_VERSION: i64 = 2;
@@ -142,7 +144,9 @@ fn unlock(
     }
 }
 
-/// Escapes a path for use inside a `file:` URI filename.
+/// Escapes a path for use inside a `file:` URI filename. SQLite reads the path
+/// as UTF-8 and decodes `%XX`, so only the characters that would start the
+/// query or fragment need escaping; everything else passes through unchanged.
 fn file_uri(path: &std::path::Path, query: &str) -> Result<String, StoreError> {
     let text = path.to_str().ok_or_else(|| {
         StoreError::io(
@@ -155,10 +159,10 @@ fn file_uri(path: &std::path::Path, query: &str) -> Result<String, StoreError> {
     })?;
     let mut uri = String::with_capacity(text.len() + query.len() + 8);
     uri.push_str("file:");
-    for byte in text.bytes() {
-        match byte {
-            b'%' | b'?' | b'#' => uri.push_str(&format!("%{byte:02X}")),
-            _ => uri.push(byte as char),
+    for character in text.chars() {
+        match character {
+            '%' | '?' | '#' => uri.push_str(&format!("%{:02X}", character as u32)),
+            other => uri.push(other),
         }
     }
     if !query.is_empty() {
@@ -166,6 +170,18 @@ fn file_uri(path: &std::path::Path, query: &str) -> Result<String, StoreError> {
         uri.push_str(query);
     }
     Ok(uri)
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::file_uri;
+
+    #[test]
+    fn file_uri_keeps_non_ascii_and_escapes_only_delimiters() {
+        let uri =
+            file_uri(std::path::Path::new("/tmp/日本語 50%?#.sqlite"), "mode=ro").expect("uri");
+        assert_eq!(uri, "file:/tmp/日本語 50%25%3F%23.sqlite?mode=ro");
+    }
 }
 
 #[cfg(all(test, feature = "write"))]

@@ -16,8 +16,8 @@ use zanei_core::{
     config::{CONFIG_WATCH_INTERVAL, Config, ConfigWatcher},
     normalize::format_timestamp,
     store::{
-        DaemonMode, DaemonPermissions, DaemonState, LockedReason, MigrationOutcome, StoreError,
-        StoreFormat, StoreReader, StoreStatus, StoreWriter, migrate_to_encrypted,
+        DaemonMode, DaemonPermissions, DaemonState, LockedReason, MigrationOutcome, RetiredStore,
+        StoreError, StoreFormat, StoreReader, StoreStatus, StoreWriter, migrate_to_encrypted,
     },
 };
 use zanei_macos::permission::{PermissionError, PermissionStatus, permission_status};
@@ -75,7 +75,11 @@ pub fn run_daemon(
     // Ownership comes first: the migration below rewrites the store file, and
     // only the single recorder that owns the store may do that.
     let ownership = StoreOwnership::acquire(store_path, owner.clone())?;
-    let (mut writer, reader) = open_encrypted_store(store_path)?;
+    let OpenedStore {
+        mut writer,
+        reader,
+        retired,
+    } = open_encrypted_store(store_path)?;
     let initial_status = reader.status()?;
     let base_dropped = initial_status.events_dropped;
     let base_collector_failures = initial_status.collector_failures.clone();
@@ -112,6 +116,7 @@ pub fn run_daemon(
     let _main_thread_observers = main_thread_observers;
     main_thread::run(main_run_loop, "daemon-runtime", move || {
         let _ownership = ownership;
+        let _retired_store = retired;
         let loop_result = ActiveDaemon {
             config_watcher: &mut config_watcher,
             active_retention_hours: config.output.retention_hours,
@@ -146,23 +151,61 @@ pub fn run_daemon(
     })?
 }
 
+/// The recorder's store connections plus, after a migration, the retired
+/// plaintext connection that must outlive them (see `RetiredStore`).
+struct OpenedStore {
+    writer: StoreWriter,
+    reader: StoreReader,
+    retired: Option<RetiredStore>,
+}
+
 /// Opens the recorder's store, creating its key on first use and converting a
-/// store written before encryption existed. The recorder never shows Keychain
-/// dialogs: a locked or inaccessible Keychain fails the start with a message.
-fn open_encrypted_store(store_path: &Path) -> Result<(StoreWriter, StoreReader), DaemonError> {
-    let key = store_access::load_store_key(KeyAccess::CreateIfMissing, KeyPrompt::Suppressed)?
-        .ok_or(StoreError::Locked(LockedReason::KeyMissing))?;
-    if let MigrationOutcome::Migrated { events } = migrate_to_encrypted(store_path, &key)? {
-        eprintln!("zanei: encrypted the existing store ({events} events)");
-    }
-    // Probe exactly once, before any connection exists: probing again while the
-    // writer is open would drop its WAL-mode file lock (see `StoreFormat::probe`),
-    // letting another process delete the WAL out from under the recorder.
+/// store written before encryption existed. The recorder never shows key store
+/// dialogs: a locked or inaccessible key store fails the start with a message.
+fn open_encrypted_store(store_path: &Path) -> Result<OpenedStore, DaemonError> {
+    // An encrypted store only ever gets its existing key: generating a fresh one
+    // would turn "key missing" into "key mismatch" and collide with the original
+    // item if it is restored later. New and plaintext stores get a key created.
     let format = StoreFormat::probe(store_path)?;
-    let writer = StoreWriter::open_known(store_path, format, Some(&key))?;
-    let reader = StoreReader::open_known(store_path, writer.format(), Some(&key))?;
+    let key = match format {
+        StoreFormat::Encrypted => Some(
+            store_access::load_store_key(KeyAccess::Existing, KeyPrompt::Suppressed)?
+                .ok_or(StoreError::Locked(LockedReason::KeyMissing))?,
+        ),
+        StoreFormat::Missing | StoreFormat::Plaintext => Some(
+            store_access::load_store_key(KeyAccess::CreateIfMissing, KeyPrompt::Suppressed)?
+                .ok_or(StoreError::Locked(LockedReason::KeyMissing))?,
+        ),
+        // Let the open below report the damage instead of touching any key.
+        StoreFormat::Unrecognized => None,
+    };
+    let retired = match (format, key.as_ref()) {
+        (StoreFormat::Plaintext, Some(key)) => match migrate_to_encrypted(store_path, key)? {
+            MigrationOutcome::Migrated { events, retired } => {
+                eprintln!("zanei: encrypted the existing store ({events} events)");
+                Some(retired)
+            }
+            MigrationOutcome::Unchanged => None,
+        },
+        _ => None,
+    };
+    // Probe once more only if the migration replaced the file, and always before
+    // any connection to it exists: probing while the writer is open would drop
+    // its WAL-mode file lock (see `StoreFormat::probe`), letting another process
+    // delete the WAL out from under the recorder.
+    let format = if retired.is_some() {
+        StoreFormat::probe(store_path)?
+    } else {
+        format
+    };
+    let writer = StoreWriter::open_known(store_path, format, key.as_ref())?;
+    let reader = StoreReader::open_known(store_path, writer.format(), key.as_ref())?;
     restrict_store_permissions(store_path)?;
-    Ok((writer, reader))
+    Ok(OpenedStore {
+        writer,
+        reader,
+        retired,
+    })
 }
 
 pub fn run_record(config_path: &Path, output: RecordOutput) -> Result<(), DaemonError> {

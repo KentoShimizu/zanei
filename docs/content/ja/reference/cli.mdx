@@ -133,13 +133,13 @@ zanei doctor --json     # agent 向け機械可読
   },
   "missing_required": ["input_monitoring"],
   "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-  "store_key": { "state": "keychain" }
+  "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" }
 }
 ```
 
 `status` の値：`granted` / `denied` / `not_determined`。`reported_by_recorder` は、新鮮な recorder heartbeat 由来なら `true` です。heartbeat がなければ `doctor` 自身のプロセスから probe して `false` とし、人間向け出力には recorder 自身の権限を見るには起動が必要という注記を加えます。
 
-`store_key` はストアの暗号化鍵の所在を報告します。`state` は `keychain`（ログインキーチェーンで見つかった）、`file`（開発用上書き `ZANEI_STORE_KEY_FILE` から読んだ）、`not_needed`（ストアがない・平文・認識できない）、`missing`（ストアは暗号化されているが鍵の item がない）、`mismatch`（鍵でこのストアを復号できない）、`keychain_locked`、`keychain_denied`、`unavailable` のいずれかです。`detail` は補足がある場合だけ含まれます。人間向け出力では権限の表の後に `Store key: ...` の行が加わります。ストアがロックされていても `doctor` は失敗せず、鍵の状態を報告し、権限は自身のプロセスから probe します。
+`store_key` はストアの暗号化鍵の所在を報告します。`state` は `key_store`（鍵が見つかった。`detail` に所在 — ログインキーチェーン、または開発用上書き `ZANEI_STORE_KEY_FILE`）、`not_needed`（ストアがない・平文・認識できない）、`missing`（ストアは暗号化されているが鍵がない）、`mismatch`（鍵でこのストアを復号できない）、`key_store_locked` / `key_store_denied`（`detail` にプラットフォームの案内。例：ログインキーチェーンがロックされている）、`unavailable` のいずれかです。`detail` は補足がある場合だけ含まれます。人間向け出力では権限の表の後に `Store key: ...` の行が加わります。ストアがロックされていても `doctor` は失敗せず、鍵の状態を報告し、権限は自身のプロセスから probe します。
 
 人間向け出力の最終行には、必ず次の操作が表示されます。必要な権限が denied の場合は、
 `zanei start` で recorder に権限を要求させ、ダイアログと System Settings の案内に従います。

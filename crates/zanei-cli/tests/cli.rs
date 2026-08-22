@@ -1111,6 +1111,37 @@ fn export_sqlite_writes_a_plaintext_snapshot_any_sqlite_client_can_open() {
 }
 
 #[test]
+fn recorder_refuses_an_encrypted_store_without_its_key_and_creates_none() {
+    let fixture = Fixture::populated();
+    let missing_key = fixture.directory.path().join("missing.key");
+    let output = fixture
+        .process_command()
+        .env(STORE_KEY_FILE_ENV, &missing_key)
+        .arg("__daemon")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the recorder");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no key for it is available"));
+    assert!(
+        !missing_key.exists(),
+        "the recorder must not generate a key for an encrypted store"
+    );
+    assert_eq!(
+        StoreFormat::probe(&fixture.store).expect("probe"),
+        StoreFormat::Encrypted
+    );
+    assert_eq!(
+        fixture
+            .open_reader()
+            .status()
+            .expect("store untouched")
+            .events_captured,
+        KNOWN_EVENT_TYPES.len() as u64
+    );
+}
+
+#[test]
 fn foreground_daemon_encrypts_a_plaintext_store_on_start() {
     let directory = TempDir::new().expect("migration fixture");
     let config = directory.path().join("config.toml");

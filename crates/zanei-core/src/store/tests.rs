@@ -1081,8 +1081,14 @@ fn migration_encrypts_a_plaintext_store_in_place_and_is_idempotent() {
     }
     let key = StoreKey::generate().expect("generate key");
 
-    let outcome = migrate_to_encrypted(database.path(), &key).expect("migrate");
-    assert_eq!(outcome, MigrationOutcome::Migrated { events: 2 });
+    let MigrationOutcome::Migrated {
+        events,
+        retired: _retired,
+    } = migrate_to_encrypted(database.path(), &key).expect("migrate")
+    else {
+        panic!("plaintext store must be migrated");
+    };
+    assert_eq!(events, 2);
     assert_eq!(
         StoreFormat::probe(database.path()).expect("probe migrated"),
         StoreFormat::Encrypted
@@ -1104,10 +1110,10 @@ fn migration_encrypts_a_plaintext_store_in_place_and_is_idempotent() {
     assert_eq!(status.pid, Some(42));
     assert_eq!(status.retention_hours, Some(48));
 
-    assert_eq!(
+    assert!(matches!(
         migrate_to_encrypted(database.path(), &key).expect("second migration"),
         MigrationOutcome::Unchanged
-    );
+    ));
     let mut writer =
         StoreWriter::open_with_key(database.path(), Some(&key)).expect("writer after migration");
     writer
@@ -1127,11 +1133,151 @@ fn migration_encrypts_a_plaintext_store_in_place_and_is_idempotent() {
     );
 
     let missing = TestDatabase::new("migrate-missing");
-    assert_eq!(
+    assert!(matches!(
         migrate_to_encrypted(missing.path(), &key).expect("migrate missing store"),
         MigrationOutcome::Unchanged
-    );
+    ));
     assert!(!missing.path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_rewrites_the_target_of_a_symlinked_store() {
+    let target = TestDatabase::new("symlink-target");
+    let link = TestDatabase::new("symlink-link");
+    StoreWriter::open(target.path())
+        .and_then(|mut writer| {
+            writer.append(&app_launch(
+                "evt_01K00000000000000000000401",
+                "2026-08-16T09:00:00.000Z",
+                "Safari",
+                "com.apple.Safari",
+            ))
+        })
+        .expect("plaintext target store");
+    std::os::unix::fs::symlink(target.path(), link.path()).expect("symlink to the store");
+    let key = StoreKey::generate().expect("generate key");
+
+    let MigrationOutcome::Migrated {
+        events,
+        retired: _retired,
+    } = migrate_to_encrypted(link.path(), &key).expect("migrate through the symlink")
+    else {
+        panic!("plaintext store must be migrated");
+    };
+    assert_eq!(events, 1);
+    assert!(
+        std::fs::symlink_metadata(link.path())
+            .expect("link metadata")
+            .file_type()
+            .is_symlink(),
+        "the symlink itself must survive"
+    );
+    assert_eq!(
+        StoreFormat::probe(target.path()).expect("probe target"),
+        StoreFormat::Encrypted
+    );
+    assert!(!PathBuf::from(format!("{}.migrating", target.path().display())).exists());
+    assert_eq!(
+        StoreReader::open_with_key(link.path(), Some(&key))
+            .expect("read through the symlink")
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query")
+            .len(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_keeps_the_old_file_locked_so_late_writers_fail_instead_of_writing_into_it() {
+    use rusqlite::ffi::ErrorCode;
+
+    let database = TestDatabase::new("retired");
+    let alias = TestDatabase::new("retired-alias");
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| {
+            writer.append(&app_launch(
+                "evt_01K00000000000000000000501",
+                "2026-08-16T09:00:00.000Z",
+                "Safari",
+                "com.apple.Safari",
+            ))
+        })
+        .expect("plaintext store");
+    // A hard link keeps naming the plaintext inode after the swap, like a process
+    // that opened the store just before the encrypted copy replaced it.
+    std::fs::hard_link(database.path(), alias.path()).expect("hard link to the plaintext inode");
+    let key = StoreKey::generate().expect("generate key");
+
+    let MigrationOutcome::Migrated { retired, .. } =
+        migrate_to_encrypted(database.path(), &key).expect("migrate")
+    else {
+        panic!("plaintext store must be migrated");
+    };
+    assert_eq!(
+        StoreFormat::probe(alias.path()).expect("probe old inode"),
+        StoreFormat::Plaintext
+    );
+    let late = rusqlite::Connection::open(alias.path()).expect("open the old inode");
+    late.busy_timeout(std::time::Duration::ZERO)
+        .expect("no busy wait");
+    let locked = late
+        .execute(
+            "INSERT INTO daemon_permissions(id, snapshot_json) VALUES (1, '{}')",
+            [],
+        )
+        .expect_err("the retired store must still be locked");
+    assert!(matches!(
+        locked,
+        rusqlite::Error::SqliteFailure(error, _)
+            if error.code == ErrorCode::DatabaseBusy || error.code == ErrorCode::DatabaseLocked
+    ));
+    assert_eq!(
+        StoreReader::open_with_key(database.path(), Some(&key))
+            .expect("open the encrypted store")
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query")
+            .len(),
+        1
+    );
+
+    // Releasing the retired connection is exactly what lets a late writer commit
+    // into the orphaned file, which is why the recorder keeps it for its lifetime.
+    drop(retired);
+    late.execute(
+        "INSERT INTO daemon_permissions(id, snapshot_json) VALUES (1, '{}')",
+        [],
+    )
+    .expect("orphaned inode accepts writes once the lock is gone");
+}
+
+#[test]
+fn plaintext_snapshot_handles_non_ascii_paths() {
+    let database = TestDatabase::new("スナップショット-source");
+    let snapshot = TestDatabase::new("スナップショット-output");
+    let key = StoreKey::generate().expect("generate key");
+    {
+        let mut writer =
+            StoreWriter::open_with_key(database.path(), Some(&key)).expect("encrypted store");
+        writer
+            .append(&app_launch(
+                "evt_01K00000000000000000000601",
+                "2026-08-16T09:00:00.000Z",
+                "Safari",
+                "com.apple.Safari",
+            ))
+            .expect("append");
+    }
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export snapshot from a non-ASCII path");
+    assert_eq!(report.events, 1);
 }
 
 #[test]

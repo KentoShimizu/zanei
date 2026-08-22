@@ -133,13 +133,13 @@ required permission is missing. In that combination, stdout is therefore not JSO
   },
   "missing_required": ["input_monitoring"],
   "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-  "store_key": { "state": "keychain" }
+  "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" }
 }
 ```
 
 `status` values: `granted` / `denied` / `not_determined`. `reported_by_recorder` is `true` when the result came from a fresh recorder heartbeat. Without one, `doctor` probes from its own process, sets this field to `false`, and the human output notes that the recorder must be started to see its own permissions.
 
-`store_key` reports where the store's encryption key is. `state` is `keychain` (found in the login Keychain), `file` (read from the `ZANEI_STORE_KEY_FILE` development override), `not_needed` (the store is missing, plaintext, or not recognized), `missing` (the store is encrypted but there is no key item), `mismatch` (the key does not decrypt this store), `keychain_locked`, `keychain_denied`, or `unavailable`; `detail` is present only when there is more to report. Human-readable output adds a `Store key: ...` line after the permission table. `doctor` does not fail when the store is locked: it reports the key state and probes permissions from its own process instead.
+`store_key` reports where the store's encryption key is. `state` is `key_store` (the key was found; `detail` names the place — the login Keychain, or the `ZANEI_STORE_KEY_FILE` development override), `not_needed` (the store is missing, plaintext, or not recognized), `missing` (the store is encrypted but there is no key), `mismatch` (the key does not decrypt this store), `key_store_locked` or `key_store_denied` (`detail` carries the platform's advice, for example that the login Keychain is locked), or `unavailable`; `detail` is present only when there is more to report. Human-readable output adds a `Store key: ...` line after the permission table. `doctor` does not fail when the store is locked: it reports the key state and probes permissions from its own process instead.
 
 Human-readable output always ends with the next action. When a required permission is denied, it
 walks through granting it: run `zanei start` so the recorder asks macOS for the permission, then

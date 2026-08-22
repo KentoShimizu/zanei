@@ -11,7 +11,7 @@ use zanei_core::store::{
 use super::{EXIT_MISSING_PERMISSIONS, EXIT_SUCCESS};
 use crate::error::CliError;
 use crate::permissions::probe_permissions;
-use crate::store_access::{self, KeyAccess, KeyPrompt, KeySource};
+use crate::store_access::{self, KeyAccess, KeyPrompt};
 
 mod render;
 
@@ -117,10 +117,9 @@ fn store_key_report(store_path: &Path) -> StoreKeyReport {
     match StoreFormat::probe(store_path) {
         Ok(StoreFormat::Encrypted) => {
             match store_access::load_store_key(KeyAccess::Existing, KeyPrompt::Allowed) {
-                Ok(Some(_)) => match store_access::key_source() {
-                    KeySource::Keychain => StoreKeyReport::new("keychain", None),
-                    KeySource::File => StoreKeyReport::new("file", None),
-                },
+                Ok(Some(_)) => {
+                    StoreKeyReport::new("key_store", Some(store_access::key_store().location()))
+                }
                 Ok(None) => StoreKeyReport::from_locked(&LockedReason::KeyMissing),
                 Err(StoreError::Locked(reason)) => StoreKeyReport::from_locked(&reason),
                 Err(error) => StoreKeyReport::new("unavailable", Some(error.to_string())),
@@ -318,26 +317,30 @@ impl StoreKeyReport {
         match reason {
             LockedReason::KeyMissing => Self::new("missing", None),
             LockedReason::KeyMismatch => Self::new("mismatch", None),
-            LockedReason::KeychainLocked => Self::new("keychain_locked", None),
-            LockedReason::KeychainDenied => Self::new("keychain_denied", None),
+            LockedReason::KeyStoreLocked(advice) => {
+                Self::new("key_store_locked", Some(advice.clone()))
+            }
+            LockedReason::KeyStoreDenied(advice) => {
+                Self::new("key_store_denied", Some(advice.clone()))
+            }
             LockedReason::KeyUnavailable(detail) => Self::new("unavailable", Some(detail.clone())),
         }
     }
 
     pub(super) fn describe(&self) -> String {
-        let text = match self.state {
-            "keychain" => "in the login Keychain",
-            "file" => "read from ZANEI_STORE_KEY_FILE (development override)",
-            "not_needed" => "not needed yet (the store is not encrypted)",
-            "missing" => "missing: the store is encrypted but its key is not in the login Keychain",
-            "mismatch" => "does not decrypt this store",
-            "keychain_locked" => "unavailable: the login Keychain is locked",
-            "keychain_denied" => "denied by macOS for this process",
-            _ => "unavailable",
-        };
-        match &self.detail {
-            Some(detail) => format!("{text} ({detail})"),
-            None => text.to_owned(),
+        match (self.state, self.detail.as_deref()) {
+            ("key_store", Some(location)) => format!("in {location}"),
+            ("key_store", None) => "in the platform key store".to_owned(),
+            ("not_needed", _) => "not needed yet (the store is not encrypted)".to_owned(),
+            ("missing", _) => {
+                "missing: the store is encrypted but no key for it is available".to_owned()
+            }
+            ("mismatch", _) => "does not decrypt this store".to_owned(),
+            ("key_store_locked" | "key_store_denied", Some(advice)) => {
+                format!("unavailable: {advice}")
+            }
+            (_, Some(detail)) => format!("unavailable ({detail})"),
+            _ => "unavailable".to_owned(),
         }
     }
 }
