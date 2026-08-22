@@ -156,6 +156,24 @@ pub(crate) fn mcp_store_key(store: &Path) -> Result<Option<StoreKey>, String> {
     store_key_for(store, KeyPrompt::Suppressed).map_err(|error| error.to_string())
 }
 
+/// Creates the key file's directory when it is missing, owner-only like the
+/// store's directory. An existing directory keeps its permissions.
+fn ensure_parent_directory(path: &Path) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() || parent.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// The development override: one hexadecimal key in a file.
 struct FileKeyStore {
     path: PathBuf,
@@ -182,7 +200,8 @@ impl KeyStore for FileKeyStore {
         }
     }
 
-    /// Writes the key to a private temporary file in the same directory, syncs
+    /// Writes the key to a private temporary file in the same directory
+    /// (created owner-only when it is missing), syncs
     /// it, and links it into place. The final name therefore never holds a
     /// half-written key, and two creators racing each other cannot both win:
     /// the link fails with `AlreadyExists` for the loser, who then adopts the
@@ -194,6 +213,8 @@ impl KeyStore for FileKeyStore {
                 self.path.display()
             ))
         };
+        ensure_parent_directory(&self.path)
+            .map_err(|error| unavailable("create the directory for", error))?;
         let mut staging = self.path.as_os_str().to_os_string();
         staging.push(format!(".tmp-{}", std::process::id()));
         let staging = PathBuf::from(staging);
@@ -254,6 +275,36 @@ mod tests {
             absolute_key_file(std::path::PathBuf::from("/tmp/dev.key")),
             std::path::PathBuf::from("/tmp/dev.key")
         );
+    }
+
+    #[test]
+    fn key_file_directory_is_created_owner_only_when_missing() {
+        let directory = TempDir::new().expect("key directory");
+        let parent = directory.path().join("config").join("zanei");
+        let store = FileKeyStore {
+            path: parent.join("dev.key"),
+        };
+
+        store
+            .store(&StoreKey::generate().expect("key"))
+            .expect("create the key file and its directory");
+
+        assert!(
+            store
+                .load(KeyStoreInteraction::NoPrompt)
+                .expect("read key file")
+                .is_some()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&parent)
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700);
+        }
     }
 
     #[test]

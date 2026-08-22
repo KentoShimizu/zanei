@@ -45,7 +45,7 @@ Valid for every subcommand.
 
 | Variable | Description |
 | --- | --- |
-| `ZANEI_STORE_KEY_FILE=<path>` | Read the store's encryption key from this file (64 hexadecimal characters) instead of the login Keychain; the recorder creates the file (mode 0600) if it is missing. A development override for builds from source, whose ad-hoc code signature changes on every build and would otherwise trigger Keychain dialogs. Not for everyday use: the key sits on disk |
+| `ZANEI_STORE_KEY_FILE=<path>` | Read the store's encryption key from this file (64 hexadecimal characters) instead of the login Keychain; the recorder creates the file (mode 0600) and its directory if they are missing. A development override for builds from source, whose ad-hoc code signature changes on every build and would otherwise trigger Keychain dialogs. Not for everyday use: the key sits on disk |
 
 ## Shared conventions
 

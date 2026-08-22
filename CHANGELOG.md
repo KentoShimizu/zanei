@@ -32,7 +32,8 @@ The store is encrypted at rest.
 - `purge` on a store that does not exist prints `Purged 0 events`
   instead of creating one.
 - `ZANEI_STORE_KEY_FILE=<path>` reads the key from a file instead of
-  the Keychain, for builds from source and CI.
+  the Keychain, for builds from source and CI; the recorder creates the
+  file and its directory when they are missing.
 - SQLCipher (BSD-3-Clause) is compiled in; see `THIRD_PARTY_NOTICES.md`.
 
 ## 0.2.0 — 2026-08-18
