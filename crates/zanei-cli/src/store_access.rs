@@ -37,11 +37,17 @@ pub(crate) enum KeyPrompt {
     Suppressed,
 }
 
-/// The key file path from the environment, when the override is active.
+/// The key file path from the environment, when the override is active. It is
+/// made absolute here, once: the recorder receives it through the launch agent
+/// and runs with a different working directory than the shell that set it.
 pub(crate) fn key_file_override() -> Option<PathBuf> {
     std::env::var_os(STORE_KEY_FILE_ENV)
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(|value| absolute_key_file(PathBuf::from(value)))
+}
+
+fn absolute_key_file(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
 }
 
 /// The key store this process uses: the override file when set, otherwise the
@@ -234,7 +240,21 @@ mod tests {
     use tempfile::TempDir;
     use zanei_core::store::{KeyStore, KeyStoreError, KeyStoreInteraction, StoreKey};
 
-    use super::FileKeyStore;
+    use super::{FileKeyStore, absolute_key_file};
+
+    #[test]
+    fn key_file_override_is_resolved_against_the_current_directory() {
+        let resolved = absolute_key_file(std::path::PathBuf::from("dev.key"));
+        assert!(resolved.is_absolute());
+        assert_eq!(
+            resolved,
+            std::env::current_dir().expect("cwd").join("dev.key")
+        );
+        assert_eq!(
+            absolute_key_file(std::path::PathBuf::from("/tmp/dev.key")),
+            std::path::PathBuf::from("/tmp/dev.key")
+        );
+    }
 
     #[test]
     fn key_file_is_created_once_and_read_back() {

@@ -22,7 +22,7 @@ pub use error::{LockedReason, StoreError, StoreFailureKind};
 pub use key::{STORE_KEY_BYTES, StoreFormat, StoreKey};
 pub use key_store::{KeyStore, KeyStoreError, KeyStoreInteraction, load_or_create};
 pub use reader::{SkippedRetired, StoreReader};
-pub use retired::{RetiredPlaintext, remove_retired, retired_plaintext_stores};
+pub use retired::{RetiredPlaintext, remove_retired, resolve_store_path, retired_plaintext_stores};
 pub use snapshot::{SnapshotReport, export_plain_sqlite};
 pub use types::{
     DaemonMode, DaemonPermissions, DaemonState, HEARTBEAT_STALE_AFTER_SECONDS, PermissionState,

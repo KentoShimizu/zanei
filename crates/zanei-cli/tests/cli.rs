@@ -1309,3 +1309,98 @@ fn purge_covers_set_aside_stores_even_without_a_live_store() {
         "purge must not create a live store"
     );
 }
+
+#[test]
+fn recorder_retries_state_adoption_after_a_crash_before_it_completed() {
+    // The state after a crash between creating the encrypted store and adopting
+    // the previous store's state: a paused set-aside file next to a live store
+    // that has never recorded.
+    let directory = TempDir::new().expect("adoption fixture");
+    let config = directory.path().join("config.toml");
+    let store = directory.path().join("store.sqlite");
+    fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
+    let retired = directory
+        .path()
+        .join("store.sqlite.plaintext-20260823T000000Z");
+    StoreWriter::open(&retired)
+        .and_then(|writer| {
+            writer.write_daemon_state(&DaemonState {
+                paused_until: Some("infinity".to_owned()),
+                events_dropped: 3,
+                ..DaemonState::default()
+            })
+        })
+        .expect("paused set-aside store");
+    StoreWriter::open_with_key(&store, Some(&read_key(&key_file_for(&store))))
+        .expect("fresh encrypted store");
+
+    let mut child = spawn_foreground_daemon(&config, &store);
+    wait_for_daemon_ready(&mut child, &store);
+    let status = command(&config, &store)
+        .args(["status", "--json"])
+        .output()
+        .expect("status output");
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");
+    assert_eq!(
+        value["paused"], true,
+        "the pause is adopted on the next start"
+    );
+    assert_eq!(value["events_dropped"], 3);
+    signal_child(&mut child, "TERM");
+    assert!(wait_for_child(&mut child).success());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_store_keeps_its_link_and_owner_only_companions() {
+    let directory = TempDir::new().expect("symlink fixture");
+    let config = directory.path().join("config.toml");
+    let target = directory.path().join("real.sqlite");
+    let store = directory.path().join("store.sqlite");
+    fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
+    StoreWriter::open(&target).expect("plaintext target store");
+    std::os::unix::fs::symlink(&target, &store).expect("symlink to the store");
+
+    let mut child = spawn_foreground_daemon(&config, &store);
+    wait_for_daemon_ready(&mut child, &store);
+
+    assert!(
+        fs::symlink_metadata(&store)
+            .expect("link metadata")
+            .file_type()
+            .is_symlink(),
+        "the configured path stays a link"
+    );
+    assert_eq!(
+        StoreFormat::probe(&target).expect("probe target"),
+        StoreFormat::Encrypted,
+        "the link points at the new encrypted store"
+    );
+    let retired: Vec<_> = fs::read_dir(directory.path())
+        .expect("list fixture directory")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .starts_with("real.sqlite.plaintext-")
+        })
+        .collect();
+    assert!(
+        !retired.is_empty(),
+        "the set-aside file sits next to the real target"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["real.sqlite", "real.sqlite-wal", "real.sqlite-shm"] {
+        let path = directory.path().join(name);
+        let mode = fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{name} must be owner-only");
+    }
+
+    signal_child(&mut child, "TERM");
+    assert!(wait_for_child(&mut child).success());
+}

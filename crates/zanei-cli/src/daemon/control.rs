@@ -214,24 +214,31 @@ fn start_launch_agent_with(
         wait_for_launch_agent_removal_with(timeout, is_registered, &mut sleep)?;
     }
     bootstrap()?;
-    wait_for_daemon_start_with(timeout, is_daemon_alive, sleep)?;
+    if let Err(error) = wait_for_daemon_start_with(timeout, is_daemon_alive, sleep) {
+        // A store the recorder cannot unlock will not fix itself: leave nothing registered
+        // for launchd to relaunch, then report the cause. A failed boot-out is secondary.
+        if matches!(error, DaemonError::Store(StoreError::Locked(_))) {
+            let _ = bootout();
+        }
+        return Err(error);
+    }
     Ok(registered)
 }
 
 fn daemon_is_alive(store_path: &Path) -> Result<bool, DaemonError> {
-    let Some(owner) = StoreOwnership::probe(store_path)? else {
-        return Ok(false);
-    };
-    // Ownership is acquired before the store is created or set aside. Until the reader can
-    // observe a complete heartbeat, a store read failure is a not-ready observation for this
-    // bounded wait — except a locked store, which the recorder cannot unlock either: waiting
-    // would only let launchd relaunch it until the timeout hides the real cause.
+    // The store is inspected before the owner: a recorder that cannot unlock it exits at
+    // once, so its ownership lock is rarely observable, while the locked store itself is.
+    // That failure is fatal for this wait; any other read failure (no store yet, a store
+    // being set aside) is a not-ready observation.
     let status = match crate::store_access::open_reader(store_path, KeyPrompt::Suppressed)
         .and_then(|reader| reader.status())
     {
         Ok(status) => status,
         Err(error @ StoreError::Locked(_)) => return Err(DaemonError::Store(error)),
         Err(_) => return Ok(false),
+    };
+    let Some(owner) = StoreOwnership::probe(store_path)? else {
+        return Ok(false);
     };
     Ok(owner_has_fresh_heartbeat(&owner, &status))
 }
@@ -593,10 +600,14 @@ mod tests {
         use zanei_core::store::{LockedReason, StoreError};
 
         let mut sleeps = 0;
+        let mut boot_outs = 0;
         let error = super::start_launch_agent_with(
             false,
             std::time::Duration::from_secs(10),
-            || Ok(()),
+            || {
+                boot_outs += 1;
+                Ok(())
+            },
             || Ok(false),
             |_| sleeps += 1,
             || Ok(()),
@@ -615,6 +626,10 @@ mod tests {
         assert_eq!(
             sleeps, 0,
             "the wait must stop at the first locked observation"
+        );
+        assert_eq!(
+            boot_outs, 1,
+            "nothing is left registered for launchd to relaunch"
         );
     }
 }

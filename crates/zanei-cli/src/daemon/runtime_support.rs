@@ -41,10 +41,14 @@ pub(crate) fn ensure_store_parent(store_path: &Path) -> Result<(), DaemonError> 
 }
 
 /// Makes an existing store (and its WAL companions) readable by the owner only.
+/// SQLite creates the companions next to the file a symlinked path resolves to,
+/// so the path is resolved the same way before the suffixes are appended.
 pub(crate) fn restrict_store_permissions(store_path: &Path) -> Result<(), DaemonError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let store_path = zanei_core::store::resolve_store_path(store_path);
+        let store_path = store_path.as_path();
         let mut companions = vec![store_path.to_owned()];
         for suffix in ["-wal", "-shm"] {
             let mut companion = store_path.as_os_str().to_os_string();

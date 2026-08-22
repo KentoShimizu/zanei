@@ -17,7 +17,8 @@ use zanei_core::{
     normalize::format_timestamp,
     store::{
         DaemonMode, DaemonPermissions, DaemonState, LockedReason, StoreError, StoreFormat,
-        StoreReader, StoreStatus, StoreWriter, purge_retired_plaintext, set_aside_plaintext,
+        StoreReader, StoreStatus, StoreWriter, purge_retired_plaintext, retired_plaintext_stores,
+        set_aside_plaintext,
     },
 };
 use zanei_macos::permission::{PermissionError, PermissionStatus, permission_status};
@@ -198,33 +199,61 @@ fn open_encrypted_store(store_path: &Path) -> Result<(StoreWriter, StoreReader),
         // Let the open below report the damage instead of touching any key.
         StoreFormat::Unrecognized => None,
     };
-    let (format, retired) = if format == StoreFormat::Plaintext {
-        let retired = set_aside_plaintext(store_path, OffsetDateTime::now_utc())?;
-        if let Some(retired) = &retired {
+    let format = if format == StoreFormat::Plaintext {
+        if let Some(retired) = set_aside_plaintext(store_path, OffsetDateTime::now_utc())? {
             eprintln!(
                 "zanei: kept the previous plaintext store as {}; its events stay readable \
                  next to the new encrypted store until they age out of retention",
                 retired.path.display()
             );
         }
-        (StoreFormat::Missing, retired)
+        StoreFormat::Missing
     } else {
-        (format, None)
+        format
     };
     // The format was probed before any connection existed; probing again while
     // the writer is open would drop its WAL-mode file lock (see
     // `StoreFormat::probe`).
     let writer = StoreWriter::open_known(store_path, format, key.as_ref())?;
-    if let Some(retired) = &retired {
-        // An active pause, the counters, and the last permission report belong
-        // to the user, not to the file: carry them into the new store.
-        let previous =
-            StoreReader::open_known(&retired.path, StoreFormat::Plaintext, None)?.status()?;
-        writer.adopt_daemon_state(&previous)?;
-    }
     let reader = StoreReader::open_known(store_path, writer.format(), key.as_ref())?;
+    adopt_previous_state_if_fresh(&writer, &reader, store_path)?;
     restrict_store_permissions(store_path)?;
     Ok((writer, reader))
+}
+
+/// Carries the newest set-aside store's daemon state — an active pause, the
+/// counters, the last event time, collector failures, the last permission
+/// report — into a live store the recorder has never used. "Never used" is
+/// `started_at IS NULL`: the first heartbeat sets it, so a crash between
+/// creating the encrypted store and this step is simply retried on the next
+/// start, and a store that has recorded is never touched again. The state is
+/// the user's, not the file's, so an unreadable set-aside store is reported
+/// rather than allowed to stop the start.
+fn adopt_previous_state_if_fresh(
+    writer: &StoreWriter,
+    reader: &StoreReader,
+    store_path: &Path,
+) -> Result<(), DaemonError> {
+    if reader.status()?.started_at.is_some() {
+        return Ok(());
+    }
+    let Some(previous) = retired_plaintext_stores(store_path)?.pop() else {
+        return Ok(());
+    };
+    // Probing opens the set-aside file only, never the live store.
+    if StoreFormat::probe(&previous.path)? != StoreFormat::Plaintext {
+        return Ok(());
+    }
+    match StoreReader::open_known(&previous.path, StoreFormat::Plaintext, None)
+        .and_then(|previous| previous.status())
+    {
+        Ok(state) => writer.adopt_daemon_state(&state)?,
+        Err(error) => eprintln!(
+            "zanei: could not carry the previous store's state over from {}: {error}",
+            previous.path.display()
+        ),
+    }
+    Ok(())
 }
 
 pub fn run_record(config_path: &Path, output: RecordOutput) -> Result<(), DaemonError> {

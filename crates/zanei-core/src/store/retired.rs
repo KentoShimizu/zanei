@@ -35,7 +35,7 @@ pub struct RetiredPlaintext {
 /// and the link itself is never renamed. The result is canonical whether or
 /// not the store file exists yet, so listings agree before and after a store
 /// is created.
-pub(super) fn resolve_store_path(store_path: &Path) -> PathBuf {
+pub fn resolve_store_path(store_path: &Path) -> PathBuf {
     if let Ok(real) = fs::canonicalize(store_path) {
         return real;
     }
