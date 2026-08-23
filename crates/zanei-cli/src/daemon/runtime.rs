@@ -229,9 +229,6 @@ fn open_encrypted_store(store_path: &Path) -> Result<(StoreWriter, StoreReader),
                  next to the new encrypted store until they age out of retention",
                 retired.path.display()
             );
-            // `rename` kept the previous store's mode, and a 0.2.x store created
-            // with the default umask is readable by every account on the Mac.
-            restrict_store_permissions(&retired.path)?;
         }
         StoreFormat::Missing
     } else {
@@ -244,6 +241,13 @@ fn open_encrypted_store(store_path: &Path) -> Result<(StoreWriter, StoreReader),
     let reader = StoreReader::open_known(store_path, writer.format(), key.as_ref())?;
     adopt_previous_state_if_fresh(&writer, &reader, store_path)?;
     restrict_store_permissions(store_path)?;
+    // `rename` kept each set-aside store's mode, and a 0.2.x store created with
+    // the default umask is readable by every account on the Mac. Every start
+    // covers all of them: a start that crashed right after the rename never
+    // enters the set-aside branch again.
+    for retired in retired_plaintext_stores(store_path)? {
+        restrict_store_permissions(&retired.path)?;
+    }
     Ok((writer, reader))
 }
 

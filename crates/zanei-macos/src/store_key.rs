@@ -92,9 +92,10 @@ fn classify(failure: KeychainFailure, operation: &'static str) -> KeyStoreError 
             KeyStoreError::Unavailable("failed to build a Keychain request".to_owned())
         }
         KeychainFailure::Status(ERR_SEC_DUPLICATE_ITEM) => KeyStoreError::AlreadyExists,
-        KeychainFailure::Status(ERR_SEC_INTERACTION_NOT_ALLOWED) => {
-            // The same status covers a locked keychain and an access-control
-            // prompt that could not be shown; the lock state tells them apart.
+        KeychainFailure::Status(ERR_SEC_INTERACTION_NOT_ALLOWED | ERR_SEC_AUTH_FAILED) => {
+            // Either status covers both a locked keychain and an access-control
+            // check that could not prompt (a locked login keychain reports
+            // `errSecAuthFailed` on current macOS); the lock state tells them apart.
             if keychain::default_keychain_is_unlocked() == Some(false) {
                 KeyStoreError::Locked {
                     advice: LOCKED_ADVICE.to_owned(),
@@ -105,11 +106,9 @@ fn classify(failure: KeychainFailure, operation: &'static str) -> KeyStoreError 
                 }
             }
         }
-        KeychainFailure::Status(ERR_SEC_AUTH_FAILED | ERR_SEC_USER_CANCELED) => {
-            KeyStoreError::Denied {
-                advice: DENIED_ADVICE.to_owned(),
-            }
-        }
+        KeychainFailure::Status(ERR_SEC_USER_CANCELED) => KeyStoreError::Denied {
+            advice: DENIED_ADVICE.to_owned(),
+        },
         KeychainFailure::Status(status) => KeyStoreError::Unavailable(format!(
             "Keychain {operation} failed with OSStatus {status}"
         )),

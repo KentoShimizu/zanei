@@ -70,6 +70,15 @@ pub fn retired_plaintext_stores(store_path: &Path) -> Result<Vec<RetiredPlaintex
     let mut retired = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| StoreError::io("list the store directory", error))?;
+        // Only a regular file is the recorder's own: a symlink under such a name
+        // would have retention edit whatever it points at.
+        let is_regular_file = entry
+            .file_type()
+            .map_err(|error| StoreError::io("list the store directory", error))?
+            .is_file();
+        if !is_regular_file {
+            continue;
+        }
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -287,6 +296,37 @@ mod write {
 #[cfg(test)]
 mod tests {
     use super::parse_retired_name;
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_not_retired_stores() {
+        use super::retired_plaintext_stores;
+        let directory =
+            std::env::temp_dir().join(format!("zanei-retired-symlink-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("scratch directory");
+        let elsewhere = directory.join("elsewhere.sqlite");
+        std::fs::write(&elsewhere, b"").expect("link target");
+        std::os::unix::fs::symlink(
+            &elsewhere,
+            directory.join("store.sqlite.plaintext-20260823T000000Z"),
+        )
+        .expect("symlink under a set-aside name");
+        std::fs::write(
+            directory.join("store.sqlite.plaintext-20260823T010000Z"),
+            b"",
+        )
+        .expect("regular set-aside file");
+
+        let found = retired_plaintext_stores(&directory.join("store.sqlite")).expect("list");
+
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0]
+                .path
+                .ends_with("store.sqlite.plaintext-20260823T010000Z")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 
     #[cfg(feature = "write")]
     #[test]

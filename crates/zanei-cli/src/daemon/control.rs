@@ -6,9 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zanei_core::store::{StoreError, StoreStatus};
+use zanei_core::store::{StoreError, StoreFormat, StoreKey, StoreStatus};
 
-use crate::store_access::KeyPrompt;
+use crate::store_access::{KeyAccess, KeyPrompt};
 
 use super::{DaemonError, StoreOwner, StoreOwnership};
 
@@ -226,6 +226,29 @@ fn start_launch_agent_with(
 }
 
 fn daemon_is_alive(store_path: &Path) -> Result<bool, DaemonError> {
+    daemon_is_alive_with(store_path, || {
+        crate::store_access::load_store_key(KeyAccess::Existing, KeyPrompt::Suppressed)
+    })
+}
+
+/// `probe_key` stands in for the recorder's own key lookup. While the store is still
+/// missing or plaintext the recorder creates or loads the key, and a key store that is
+/// locked or denied makes it exit before it ever owns the store; `open_reader` does not
+/// touch the key store for those formats, so it is asked directly. A missing key is not
+/// a failure: the recorder creates one.
+fn daemon_is_alive_with(
+    store_path: &Path,
+    probe_key: impl FnOnce() -> Result<Option<StoreKey>, StoreError>,
+) -> Result<bool, DaemonError> {
+    if matches!(
+        StoreFormat::probe(store_path)?,
+        StoreFormat::Missing | StoreFormat::Plaintext
+    ) {
+        probe_key().or_else(|error| match error {
+            StoreError::Locked(_) => Err(DaemonError::Store(error)),
+            _ => Ok(None),
+        })?;
+    }
     // The store is inspected before the owner: a recorder that cannot unlock it exits at
     // once, so its ownership lock is rarely observable, while the locked store itself is.
     // That failure is fatal for this wait; any other read failure (no store yet, a store
@@ -377,7 +400,38 @@ mod tests {
     };
 
     use tempfile::TempDir;
-    use zanei_core::store::{DaemonMode, StoreStatus};
+    use zanei_core::store::{DaemonMode, LockedReason, StoreError, StoreStatus, StoreWriter};
+
+    #[test]
+    fn a_locked_key_store_fails_the_wait_while_the_store_is_missing_or_plaintext() {
+        let directory = TempDir::new().expect("store directory");
+        let store = directory.path().join("store.sqlite");
+        let locked = || {
+            Err(StoreError::Locked(LockedReason::KeyStoreLocked(
+                "unlock the login keychain".to_owned(),
+            )))
+        };
+
+        assert!(
+            matches!(
+                super::daemon_is_alive_with(&store, locked),
+                Err(crate::daemon::DaemonError::Store(StoreError::Locked(_)))
+            ),
+            "missing store: the recorder is about to create the key"
+        );
+        StoreWriter::open(&store).expect("plaintext store");
+        assert!(
+            matches!(
+                super::daemon_is_alive_with(&store, locked),
+                Err(crate::daemon::DaemonError::Store(StoreError::Locked(_)))
+            ),
+            "plaintext store: the recorder is about to create the key"
+        );
+        assert!(
+            !super::daemon_is_alive_with(&store, || Ok(None)).expect("no key yet is not a failure"),
+            "nothing owns the store yet"
+        );
+    }
 
     use super::{
         DaemonError, StoreOwner, build_launch_agent_plist, owner_has_fresh_heartbeat,

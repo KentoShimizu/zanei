@@ -1344,11 +1344,28 @@ fn recorder_retries_state_adoption_after_a_crash_before_it_completed() {
             })
         })
         .expect("paused set-aside store");
+    // The crash also came before the set-aside store was made owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&retired, fs::Permissions::from_mode(0o644))
+            .expect("loosen the set-aside store");
+    }
     StoreWriter::open_with_key(&store, Some(&read_key(&key_file_for(&store))))
         .expect("fresh encrypted store");
 
     let mut child = spawn_foreground_daemon(&config, &store);
     wait_for_daemon_ready(&mut child, &store);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&retired)
+            .expect("retired metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "every start restricts the set-aside stores");
+    }
     let status = command(&config, &store)
         .args(["status", "--json"])
         .output()
