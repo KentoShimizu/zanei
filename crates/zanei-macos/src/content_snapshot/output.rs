@@ -18,7 +18,7 @@ use super::{
     scheduler::ScheduledSnapshot,
     state::{SnapshotState, SnapshotWindowKey},
 };
-use crate::text_capture::{ChromeWindowKey, TextQuarantine};
+use crate::text_capture::{ChromeWindowKey, ReleasedEvent, TextQuarantine};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit(
@@ -28,12 +28,14 @@ pub(super) fn emit(
     hash: u64,
     capture_context: CaptureContext,
     chrome_version: Option<u64>,
+    reserved_at: Instant,
     state: &mut SnapshotState,
     sender: &SyncSender<RawEvent>,
     health: &SharedHealth,
     quarantine: &mut TextQuarantine,
 ) {
     let bytes = output.text.len();
+    let metrics = TraceMetrics::from(&output);
     let event = build_raw_event(
         &candidate,
         key,
@@ -49,24 +51,19 @@ pub(super) fn emit(
                 window_id: key.window_id,
             },
             version,
+            hash,
+            reserved_at,
         );
         // Conservatively reserve limits now: even a later quarantine drop consumes
         // the global interval and daily budget, preventing unbounded held snapshots.
-        state.commit_save(key, hash, bytes, Instant::now());
-        trace_candidate(
-            &candidate,
-            "quarantine_reserved",
-            output.nodes,
-            output.elapsed,
-            bytes,
-            output.complete,
-            output.cutoff,
-        );
+        state.reserve(key, bytes, reserved_at);
+        trace_metrics(&candidate, "quarantine_reserved", metrics);
         return;
     }
     let gate = match sender.try_send(event) {
         Ok(()) => {
-            state.commit_save(key, hash, bytes, Instant::now());
+            state.reserve(key, bytes, reserved_at);
+            state.record_hash(key, hash);
             "emit"
         }
         Err(TrySendError::Full(_)) => {
@@ -78,25 +75,32 @@ pub(super) fn emit(
             "output_disconnected"
         }
     };
-    trace_candidate(
-        &candidate,
-        gate,
-        output.nodes,
-        output.elapsed,
-        bytes,
-        output.complete,
-        output.cutoff,
-    );
+    trace_metrics(&candidate, gate, metrics);
 }
 
 pub(super) fn emit_released(
-    events: Vec<RawEvent>,
+    events: Vec<ReleasedEvent>,
     sender: &SyncSender<RawEvent>,
     health: &SharedHealth,
+    state: &mut SnapshotState,
 ) {
-    for event in events {
-        if sender.try_send(event).is_err() {
-            health.dropped.fetch_add(1, Ordering::Relaxed);
+    for released in events {
+        let (event, snapshot_hash) = released.into_parts();
+        match sender.try_send(event) {
+            Ok(()) => {
+                if let Some((key, hash)) = snapshot_hash {
+                    state.record_hash(
+                        SnapshotWindowKey {
+                            pid: key.pid,
+                            window_id: key.window_id,
+                        },
+                        hash,
+                    );
+                }
+            }
+            Err(_) => {
+                health.dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -155,6 +159,7 @@ pub(super) fn trace_candidate(
             TraceMetrics {
                 nodes,
                 degraded_nodes: 0,
+                frameless_nodes: 0,
                 elapsed,
                 bytes,
                 complete,
@@ -168,6 +173,7 @@ pub(super) fn trace_candidate(
 struct TraceMetrics {
     nodes: usize,
     degraded_nodes: usize,
+    frameless_nodes: usize,
     elapsed: Duration,
     bytes: usize,
     complete: bool,
@@ -179,6 +185,7 @@ impl From<&SnapshotWalkOutput> for TraceMetrics {
         Self {
             nodes: output.nodes,
             degraded_nodes: output.degraded_nodes,
+            frameless_nodes: output.frameless_nodes,
             elapsed: output.elapsed,
             bytes: output.text.len(),
             complete: output.complete,
@@ -199,11 +206,12 @@ fn trace_summary(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetric
         .id
         .map_or_else(|| "none".to_owned(), |window_id| window_id.to_string());
     format!(
-        "component=content_snapshot trigger={} gate={} nodes={} degraded_nodes={} elapsed_ms={} bytes={} complete={} cutoff={} pid={} window_id={}",
+        "component=content_snapshot trigger={} gate={} nodes={} degraded_nodes={} frameless_nodes={} elapsed_ms={} bytes={} complete={} cutoff={} pid={} window_id={}",
         trigger,
         gate,
         metrics.nodes,
         metrics.degraded_nodes,
+        metrics.frameless_nodes,
         metrics.elapsed.as_millis(),
         metrics.bytes,
         metrics.complete,
@@ -211,6 +219,10 @@ fn trace_summary(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetric
         candidate.target.app.pid,
         window_id
     )
+}
+
+fn trace_metrics(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetrics) {
+    crate::trace::trace!("{}", trace_summary(candidate, gate, metrics));
 }
 
 #[cfg(test)]
@@ -221,6 +233,7 @@ pub(super) fn test_trace_summary(candidate: &ScheduledSnapshot) -> String {
         TraceMetrics {
             nodes: 42,
             degraded_nodes: 0,
+            frameless_nodes: 0,
             elapsed: Duration::from_millis(17),
             bytes: 512,
             complete: true,

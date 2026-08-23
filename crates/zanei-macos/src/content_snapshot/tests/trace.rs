@@ -24,6 +24,7 @@ fn trace_contains_only_metrics_and_identifiers_never_content_context() {
         "trigger=settle",
         "gate=emit",
         "nodes=42",
+        "frameless_nodes=0",
         "elapsed_ms=17",
         "bytes=512",
         "complete=true",

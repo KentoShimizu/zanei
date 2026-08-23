@@ -10,7 +10,7 @@ fn key(pid: i64, window_id: i64) -> SnapshotWindowKey {
 }
 
 #[test]
-fn hashes_and_times_commit_only_after_delivery_or_quarantine_reservation() {
+fn reservation_consumes_limits_but_hash_is_recorded_only_after_release() {
     let base = Instant::now();
     let mut state = SnapshotState::new(base);
     let first = key(7, 11);
@@ -18,7 +18,13 @@ fn hashes_and_times_commit_only_after_delivery_or_quarantine_reservation() {
 
     assert_eq!(state.evaluate_save(first, hash, 4, base), Ok(()));
     assert_eq!(state.evaluate_save(first, hash, 4, base), Ok(()));
-    state.commit_save(first, hash, 4, base);
+    state.reserve(first, 4, base);
+    assert_eq!(
+        state.evaluate_save(first, hash, 4, base + Duration::from_secs(5)),
+        Ok(()),
+        "a reserved snapshot that is later dropped must not deduplicate its body"
+    );
+    state.record_hash(first, hash);
     assert_eq!(
         state.evaluate_save(first, hash, 4, base + Duration::from_secs(5)),
         Err(SaveBlock::Duplicate)
@@ -38,9 +44,8 @@ fn hashes_and_times_commit_only_after_delivery_or_quarantine_reservation() {
 fn daily_budget_rolls_at_the_24_hour_boundary() {
     let base = Instant::now();
     let mut state = SnapshotState::new(base);
-    state.commit_save(
+    state.reserve(
         key(7, 11),
-        1,
         usize::try_from(DAILY_TEXT_BUDGET_BYTES).expect("design budget fits usize"),
         base,
     );
@@ -56,7 +61,7 @@ fn a_body_that_would_cross_the_daily_limit_marks_the_current_budget_degraded() {
     let mut state = SnapshotState::new(base);
     let almost_full =
         usize::try_from(DAILY_TEXT_BUDGET_BYTES - 1).expect("design budget fits usize");
-    state.commit_save(key(7, 11), 1, almost_full, base);
+    state.reserve(key(7, 11), almost_full, base);
     assert_eq!(
         state.evaluate_save(key(8, 12), 2, 2, base + Duration::from_secs(5)),
         Err(SaveBlock::DailyBudget)
@@ -79,7 +84,7 @@ fn backoff_doubles_to_the_cap_and_termination_cleans_pid_state() {
         state.backoff_remaining(base + Duration::from_secs(8)),
         Some(Duration::from_secs(600))
     );
-    state.commit_save(key(7, 11), 1, 1, base + Duration::from_secs(700));
+    state.reserve(key(7, 11), 1, base + Duration::from_secs(700));
     state.record_failure(7, base + Duration::from_secs(701), true);
     state.terminate_pid(7);
     assert!(state.backoff_allows(7, base + Duration::from_secs(701)));

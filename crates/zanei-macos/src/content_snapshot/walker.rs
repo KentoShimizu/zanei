@@ -5,10 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::ffi::ax::{
-    AxFrame, AxTextRange, SnapshotAttribute, SnapshotAttributeValue, SnapshotAxElement,
-    SnapshotAxError,
-};
+use crate::ffi::ax::{AxFrame, AxTextRange, SnapshotAxError};
 
 use super::{
     budget::{CHILDREN_BATCH_SIZE, WalkBudget},
@@ -18,6 +15,9 @@ use super::{
 #[path = "walker/text.rs"]
 mod text;
 use text::TextAssembler;
+
+#[path = "walker/ax_node.rs"]
+mod ax_node;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotCutoff {
@@ -97,13 +97,18 @@ impl std::error::Error for SnapshotWalkError {
 pub(crate) struct NodeSafeAttributes {
     pub(crate) role: Option<String>,
     pub(crate) subrole: Option<String>,
+    pub(crate) frame: Option<AxFrame>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct NodeContentAttributes {
     pub(crate) title: Option<String>,
     pub(crate) description: Option<String>,
-    pub(crate) frame: Option<AxFrame>,
 }
 
 pub(crate) trait SnapshotNode: Sized {
     fn safe_attributes(&self) -> Result<NodeSafeAttributes, SnapshotReadError>;
+    fn content_attributes(&self) -> Result<NodeContentAttributes, SnapshotReadError>;
     fn value(&self) -> Result<Option<String>, SnapshotReadError>;
     fn visible_range(&self) -> Result<Option<AxTextRange>, SnapshotReadError>;
     fn string_for_range(&self, range: AxTextRange) -> Result<Option<String>, SnapshotReadError>;
@@ -146,6 +151,7 @@ pub struct SnapshotWalkOutput {
     pub complete: bool,
     pub cutoff: Option<SnapshotCutoff>,
     pub degraded_nodes: usize,
+    pub frameless_nodes: usize,
 }
 
 enum Work<N> {
@@ -178,6 +184,7 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
         text: TextAssembler::new(budget.text_bytes),
         cutoff: None,
         degraded_nodes: 0,
+        frameless_nodes: 0,
     };
     let mut stack = vec![Work::Visit {
         node: root,
@@ -221,6 +228,7 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
         complete: context.cutoff.is_none(),
         cutoff: context.cutoff,
         degraded_nodes: context.degraded_nodes,
+        frameless_nodes: context.frameless_nodes,
     })
 }
 
@@ -256,15 +264,19 @@ fn visit_node<'a, N: SnapshotNode>(
             return Ok(());
         }
     };
-    if !context.can_continue()
-        || attributes
-            .frame
-            .is_some_and(|frame| !frames_intersect(frame, window_frame))
-    {
+    if !context.can_continue() {
         return Ok(());
     }
     let class = classify_role(attributes.role.as_deref(), attributes.subrole.as_deref());
-    let (fragments, degraded) = node_fragments(&node, is_root, class, &attributes, context)?;
+    let Some(frame) = attributes.frame else {
+        context.frameless_nodes = context.frameless_nodes.saturating_add(1);
+        descend_if_container(node, is_root, class, false, stack, context)?;
+        return Ok(());
+    };
+    if !frames_intersect(frame, window_frame) {
+        return Ok(());
+    }
+    let (fragments, degraded) = node_fragments(&node, is_root, class, context)?;
     if degraded {
         context.degraded_nodes = context.degraded_nodes.saturating_add(1);
     }
@@ -274,6 +286,17 @@ fn visit_node<'a, N: SnapshotNode>(
             return Ok(());
         }
     }
+    descend_if_container(node, is_root, class, degraded, stack, context)
+}
+
+fn descend_if_container<'a, N: SnapshotNode>(
+    node: N,
+    is_root: bool,
+    class: SnapshotNodeClass,
+    degraded: bool,
+    stack: &mut Vec<Work<N>>,
+    context: &mut WalkContext<'a>,
+) -> Result<(), SnapshotWalkError> {
     if class.descends() && context.can_continue() {
         match context.read_node(is_root, || node.children_count())? {
             NodeRead::Value(0) => {}
@@ -336,15 +359,25 @@ fn node_fragments(
     node: &impl SnapshotNode,
     is_root: bool,
     class: SnapshotNodeClass,
-    attributes: &NodeSafeAttributes,
     context: &mut WalkContext<'_>,
 ) -> Result<(Vec<String>, bool), SnapshotWalkError> {
     let mut fragments = Vec::new();
     let mut degraded = false;
+    let content = if matches!(
+        class,
+        SnapshotNodeClass::SecureInput | SnapshotNodeClass::Menu | SnapshotNodeClass::MultiLineText
+    ) {
+        NodeContentAttributes::default()
+    } else {
+        match context.read_node(is_root, || node.content_attributes())? {
+            NodeRead::Value(content) => content,
+            NodeRead::Degraded => return Ok((fragments, true)),
+        }
+    };
     match class {
         SnapshotNodeClass::SecureInput | SnapshotNodeClass::Menu => {}
         SnapshotNodeClass::SingleLineInput | SnapshotNodeClass::Container => {
-            push_unique(&mut fragments, attributes.title.as_deref());
+            push_unique(&mut fragments, content.title.as_deref());
         }
         SnapshotNodeClass::MultiLineText => {
             let range = match context.read_node(is_root, || node.visible_range())? {
@@ -376,15 +409,15 @@ fn node_fragments(
                 None
             };
             push_unique(&mut fragments, value.as_deref());
-            push_unique(&mut fragments, attributes.title.as_deref());
-            push_unique(&mut fragments, attributes.description.as_deref());
+            push_unique(&mut fragments, content.title.as_deref());
+            push_unique(&mut fragments, content.description.as_deref());
         }
         SnapshotNodeClass::Image => {
-            push_unique(&mut fragments, attributes.description.as_deref());
+            push_unique(&mut fragments, content.description.as_deref());
         }
         SnapshotNodeClass::Unknown => {
-            push_unique(&mut fragments, attributes.title.as_deref());
-            push_unique(&mut fragments, attributes.description.as_deref());
+            push_unique(&mut fragments, content.title.as_deref());
+            push_unique(&mut fragments, content.description.as_deref());
         }
     }
     if degraded {
@@ -411,6 +444,7 @@ struct WalkContext<'a> {
     text: TextAssembler,
     cutoff: Option<SnapshotCutoff>,
     degraded_nodes: usize,
+    frameless_nodes: usize,
 }
 
 enum NodeRead<T> {
@@ -465,104 +499,4 @@ fn frames_intersect(left: AxFrame, right: AxFrame) -> bool {
         && left_max_x > right.origin.x
         && left.origin.y < right_max_y
         && left_max_y > right.origin.y
-}
-
-impl SnapshotNode for SnapshotAxElement {
-    fn safe_attributes(&self) -> Result<NodeSafeAttributes, SnapshotReadError> {
-        let values = self.copy_multiple(&[
-            SnapshotAttribute::Role,
-            SnapshotAttribute::Subrole,
-            SnapshotAttribute::Title,
-            SnapshotAttribute::Description,
-            SnapshotAttribute::Position,
-            SnapshotAttribute::Size,
-        ])?;
-        decode_safe_attributes(values)
-    }
-
-    fn value(&self) -> Result<Option<String>, SnapshotReadError> {
-        let mut values = self.copy_multiple(&[SnapshotAttribute::Value])?.into_iter();
-        text_result(values.next(), "AXValue result")
-    }
-
-    fn visible_range(&self) -> Result<Option<AxTextRange>, SnapshotReadError> {
-        self.visible_character_range().map_err(Into::into)
-    }
-
-    fn string_for_range(&self, range: AxTextRange) -> Result<Option<String>, SnapshotReadError> {
-        self.string_for_range(range).map_err(Into::into)
-    }
-
-    fn children_count(&self) -> Result<usize, SnapshotReadError> {
-        self.children_count().map_err(Into::into)
-    }
-
-    fn children_range(
-        &self,
-        index: usize,
-        maximum_count: usize,
-    ) -> Result<Vec<Self>, SnapshotReadError> {
-        self.children_range(index, maximum_count)
-            .map_err(Into::into)
-    }
-}
-
-fn decode_safe_attributes(
-    values: Vec<Result<Option<SnapshotAttributeValue>, SnapshotAxError>>,
-) -> Result<NodeSafeAttributes, SnapshotReadError> {
-    if values.len() != 6 {
-        return Err(SnapshotReadError::Contract(
-            "AX safe attribute result count",
-        ));
-    }
-    let mut values = values.into_iter();
-    let role = text_result(values.next(), "AXRole result")?;
-    let subrole = text_result(values.next(), "AXSubrole result")?;
-    let title = text_result(values.next(), "AXTitle result")?;
-    let description = text_result(values.next(), "AXDescription result")?;
-    let position = point_result(values.next())?;
-    let size = size_result(values.next())?;
-    let frame = match (position, size) {
-        (Some(origin), Some(size)) => Some(AxFrame { origin, size }),
-        (None, None) => None,
-        _ => return Err(SnapshotReadError::Contract("AX node frame result")),
-    };
-    Ok(NodeSafeAttributes {
-        role,
-        subrole,
-        title,
-        description,
-        frame,
-    })
-}
-
-fn text_result(
-    result: Option<Result<Option<SnapshotAttributeValue>, SnapshotAxError>>,
-    missing: &'static str,
-) -> Result<Option<String>, SnapshotReadError> {
-    match result.ok_or(SnapshotReadError::Contract(missing))?? {
-        Some(SnapshotAttributeValue::Text(value)) => Ok(Some(value)),
-        None => Ok(None),
-        Some(_) => Err(SnapshotReadError::Contract("AX text attribute type")),
-    }
-}
-
-fn point_result(
-    result: Option<Result<Option<SnapshotAttributeValue>, SnapshotAxError>>,
-) -> Result<Option<crate::ffi::ax::AxPoint>, SnapshotReadError> {
-    match result.ok_or(SnapshotReadError::Contract("AXPosition result"))?? {
-        Some(SnapshotAttributeValue::Point(value)) => Ok(Some(value)),
-        None => Ok(None),
-        Some(_) => Err(SnapshotReadError::Contract("AXPosition attribute type")),
-    }
-}
-
-fn size_result(
-    result: Option<Result<Option<SnapshotAttributeValue>, SnapshotAxError>>,
-) -> Result<Option<crate::ffi::ax::AxSize>, SnapshotReadError> {
-    match result.ok_or(SnapshotReadError::Contract("AXSize result"))?? {
-        Some(SnapshotAttributeValue::Size(value)) => Ok(Some(value)),
-        None => Ok(None),
-        Some(_) => Err(SnapshotReadError::Contract("AXSize attribute type")),
-    }
 }

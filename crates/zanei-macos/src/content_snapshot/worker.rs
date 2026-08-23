@@ -1,7 +1,6 @@
 //! Content worker loop, ordered policy gates, traversal, and delivery commit.
 
 use std::{
-    fmt,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -21,7 +20,7 @@ use crate::{
         output::{emit, emit_released, trace_candidate, trace_output},
         scheduler::{ScheduledSnapshot, SnapshotScheduler},
         state::{SaveBlock, SnapshotState},
-        walker::{InstantWalkClock, SnapshotWalkError, WalkClock, walk_snapshot},
+        walker::{InstantWalkClock, WalkClock, walk_snapshot},
     },
     ffi::window_list::window_id_for_frame,
     focus_context::FocusContext,
@@ -80,13 +79,14 @@ pub(super) fn run_worker_with_scanner<F>(
     let mut scheduler = SnapshotScheduler::default();
     let mut quarantine = TextQuarantine::new(chrome_observer);
     while !stop.load(Ordering::Acquire) {
-        if service_controls(&controls, &mut scheduler) {
+        if service_controls(&controls, &mut scheduler, state, Instant::now()) {
             break;
         }
         emit_released(
             quarantine.release(Instant::now(), &capture_policy),
             &sender,
             &health,
+            state,
         );
         let wait = scheduler
             .next_deadline()
@@ -128,15 +128,22 @@ pub(super) fn run_worker_with_scanner<F>(
         }
         update_degraded(&health, state, Instant::now());
     }
-    emit_released(quarantine.flush(), &sender, &health);
+    emit_released(quarantine.flush(), &sender, &health, state);
     scheduler.stop();
 }
 
-fn service_controls(controls: &Receiver<Control>, scheduler: &mut SnapshotScheduler) -> bool {
+pub(super) fn service_controls(
+    controls: &Receiver<Control>,
+    scheduler: &mut SnapshotScheduler,
+    state: &mut SnapshotState,
+    now: Instant,
+) -> bool {
     for control in controls.try_iter() {
         match control {
             Control::ReplaceFilter { acknowledge } => {
-                scheduler.replace_filter();
+                if let Some(pid) = scheduler.replace_filter(now) {
+                    state.clear_backoff(pid);
+                }
                 let _ = acknowledge.send(());
             }
             Control::Stop => {
@@ -309,7 +316,8 @@ fn process_candidate<F>(
         return;
     }
     let hash = SnapshotState::text_hash(&output.text);
-    if let Err(block) = state.evaluate_save(key, hash, output.text.len(), Instant::now()) {
+    let save_at = Instant::now();
+    if let Err(block) = state.evaluate_save(key, hash, output.text.len(), save_at) {
         let gate = match block {
             SaveBlock::Duplicate => "duplicate",
             SaveBlock::GlobalInterval => "global_interval",
@@ -329,6 +337,7 @@ fn process_candidate<F>(
         hash,
         decision.capture_context(),
         decision.chrome_version(),
+        save_at,
         state,
         sender,
         health,
@@ -511,6 +520,7 @@ fn initial_time_cutoff(clock: &impl WalkClock, ax_calls: usize) -> Option<Snapsh
         complete: false,
         cutoff: Some(SnapshotCutoff::Time),
         degraded_nodes: 0,
+        frameless_nodes: 0,
     })
 }
 
@@ -520,18 +530,6 @@ pub(super) fn test_live_scan(
     window_id: i64,
 ) -> Result<Option<SnapshotWalkOutput>, String> {
     scan(pid, window_id, &AtomicBool::new(false)).map_err(|error| error.to_string())
-}
-
-#[derive(Debug)]
-pub(super) enum ScanError {
-    Ax(SnapshotAxError),
-    Walk(SnapshotWalkError),
-}
-
-impl From<SnapshotAxError> for ScanError {
-    fn from(error: SnapshotAxError) -> Self {
-        Self::Ax(error)
-    }
 }
 
 fn record_scan_failure(
@@ -549,16 +547,6 @@ fn record_scan_failure(
         ScanError::Ax(_) => (0, Duration::ZERO),
     };
     trace_candidate(candidate, "ax_failure", nodes, elapsed, 0, false, None);
-}
-
-fn scan_timed_out(error: &ScanError) -> bool {
-    match error {
-        ScanError::Ax(error) => error.is_timeout(),
-        ScanError::Walk(error) => match &error.source {
-            crate::content_snapshot::walker::SnapshotReadError::Ax(error) => error.is_timeout(),
-            crate::content_snapshot::walker::SnapshotReadError::Contract(_) => false,
-        },
-    }
 }
 
 fn update_degraded(health: &SharedHealth, state: &mut SnapshotState, now: Instant) {
@@ -580,20 +568,7 @@ fn update_degraded(health: &SharedHealth, state: &mut SnapshotState, now: Instan
     }
 }
 
-impl fmt::Display for ScanError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Ax(error) => error.fmt(formatter),
-            Self::Walk(error) => error.fmt(formatter),
-        }
-    }
-}
+mod error;
 
-impl std::error::Error for ScanError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Ax(error) => Some(error),
-            Self::Walk(error) => Some(error),
-        }
-    }
-}
+pub(super) use error::ScanError;
+use error::scan_timed_out;

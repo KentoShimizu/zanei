@@ -10,7 +10,10 @@ use crate::{
     content_snapshot::{
         SnapshotCutoff,
         budget::WalkBudget,
-        walker::{NodeSafeAttributes, SnapshotNode, SnapshotReadError, WalkClock, walk_snapshot},
+        walker::{
+            NodeContentAttributes, NodeSafeAttributes, SnapshotNode, SnapshotReadError, WalkClock,
+            walk_snapshot,
+        },
     },
     ffi::ax::AxTextRange,
 };
@@ -19,6 +22,7 @@ use super::support::frame;
 
 #[derive(Clone, Default)]
 struct Metrics {
+    content_attribute_reads: Arc<AtomicUsize>,
     value_reads: Arc<AtomicUsize>,
     visible_range_reads: Arc<AtomicUsize>,
     string_range_reads: Arc<AtomicUsize>,
@@ -29,6 +33,7 @@ struct Metrics {
 #[derive(Clone)]
 pub(super) struct FakeNode {
     attributes: NodeSafeAttributes,
+    content_attributes: NodeContentAttributes,
     window_number: Option<i64>,
     value: Option<String>,
     visible: Option<String>,
@@ -51,6 +56,7 @@ impl FakeNode {
                 frame: Some(frame(0.0, 0.0, 100.0, 100.0)),
                 ..NodeSafeAttributes::default()
             },
+            content_attributes: NodeContentAttributes::default(),
             window_number: None,
             value: None,
             visible: None,
@@ -81,11 +87,11 @@ impl FakeNode {
     pub(super) fn chromium_window() -> Self {
         let mut root = Self::new("AXWindow");
         let mut checkbox = Self::new("AXCheckBox");
-        checkbox.attributes.title = Some("Checked option".to_owned());
+        checkbox.content_attributes.title = Some("Checked option".to_owned());
         checkbox.numeric_value = true;
         checkbox.illegal_leaf_range = true;
         let mut heading = Self::new("AXHeading");
-        heading.attributes.title = Some("Heading".to_owned());
+        heading.content_attributes.title = Some("Heading".to_owned());
         heading.numeric_value = true;
         heading.illegal_leaf_range = true;
         root.children = vec![checkbox, heading];
@@ -133,6 +139,14 @@ impl SnapshotNode for FakeNode {
         } else {
             Ok(self.attributes.clone())
         }
+    }
+
+    fn content_attributes(&self) -> Result<NodeContentAttributes, SnapshotReadError> {
+        self.tick();
+        self.metrics
+            .content_attribute_reads
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(self.content_attributes.clone())
     }
 
     fn value(&self) -> Result<Option<String>, SnapshotReadError> {
@@ -232,13 +246,13 @@ fn sensitive_and_unknown_classes_never_read_values_or_descend_secure_menu_subtre
     leaked.value = Some("leaked".to_owned());
     secure.children.push(leaked);
     let mut single = FakeNode::new("AXTextField");
-    single.attributes.title = Some("Label".to_owned());
+    single.content_attributes.title = Some("Label".to_owned());
     single.value = Some("4111111111111111".to_owned());
     let mut area = FakeNode::new("AXTextArea");
     area.value = Some("hidden scrollback".to_owned());
     area.visible = Some("visible output".to_owned());
     let mut unknown = FakeNode::new("AXFutureControl");
-    unknown.attributes.title = Some("Mystery".to_owned());
+    unknown.content_attributes.title = Some("Mystery".to_owned());
     unknown.value = Some("unknown secret".to_owned());
     let mut menu = FakeNode::new("AXMenu");
     let mut menu_child = FakeNode::new("AXStaticText");
@@ -343,14 +357,45 @@ fn node_failures_are_degraded_and_offscreen_nodes_are_excluded() {
 }
 
 #[test]
+fn frameless_nodes_skip_own_content_and_containers_descend_into_framed_children() {
+    let mut root = FakeNode::new("AXGroup");
+    root.attributes.frame = None;
+    root.content_attributes.title = Some("frameless title".to_owned());
+    root.content_attributes.description = Some("frameless description".to_owned());
+    let metrics = root.metrics.clone();
+    let mut frameless_text = FakeNode::new("AXStaticText");
+    frameless_text.attributes.frame = None;
+    frameless_text.content_attributes.title = Some("frameless label".to_owned());
+    frameless_text.content_attributes.description = Some("frameless hint".to_owned());
+    frameless_text.value = Some("frameless value".to_owned());
+    let mut child = FakeNode::new("AXTextField");
+    child.content_attributes.title = Some("Framed child".to_owned());
+    root.children = vec![frameless_text, child];
+    let shared = root.clone();
+    root = root.with_shared(&shared);
+
+    let output = walk(root, generous_budget());
+
+    assert_eq!(output.text, "Framed child");
+    assert_eq!(output.frameless_nodes, 2);
+    assert_eq!(output.degraded_nodes, 0);
+    assert_eq!(metrics.value_reads.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        metrics.content_attribute_reads.load(Ordering::Relaxed),
+        1,
+        "only the framed child reads title and description"
+    );
+}
+
+#[test]
 fn numeric_values_drop_only_the_affected_nodes() {
     let mut root = FakeNode::new("AXGroup");
     let mut checkbox = FakeNode::new("AXCheckBox");
     checkbox.fail_value_read = true;
-    checkbox.attributes.title = Some("Checked option".to_owned());
+    checkbox.content_attributes.title = Some("Checked option".to_owned());
     let mut heading = FakeNode::new("AXHeading");
     heading.fail_value_read = true;
-    heading.attributes.title = Some("Heading".to_owned());
+    heading.content_attributes.title = Some("Heading".to_owned());
     let mut text = FakeNode::new("AXStaticText");
     text.value = Some("Visible text".to_owned());
     root.children = vec![checkbox, heading, text];
@@ -377,7 +422,7 @@ fn chromium_profile_counts_children_before_ranges_and_accepts_numeric_values() {
     assert_eq!(metrics.children_range_reads.load(Ordering::Relaxed), 1);
     assert_eq!(output.text, "Checked option\nHeading");
     assert_eq!(output.degraded_nodes, 0);
-    assert_eq!(output.ax_calls, 9);
+    assert_eq!(output.ax_calls, 12);
 }
 
 #[test]

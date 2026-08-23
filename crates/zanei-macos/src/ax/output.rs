@@ -71,12 +71,14 @@ impl<'a> AxOutput<'a> {
             .quarantine
             .release(std::time::Instant::now(), &self.capture_policy)
         {
+            let (event, _) = event.into_parts();
             self.send_now(event);
         }
     }
 
     pub(super) fn flush(&mut self) {
         for event in self.quarantine.flush() {
+            let (event, _) = event.into_parts();
             self.send_now(event);
         }
     }

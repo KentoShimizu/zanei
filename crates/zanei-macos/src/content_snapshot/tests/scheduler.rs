@@ -115,13 +115,27 @@ fn focus_change_schedules_previous_window_and_frequency_predicates_are_exact() {
 }
 
 #[test]
-fn filter_replacement_preserves_timers_while_pause_stop_and_wake_discard_them() {
+fn filter_replacement_rearms_current_target_while_pause_stop_and_wake_discard_it() {
     let base = Instant::now();
     let mut scheduler = SnapshotScheduler::default();
     scheduler.observe(trigger(7, 11, SnapshotTriggerKind::Focus, base));
-    let deadline = scheduler.next_deadline();
-    scheduler.replace_filter();
-    assert_eq!(scheduler.next_deadline(), deadline);
+    let reload = base + Duration::from_secs(9);
+    assert_eq!(scheduler.replace_filter(reload), Some(7));
+    assert_eq!(
+        scheduler.next_deadline(),
+        Some(reload + SETTLE_QUIET_INTERVAL)
+    );
+    assert_eq!(
+        scheduler
+            .take_due(reload + SETTLE_QUIET_INTERVAL)
+            .expect("reload settle")
+            .trigger,
+        ContentSnapshotTrigger::Settle
+    );
+    assert_eq!(
+        scheduler.next_deadline(),
+        Some(reload + REFRESH_INTERVALS[0])
+    );
 
     scheduler.did_wake();
     assert_eq!(scheduler.next_deadline(), None);

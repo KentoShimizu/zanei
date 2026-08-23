@@ -12,7 +12,7 @@ pub use authorization::{
     InputAuthorizationPublisher, InputAuthorizations, input_authorization_channel,
 };
 pub(crate) use focused_target::FocusedTarget;
-pub(crate) use quarantine::{ChromeWindowKey, TextQuarantine};
+pub(crate) use quarantine::{ChromeWindowKey, ReleasedEvent, TextQuarantine};
 pub(crate) use value::{FocusChangeCapture, ValueCapture, ValueEmission, ValueObservation};
 #[cfg(test)]
 pub(crate) use value::{VALUE_DEBOUNCE, VALUE_MAX_HOLD};

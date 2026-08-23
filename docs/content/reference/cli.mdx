@@ -413,6 +413,7 @@ With `--format json`, the same session is represented by `range`, `token_estimat
 `skipped_unknown_types`, and `sessions`; session activities use the same fixed phrases. Every JSON session includes `content_snapshots`, including `0`. Markdown prints `Content snapshots: N` after the activity lines only when the count is nonzero. Snapshot bodies are never inlined. JSON sessions always include
 `event_ids_truncated` and include up to 100 `event_ids` when the token budget permits. `event_ids`
 may be omitted before sessions are removed.
+Ranges that contain only snapshots, including snapshots before the first ordinary event, still emit metadata-backed sessions with empty activity and event lists.
 
 ## `export`
 

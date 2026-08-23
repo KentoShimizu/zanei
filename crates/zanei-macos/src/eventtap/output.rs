@@ -16,7 +16,7 @@ use crate::trace;
 use crate::{
     capture_policy::CapturePolicy,
     ffi::eventtap::NativeContext,
-    text_capture::{ChromeWindowKey, InputAuthorization, TextQuarantine},
+    text_capture::{ChromeWindowKey, InputAuthorization, ReleasedEvent, TextQuarantine},
 };
 
 use super::clipboard::ClipboardOutput;
@@ -139,12 +139,13 @@ pub(super) fn emit_or_quarantine(
 
 pub(super) fn emit_released(
     sender: &SyncSender<RawEvent>,
-    events: Vec<RawEvent>,
+    events: Vec<ReleasedEvent>,
     dropped_events: &AtomicU64,
 ) -> bool {
-    events
-        .into_iter()
-        .all(|event| try_send_counted(sender, event, dropped_events).continues())
+    events.into_iter().all(|event| {
+        let (event, _) = event.into_parts();
+        try_send_counted(sender, event, dropped_events).continues()
+    })
 }
 
 fn has_text_body(event: &RawEvent) -> bool {

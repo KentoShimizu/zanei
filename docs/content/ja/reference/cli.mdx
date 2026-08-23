@@ -410,6 +410,7 @@ Content snapshots: 3
 `--format json` では同じ session を `range`・`token_estimate`・`truncated`・`skipped_unknown_types`・`sessions` で表し、activity には同じ固定句を使います。各 JSON session は 0 を含めて `content_snapshots` を常に持ちます。Markdown は snapshot 件数が 0 でないときだけ activity の後に `Content snapshots: N` を表示し、本文は inline しません。JSON session は `event_ids_truncated` を
 常に含み、token budget が許す場合は最大 100 件の `event_ids` も含みます。`event_ids` は
 session を削除する前に省略されることがあります。
+snapshot だけの範囲や最初の通常 event より前の snapshot でも、metadata に基づく空の activity・event list を持つ session を出力します。
 
 ## `export`
 

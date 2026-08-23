@@ -19,7 +19,26 @@ pub(crate) struct ChromeWindowKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HeldBodyKind {
     Text,
-    Snapshot,
+    Snapshot { hash: u64 },
+}
+
+pub(crate) struct ReleasedEvent {
+    event: RawEvent,
+    snapshot_hash: Option<(ChromeWindowKey, u64)>,
+}
+
+impl ReleasedEvent {
+    pub(crate) fn into_parts(self) -> (RawEvent, Option<(ChromeWindowKey, u64)>) {
+        (self.event, self.snapshot_hash)
+    }
+}
+
+impl std::ops::Deref for ReleasedEvent {
+    type Target = RawEvent;
+
+    fn deref(&self) -> &Self::Target {
+        &self.event
+    }
 }
 
 pub(crate) struct TextQuarantine {
@@ -66,13 +85,15 @@ impl TextQuarantine {
         event: RawEvent,
         key: ChromeWindowKey,
         version_at_decision: u64,
+        hash: u64,
+        held_at: Instant,
     ) {
         self.hold_at(
             event,
             key,
             version_at_decision,
-            HeldBodyKind::Snapshot,
-            Instant::now(),
+            HeldBodyKind::Snapshot { hash },
+            held_at,
         );
     }
 
@@ -84,7 +105,7 @@ impl TextQuarantine {
         kind: HeldBodyKind,
         held_at: Instant,
     ) {
-        self.observer.request_observation(key.pid);
+        self.observer.request_observation(key.pid, key.window_id);
         self.held.push(HeldEvent {
             event,
             key,
@@ -95,7 +116,7 @@ impl TextQuarantine {
         });
     }
 
-    pub(crate) fn release(&mut self, now: Instant, policy: &CapturePolicy) -> Vec<RawEvent> {
+    pub(crate) fn release(&mut self, now: Instant, policy: &CapturePolicy) -> Vec<ReleasedEvent> {
         let tracker = policy.chrome_tracker();
         let mut released = Vec::new();
         let mut pending = Vec::with_capacity(self.held.len());
@@ -108,7 +129,8 @@ impl TextQuarantine {
             } else if now >= held.expires_at {
                 released.extend(resolve_unresponsive(held));
             } else {
-                self.observer.request_observation(held.key.pid);
+                self.observer
+                    .request_observation(held.key.pid, held.key.window_id);
                 pending.push(held);
             }
         }
@@ -116,7 +138,7 @@ impl TextQuarantine {
         released
     }
 
-    pub(crate) fn flush(&mut self) -> Vec<RawEvent> {
+    pub(crate) fn flush(&mut self) -> Vec<ReleasedEvent> {
         self.held
             .drain(..)
             .filter_map(resolve_unresponsive)
@@ -129,35 +151,46 @@ impl TextQuarantine {
     }
 }
 
-fn resolve_confirmed(mut held: HeldEvent, policy: &CapturePolicy) -> Option<RawEvent> {
+fn resolve_confirmed(mut held: HeldEvent, policy: &CapturePolicy) -> Option<ReleasedEvent> {
     let scope = match held.kind {
         HeldBodyKind::Text => PrivacyScope::TextContent,
-        HeldBodyKind::Snapshot => PrivacyScope::ContentSnapshot,
+        HeldBodyKind::Snapshot { .. } => PrivacyScope::ContentSnapshot,
     };
     let decision = policy.decision(scope, &held.event.app, Some(held.key.window_id));
     held.event.capture_context = decision.capture_context();
-    if !decision.is_allowed() && held.kind == HeldBodyKind::Snapshot {
+    if !decision.is_allowed() && matches!(held.kind, HeldBodyKind::Snapshot { .. }) {
         return drop_snapshot(&held, "denied");
     }
     let unchanged = decision.chrome_version() == Some(held.version_at_decision);
-    if !unchanged && held.kind == HeldBodyKind::Snapshot {
+    if !unchanged && matches!(held.kind, HeldBodyKind::Snapshot { .. }) {
         return drop_snapshot(&held, "version_changed");
     }
     if !decision.is_allowed() || !unchanged {
         suppress_text_content(&mut held.event.data, &mut held.event.element);
     }
-    Some(held.event)
+    Some(released(held))
 }
 
-fn resolve_unresponsive(mut held: HeldEvent) -> Option<RawEvent> {
-    if held.kind == HeldBodyKind::Snapshot {
+fn resolve_unresponsive(mut held: HeldEvent) -> Option<ReleasedEvent> {
+    if matches!(held.kind, HeldBodyKind::Snapshot { .. }) {
         return drop_snapshot(&held, "unresponsive");
     }
     suppress_text_content(&mut held.event.data, &mut held.event.element);
-    Some(held.event)
+    Some(released(held))
 }
 
-fn drop_snapshot(held: &HeldEvent, reason: &str) -> Option<RawEvent> {
+fn released(held: HeldEvent) -> ReleasedEvent {
+    let snapshot_hash = match held.kind {
+        HeldBodyKind::Text => None,
+        HeldBodyKind::Snapshot { hash } => Some((held.key, hash)),
+    };
+    ReleasedEvent {
+        event: held.event,
+        snapshot_hash,
+    }
+}
+
+fn drop_snapshot(held: &HeldEvent, reason: &str) -> Option<ReleasedEvent> {
     crate::trace::trace!(
         "component=content_snapshot gate=unconfirmed action=drop reason={} pid={} window_id={}",
         reason,
@@ -368,7 +401,7 @@ mod tests {
                 window_id: 11,
             },
             version,
-            HeldBodyKind::Snapshot,
+            HeldBodyKind::Snapshot { hash: 1 },
             held_at,
         );
         observe(
@@ -400,7 +433,7 @@ mod tests {
                 window_id: 11,
             },
             version,
-            HeldBodyKind::Snapshot,
+            HeldBodyKind::Snapshot { hash: 1 },
             held_at,
         );
 
@@ -427,7 +460,7 @@ mod tests {
                 window_id: 11,
             },
             version,
-            HeldBodyKind::Snapshot,
+            HeldBodyKind::Snapshot { hash: 1 },
             held_at,
         );
         observe(

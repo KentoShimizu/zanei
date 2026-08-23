@@ -26,7 +26,7 @@ pub(crate) enum SaveBlock {
 
 #[derive(Clone, Copy, Debug)]
 struct SavedWindow {
-    hash: u64,
+    hash: Option<u64>,
     saved_at: Instant,
 }
 
@@ -94,7 +94,7 @@ impl SnapshotState {
         if self
             .windows
             .get(&key)
-            .is_some_and(|saved| saved.hash == hash)
+            .is_some_and(|saved| saved.hash == Some(hash))
         {
             return Err(SaveBlock::Duplicate);
         }
@@ -111,25 +111,27 @@ impl SnapshotState {
         Ok(())
     }
 
-    pub(crate) fn commit_save(
-        &mut self,
-        key: SnapshotWindowKey,
-        hash: u64,
-        bytes: usize,
-        now: Instant,
-    ) {
+    pub(crate) fn reserve(&mut self, key: SnapshotWindowKey, bytes: usize, now: Instant) {
         let bytes =
             u64::try_from(bytes).expect("the 32 KiB snapshot design limit always fits in u64");
-        self.windows.insert(
-            key,
-            SavedWindow {
-                hash,
+        self.windows
+            .entry(key)
+            .and_modify(|saved| saved.saved_at = now)
+            .or_insert(SavedWindow {
+                hash: None,
                 saved_at: now,
-            },
-        );
+            });
         self.global_saved_at = Some(now);
         self.daily_bytes = self.daily_bytes.saturating_add(bytes);
         self.backoffs.remove(&key.pid);
+    }
+
+    pub(crate) fn record_hash(&mut self, key: SnapshotWindowKey, hash: u64) {
+        let saved = self
+            .windows
+            .get_mut(&key)
+            .expect("snapshot hash is recorded only after reserving its limits");
+        saved.hash = Some(hash);
     }
 
     pub(crate) fn record_failure(&mut self, pid: i64, now: Instant, timed_out: bool) {
@@ -156,6 +158,10 @@ impl SnapshotState {
     }
 
     pub(crate) fn record_scan_success(&mut self, pid: i64) {
+        self.clear_backoff(pid);
+    }
+
+    pub(crate) fn clear_backoff(&mut self, pid: i64) {
         self.backoffs.remove(&pid);
     }
 

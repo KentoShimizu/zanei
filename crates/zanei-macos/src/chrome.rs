@@ -39,9 +39,9 @@ use worker::{ChromeWorkerReceivers, run_worker};
 
 #[cfg(test)]
 use worker::{
-    ChromeWorkerState, EVENT_SOURCE, EVENT_TYPE, NavigationTracker, ObservationOutcome,
-    SnapshotError, handle_focus_transition, handle_observation_trigger, observe_once,
-    service_on_demand,
+    ChromeWorkerState, EVENT_SOURCE, EVENT_TYPE, NavigationTracker, ObservationContext,
+    ObservationOutcome, SnapshotError, handle_focus_transition, handle_observation_trigger,
+    observe_query_once, service_on_demand,
 };
 pub struct ChromeCollector {
     focus_transitions: Option<FocusTransitionReceiver>,
@@ -139,10 +139,7 @@ impl Collector for ChromeCollector {
                 let mut api = match AppleScriptClient::new() {
                     Ok(client) => {
                         let _ = startup_sender.send(Ok(()));
-                        SystemChromeApi {
-                            client,
-                            focus_context,
-                        }
+                        SystemChromeApi { client }
                     }
                     Err(error) => {
                         metrics.degraded.fetch_add(1, Ordering::Relaxed);
@@ -227,34 +224,65 @@ struct ChromeMetrics {
 trait ChromeApi {
     type Error: Display;
 
-    fn query(&mut self, pid: i64) -> Result<ChromeObservation, Self::Error>;
+    fn query(&mut self, query: ChromeQuery) -> Result<ChromeObservation, Self::Error>;
 }
 
 struct SystemChromeApi {
     client: AppleScriptClient,
-    focus_context: FocusContext,
 }
 
 impl ChromeApi for SystemChromeApi {
     type Error = AppleScriptError;
 
-    fn query(&mut self, pid: i64) -> Result<ChromeObservation, Self::Error> {
-        let observation = self.client.query()?;
-        let window_id = self
-            .focus_context
-            .current()
-            .filter(|focus| focus.app.pid == pid)
-            .and_then(|focus| focus.window)
-            .and_then(|window| window.id);
+    fn query(&mut self, query: ChromeQuery) -> Result<ChromeObservation, Self::Error> {
+        let observation = match query {
+            ChromeQuery::FrontWindow { .. } => self.client.query()?,
+            ChromeQuery::Window {
+                applescript_window_id,
+                ..
+            } => self.client.query_window(applescript_window_id)?,
+        };
+        let window_id = query.window_id();
         Ok(match observation {
             NativeObservation::Snapshot(snapshot) => {
-                ChromeObservation::Snapshot(ChromeSnapshot::from_native(snapshot, window_id))
+                ChromeObservation::Snapshot(ChromeSnapshot::from_native(snapshot, window_id)?)
             }
             NativeObservation::Incognito => ChromeObservation::Incognito { window_id },
-            NativeObservation::NotFrontmost => ChromeObservation::NotFrontmost,
             NativeObservation::NoWindow => ChromeObservation::NoWindow,
             NativeObservation::NotRunning => ChromeObservation::NotRunning,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChromeQuery {
+    FrontWindow {
+        pid: i64,
+        window_id: Option<i64>,
+    },
+    Window {
+        pid: i64,
+        window_id: i64,
+        applescript_window_id: i64,
+    },
+}
+
+impl ChromeQuery {
+    const fn pid(self) -> i64 {
+        match self {
+            Self::FrontWindow { pid, .. } | Self::Window { pid, .. } => pid,
+        }
+    }
+
+    const fn window_id(self) -> Option<i64> {
+        match self {
+            Self::FrontWindow { window_id, .. } => window_id,
+            Self::Window { window_id, .. } => Some(window_id),
+        }
+    }
+
+    const fn is_targeted(self) -> bool {
+        matches!(self, Self::Window { .. })
     }
 }
 
@@ -262,7 +290,6 @@ impl ChromeApi for SystemChromeApi {
 enum ChromeObservation {
     Snapshot(ChromeSnapshot),
     Incognito { window_id: Option<i64> },
-    NotFrontmost,
     NoWindow,
     NotRunning,
 }
@@ -270,6 +297,7 @@ enum ChromeObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChromeSnapshot {
     window_id: Option<i64>,
+    applescript_window_id: i64,
     window_key: String,
     window_title: Option<String>,
     tab_key: String,
@@ -278,15 +306,23 @@ struct ChromeSnapshot {
 }
 
 impl ChromeSnapshot {
-    fn from_native(value: NativeSnapshot, window_id: Option<i64>) -> Self {
-        Self {
+    fn from_native(
+        value: NativeSnapshot,
+        window_id: Option<i64>,
+    ) -> Result<Self, AppleScriptError> {
+        let applescript_window_id = value
+            .window_key
+            .parse()
+            .map_err(|_| AppleScriptError::InvalidResponse("Chrome window id is not an integer"))?;
+        Ok(Self {
             window_id,
+            applescript_window_id,
             window_key: value.window_key,
             window_title: value.window_title,
             tab_key: value.tab_key,
             url: value.url,
             tab_title: value.tab_title,
-        }
+        })
     }
 }
 

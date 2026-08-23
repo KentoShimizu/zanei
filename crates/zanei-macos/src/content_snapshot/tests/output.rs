@@ -1,4 +1,7 @@
-use std::{sync::mpsc::sync_channel, time::Instant};
+use std::{
+    sync::mpsc::sync_channel,
+    time::{Duration, Instant},
+};
 
 use zanei_core::{
     config::FilterConfig,
@@ -11,6 +14,7 @@ use crate::{
     chrome::{ChromeEligibilityObservation, ChromeObserver, chrome_eligibility_channel},
     content_snapshot::{
         SharedHealth, SnapshotTriggerKind, SnapshotWalkOutput,
+        budget::GLOBAL_SAVE_INTERVAL,
         output::{emit, emit_released},
         scheduler::ScheduledSnapshot,
         state::{SaveBlock, SnapshotState, SnapshotWindowKey},
@@ -46,6 +50,7 @@ fn quarantined_snapshot_reserves_interval_and_budget_without_double_commit() {
         complete: true,
         cutoff: None,
         degraded_nodes: 0,
+        frameless_nodes: 0,
     };
     let filter = FilterConfig::default();
     let (eligibility, tracker) = chrome_eligibility_channel(filter.clone());
@@ -75,6 +80,7 @@ fn quarantined_snapshot_reserves_interval_and_budget_without_double_commit() {
         hash,
         decision.capture_context(),
         decision.chrome_version(),
+        now,
         &mut state,
         &sender,
         &health,
@@ -89,12 +95,12 @@ fn quarantined_snapshot_reserves_interval_and_budget_without_double_commit() {
             },
             SnapshotState::text_hash("next"),
             4,
-            Instant::now(),
+            now,
         ),
         Err(SaveBlock::GlobalInterval)
     );
     let reserved_bytes = u64::try_from(bytes).expect("snapshot size fits u64");
-    assert_eq!(state.daily_bytes(Instant::now()), reserved_bytes);
+    assert_eq!(state.daily_bytes(now), reserved_bytes);
     assert!(events.try_recv().is_err(), "snapshot remains quarantined");
 
     eligibility.observe(
@@ -104,13 +110,99 @@ fn quarantined_snapshot_reserves_interval_and_budget_without_double_commit() {
             url: "https://allowed.example/confirmed".to_owned(),
         },
     );
-    let released = quarantine.release(Instant::now(), &policy);
-    emit_released(released, &sender, &health);
+    let released = quarantine.release(now + std::time::Duration::from_millis(1), &policy);
+    emit_released(released, &sender, &health, &mut state);
 
     assert!(events.try_recv().is_ok(), "confirmed snapshot is delivered");
     assert_eq!(
-        state.daily_bytes(Instant::now()),
+        state.daily_bytes(now),
         reserved_bytes,
         "release must not commit the reservation twice"
+    );
+}
+
+#[test]
+fn dropped_snapshot_does_not_deduplicate_identical_settle_on_return() {
+    let now = Instant::now();
+    let mut target = trigger(7, 11, SnapshotTriggerKind::Focus, now);
+    target.app.name = "Google Chrome".to_owned();
+    target.app.bundle_id = Some(CHROME_BUNDLE_ID.to_owned());
+    let candidate = ScheduledSnapshot {
+        target,
+        trigger: ContentSnapshotTrigger::FocusOut,
+        activity_window: None,
+    };
+    let key = SnapshotWindowKey {
+        pid: 7,
+        window_id: 11,
+    };
+    let text = "identical after return".to_owned();
+    let bytes = text.len();
+    let hash = SnapshotState::text_hash(&text);
+    let output = SnapshotWalkOutput {
+        text,
+        nodes: 1,
+        ax_calls: 1,
+        elapsed: Duration::ZERO,
+        complete: true,
+        cutoff: None,
+        degraded_nodes: 0,
+        frameless_nodes: 0,
+    };
+    let filter = FilterConfig::default();
+    let (eligibility, tracker) = chrome_eligibility_channel(filter.clone());
+    eligibility.observe_at(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://allowed.example/initial".to_owned(),
+        },
+        now - Duration::from_millis(1),
+    );
+    let policy = CapturePolicy::new(tracker, filter, None);
+    let decision = policy.decision(
+        PrivacyScope::ContentSnapshot,
+        &candidate.target.app.raw_app(),
+        Some(11),
+    );
+    let mut quarantine = TextQuarantine::new(ChromeObserver::new());
+    let mut state = SnapshotState::new(now);
+    let health = SharedHealth::default();
+    let (sender, events) = sync_channel(1);
+
+    emit(
+        candidate,
+        output,
+        key,
+        hash,
+        decision.capture_context(),
+        decision.chrome_version(),
+        now,
+        &mut state,
+        &sender,
+        &health,
+        &mut quarantine,
+    );
+    eligibility.observe_at(
+        7,
+        ChromeEligibilityObservation::Unavailable {
+            window_id: Some(11),
+        },
+        now + Duration::from_millis(1),
+    );
+    assert!(
+        quarantine
+            .release(now + Duration::from_millis(1), &policy)
+            .is_empty()
+    );
+    assert!(events.try_recv().is_err());
+
+    let return_at = now + GLOBAL_SAVE_INTERVAL;
+    assert_eq!(state.evaluate_save(key, hash, bytes, return_at), Ok(()));
+    state.reserve(key, bytes, return_at);
+    state.record_hash(key, hash);
+    assert_eq!(
+        state.evaluate_save(key, hash, bytes, return_at + GLOBAL_SAVE_INTERVAL),
+        Err(SaveBlock::Duplicate)
     );
 }

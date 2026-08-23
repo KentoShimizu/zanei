@@ -143,7 +143,10 @@ fn snapshot_counts_use_the_last_session_start_at_or_before_the_timestamp() {
         activate("Safari", "com.apple.Safari", 0),
         activate("Slack", "com.tinyspeck.slackmacgap", 60),
     ];
-    let metadata = vec![snapshot_metadata(50, 1), snapshot_metadata(60, 2)];
+    let metadata = vec![
+        snapshot_for_app(50, 1, "Safari", Some("com.apple.Safari")),
+        snapshot_for_app(60, 2, "Slack", Some("com.tinyspeck.slackmacgap")),
+    ];
 
     let timeline = build(&events, &metadata, &options(Granularity::Fine, usize::MAX))
         .expect("timeline should build");
@@ -154,7 +157,7 @@ fn snapshot_counts_use_the_last_session_start_at_or_before_the_timestamp() {
 }
 
 #[test]
-fn snapshot_counts_prefer_the_latest_session_of_the_same_app() {
+fn snapshot_counts_prefer_the_latest_same_app_session_and_preserve_unmatched_apps() {
     let events = vec![
         activate("Safari", "com.apple.Safari", 0),
         activate("Slack", "com.tinyspeck.slackmacgap", 60),
@@ -168,8 +171,95 @@ fn snapshot_counts_prefer_the_latest_session_of_the_same_app() {
     let timeline = build(&events, &metadata, &options(Granularity::Fine, usize::MAX))
         .expect("timeline should build");
 
+    assert_eq!(timeline.sessions.len(), 3);
     assert_eq!(timeline.sessions[0].content_snapshots, 1);
-    assert_eq!(timeline.sessions[1].content_snapshots, 2);
+    assert_eq!(timeline.sessions[1].content_snapshots, 1);
+    assert_eq!(timeline.sessions[2].app, "Unknown");
+    assert_eq!(timeline.sessions[2].content_snapshots, 1);
+}
+
+#[test]
+fn snapshot_only_store_builds_eventless_session_from_metadata() {
+    let metadata = vec![
+        snapshot_for_app(1, 1, "Notes", None),
+        snapshot_for_app(3, 2, "Notes", None),
+    ];
+    let expected_start = metadata[0].ts.clone();
+    let expected_end = metadata[1].ts.clone();
+    let timeline = build(&[], &metadata, &options(Granularity::Fine, usize::MAX))
+        .expect("snapshot-only timeline should build");
+
+    assert_eq!(timeline.sessions.len(), 1);
+    let session = &timeline.sessions[0];
+    assert_eq!(session.start, expected_start);
+    assert_eq!(session.end, expected_end);
+    assert_eq!(session.app, "Notes");
+    assert!(session.title_summary.is_none());
+    assert!(session.activities.is_empty());
+    assert_eq!(session.content_snapshots, 2);
+    assert_eq!(session.event_ids.as_deref(), Some([].as_slice()));
+    assert_eq!(session.interactions.as_deref(), Some([].as_slice()));
+
+    let encoded = serialize(&timeline, TimelineFormat::Json).expect("timeline should serialize");
+    let json: serde_json::Value = serde_json::from_str(&encoded).expect("output should be JSON");
+    assert_eq!(json["sessions"][0]["activities"], serde_json::json!([]));
+    assert_eq!(json["sessions"][0]["event_ids"], serde_json::json!([]));
+    assert_eq!(json["sessions"][0]["interactions"], serde_json::json!([]));
+
+    let mut markdown_options = options(Granularity::Coarse, usize::MAX);
+    markdown_options.format = TimelineFormat::Markdown;
+    let markdown = build(&[], &metadata, &markdown_options)
+        .and_then(|timeline| serialize(&timeline, TimelineFormat::Markdown).map_err(Into::into))
+        .expect("snapshot-only markdown should serialize");
+    assert!(markdown.contains(&format!(
+        "## {expected_start} — {expected_end} · Notes\nContent snapshots: 2"
+    )));
+    assert!(!markdown.contains("\nTitle:"));
+    assert!(!markdown.contains("\n- "));
+}
+
+#[test]
+fn snapshot_before_first_event_stays_in_its_own_session() {
+    let events = vec![activate("Safari", "com.apple.Safari", 10)];
+    let metadata = vec![snapshot_for_app(1, 1, "Safari", Some("com.apple.Safari"))];
+
+    let timeline = build(
+        &events,
+        &metadata,
+        &options(Granularity::Coarse, usize::MAX),
+    )
+    .expect("timeline should build");
+
+    assert_eq!(timeline.sessions.len(), 2);
+    assert_eq!(timeline.sessions[0].app, "Safari");
+    assert_eq!(timeline.sessions[0].content_snapshots, 1);
+    assert!(timeline.sessions[0].activities.is_empty());
+    assert_eq!(timeline.sessions[1].content_snapshots, 0);
+}
+
+#[test]
+fn ordinary_different_app_closes_snapshot_only_session_without_coarse_absorption() {
+    let events = vec![activate("Slack", "com.tinyspeck.slackmacgap", 10)];
+    let metadata = vec![
+        snapshot_for_app(1, 1, "Safari", Some("com.apple.Safari")),
+        snapshot_for_app(5, 2, "Safari", Some("com.apple.Safari")),
+        snapshot_for_app(20, 3, "Safari", Some("com.apple.Safari")),
+    ];
+
+    let timeline = build(
+        &events,
+        &metadata,
+        &options(Granularity::Coarse, usize::MAX),
+    )
+    .expect("timeline should build");
+
+    assert_eq!(timeline.sessions.len(), 3);
+    assert_eq!(timeline.sessions[0].app, "Safari");
+    assert_eq!(timeline.sessions[0].content_snapshots, 2);
+    assert_eq!(timeline.sessions[1].app, "Slack");
+    assert_eq!(timeline.sessions[1].content_snapshots, 0);
+    assert_eq!(timeline.sessions[2].app, "Safari");
+    assert_eq!(timeline.sessions[2].content_snapshots, 1);
 }
 
 #[test]
@@ -183,7 +273,7 @@ fn markdown_omits_zero_snapshot_counts_and_includes_nonzero_counts() {
     assert!(!zero.contains("Content snapshots:"));
 
     let counted =
-        build(&events, &[snapshot_metadata(1, 1)], &markdown_options).expect("counted timeline");
+        build(&events, &[safari_snapshot(1, 1)], &markdown_options).expect("counted timeline");
     let counted = serialize(&counted, TimelineFormat::Markdown).expect("counted markdown");
     assert!(counted.contains("Content snapshots: 1"));
 }
@@ -197,7 +287,7 @@ fn snapshot_counts_survive_bounce_absorption_and_adjacent_merge() {
     ];
     let bounced = build(
         &bounce_events,
-        &[snapshot_metadata(15, 1)],
+        &[safari_snapshot(15, 1)],
         &options(Granularity::Coarse, usize::MAX),
     )
     .expect("bounce timeline");
@@ -213,7 +303,7 @@ fn snapshot_counts_survive_bounce_absorption_and_adjacent_merge() {
             "https://example.com/long-page",
         ),
     ];
-    let metadata = vec![snapshot_metadata(1, 2), snapshot_metadata(401, 3)];
+    let metadata = vec![safari_snapshot(1, 2), safari_snapshot(401, 3)];
     let unlimited = build(
         &adjacent_events,
         &metadata,
@@ -243,7 +333,7 @@ fn snapshot_count_participates_in_token_estimation_without_changing_the_ladder()
     let counted = build(
         &events,
         &(0..100)
-            .map(|index| snapshot_metadata(1, index))
+            .map(|index| safari_snapshot(1, index))
             .collect::<Vec<_>>(),
         &options(Granularity::Coarse, usize::MAX),
     )
@@ -378,8 +468,8 @@ fn event(app: &str, bundle_id: &str, seconds: i64, event_type: &str, data: Event
     .event
 }
 
-fn snapshot_metadata(seconds: i64, id: u64) -> EventMetadata {
-    snapshot_for_app(seconds, id, "Example", Some("com.example.App"))
+fn safari_snapshot(seconds: i64, id: u64) -> EventMetadata {
+    snapshot_for_app(seconds, id, "Safari", Some("com.apple.Safari"))
 }
 
 fn snapshot_for_app(

@@ -1,14 +1,47 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
 use zanei_core::config::FilterConfig;
-use zanei_core::schema::{BrowserMode, EventData};
+use zanei_core::schema::{
+    App, BrowserMode, ContentSnapshotData, ContentSnapshotTrigger, EventData, Window,
+};
 
-use crate::workspace::ApplicationInfo;
+use crate::{
+    CapturePolicy,
+    text_capture::{ChromeWindowKey, TextQuarantine},
+    workspace::ApplicationInfo,
+};
 
 use super::*;
+
+fn observe_once<A: ChromeApi>(
+    api: &mut A,
+    tracker: &mut NavigationTracker,
+    app: &ApplicationInfo,
+    sender: &std::sync::mpsc::SyncSender<zanei_collector::RawEvent>,
+    metrics: &ChromeMetrics,
+    eligibility: &ChromeEligibilityPublisher,
+) -> ObservationOutcome {
+    let context = ObservationContext {
+        sender,
+        metrics,
+        eligibility,
+    };
+    observe_query_once(
+        api,
+        tracker,
+        Some(app),
+        ChromeQuery::FrontWindow {
+            pid: app.pid,
+            window_id: None,
+        },
+        true,
+        Instant::now(),
+        &context,
+    )
+}
 
 #[test]
 fn first_snapshot_emits_once_and_identical_page_does_not_repeat() {
@@ -97,24 +130,10 @@ fn incognito_resets_tracker_and_next_normal_snapshot_has_no_transition() {
 }
 
 #[test]
-fn no_window_resets_but_not_frontmost_preserves_the_previous_page() {
+fn no_window_resets_the_previous_page() {
     let (sender, _) = sync_channel(1);
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
     let mut tracker = tracker_with_initial_snapshot();
-    let mut background = FakeApi::new([Ok(ChromeObservation::NotFrontmost)]);
-    assert!(matches!(
-        observe_once(
-            &mut background,
-            &mut tracker,
-            &chrome_app(),
-            &sender,
-            &ChromeMetrics::default(),
-            &eligibility,
-        ),
-        ObservationOutcome::Inactive
-    ));
-    assert!(tracker.previous.is_some());
-
     let mut no_window = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
     assert!(matches!(
         observe_once(
@@ -149,6 +168,7 @@ fn rejects_empty_identity_and_non_absolute_url() {
 
 #[test]
 fn chrome_focus_transition_queries_immediately() {
+    let now = Instant::now();
     let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
     let (sender, _) = sync_channel(1);
     let mut state = ChromeWorkerState::default();
@@ -166,6 +186,7 @@ fn chrome_focus_transition_queries_immediately() {
             }),
             resynced: false,
         },
+        now,
         &mut api,
         &sender,
         &mut state,
@@ -174,16 +195,13 @@ fn chrome_focus_transition_queries_immediately() {
     ));
     assert_eq!(api.query_count, 1);
     assert!(state.frontmost.is_some());
-    assert!(state.on_demand.is_none());
+    assert!(state.on_demand.is_empty());
 }
 
 #[test]
 fn wake_resync_invalidates_then_reseeds_text_eligibility() {
-    let mut state = ChromeWorkerState {
-        navigation: NavigationTracker::default(),
-        frontmost: Some(chrome_app()),
-        on_demand: None,
-    };
+    let now = Instant::now();
+    let mut state = worker_state(7);
     let (eligibility, text) = chrome_eligibility_channel(FilterConfig::default());
     eligibility.observe(
         42,
@@ -221,6 +239,7 @@ fn wake_resync_invalidates_then_reseeds_text_eligibility() {
             }),
             resynced: true,
         },
+        now,
         &mut api,
         &sender,
         &mut state,
@@ -236,11 +255,8 @@ fn wake_resync_invalidates_then_reseeds_text_eligibility() {
 
 #[test]
 fn wake_resync_without_focus_clears_stale_text_eligibility() {
-    let mut state = ChromeWorkerState {
-        navigation: NavigationTracker::default(),
-        frontmost: Some(chrome_app()),
-        on_demand: None,
-    };
+    let now = Instant::now();
+    let mut state = worker_state(7);
     let (eligibility, text) = chrome_eligibility_channel(FilterConfig::default());
     eligibility.observe(
         42,
@@ -258,6 +274,7 @@ fn wake_resync_without_focus_clears_stale_text_eligibility() {
             current: None,
             resynced: true,
         },
+        now,
         &mut api,
         &sender,
         &mut state,
@@ -393,11 +410,7 @@ fn no_observation_happens_without_a_trigger_for_five_simulated_seconds() {
     let mut api = FakeApi::new([]);
     let (sender, _) = sync_channel(1);
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
-    let mut state = ChromeWorkerState {
-        navigation: NavigationTracker::default(),
-        frontmost: Some(chrome_app()),
-        on_demand: None,
-    };
+    let mut state = worker_state(7);
 
     assert!(service_on_demand(
         started_at + Duration::from_secs(5),
@@ -416,14 +429,13 @@ fn on_demand_requests_within_debounce_coalesce_into_one_observation() {
     let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
     let (sender, _) = sync_channel(1);
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
-    let mut state = ChromeWorkerState {
-        navigation: NavigationTracker::default(),
-        frontmost: Some(chrome_app()),
-        on_demand: None,
-    };
+    let mut state = worker_state(7);
     for offset in [Duration::ZERO, Duration::from_millis(100)] {
         assert!(handle_observation_trigger(
-            ObservationTrigger::OnDemand { pid: 42 },
+            ObservationTrigger::OnDemand {
+                pid: 42,
+                window_id: 7,
+            },
             started_at + offset,
             &mut api,
             &sender,
@@ -450,6 +462,13 @@ fn on_demand_requests_within_debounce_coalesce_into_one_observation() {
         &eligibility,
     ));
     assert_eq!(api.query_count, 1);
+    assert_eq!(
+        api.queries,
+        [ChromeQuery::FrontWindow {
+            pid: 42,
+            window_id: Some(7),
+        }]
+    );
 }
 
 #[test]
@@ -457,11 +476,7 @@ fn page_load_triggers_one_observation() {
     let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
     let (sender, _) = sync_channel(1);
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
-    let mut state = ChromeWorkerState {
-        navigation: NavigationTracker::default(),
-        frontmost: Some(chrome_app()),
-        on_demand: None,
-    };
+    let mut state = worker_state(7);
 
     assert!(handle_observation_trigger(
         ObservationTrigger::PageLoaded { pid: 42 },
@@ -475,6 +490,8 @@ fn page_load_triggers_one_observation() {
     assert_eq!(api.query_count, 1);
 }
 
+#[path = "tests/focus_out.rs"]
+mod focus_out;
 fn tracker_with_initial_snapshot() -> NavigationTracker {
     let mut tracker = NavigationTracker::default();
     tracker
@@ -490,13 +507,52 @@ fn tracker_with_initial_snapshot() -> NavigationTracker {
 }
 
 fn snapshot(window: &str, tab: &str, url: &str, title: &str) -> ChromeSnapshot {
+    let applescript_window_id = window
+        .rsplit_once('-')
+        .and_then(|(_, id)| id.parse().ok())
+        .unwrap_or(0);
+    let mut snapshot = snapshot_for_window(7, applescript_window_id, tab, url, title);
+    snapshot.window_key = window.to_owned();
+    snapshot
+}
+
+fn snapshot_for_window(
+    window_id: i64,
+    applescript_window_id: i64,
+    tab: &str,
+    url: &str,
+    title: &str,
+) -> ChromeSnapshot {
     ChromeSnapshot {
-        window_id: Some(7),
-        window_key: window.to_owned(),
+        window_id: Some(window_id),
+        applescript_window_id,
+        window_key: applescript_window_id.to_string(),
         window_title: Some(title.to_owned()),
         tab_key: tab.to_owned(),
         url: url.to_owned(),
         tab_title: Some(title.to_owned()),
+    }
+}
+
+fn worker_state(window_id: i64) -> ChromeWorkerState {
+    ChromeWorkerState {
+        navigation: NavigationTracker::default(),
+        frontmost: Some(chrome_focus(window_id)),
+        apps: HashMap::from([(42, chrome_app())]),
+        on_demand: HashMap::new(),
+    }
+}
+
+fn chrome_focus(window_id: i64) -> crate::focus_context::FocusSnapshot {
+    crate::focus_context::FocusSnapshot {
+        app: chrome_app(),
+        window: Some(crate::ffi::window_list::NativeWindow {
+            title: Some("Chrome".to_owned()),
+            id: Some(window_id),
+        }),
+        generation: 1,
+        focused_field: None,
+        field_generation: 1,
     }
 }
 
@@ -512,6 +568,7 @@ fn chrome_app() -> ApplicationInfo {
 struct FakeApi {
     observations: VecDeque<Result<ChromeObservation, &'static str>>,
     query_count: usize,
+    queries: Vec<ChromeQuery>,
 }
 
 impl FakeApi {
@@ -521,6 +578,7 @@ impl FakeApi {
         Self {
             observations: observations.into_iter().collect(),
             query_count: 0,
+            queries: Vec::new(),
         }
     }
 }
@@ -528,8 +586,9 @@ impl FakeApi {
 impl ChromeApi for FakeApi {
     type Error = &'static str;
 
-    fn query(&mut self, _pid: i64) -> Result<ChromeObservation, Self::Error> {
+    fn query(&mut self, query: ChromeQuery) -> Result<ChromeObservation, Self::Error> {
         self.query_count += 1;
+        self.queries.push(query);
         self.observations.pop_front().expect("fake observation")
     }
 }

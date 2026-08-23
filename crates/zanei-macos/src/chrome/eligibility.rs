@@ -22,7 +22,7 @@ enum ChromeWindowState {
 pub enum ChromeEligibilityObservation {
     Normal { window_id: Option<i64>, url: String },
     Incognito { window_id: Option<i64> },
-    Unavailable,
+    Unavailable { window_id: Option<i64> },
 }
 
 #[derive(Clone, Debug)]
@@ -57,7 +57,7 @@ impl ChromeEligibilityPublisher {
         let Ok(pid) = i32::try_from(pid) else {
             return;
         };
-        let (active_key, next_state) = match observation {
+        let (key, next_state) = match observation {
             ChromeEligibilityObservation::Normal { window_id, url } => (
                 window_id.map(|window_id| (pid, window_id)),
                 Some(ChromeWindowState::Normal {
@@ -68,7 +68,16 @@ impl ChromeEligibilityPublisher {
                 window_id.map(|window_id| (pid, window_id)),
                 Some(ChromeWindowState::Incognito),
             ),
-            ChromeEligibilityObservation::Unavailable => (None, None),
+            ChromeEligibilityObservation::Unavailable { window_id } => {
+                let Ok(mut state) = self.state.write() else {
+                    crate::trace::trace!(
+                        "component=chrome phase=eligibility action=observe result=poisoned"
+                    );
+                    return;
+                };
+                mark_unavailable(&mut state, pid, window_id, observed_at);
+                return;
+            }
         };
         let Ok(mut state) = self.state.write() else {
             crate::trace::trace!(
@@ -76,8 +85,7 @@ impl ChromeEligibilityPublisher {
             );
             return;
         };
-        mark_disappeared_windows(&mut state, pid, active_key, observed_at);
-        let Some(key) = active_key else {
+        let Some(key) = key else {
             return;
         };
         if let Some(record) = state.windows.get_mut(&key)
@@ -224,26 +232,39 @@ pub fn chrome_eligibility_channel(
     )
 }
 
-fn mark_disappeared_windows(
+fn mark_unavailable(
     state: &mut EligibilityState,
     pid: i32,
-    active_key: Option<(i32, i64)>,
+    window_id: Option<i64>,
     observed_at: Instant,
 ) {
-    let disappeared: Vec<_> = state
+    if let Some(window_id) = window_id {
+        let key = (pid, window_id);
+        let version = next_version(state);
+        state.windows.insert(
+            key,
+            WindowRecord {
+                state: None,
+                version,
+                observed_at,
+            },
+        );
+        return;
+    }
+    let active: Vec<_> = state
         .windows
         .iter()
-        .filter_map(|(key, record)| {
-            (key.0 == pid && Some(*key) != active_key && record.state.is_some()).then_some(*key)
-        })
+        .filter_map(|(key, record)| (key.0 == pid && record.state.is_some()).then_some(*key))
         .collect();
-    for key in disappeared {
+    for key in active {
         let version = next_version(state);
-        if let Some(record) = state.windows.get_mut(&key) {
-            record.state = None;
-            record.version = version;
-            record.observed_at = observed_at;
-        }
+        let record = state
+            .windows
+            .get_mut(&key)
+            .expect("active Chrome window key remains present");
+        record.state = None;
+        record.version = version;
+        record.observed_at = observed_at;
     }
 }
 
@@ -295,8 +316,34 @@ mod tests {
         assert!(incognito_version > normal_version);
         assert!(!tracker.allows_text(7, Some(11)));
 
-        publisher.observe(7, ChromeEligibilityObservation::Unavailable);
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Unavailable { window_id: None },
+        );
         assert_eq!(tracker.state_version(7, 11), None);
+    }
+
+    #[test]
+    fn observing_another_window_preserves_prior_window_until_targeted_unavailable() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        publisher.observe(7, normal(11, "https://first.example"));
+        let first_version = tracker.state_version(7, 11);
+
+        publisher.observe(7, normal(12, "https://second.example"));
+
+        assert_eq!(tracker.state_version(7, 11), first_version);
+        assert!(tracker.allows_snapshot(7, Some(11)));
+        assert!(tracker.allows_snapshot(7, Some(12)));
+
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Unavailable {
+                window_id: Some(11),
+            },
+        );
+
+        assert_eq!(tracker.state_version(7, 11), None);
+        assert!(tracker.allows_snapshot(7, Some(12)));
     }
 
     #[test]

@@ -28,6 +28,17 @@ pub enum TimelineError {
 struct RawSession {
     events: Vec<TimedEvent>,
     content_snapshots: u64,
+    metadata_span: Option<MetadataSpan>,
+}
+
+#[derive(Clone)]
+struct MetadataSpan {
+    app_name: String,
+    bundle_id: Option<String>,
+    start: String,
+    start_at: OffsetDateTime,
+    end: String,
+    end_at: OffsetDateTime,
 }
 
 #[derive(Clone)]
@@ -115,6 +126,7 @@ fn split_sessions(events: Vec<TimedEvent>) -> Vec<RawSession> {
     let mut current = RawSession {
         events: Vec::new(),
         content_snapshots: 0,
+        metadata_span: None,
     };
     for item in events {
         let split_for_idle = current
@@ -131,6 +143,7 @@ fn split_sessions(events: Vec<TimedEvent>) -> Vec<RawSession> {
             current = RawSession {
                 events: Vec::new(),
                 content_snapshots: 0,
+                metadata_span: None,
             };
         }
         current.events.push(item);
@@ -142,7 +155,7 @@ fn split_sessions(events: Vec<TimedEvent>) -> Vec<RawSession> {
 }
 
 fn assign_content_snapshots(
-    sessions: &mut [RawSession],
+    sessions: &mut Vec<RawSession>,
     metadata: &[EventMetadata],
 ) -> Result<(), TimelineError> {
     let mut timed = metadata
@@ -159,34 +172,62 @@ fn assign_content_snapshots(
         .collect::<Result<Vec<_>, TimelineError>>()?;
     timed.sort_unstable_by_key(|(at, _)| *at);
     for (at, item) in timed {
-        let started_before =
-            |session: &RawSession| session.events.first().is_some_and(|event| event.at <= at);
-        let matching = sessions.iter().rposition(|session| {
-            started_before(session) && snapshot_matches_session(item, session)
+        let matching = sessions.iter().enumerate().rposition(|(index, session)| {
+            session
+                .start_at()
+                .is_some_and(|session_start| session_start <= at)
+                && snapshot_matches_session(item, session)
+                && snapshot_session_is_open(sessions, index, item, at)
         });
-        let by_time = sessions.iter().rposition(started_before);
-        if let Some(session) = matching
-            .or(by_time)
-            .and_then(|index| sessions.get_mut(index))
-        {
+        if let Some(session) = matching.and_then(|index| sessions.get_mut(index)) {
             session.content_snapshots = session.content_snapshots.saturating_add(1);
+            if let Some(span) = &mut session.metadata_span {
+                span.end.clone_from(&item.ts);
+                span.end_at = at;
+            }
+            continue;
         }
+
+        let insertion = sessions
+            .iter()
+            .position(|session| session.start_at().is_some_and(|start| start > at))
+            .unwrap_or(sessions.len());
+        sessions.insert(insertion, RawSession::from_snapshot(item, at));
     }
     Ok(())
 }
 
 fn snapshot_matches_session(metadata: &EventMetadata, session: &RawSession) -> bool {
-    let Some(event) = session.events.first().map(|item| &item.event) else {
+    match metadata.bundle_id.as_deref() {
+        Some(bundle_id) => session
+            .bundle_id()
+            .is_some_and(|session_bundle| session_bundle.eq_ignore_ascii_case(bundle_id)),
+        None => session
+            .app_name()
+            .is_some_and(|app_name| app_name.eq_ignore_ascii_case(&metadata.app_name)),
+    }
+}
+
+fn snapshot_session_is_open(
+    sessions: &[RawSession],
+    index: usize,
+    metadata: &EventMetadata,
+    snapshot_at: OffsetDateTime,
+) -> bool {
+    let session = &sessions[index];
+    if !session.events.is_empty() {
+        return true;
+    }
+    let Some(start_at) = session.start_at() else {
         return false;
     };
-    match metadata.bundle_id.as_deref() {
-        Some(bundle_id) => event
-            .app
-            .bundle_id
-            .as_deref()
-            .is_some_and(|session_bundle| session_bundle.eq_ignore_ascii_case(bundle_id)),
-        None => event.app.name.eq_ignore_ascii_case(&metadata.app_name),
-    }
+    !sessions.iter().any(|candidate| {
+        !candidate.events.is_empty()
+            && candidate
+                .start_at()
+                .is_some_and(|at| at > start_at && at <= snapshot_at)
+            && !snapshot_matches_session(metadata, candidate)
+    })
 }
 
 fn sessions_for_granularity(sessions: &[RawSession], granularity: Granularity) -> Vec<RawSession> {
@@ -203,7 +244,10 @@ fn absorb_bounces(sessions: &[RawSession]) -> Vec<RawSession> {
         output.push(session.clone());
         while output.len() >= 3 {
             let last = output.len() - 1;
-            if primary_app_key(&output[last - 2]) != primary_app_key(&output[last])
+            if output[last - 2].events.is_empty()
+                || output[last - 1].events.is_empty()
+                || output[last].events.is_empty()
+                || primary_app_key(&output[last - 2]) != primary_app_key(&output[last])
                 || session_residence(&output[last - 1], &output[last]) >= BOUNCE
             {
                 break;
@@ -214,11 +258,15 @@ fn absorb_bounces(sessions: &[RawSession]) -> Vec<RawSession> {
             let trailing = trio.remove(0);
             leading.events.extend(bounce.events);
             leading.events.extend(trailing.events);
-            leading.content_snapshots += bounce.content_snapshots + trailing.content_snapshots;
+            leading.content_snapshots = leading
+                .content_snapshots
+                .saturating_add(bounce.content_snapshots)
+                .saturating_add(trailing.content_snapshots);
             let events = leading.events;
             output.push(RawSession {
                 events,
                 content_snapshots: leading.content_snapshots,
+                metadata_span: None,
             });
         }
     }
@@ -226,8 +274,8 @@ fn absorb_bounces(sessions: &[RawSession]) -> Vec<RawSession> {
 }
 
 fn session_residence(session: &RawSession, next: &RawSession) -> Duration {
-    let start = session.events.first().map(|item| item.at);
-    let next_start = next.events.first().map(|item| item.at);
+    let start = session.start_at();
+    let next_start = next.start_at();
     match (start, next_start) {
         (Some(start), Some(end)) => end - start,
         _ => Duration::ZERO,
@@ -258,16 +306,16 @@ fn build_session(raw: &RawSession, granularity: Granularity, format: TimelineFor
     event_ids.truncate(MAX_EVENT_IDS);
     Session {
         start: raw
-            .events
-            .first()
-            .map_or_else(String::new, |item| item.event.ts.clone()),
-        end: raw
-            .events
-            .last()
-            .map_or_else(String::new, |item| item.event.ts.clone()),
+            .start_timestamp()
+            .map_or_else(String::new, str::to_owned),
+        end: raw.end_timestamp().map_or_else(String::new, str::to_owned),
         app: app.clone(),
         title_summary: longest_title(raw),
-        activities: summarize(&events, &app),
+        activities: if events.is_empty() {
+            Vec::new()
+        } else {
+            summarize(&events, &app)
+        },
         content_snapshots: raw.content_snapshots,
         event_ids: (format == TimelineFormat::Json).then_some(event_ids),
         event_ids_truncated,
@@ -284,6 +332,9 @@ fn build_session(raw: &RawSession, granularity: Granularity, format: TimelineFor
 }
 
 fn dominant_app(session: &RawSession) -> String {
+    if session.events.is_empty() {
+        return session.app_name().unwrap_or_default().to_owned();
+    }
     let mut dwell = BTreeMap::<String, i128>::new();
     for (index, item) in session.events.iter().enumerate() {
         let next = session
@@ -338,7 +389,11 @@ fn merge_adjacent_same_app(sessions: Vec<RawSession>) -> Vec<RawSession> {
             && primary_app_key(previous) == primary_app_key(&session)
         {
             previous.events.extend(session.events);
-            previous.content_snapshots += session.content_snapshots;
+            previous.content_snapshots = previous
+                .content_snapshots
+                .saturating_add(session.content_snapshots);
+            previous.metadata_span =
+                merge_metadata_spans(previous.metadata_span.take(), session.metadata_span);
         } else {
             output.push(session);
         }
@@ -347,10 +402,20 @@ fn merge_adjacent_same_app(sessions: Vec<RawSession>) -> Vec<RawSession> {
 }
 
 fn primary_app_key(session: &RawSession) -> String {
-    session
-        .events
-        .first()
-        .map_or_else(String::new, |item| app_key(&item.event))
+    session.events.first().map_or_else(
+        || {
+            session
+                .metadata_span
+                .as_ref()
+                .map_or_else(String::new, |span| {
+                    span.bundle_id
+                        .as_deref()
+                        .unwrap_or(&span.app_name)
+                        .to_ascii_lowercase()
+                })
+        },
+        |item| app_key(&item.event),
+    )
 }
 
 fn app_key(event: &Event) -> String {
@@ -360,6 +425,95 @@ fn app_key(event: &Event) -> String {
         .as_deref()
         .unwrap_or(&event.app.name)
         .to_ascii_lowercase()
+}
+
+impl RawSession {
+    fn from_snapshot(metadata: &EventMetadata, at: OffsetDateTime) -> Self {
+        Self {
+            events: Vec::new(),
+            content_snapshots: 1,
+            metadata_span: Some(MetadataSpan {
+                app_name: metadata.app_name.clone(),
+                bundle_id: metadata.bundle_id.clone(),
+                start: metadata.ts.clone(),
+                start_at: at,
+                end: metadata.ts.clone(),
+                end_at: at,
+            }),
+        }
+    }
+
+    fn start_at(&self) -> Option<OffsetDateTime> {
+        match (self.events.first(), &self.metadata_span) {
+            (Some(event), Some(span)) => Some(event.at.min(span.start_at)),
+            (Some(event), None) => Some(event.at),
+            (None, Some(span)) => Some(span.start_at),
+            (None, None) => None,
+        }
+    }
+
+    fn start_timestamp(&self) -> Option<&str> {
+        match (self.events.first(), &self.metadata_span) {
+            (Some(event), Some(span)) if event.at <= span.start_at => Some(&event.event.ts),
+            (Some(_), Some(span)) => Some(&span.start),
+            (Some(event), None) => Some(&event.event.ts),
+            (None, Some(span)) => Some(&span.start),
+            (None, None) => None,
+        }
+    }
+
+    fn end_timestamp(&self) -> Option<&str> {
+        match (self.events.last(), &self.metadata_span) {
+            (Some(event), Some(span)) if event.at >= span.end_at => Some(&event.event.ts),
+            (Some(_), Some(span)) => Some(&span.end),
+            (Some(event), None) => Some(&event.event.ts),
+            (None, Some(span)) => Some(&span.end),
+            (None, None) => None,
+        }
+    }
+
+    fn app_name(&self) -> Option<&str> {
+        self.events.first().map_or_else(
+            || {
+                self.metadata_span
+                    .as_ref()
+                    .map(|span| span.app_name.as_str())
+            },
+            |event| Some(event.event.app.name.as_str()),
+        )
+    }
+
+    fn bundle_id(&self) -> Option<&str> {
+        self.events.first().map_or_else(
+            || {
+                self.metadata_span
+                    .as_ref()
+                    .and_then(|span| span.bundle_id.as_deref())
+            },
+            |event| event.event.app.bundle_id.as_deref(),
+        )
+    }
+}
+
+fn merge_metadata_spans(
+    left: Option<MetadataSpan>,
+    right: Option<MetadataSpan>,
+) -> Option<MetadataSpan> {
+    match (left, right) {
+        (Some(mut left), Some(right)) => {
+            if right.start_at < left.start_at {
+                left.start = right.start;
+                left.start_at = right.start_at;
+            }
+            if right.end_at > left.end_at {
+                left.end = right.end;
+                left.end_at = right.end_at;
+            }
+            Some(left)
+        }
+        (Some(span), None) | (None, Some(span)) => Some(span),
+        (None, None) => None,
+    }
 }
 
 fn update_estimate(

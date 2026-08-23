@@ -8,17 +8,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zanei_core::config::FilterConfig;
+use zanei_core::{config::FilterConfig, privacy::PrivacyScope};
 
 use crate::{
     CapturePolicy,
     chrome::{ChromeObserver, chrome_eligibility_channel},
     content_snapshot::{
-        SharedHealth, SnapshotAxError, SnapshotTriggerKind, SnapshotWalkOutput,
+        Control, SharedHealth, SnapshotAxError, SnapshotTriggerKind, SnapshotWalkOutput,
+        scheduler::{SETTLE_QUIET_INTERVAL, SnapshotScheduler},
         snapshot_trigger_channel,
         state::SnapshotState,
         tests::walker::FakeNode,
-        worker::{SnapshotApplication, run_worker_with_scanner, scan_application},
+        worker::{
+            SnapshotApplication, run_worker_with_scanner, scan_application, service_controls,
+        },
     },
     focus_context::FocusContext,
     secure_input::secure_input_test_channel,
@@ -97,6 +100,66 @@ fn unknown_candidate_window_id_fails_closed() {
 }
 
 #[test]
+fn filter_reload_rearms_focused_target_and_clears_pid_backoff() {
+    let observed_at = Instant::now();
+    let reload_at = observed_at + Duration::from_secs(12);
+    let target = trigger(7, 11, SnapshotTriggerKind::Focus, observed_at);
+    let excluded_filter = FilterConfig {
+        exclude_apps: vec!["dev.example.App".to_owned()],
+        ..FilterConfig::default()
+    };
+    let (_chrome_publisher, chrome) = chrome_eligibility_channel(excluded_filter.clone());
+    let policy = CapturePolicy::new(chrome, excluded_filter, None);
+    assert!(
+        !policy
+            .decision(
+                PrivacyScope::ContentSnapshot,
+                &target.app.raw_app(),
+                target.window.id,
+            )
+            .is_allowed()
+    );
+
+    let mut scheduler = SnapshotScheduler::default();
+    scheduler.observe(target.clone());
+    let mut state = SnapshotState::new(observed_at);
+    state.record_failure(7, observed_at, true);
+    assert!(!state.backoff_allows(7, observed_at));
+
+    policy.replace_filter(FilterConfig::default());
+    assert!(
+        policy
+            .decision(
+                PrivacyScope::ContentSnapshot,
+                &target.app.raw_app(),
+                target.window.id,
+            )
+            .is_allowed()
+    );
+
+    let (control, controls) = channel();
+    let (acknowledge, acknowledged) = sync_channel(1);
+    control
+        .send(Control::ReplaceFilter { acknowledge })
+        .expect("send filter replacement");
+
+    assert!(!service_controls(
+        &controls,
+        &mut scheduler,
+        &mut state,
+        reload_at,
+    ));
+    acknowledged
+        .recv()
+        .expect("filter replacement acknowledged");
+    assert_eq!(
+        scheduler.next_deadline(),
+        Some(reload_at + SETTLE_QUIET_INTERVAL)
+    );
+    assert!(state.backoff_allows(7, reload_at));
+}
+
+#[test]
 fn secure_input_enabled_after_walk_discards_the_snapshot() {
     let (trigger_publisher, trigger_receiver) = snapshot_trigger_channel();
     let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
@@ -143,6 +206,7 @@ fn secure_input_enabled_after_walk_discards_the_snapshot() {
                         complete: true,
                         cutoff: None,
                         degraded_nodes: 0,
+                        frameless_nodes: 0,
                     }))
                 },
             );

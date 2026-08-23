@@ -165,8 +165,14 @@ impl SnapshotScheduler {
         self.clear();
     }
 
-    pub(crate) const fn replace_filter(&mut self) {
-        // Filter generations change policy only; pending deadlines intentionally survive.
+    pub(crate) fn replace_filter(&mut self, now: Instant) -> Option<i64> {
+        let current = self.current.as_mut()?;
+        current.first_change = now;
+        current.last_change = now;
+        current.settle_due = Some(now + SETTLE_QUIET_INTERVAL);
+        current.refresh_index = 0;
+        current.refresh_due = now + REFRESH_INTERVALS[0];
+        Some(current.target.app.pid)
     }
 
     pub(crate) fn pause(&mut self) {
