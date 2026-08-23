@@ -6,7 +6,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 use zanei_core::config::{Config, parse_time_expression};
 use zanei_core::normalize::format_timestamp;
-use zanei_core::store::{QueryFilter, StoreError, export_plain_sqlite};
+use zanei_core::store::{MetadataFilter, QueryFilter, StoreError, export_plain_sqlite};
 use zanei_core::timeline::{
     Granularity, TimeRange, TimelineFormat, TimelineOptions, build, serialize,
 };
@@ -72,7 +72,8 @@ pub fn timeline(
 ) -> Result<u8, CliError> {
     let configured_retention_hours = Config::load(config_path)?.output.retention_hours;
     let (since, until) = range(&args.since, &args.until)?;
-    let result = store_access::open_reader(store_path, KeyPrompt::Allowed)?.query(
+    let reader = store_access::open_reader(store_path, KeyPrompt::Allowed)?;
+    let result = reader.query(
         &QueryFilter {
             since: Some(since.clone()),
             until: Some(until.clone()),
@@ -80,6 +81,14 @@ pub fn timeline(
         },
         configured_retention_hours,
     )?;
+    let snapshot_metadata = reader.query_metadata(&MetadataFilter {
+        since: Some(since.clone()),
+        until: Some(until.clone()),
+        types: vec!["content.snapshot".to_owned()],
+        app: None,
+        bundle_id: None,
+        configured_retention_hours,
+    })?;
     let format = if json {
         TimelineFormat::Json
     } else {
@@ -90,6 +99,7 @@ pub fn timeline(
     };
     let timeline = build(
         &result.events,
+        &snapshot_metadata,
         &TimelineOptions {
             range: TimeRange { since, until },
             token_budget: args.token_budget,

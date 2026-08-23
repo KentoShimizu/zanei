@@ -11,7 +11,9 @@ use crate::schema::{
 };
 
 pub(crate) use limits::enforce_size_limits;
-pub use limits::{TEXT_FIELD_MAX_BYTES, URL_TITLE_FIELD_MAX_BYTES};
+pub use limits::{
+    CONTENT_SNAPSHOT_SAFETY_MAX_BYTES, TEXT_FIELD_MAX_BYTES, URL_TITLE_FIELD_MAX_BYTES,
+};
 
 const NANOS_PER_MILLISECOND: u32 = 1_000_000;
 const KEY_GAP_NS: u64 = 2_000_000_000;
@@ -173,8 +175,13 @@ pub fn normalize(
         data,
         capture_context,
     } = raw;
+    let version = crate::schema::event_schema_version(&event_type).ok_or_else(|| {
+        NormalizeError::EventContract(<serde_json::Error as serde::de::Error>::custom(format!(
+            "unknown event type: {event_type}"
+        )))
+    })?;
     let mut event = Event {
-        version: crate::schema::EVENT_SCHEMA_VERSION,
+        version,
         id: format!("evt_{id}"),
         ts: format_timestamp(wall_time),
         mono_ns,

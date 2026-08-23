@@ -1,9 +1,7 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Serialize;
 use zanei_collector::Permission;
-use zanei_core::config::{CaptureSource, Config};
+use zanei_core::config::Config;
 use zanei_core::store::{
     DaemonPermissions, LockedReason, PermissionState, StoreError, StoreFormat, StoreStatus,
 };
@@ -13,16 +11,18 @@ use crate::error::CliError;
 use crate::permissions::probe_permissions;
 use crate::store_access::{self, KeyAccess, KeyPrompt};
 
+mod model;
 mod render;
+mod requirements;
 
+#[cfg(test)]
+use model::AutomationDetail;
+use model::{DoctorReport, PermissionReport, StatusDetail, StoreKeyReport};
 use render::{guide_granting, print_human};
-
-const ACCESSIBILITY_PANE: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
-const INPUT_MONITORING_PANE: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
-const AUTOMATION_PANE: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation";
+use requirements::{
+    accessibility_events, estimated_permissions, input_events, permission_name_and_pane,
+    snapshot_status, status_name,
+};
 const STARTED_WITH_MISSING_PERMISSIONS: &str = "Zanei recording started with missing permissions — grant them, then run `zanei stop && zanei start`.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,7 +133,7 @@ fn store_key_report(store_path: &Path) -> StoreKeyReport {
 }
 
 fn evaluate(config: &Config, status: Option<&StoreStatus>) -> Result<DoctorReport, CliError> {
-    let required = crate::daemon::required_permissions_for(config);
+    let required = estimated_permissions(config);
     let (snapshot, reported_by_recorder) = permissions_for_status(status, || {
         probe_permissions(&required).map_err(CliError::from)
     })?;
@@ -176,7 +176,10 @@ fn build_report(
             Permission::Accessibility => {
                 permissions.accessibility = StatusDetail {
                     status: status_name(status),
-                    required_for: accessibility_events(&config.capture.sources),
+                    required_for: accessibility_events(
+                        &config.capture.sources,
+                        config.capture.content_snapshot,
+                    ),
                 };
             }
             Permission::InputMonitoring => {
@@ -225,143 +228,6 @@ fn build_report(
         reported_by_recorder,
         store_key: StoreKeyReport::default(),
     })
-}
-
-fn snapshot_status(
-    snapshot: &DaemonPermissions,
-    permission: &Permission,
-) -> Option<PermissionState> {
-    match permission {
-        Permission::Accessibility => Some(snapshot.accessibility),
-        Permission::InputMonitoring => Some(snapshot.input_monitoring),
-        Permission::Automation { bundle_id } => snapshot.automation.get(bundle_id).copied(),
-    }
-}
-
-fn permission_name_and_pane(permission: &Permission) -> (&'static str, &'static str) {
-    match permission {
-        Permission::Accessibility => ("accessibility", ACCESSIBILITY_PANE),
-        Permission::InputMonitoring => ("input_monitoring", INPUT_MONITORING_PANE),
-        Permission::Automation { .. } => ("automation", AUTOMATION_PANE),
-    }
-}
-
-const fn status_name(status: PermissionState) -> &'static str {
-    match status {
-        PermissionState::Granted => "granted",
-        PermissionState::Denied => "denied",
-        PermissionState::NotDetermined => "not_determined",
-    }
-}
-
-fn accessibility_events(sources: &[CaptureSource]) -> Vec<&'static str> {
-    let mut events = Vec::new();
-    if sources.contains(&CaptureSource::Window) {
-        events.extend(["window.focus", "window.title"]);
-    }
-    if sources.contains(&CaptureSource::Ui) {
-        events.extend(["ui.focus", "ui.click", "ui.value"]);
-    }
-    events
-}
-
-fn input_events(sources: &[CaptureSource]) -> Vec<&'static str> {
-    let mut events = Vec::new();
-    if sources.contains(&CaptureSource::Input) {
-        events.extend([
-            "input.key",
-            "input.scroll",
-            "clipboard.copy",
-            "clipboard.paste",
-        ]);
-    }
-    if sources.contains(&CaptureSource::Ui) {
-        events.push("ui.click");
-    }
-    events
-}
-
-#[derive(Debug, Serialize)]
-struct DoctorReport {
-    ok: bool,
-    capture_sources: Vec<&'static str>,
-    permissions: PermissionReport,
-    missing_required: Vec<&'static str>,
-    settings_pane: Option<&'static str>,
-    #[serde(skip)]
-    missing_permissions: Vec<Permission>,
-    reported_by_recorder: bool,
-    store_key: StoreKeyReport,
-}
-
-/// Where the store's encryption key is, or why it is not.
-#[derive(Debug, Serialize)]
-pub(crate) struct StoreKeyReport {
-    state: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-}
-
-impl Default for StoreKeyReport {
-    fn default() -> Self {
-        Self::new("not_needed", None)
-    }
-}
-
-impl StoreKeyReport {
-    const fn new(state: &'static str, detail: Option<String>) -> Self {
-        Self { state, detail }
-    }
-
-    fn from_locked(reason: &LockedReason) -> Self {
-        match reason {
-            LockedReason::KeyMissing => Self::new("missing", None),
-            LockedReason::KeyMismatch => Self::new("mismatch", None),
-            LockedReason::KeyStoreLocked(advice) => {
-                Self::new("key_store_locked", Some(advice.clone()))
-            }
-            LockedReason::KeyStoreDenied(advice) => {
-                Self::new("key_store_denied", Some(advice.clone()))
-            }
-            LockedReason::KeyUnavailable(detail) => Self::new("unavailable", Some(detail.clone())),
-        }
-    }
-
-    pub(super) fn describe(&self) -> String {
-        match (self.state, self.detail.as_deref()) {
-            ("key_store", Some(location)) => format!("in {location}"),
-            ("key_store", None) => "in the platform key store".to_owned(),
-            ("not_needed", _) => "not needed yet (the store is not encrypted)".to_owned(),
-            ("missing", _) => {
-                "missing: the store is encrypted but no key for it is available".to_owned()
-            }
-            ("mismatch", _) => "does not decrypt this store".to_owned(),
-            ("key_store_locked" | "key_store_denied", Some(advice)) => {
-                format!("unavailable: {advice}")
-            }
-            (_, Some(detail)) => format!("unavailable ({detail})"),
-            _ => "unavailable".to_owned(),
-        }
-    }
-}
-
-#[derive(Debug, Default, Serialize)]
-struct PermissionReport {
-    accessibility: StatusDetail,
-    input_monitoring: StatusDetail,
-    automation: AutomationDetail,
-}
-
-#[derive(Debug, Default, Serialize)]
-struct StatusDetail {
-    status: &'static str,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    required_for: Vec<&'static str>,
-}
-
-#[derive(Debug, Default, Serialize)]
-struct AutomationDetail {
-    per_app: BTreeMap<String, &'static str>,
 }
 
 #[cfg(test)]
@@ -611,6 +477,36 @@ mod tests {
         assert_eq!(
             report.permissions.input_monitoring.required_for,
             ["ui.click"]
+        );
+    }
+
+    #[test]
+    fn content_snapshot_permissions_and_required_for_match_collector_selection() {
+        super::requirements::assert_estimate_matches_collector_matrix();
+
+        let mut content = Config::default();
+        content.capture.sources.clear();
+        content.capture.content_snapshot = true;
+        let required = crate::daemon::required_permissions_for(&content);
+        let snapshot = DaemonPermissions {
+            permissions_ok: false,
+            accessibility: PermissionState::Denied,
+            input_monitoring: PermissionState::Granted,
+            automation: BTreeMap::from([(
+                "com.google.Chrome".to_owned(),
+                PermissionState::NotDetermined,
+            )]),
+        };
+        let report = build_report(&content, &required, snapshot, false).expect("doctor report");
+
+        assert_eq!(
+            report.permissions.accessibility.required_for,
+            ["content.snapshot"]
+        );
+        assert_eq!(report.missing_required, ["accessibility"]);
+        assert_eq!(
+            report.permissions.automation.per_app["com.google.Chrome"],
+            "not_determined"
         );
     }
 

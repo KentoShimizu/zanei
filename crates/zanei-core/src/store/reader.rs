@@ -9,9 +9,10 @@ use time::format_description::well_known::Rfc3339;
 use super::RetiredPlaintext;
 use super::{
     COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
-    DaemonPermissions, HEARTBEAT_STALE_AFTER_SECONDS, LEGACY_STORE_SCHEMA_VERSION, QueryFilter,
-    QueryResult, RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreFormat,
-    StoreKey, StoreStatus, file_uri, retention_cutoff, retired_plaintext_stores, store_uri, unlock,
+    DaemonPermissions, HEARTBEAT_STALE_AFTER_SECONDS, LEGACY_STORE_SCHEMA_VERSION,
+    PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION, QueryFilter, QueryResult,
+    RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreFormat, StoreKey,
+    StoreStatus, file_uri, retention_cutoff, retired_plaintext_stores, store_uri, unlock,
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
@@ -207,7 +208,7 @@ impl StoreReader {
         &self.connection
     }
 
-    fn effective_retention_hours_at(
+    pub(super) fn effective_retention_hours_at(
         &self,
         now: OffsetDateTime,
         configured_retention_hours: u64,
@@ -245,6 +246,13 @@ impl StoreReader {
             ..StoreStatus::default()
         }
         .effective_retention_hours(configured_retention_hours))
+    }
+
+    pub fn query_metadata(
+        &self,
+        filter: &super::MetadataFilter,
+    ) -> Result<Vec<super::EventMetadata>, StoreError> {
+        super::event_metadata::run(self, filter)
     }
 
     pub fn status(&self) -> Result<StoreStatus, StoreError> {
@@ -293,7 +301,7 @@ impl StoreReader {
                  collector_failures_json, NULL \
                  FROM daemon_state WHERE id = 1"
             }
-            STORE_SCHEMA_VERSION => {
+            PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION | STORE_SCHEMA_VERSION => {
                 "SELECT pid, started_at, instance_id, mode, heartbeat_at, retention_hours, \
                  paused_until, events_captured, events_dropped, last_event_ts, degraded_json, \
                  collector_failures_json, last_known_permissions_json \
@@ -327,11 +335,12 @@ impl StoreReader {
             .and_then(|state| state.last_known_permissions_json.as_deref())
             .map(|json| deserialize_permissions("last_known_permissions_json", json))
             .transpose()?;
-        let last_known_permissions = if self.schema_version < STORE_SCHEMA_VERSION {
-            permissions.clone()
-        } else {
-            last_known_permissions
-        };
+        let last_known_permissions =
+            if self.schema_version < PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION {
+                permissions.clone()
+            } else {
+                last_known_permissions
+            };
         transaction.commit()?;
         state.map_or_else(
             || Ok(StoreStatus::default()),
@@ -480,6 +489,7 @@ fn readable_schema_version(connection: &Connection) -> Result<i64, StoreError> {
             | DAEMON_IDENTITY_STORE_SCHEMA_VERSION
             | RETENTION_STORE_SCHEMA_VERSION
             | COLLECTOR_FAILURES_STORE_SCHEMA_VERSION
+            | PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION
             | STORE_SCHEMA_VERSION
     ) {
         Ok(version)

@@ -88,6 +88,14 @@ impl ScopeSummary {
     pub(crate) fn prompt_sites(&self) -> String {
         prompt_axis(&self.sites, "site")
     }
+
+    pub(crate) fn status_apps(&self) -> String {
+        status_axis(&self.apps)
+    }
+
+    pub(crate) fn status_sites(&self) -> String {
+        status_axis(&self.sites)
+    }
 }
 
 pub(super) fn show(config: &Config, candidates: &[AppCandidate]) {
@@ -233,6 +241,14 @@ fn show_axis(axis: &AxisSummary) -> String {
         output.push(']');
     }
     output
+}
+
+fn status_axis(axis: &AxisSummary) -> String {
+    let mode = match axis.mode {
+        ScopeMode::Exclude => "exclude",
+        ScopeMode::Only => "only",
+    };
+    format!("{mode} {}", axis.entries.len())
 }
 
 fn preview_names(entries: &[SummaryEntry]) -> String {

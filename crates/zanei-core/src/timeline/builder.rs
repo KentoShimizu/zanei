@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::schema::{Event, EventData};
+use crate::store::EventMetadata;
 
 use super::activity::{describe, summarize};
 use super::model::{Granularity, Interaction, Session, Timeline, TimelineFormat, TimelineOptions};
@@ -26,6 +27,7 @@ pub enum TimelineError {
 #[derive(Clone)]
 struct RawSession {
     events: Vec<TimedEvent>,
+    content_snapshots: u64,
 }
 
 #[derive(Clone)]
@@ -34,7 +36,11 @@ struct TimedEvent {
     at: OffsetDateTime,
 }
 
-pub fn build(events: &[Event], options: &TimelineOptions) -> Result<Timeline, TimelineError> {
+pub fn build(
+    events: &[Event],
+    snapshot_metadata: &[EventMetadata],
+    options: &TimelineOptions,
+) -> Result<Timeline, TimelineError> {
     if options.token_budget < MIN_TIMELINE_TOKEN_BUDGET_TOKENS {
         return Err(TimelineError::TokenBudgetBelowMinimum {
             minimum: MIN_TIMELINE_TOKEN_BUDGET_TOKENS,
@@ -42,7 +48,8 @@ pub fn build(events: &[Event], options: &TimelineOptions) -> Result<Timeline, Ti
     }
     let mut timed = parse_events(events)?;
     timed.sort_by_key(|item| (item.at, item.event.mono_ns));
-    let base_sessions = split_sessions(timed);
+    let mut base_sessions = split_sessions(timed);
+    assign_content_snapshots(&mut base_sessions, snapshot_metadata)?;
     let mut granularity = options.granularity;
     let mut raw_sessions = sessions_for_granularity(&base_sessions, granularity);
     let mut timeline = assemble(&raw_sessions, options, granularity);
@@ -105,7 +112,10 @@ fn parse_events(events: &[Event]) -> Result<Vec<TimedEvent>, TimelineError> {
 
 fn split_sessions(events: Vec<TimedEvent>) -> Vec<RawSession> {
     let mut sessions = Vec::new();
-    let mut current = RawSession { events: Vec::new() };
+    let mut current = RawSession {
+        events: Vec::new(),
+        content_snapshots: 0,
+    };
     for item in events {
         let split_for_idle = current
             .events
@@ -118,7 +128,10 @@ fn split_sessions(events: Vec<TimedEvent>) -> Vec<RawSession> {
                 .is_some_and(|previous| app_key(&previous.event) != app_key(&item.event));
         if (split_for_idle || split_for_activation) && !current.events.is_empty() {
             sessions.push(current);
-            current = RawSession { events: Vec::new() };
+            current = RawSession {
+                events: Vec::new(),
+                content_snapshots: 0,
+            };
         }
         current.events.push(item);
     }
@@ -126,6 +139,33 @@ fn split_sessions(events: Vec<TimedEvent>) -> Vec<RawSession> {
         sessions.push(current);
     }
     sessions
+}
+
+fn assign_content_snapshots(
+    sessions: &mut [RawSession],
+    metadata: &[EventMetadata],
+) -> Result<(), TimelineError> {
+    let mut timed = metadata
+        .iter()
+        .map(|item| {
+            OffsetDateTime::parse(&item.ts, &Rfc3339).map_err(|_| TimelineError::InvalidTimestamp {
+                event_id: item.id.clone(),
+                timestamp: item.ts.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    timed.sort_unstable();
+    for at in timed {
+        let insertion = sessions
+            .partition_point(|session| session.events.first().is_some_and(|event| event.at <= at));
+        if let Some(session) = insertion
+            .checked_sub(1)
+            .and_then(|index| sessions.get_mut(index))
+        {
+            session.content_snapshots += 1;
+        }
+    }
+    Ok(())
 }
 
 fn sessions_for_granularity(sessions: &[RawSession], granularity: Granularity) -> Vec<RawSession> {
@@ -153,8 +193,12 @@ fn absorb_bounces(sessions: &[RawSession]) -> Vec<RawSession> {
             let trailing = trio.remove(0);
             leading.events.extend(bounce.events);
             leading.events.extend(trailing.events);
+            leading.content_snapshots += bounce.content_snapshots + trailing.content_snapshots;
             let events = leading.events;
-            output.push(RawSession { events });
+            output.push(RawSession {
+                events,
+                content_snapshots: leading.content_snapshots,
+            });
         }
     }
     output
@@ -203,6 +247,7 @@ fn build_session(raw: &RawSession, granularity: Granularity, format: TimelineFor
         app: app.clone(),
         title_summary: longest_title(raw),
         activities: summarize(&events, &app),
+        content_snapshots: raw.content_snapshots,
         event_ids: (format == TimelineFormat::Json).then_some(event_ids),
         event_ids_truncated,
         interactions: (granularity == Granularity::Fine).then(|| {
@@ -272,6 +317,7 @@ fn merge_adjacent_same_app(sessions: Vec<RawSession>) -> Vec<RawSession> {
             && primary_app_key(previous) == primary_app_key(&session)
         {
             previous.events.extend(session.events);
+            previous.content_snapshots += session.content_snapshots;
         } else {
             output.push(session);
         }

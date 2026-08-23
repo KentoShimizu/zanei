@@ -13,9 +13,10 @@ use zanei_core::config::DEFAULT_RETENTION_HOURS;
 use zanei_core::normalize::{format_timestamp, normalize};
 use zanei_core::schema::{
     App, BrowserMode, BrowserNavigateData, BrowserTransition, ClickButton, ClipboardCopyData,
-    ClipboardOrigin, ClipboardPasteData, ContentKind, Element, EmptyData, Event, EventData,
-    FieldKind, InputKeyData, InputKeyKind, InputScrollData, KNOWN_EVENT_TYPES, RawEvent,
-    ScrollDirection, UiClickData, UiFocusData, UiValueData, Window, WindowTitleData,
+    ClipboardOrigin, ClipboardPasteData, ContentKind, ContentSnapshotData, ContentSnapshotTrigger,
+    Element, EmptyData, Event, EventData, FieldKind, InputKeyData, InputKeyKind, InputScrollData,
+    KNOWN_EVENT_TYPES, RawEvent, ScrollDirection, UiClickData, UiFocusData, UiValueData, Window,
+    WindowTitleData,
 };
 use zanei_core::store::{
     DaemonMode, DaemonPermissions, DaemonState, PermissionState, StoreKey, StoreReader, StoreWriter,
@@ -293,6 +294,15 @@ fn event_payloads() -> Vec<(&'static str, EventData)> {
                 field_kind: Some(FieldKind::Text),
             }),
         ),
+        (
+            "content.snapshot",
+            EventData::ContentSnapshot(ContentSnapshotData {
+                text: Some("Visible fixture snapshot".to_owned()),
+                chars: 24,
+                complete: true,
+                trigger: ContentSnapshotTrigger::Settle,
+            }),
+        ),
     ]
 }
 
@@ -301,7 +311,10 @@ fn raw_event(event_type: &str, data: EventData) -> RawEvent {
     let has_element = event_type.starts_with("ui.");
     let source = if event_type.starts_with("app.") {
         "macos.workspace"
-    } else if event_type.starts_with("window.") || event_type.starts_with("ui.") {
+    } else if event_type.starts_with("window.")
+        || event_type.starts_with("ui.")
+        || event_type.starts_with("content.")
+    {
         "macos.ax"
     } else if event_type.starts_with("browser.") {
         "macos.applescript"

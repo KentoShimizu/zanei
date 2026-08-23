@@ -77,7 +77,7 @@ impl Pipeline {
         let degraded = Arc::new(Mutex::new(BTreeMap::new()));
         let worker_dropped = Arc::clone(&dropped);
         let worker_degraded = Arc::clone(&degraded);
-        let gate = SourceGate::new(&config.capture.sources);
+        let gate = SourceGate::new(&config.capture.sources, config.capture.content_snapshot);
         let filter = PrivacyFilter::new(config.filter.clone());
         let batch_interval = Duration::from_secs(config.output.batch_interval_s);
         let handle = thread::Builder::new()

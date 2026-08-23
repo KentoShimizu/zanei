@@ -62,6 +62,7 @@ fn redact_payload(data: &mut EventData, rule: RedactorKind) -> bool {
         EventData::InputKey(value) => redact_optional(&mut value.text, rule),
         EventData::ClipboardCopy(value) => redact_optional(&mut value.text, rule),
         EventData::ClipboardPaste(value) => redact_optional(&mut value.text, rule),
+        EventData::ContentSnapshot(value) => redact_optional(&mut value.text, rule),
         EventData::BrowserNavigate(value) => {
             let url_changed = redact_optional(value.url.as_option_mut(), rule);
             url_changed | redact_optional(&mut value.tab_title, rule)

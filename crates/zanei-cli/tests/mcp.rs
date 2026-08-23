@@ -71,6 +71,7 @@ fn mcp_stdio_exposes_three_tools_and_contract_results() {
     assert_eq!(status["retention_hours"], 48);
     assert_eq!(status["capture"]["sources"], json!(["app"]));
     assert_eq!(status["capture"]["text_content"], false);
+    assert_eq!(status["capture"]["content_snapshot"], false);
     assert_eq!(status["permissions_ok"], true);
     assert_eq!(status["events_dropped"], 2);
     assert_eq!(status["degraded"], json!({}));
@@ -89,11 +90,11 @@ fn mcp_stdio_exposes_three_tools_and_contract_results() {
             "truncated",
         ],
     );
-    assert_eq!(query["count"], KNOWN_EVENT_TYPES.len());
+    assert_eq!(query["count"], KNOWN_EVENT_TYPES.len() - 1);
     assert_eq!(query["truncated"], false);
     assert_eq!(query["skipped_unknown_types"], 0);
     let events = query["events"].as_array().expect("query events array");
-    assert_eq!(events.len(), KNOWN_EVENT_TYPES.len());
+    assert_eq!(events.len(), KNOWN_EVENT_TYPES.len() - 1);
     assert_keys(
         &events[0],
         &[
@@ -118,7 +119,23 @@ fn mcp_stdio_exposes_three_tools_and_contract_results() {
         .collect();
     assert_eq!(
         event_types,
-        KNOWN_EVENT_TYPES.iter().copied().collect::<BTreeSet<_>>()
+        KNOWN_EVENT_TYPES
+            .iter()
+            .copied()
+            .filter(|event_type| !event_type.starts_with("content."))
+            .collect::<BTreeSet<_>>()
+    );
+
+    let content = client.call_tool(
+        "query_events",
+        json!({ "types": ["content.snapshot"], "limit": 2 }),
+    );
+    assert_eq!(content["count"], 1);
+    assert_eq!(content["events"][0]["type"], "content.snapshot");
+    assert_eq!(content["events"][0]["v"], 2);
+    assert_eq!(
+        content["events"][0]["data"]["text"],
+        "Visible fixture snapshot"
     );
 
     let timeline = client.call_tool("get_timeline", json!({}));
@@ -130,7 +147,9 @@ fn mcp_stdio_exposes_three_tools_and_contract_results() {
     assert!(timeline["range"]["since"].is_string());
     assert!(timeline["range"]["until"].is_string());
     assert!(timeline["content"].as_str().is_some_and(|content| {
-        content.contains("Zanei timeline") && content.contains("FixtureApp")
+        content.contains("Zanei timeline")
+            && content.contains("FixtureApp")
+            && content.contains("Content snapshots: 1")
     }));
     assert!(timeline["token_estimate"].is_number());
     assert_eq!(timeline["truncated"], false);
@@ -170,6 +189,7 @@ fn tool_results_validate_against_the_listed_output_schemas() {
     );
     assert_eq!(structured["skipped_unknown_types"], 0);
     assert_eq!(structured["sessions"][0]["event_ids_truncated"], false);
+    assert_eq!(structured["sessions"][0]["content_snapshots"], 1);
 
     for (name, output) in [
         ("get_status", &status),

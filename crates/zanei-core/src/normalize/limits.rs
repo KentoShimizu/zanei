@@ -4,6 +4,9 @@ use crate::schema::{Event, EventData};
 /// serialization, and batch-memory cost.
 pub const TEXT_FIELD_MAX_BYTES: usize = 64 * 1024;
 
+/// A second-line safety valve above the collector's 32 KiB snapshot budget.
+pub const CONTENT_SNAPSHOT_SAFETY_MAX_BYTES: usize = 64 * 1024;
+
 /// URLs and titles are contextual metadata; 4 KiB covers normal values while
 /// rejecting abnormal OS or application payloads before persistence.
 pub const URL_TITLE_FIELD_MAX_BYTES: usize = 4 * 1024;
@@ -31,6 +34,9 @@ pub(crate) fn enforce_size_limits(event: &mut Event) {
         }
         EventData::ClipboardCopy(data) => drop_oversized(&mut data.text, TEXT_FIELD_MAX_BYTES),
         EventData::ClipboardPaste(data) => drop_oversized(&mut data.text, TEXT_FIELD_MAX_BYTES),
+        EventData::ContentSnapshot(data) => {
+            drop_oversized(&mut data.text, CONTENT_SNAPSHOT_SAFETY_MAX_BYTES)
+        }
         EventData::AppActivate(_)
         | EventData::AppLaunch(_)
         | EventData::AppTerminate(_)

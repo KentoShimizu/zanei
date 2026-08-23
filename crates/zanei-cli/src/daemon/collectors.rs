@@ -7,6 +7,8 @@ use std::{
 
 use zanei_collector::{Collector, Permission, RawEvent};
 use zanei_core::config::{CaptureSource, Config, FilterConfig};
+use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyFilter};
+use zanei_core::schema::App;
 use zanei_macos::{
     TextContentPolicy,
     ax::{AxCollector, click_channel},
@@ -40,10 +42,19 @@ impl CollectorSet {
         let sources = &config.capture.sources;
         let capture_app = sources.contains(&CaptureSource::App);
         let capture_ui = sources.contains(&CaptureSource::Ui);
-        let capture_ax = sources.contains(&CaptureSource::Window) || capture_ui;
+        let capture_content = config.capture.content_snapshot;
+        let capture_ax = sources.contains(&CaptureSource::Window) || capture_ui || capture_content;
         let capture_input = sources.contains(&CaptureSource::Input);
         let capture_browser = sources.contains(&CaptureSource::Browser);
-        let needs_chrome_privacy = config.capture.text_content && (capture_ui || capture_input);
+        let chrome = App {
+            name: "Google Chrome".to_owned(),
+            bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
+            pid: None,
+        };
+        let needs_chrome_privacy = config.capture.text_content && (capture_ui || capture_input)
+            || capture_content
+                && PrivacyFilter::new(config.filter.clone())
+                    .content_snapshot_app_is_allowed(&chrome);
         let (chrome_eligibility, chrome_tracker) =
             chrome_eligibility_channel(config.filter.clone());
         let text_policy = TextContentPolicy::new(chrome_tracker);
@@ -182,12 +193,14 @@ pub(crate) struct CollectorHealth {
 #[derive(Clone)]
 pub(crate) struct SourceGate {
     sources: BTreeSet<CaptureSource>,
+    content_snapshot: bool,
 }
 
 impl SourceGate {
-    pub(crate) fn new(sources: &[CaptureSource]) -> Self {
+    pub(crate) fn new(sources: &[CaptureSource], content_snapshot: bool) -> Self {
         Self {
             sources: sources.iter().copied().collect(),
+            content_snapshot,
         }
     }
 
@@ -206,6 +219,8 @@ impl SourceGate {
             Some(CaptureSource::Input)
         } else if event_type.starts_with("browser.") {
             Some(CaptureSource::Browser)
+        } else if event_type.starts_with("content.") {
+            return self.content_snapshot;
         } else {
             None
         };

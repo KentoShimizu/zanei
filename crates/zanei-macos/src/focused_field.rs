@@ -126,8 +126,8 @@ pub(crate) fn observed_field_class(
 mod tests {
     use zanei_core::{
         schema::{
-            App, EVENT_SCHEMA_VERSION, Event, EventData, FieldKind, InputKeyData, InputKeyKind,
-            Redaction, Window,
+            App, Event, EventData, FieldKind, InputKeyData, InputKeyKind, Redaction, Window,
+            event_schema_version,
         },
         sink::{Sink, StreamSink},
     };
@@ -263,7 +263,7 @@ mod tests {
 
         for (field_kind, expected) in cases {
             let event = Event {
-                version: EVENT_SCHEMA_VERSION,
+                version: event_schema_version("input.key").expect("input.key schema version"),
                 id: "evt_00000000000000000000000000".to_owned(),
                 ts: "1970-01-01T00:00:00Z".to_owned(),
                 mono_ns: 0,

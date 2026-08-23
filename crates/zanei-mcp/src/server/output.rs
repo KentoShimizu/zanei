@@ -90,6 +90,7 @@ pub(super) struct GetStatusOutput {
 pub(super) struct CaptureOutput {
     pub(super) sources: Vec<String>,
     pub(super) text_content: bool,
+    pub(super) content_snapshot: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -114,6 +115,7 @@ pub(super) struct SessionOutput {
     app: String,
     title_summary: Option<String>,
     activities: Vec<String>,
+    content_snapshots: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     event_ids: Option<Vec<String>>,
     event_ids_truncated: bool,
@@ -129,6 +131,7 @@ impl From<Session> for SessionOutput {
             app: session.app,
             title_summary: session.title_summary,
             activities: session.activities,
+            content_snapshots: session.content_snapshots,
             event_ids: session.event_ids,
             event_ids_truncated: session.event_ids_truncated,
             interactions: session

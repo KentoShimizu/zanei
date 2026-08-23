@@ -3,6 +3,7 @@ use zanei_core::normalize::normalize;
 use zanei_core::schema::{
     App, BrowserMode, BrowserNavigateData, EmptyData, Event, EventData, RawEvent, Window,
 };
+use zanei_core::store::EventMetadata;
 use zanei_core::timeline::{
     Granularity, MIN_TIMELINE_TOKEN_BUDGET_TOKENS, TimeRange, TimelineError, TimelineFormat,
     TimelineOptions, build, estimate_tokens, serialize,
@@ -17,10 +18,10 @@ fn coarse_sessions_absorb_short_app_bounces_but_fine_sessions_keep_them() {
         activate("Safari", "com.apple.Safari", 80),
     ];
 
-    let coarse =
-        build(&events, &options(Granularity::Coarse, 4_000)).expect("coarse timeline should build");
-    let fine =
-        build(&events, &options(Granularity::Fine, 4_000)).expect("fine timeline should build");
+    let coarse = build(&events, &[], &options(Granularity::Coarse, 4_000))
+        .expect("coarse timeline should build");
+    let fine = build(&events, &[], &options(Granularity::Fine, 4_000))
+        .expect("fine timeline should build");
 
     assert_eq!(coarse.sessions.len(), 1);
     assert_eq!(coarse.sessions[0].app, "Safari");
@@ -38,7 +39,7 @@ fn coarse_sessions_absorb_repeated_short_bounces() {
     ];
 
     let timeline =
-        build(&events, &options(Granularity::Coarse, 4_000)).expect("timeline should build");
+        build(&events, &[], &options(Granularity::Coarse, 4_000)).expect("timeline should build");
 
     assert_eq!(timeline.sessions.len(), 1);
     assert_eq!(timeline.sessions[0].app, "Safari");
@@ -53,7 +54,7 @@ fn idle_gaps_over_five_minutes_split_sessions() {
     ];
 
     let timeline =
-        build(&events, &options(Granularity::Coarse, 4_000)).expect("timeline should build");
+        build(&events, &[], &options(Granularity::Coarse, 4_000)).expect("timeline should build");
 
     assert_eq!(timeline.sessions.len(), 2);
 }
@@ -75,7 +76,7 @@ fn token_budget_degrades_fine_output_and_truncates_old_sessions() {
     }
 
     let timeline =
-        build(&events, &options(Granularity::Fine, 300)).expect("timeline should degrade");
+        build(&events, &[], &options(Granularity::Fine, 300)).expect("timeline should degrade");
 
     assert!(timeline.truncated);
     assert!(timeline.sessions.len() < 20);
@@ -93,7 +94,7 @@ fn minimum_token_budget_covers_every_empty_timeline_envelope() {
     for format in [TimelineFormat::Markdown, TimelineFormat::Json] {
         let mut options = options(Granularity::Coarse, usize::MAX);
         options.format = format;
-        let timeline = build(&[], &options).expect("empty timeline should build");
+        let timeline = build(&[], &[], &options).expect("empty timeline should build");
 
         assert!(
             MIN_TIMELINE_TOKEN_BUDGET_TOKENS >= timeline.token_estimate,
@@ -106,6 +107,7 @@ fn minimum_token_budget_covers_every_empty_timeline_envelope() {
 #[test]
 fn token_budget_below_empty_envelope_minimum_is_rejected() {
     let error = build(
+        &[],
         &[],
         &options(Granularity::Coarse, MIN_TIMELINE_TOKEN_BUDGET_TOKENS - 1),
     )
@@ -123,7 +125,7 @@ fn token_budget_below_empty_envelope_minimum_is_rejected() {
 fn json_output_uses_the_public_sessions_array_shape() {
     let events = vec![activate("Safari", "com.apple.Safari", 0)];
     let options = options(Granularity::Coarse, 4_000);
-    let timeline = build(&events, &options).expect("timeline should build");
+    let timeline = build(&events, &[], &options).expect("timeline should build");
     let encoded = serialize(&timeline, TimelineFormat::Json).expect("timeline should serialize");
     let json: serde_json::Value = serde_json::from_str(&encoded).expect("output should be JSON");
 
@@ -132,6 +134,104 @@ fn json_output_uses_the_public_sessions_array_shape() {
     assert!(json["sessions"][0]["event_ids"].is_array());
     assert_eq!(json["sessions"][0]["event_ids_truncated"], false);
     assert!(json["range"]["since"].is_string());
+    assert_eq!(json["sessions"][0]["content_snapshots"], 0);
+}
+
+#[test]
+fn snapshot_counts_use_the_last_session_start_at_or_before_the_timestamp() {
+    let events = vec![
+        activate("Safari", "com.apple.Safari", 0),
+        activate("Slack", "com.tinyspeck.slackmacgap", 60),
+    ];
+    let metadata = vec![snapshot_metadata(50, 1), snapshot_metadata(60, 2)];
+
+    let timeline = build(&events, &metadata, &options(Granularity::Fine, usize::MAX))
+        .expect("timeline should build");
+
+    assert_eq!(timeline.sessions.len(), 2);
+    assert_eq!(timeline.sessions[0].content_snapshots, 1);
+    assert_eq!(timeline.sessions[1].content_snapshots, 1);
+}
+
+#[test]
+fn markdown_omits_zero_snapshot_counts_and_includes_nonzero_counts() {
+    let events = vec![activate("Safari", "com.apple.Safari", 0)];
+    let mut markdown_options = options(Granularity::Coarse, usize::MAX);
+    markdown_options.format = TimelineFormat::Markdown;
+
+    let zero = build(&events, &[], &markdown_options).expect("zero-count timeline");
+    let zero = serialize(&zero, TimelineFormat::Markdown).expect("zero-count markdown");
+    assert!(!zero.contains("Content snapshots:"));
+
+    let counted =
+        build(&events, &[snapshot_metadata(1, 1)], &markdown_options).expect("counted timeline");
+    let counted = serialize(&counted, TimelineFormat::Markdown).expect("counted markdown");
+    assert!(counted.contains("Content snapshots: 1"));
+}
+
+#[test]
+fn snapshot_counts_survive_bounce_absorption_and_adjacent_merge() {
+    let bounce_events = vec![
+        activate("Safari", "com.apple.Safari", 0),
+        activate("Slack", "com.tinyspeck.slackmacgap", 10),
+        activate("Safari", "com.apple.Safari", 20),
+    ];
+    let bounced = build(
+        &bounce_events,
+        &[snapshot_metadata(15, 1)],
+        &options(Granularity::Coarse, usize::MAX),
+    )
+    .expect("bounce timeline");
+    assert_eq!(bounced.sessions.len(), 1);
+    assert_eq!(bounced.sessions[0].content_snapshots, 1);
+
+    let adjacent_events = vec![
+        activate("Safari", "com.apple.Safari", 0),
+        navigate(
+            "Safari",
+            "com.apple.Safari",
+            400,
+            "https://example.com/long-page",
+        ),
+    ];
+    let metadata = vec![snapshot_metadata(1, 2), snapshot_metadata(401, 3)];
+    let unlimited = build(
+        &adjacent_events,
+        &metadata,
+        &options(Granularity::Coarse, usize::MAX),
+    )
+    .expect("unlimited adjacent timeline");
+    assert_eq!(unlimited.sessions.len(), 2);
+    let merged = (MIN_TIMELINE_TOKEN_BUDGET_TOKENS..unlimited.token_estimate)
+        .find_map(|budget| {
+            let timeline = build(
+                &adjacent_events,
+                &metadata,
+                &options(Granularity::Coarse, budget),
+            )
+            .ok()?;
+            (timeline.sessions.len() == 1 && !timeline.truncated).then_some(timeline)
+        })
+        .expect("a budget should exercise adjacent same-app merge");
+    assert_eq!(merged.sessions[0].content_snapshots, 2);
+}
+
+#[test]
+fn snapshot_count_participates_in_token_estimation_without_changing_the_ladder() {
+    let events = vec![activate("Safari", "com.apple.Safari", 0)];
+    let zero = build(&events, &[], &options(Granularity::Coarse, usize::MAX))
+        .expect("zero-count timeline");
+    let counted = build(
+        &events,
+        &(0..100)
+            .map(|index| snapshot_metadata(1, index))
+            .collect::<Vec<_>>(),
+        &options(Granularity::Coarse, usize::MAX),
+    )
+    .expect("counted timeline");
+
+    assert!(counted.token_estimate > zero.token_estimate);
+    assert_eq!(counted.sessions[0].content_snapshots, 100);
 }
 
 #[test]
@@ -147,8 +247,8 @@ fn session_event_ids_are_capped_at_one_hundred() {
         })
         .collect();
 
-    let timeline =
-        build(&events, &options(Granularity::Coarse, usize::MAX)).expect("timeline should build");
+    let timeline = build(&events, &[], &options(Granularity::Coarse, usize::MAX))
+        .expect("timeline should build");
     let session = timeline.sessions.first().expect("one timeline session");
 
     assert_eq!(session.event_ids.as_ref().map(Vec::len), Some(100));
@@ -167,7 +267,7 @@ fn token_budget_removes_all_event_ids_before_dropping_sessions() {
             )
         })
         .collect();
-    let unlimited = build(&events, &options(Granularity::Coarse, usize::MAX))
+    let unlimited = build(&events, &[], &options(Granularity::Coarse, usize::MAX))
         .expect("unlimited timeline should build");
     let mut without_ids = unlimited.clone();
     for session in &mut without_ids.sessions {
@@ -178,6 +278,7 @@ fn token_budget_removes_all_event_ids_before_dropping_sessions() {
 
     let timeline = build(
         &events,
+        &[],
         &options(Granularity::Coarse, without_ids.token_estimate),
     )
     .expect("budgeted timeline should build");
@@ -255,4 +356,16 @@ fn event(app: &str, bundle_id: &str, seconds: i64, event_type: &str, data: Event
     )
     .expect("fixture wall time is representable")
     .event
+}
+
+fn snapshot_metadata(seconds: i64, id: u64) -> EventMetadata {
+    EventMetadata {
+        id: format!("snapshot-{id}"),
+        ts: zanei_core::normalize::format_timestamp(
+            OffsetDateTime::UNIX_EPOCH + Duration::seconds(seconds),
+        ),
+        bundle_id: Some("com.example.App".to_owned()),
+        app_name: "Example".to_owned(),
+        window_id: Some(1),
+    }
 }

@@ -146,7 +146,11 @@ fn status_human_output_shows_text_content_opt_in_state() {
         .expect("opt-in human status output");
 
     assert_eq!(output.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("TEXT CONTENT      on (opt-in)"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("TEXT CONTENT      on (apps: exclude 6, sites: exclude 0)"));
+    assert!(stdout.contains(
+        "CONTENT SNAPSHOT  off (opt-in: zanei config set capture.content_snapshot true)"
+    ));
 }
 
 #[test]
@@ -1080,7 +1084,13 @@ fn export_sqlite_writes_a_plaintext_snapshot_any_sqlite_client_can_open() {
     }
     let events = StoreReader::open(&out)
         .expect("snapshot opens without a key")
-        .query(&QueryFilter::default(), 48)
+        .query(
+            &QueryFilter {
+                types: vec!["*".to_owned()],
+                ..QueryFilter::default()
+            },
+            48,
+        )
         .expect("snapshot events");
     assert_eq!(events.events.len(), KNOWN_EVENT_TYPES.len());
 

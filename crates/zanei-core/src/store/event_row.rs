@@ -2,7 +2,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::schema::{
-    App, ClipboardOrigin, Event, EventData, Redaction, Window, is_known_event_type,
+    App, ClipboardOrigin, Event, EventData, Redaction, Window, event_schema_version,
+    is_known_event_type,
 };
 
 use super::StoreError;
@@ -42,7 +43,8 @@ pub(crate) fn decode(row: &rusqlite::Row<'_>) -> Result<DecodedEventRow, StoreEr
         .map_err(|_| StoreError::invalid_timestamp("event.ts", ts.clone()))?;
 
     let event = Event {
-        version: crate::schema::EVENT_SCHEMA_VERSION,
+        version: event_schema_version(&event_type)
+            .expect("known event types have a schema version"),
         id: row.get(0)?,
         ts,
         mono_ns: unsigned("mono_ns", row.get(2)?)?,
@@ -83,7 +85,8 @@ fn requires_window(data: &EventData) -> bool {
         | EventData::InputKey(_)
         | EventData::InputScroll(_)
         | EventData::BrowserNavigate(_)
-        | EventData::ClipboardPaste(_) => true,
+        | EventData::ClipboardPaste(_)
+        | EventData::ContentSnapshot(_) => true,
         EventData::ClipboardCopy(data) => data.origin == ClipboardOrigin::CopyShortcut,
         EventData::AppActivate(_) | EventData::AppLaunch(_) | EventData::AppTerminate(_) => false,
     }

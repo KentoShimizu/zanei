@@ -81,16 +81,33 @@ impl PrivacyFilter {
     /// Rechecks whether a snapshot may cross the capture-time privacy boundary.
     #[must_use]
     pub fn content_snapshot_is_allowed(&self, app: &App, website_host: Option<&str>) -> bool {
+        self.content_snapshot_app_is_allowed(app)
+            && host_scope_is_allowed(
+                app,
+                website_host,
+                &self.config.include_only_websites,
+                &self.config.exclude_websites,
+            )
+            && host_scope_is_allowed(
+                app,
+                website_host,
+                &self.config.content_snapshot.include_only_websites,
+                &self.config.content_snapshot.exclude_websites,
+            )
+    }
+
+    /// Reports whether global and snapshot-specific app rules can include `app`.
+    #[must_use]
+    pub fn content_snapshot_app_is_allowed(&self, app: &App) -> bool {
         app_is_allowed(
             app,
             &self.config.include_only_apps,
             &self.config.exclude_apps,
-        ) && host_scope_is_allowed(
+        ) && app_is_allowed(
             app,
-            website_host,
-            &self.config.include_only_websites,
-            &self.config.exclude_websites,
-        ) && scoped_event_is_allowed(app, website_host, &self.config.content_snapshot)
+            &self.config.content_snapshot.include_only_apps,
+            &self.config.content_snapshot.exclude_apps,
+        )
     }
 }
 
@@ -110,6 +127,7 @@ pub fn suppress_text_content(data: &mut EventData, element: &mut Option<Element>
             value.text = None;
             value.size_bytes = None;
         }
+        EventData::ContentSnapshot(_) => {}
         EventData::AppActivate(_)
         | EventData::AppLaunch(_)
         | EventData::AppTerminate(_)

@@ -11,10 +11,8 @@ use time::format_description::well_known::Rfc3339;
 use crate::schema::Event;
 
 use super::{
-    COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
-    DaemonState, LEGACY_STORE_SCHEMA_VERSION, LockedReason, RETENTION_STORE_SCHEMA_VERSION,
-    STORE_SCHEMA_VERSION, STORE_TABLES, StoreError, StoreFormat, StoreKey, apply_key,
-    retention_cutoff, store_uri, verify_key,
+    DaemonMode, DaemonState, LockedReason, STORE_TABLES, StoreError, StoreFormat, StoreKey,
+    apply_key, retention_cutoff, store_uri, verify_key,
 };
 
 /// A parameterized event selection for destructive store operations.
@@ -123,7 +121,7 @@ impl StoreWriter {
         };
         connection.execute_batch(STORE_PRAGMAS)?;
         connection.execute_batch(STORE_TABLES)?;
-        migrate_schema(&connection)?;
+        super::migration::migrate_schema(&connection)?;
         Ok(Self { connection, format })
     }
 
@@ -545,45 +543,4 @@ fn serialize_collector_failures(
 fn serialize_permissions(permissions: &super::DaemonPermissions) -> Result<String, StoreError> {
     serde_json::to_string(permissions)
         .map_err(|error| StoreError::invalid_json("permissions_json", error))
-}
-
-fn migrate_schema(connection: &Connection) -> Result<(), StoreError> {
-    let version = connection.query_row("SELECT schema_version FROM meta", [], |row| row.get(0))?;
-    let prior_statements = match version {
-        STORE_SCHEMA_VERSION => return Ok(()),
-        LEGACY_STORE_SCHEMA_VERSION => {
-            "ALTER TABLE daemon_state ADD COLUMN instance_id TEXT; \
-             ALTER TABLE daemon_state ADD COLUMN mode TEXT; \
-             ALTER TABLE daemon_state ADD COLUMN retention_hours INTEGER \
-             CHECK (retention_hours > 0); \
-             ALTER TABLE daemon_state ADD COLUMN collector_failures_json TEXT NOT NULL \
-             DEFAULT '{}';"
-        }
-        DAEMON_IDENTITY_STORE_SCHEMA_VERSION => {
-            "ALTER TABLE daemon_state ADD COLUMN retention_hours INTEGER \
-             CHECK (retention_hours > 0); \
-             ALTER TABLE daemon_state ADD COLUMN collector_failures_json TEXT NOT NULL \
-             DEFAULT '{}';"
-        }
-        RETENTION_STORE_SCHEMA_VERSION => {
-            "ALTER TABLE daemon_state ADD COLUMN collector_failures_json TEXT NOT NULL \
-             DEFAULT '{}';"
-        }
-        COLLECTOR_FAILURES_STORE_SCHEMA_VERSION => "",
-        _ => return Err(StoreError::UnsupportedSchemaVersion(version)),
-    };
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute_batch(prior_statements)?;
-    transaction.execute_batch(
-        "ALTER TABLE daemon_state ADD COLUMN last_known_permissions_json TEXT; \
-         UPDATE daemon_state SET last_known_permissions_json = \
-             (SELECT snapshot_json FROM daemon_permissions WHERE id = 1) \
-         WHERE id = 1;",
-    )?;
-    transaction.execute(
-        "UPDATE meta SET schema_version = ?1",
-        [STORE_SCHEMA_VERSION],
-    )?;
-    transaction.commit()?;
-    Ok(())
 }

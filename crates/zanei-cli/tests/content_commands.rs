@@ -1,4 +1,6 @@
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::process::Stdio;
 
 use clap::Parser;
 use time::OffsetDateTime;
@@ -7,8 +9,8 @@ use zanei_collector::{AppDirectory, AppDirectoryError, AppInfo};
 use zanei_core::config::Config;
 use zanei_core::normalize::format_timestamp;
 use zanei_core::schema::{
-    App, BrowserMode, BrowserNavigateData, BrowserTransition, EmptyData, Event, EventData,
-    Redaction, Window,
+    App, BrowserMode, BrowserNavigateData, BrowserTransition, ContentSnapshotData,
+    ContentSnapshotTrigger, EmptyData, Event, EventData, Redaction, Window,
 };
 use zanei_core::store::{QueryFilter, StoreReader, StoreWriter};
 
@@ -242,6 +244,308 @@ fn export_and_scoped_purge_apply_types_to_active_and_retired_stores() {
             .iter()
             .any(|event| event.app.name == "RetiredBrowser")
     );
+}
+
+#[test]
+fn default_reads_exclude_content_while_explicit_queries_and_all_exports_include_it() {
+    let fixture = Fixture::populated();
+
+    let default = fixture
+        .command()
+        .args(["query", "--since", "1h", "--format", "json"])
+        .output()
+        .expect("default query");
+    assert!(default.status.success());
+    let default_events: Vec<Event> = serde_json::from_slice(&default.stdout).expect("query JSON");
+    assert!(
+        default_events
+            .iter()
+            .all(|event| !event.event_type.starts_with("content."))
+    );
+
+    for types in [
+        "content.snapshot",
+        "content.*",
+        "app.launch,content.snapshot",
+    ] {
+        let output = fixture
+            .command()
+            .args([
+                "query", "--since", "1h", "--types", types, "--format", "json",
+            ])
+            .output()
+            .expect("explicit content query");
+        assert!(output.status.success());
+        let events: Vec<Event> = serde_json::from_slice(&output.stdout).expect("query JSON");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "content.snapshot" && event.version == 2),
+            "types={types}: {events:?}"
+        );
+    }
+
+    for format in ["json", "jsonl"] {
+        let output = fixture
+            .command()
+            .args(["export", "--since", "1h", "--format", format])
+            .output()
+            .expect("all-event export");
+        assert!(output.status.success());
+        let contains_content = if format == "json" {
+            serde_json::from_slice::<Vec<Event>>(&output.stdout)
+                .expect("export JSON")
+                .iter()
+                .any(|event| event.event_type == "content.snapshot")
+        } else {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(|line| serde_json::from_str::<Event>(line).expect("export JSONL event"))
+                .any(|event| event.event_type == "content.snapshot")
+        };
+        assert!(contains_content, "{format} export must include content");
+    }
+
+    let snapshot = fixture.directory.path().join("all-events.sqlite");
+    fixture
+        .command()
+        .args(["export", "--since", "1h", "--format", "sqlite"])
+        .arg("--out")
+        .arg(&snapshot)
+        .assert()
+        .success();
+    let sqlite_events = StoreReader::open(&snapshot)
+        .and_then(|reader| {
+            reader.query(
+                &QueryFilter {
+                    types: vec!["*".to_owned()],
+                    ..QueryFilter::default()
+                },
+                RETENTION_HOURS,
+            )
+        })
+        .expect("SQLite export query");
+    assert!(
+        sqlite_events
+            .events
+            .iter()
+            .any(|event| event.event_type == "content.snapshot")
+    );
+    let version: i64 = rusqlite::Connection::open(&snapshot)
+        .expect("open SQLite export")
+        .query_row("SELECT schema_version FROM meta", [], |row| row.get(0))
+        .expect("snapshot schema version");
+    assert_eq!(version, 6);
+
+    let timeline = fixture
+        .command()
+        .args(["timeline", "--since", "1h", "--format", "json"])
+        .output()
+        .expect("timeline JSON");
+    assert!(timeline.status.success());
+    let timeline: serde_json::Value = serde_json::from_slice(&timeline.stdout).expect("timeline");
+    assert_eq!(timeline["sessions"][0]["content_snapshots"], 1);
+}
+
+#[test]
+fn mcp_status_query_and_timeline_apply_the_content_contract() {
+    let fixture = Fixture::populated();
+    let mut child = fixture
+        .process_command()
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start MCP server");
+    let mut stdin = child.stdin.take().expect("MCP stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("MCP stdout"));
+    mcp_request(
+        &mut stdin,
+        &mut stdout,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "content-commands", "version": "0.1.0" }
+            }
+        }),
+    );
+    mcp_write(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    );
+
+    let status = mcp_tool(
+        &mut stdin,
+        &mut stdout,
+        2,
+        "get_status",
+        serde_json::json!({}),
+    );
+    assert_eq!(status["capture"]["content_snapshot"], false);
+    let default = mcp_tool(
+        &mut stdin,
+        &mut stdout,
+        3,
+        "query_events",
+        serde_json::json!({}),
+    );
+    assert!(
+        default["events"]
+            .as_array()
+            .expect("default MCP events")
+            .iter()
+            .all(|event| !event["type"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("content."))
+    );
+    let content = mcp_tool(
+        &mut stdin,
+        &mut stdout,
+        4,
+        "query_events",
+        serde_json::json!({ "types": ["content.snapshot"] }),
+    );
+    assert_eq!(content["events"][0]["type"], "content.snapshot");
+    assert_eq!(content["events"][0]["v"], 2);
+    let timeline = mcp_tool(
+        &mut stdin,
+        &mut stdout,
+        5,
+        "get_timeline",
+        serde_json::json!({ "format": "structured" }),
+    );
+    assert_eq!(timeline["sessions"][0]["content_snapshots"], 1);
+
+    drop(stdin);
+    assert!(child.wait().expect("wait for MCP server").success());
+}
+
+#[test]
+fn content_purge_preserves_other_types_and_honors_app_scope_across_sources() {
+    let fixture = Fixture::populated();
+    let retired = retired_path(&fixture);
+    let now = OffsetDateTime::now_utc();
+    let active = [
+        app_event(
+            "evt_01K00000000000000000003101",
+            "Slack",
+            now - time::Duration::minutes(5),
+        ),
+        content_event(
+            "evt_01K00000000000000000003102",
+            "Slack",
+            now - time::Duration::minutes(4),
+        ),
+        content_event(
+            "evt_01K00000000000000000003103",
+            "OtherApp",
+            now - time::Duration::minutes(3),
+        ),
+    ];
+    fixture
+        .open_writer()
+        .append_batch(&active)
+        .expect("active purge fixtures");
+    StoreWriter::open(&retired)
+        .and_then(|mut writer| {
+            writer.append_batch(&[
+                app_event(
+                    "evt_01K00000000000000000003104",
+                    "Slack",
+                    now - time::Duration::minutes(2),
+                ),
+                content_event(
+                    "evt_01K00000000000000000003105",
+                    "Slack",
+                    now - time::Duration::minutes(1),
+                ),
+                content_event(
+                    "evt_01K00000000000000000003106",
+                    "OtherApp",
+                    now - time::Duration::seconds(30),
+                ),
+            ])
+        })
+        .expect("retired purge fixtures");
+
+    fixture
+        .command()
+        .args(["purge", "--types", "content.*", "--app", "Slack", "--quiet"])
+        .assert()
+        .success();
+    let reader = fixture.open_reader();
+    let slack_content = reader
+        .query(
+            &QueryFilter {
+                types: vec!["content.*".to_owned()],
+                app: Some("Slack".to_owned()),
+                ..QueryFilter::default()
+            },
+            RETENTION_HOURS,
+        )
+        .expect("Slack content after scoped purge");
+    assert!(slack_content.events.is_empty());
+    let other_content = reader
+        .query(
+            &QueryFilter {
+                types: vec!["content.*".to_owned()],
+                app: Some("OtherApp".to_owned()),
+                ..QueryFilter::default()
+            },
+            RETENTION_HOURS,
+        )
+        .expect("other content after scoped purge");
+    assert_eq!(other_content.events.len(), 2);
+    let slack_facts = reader
+        .query(
+            &QueryFilter {
+                types: vec!["app.*".to_owned()],
+                app: Some("Slack".to_owned()),
+                ..QueryFilter::default()
+            },
+            RETENTION_HOURS,
+        )
+        .expect("Slack facts after scoped purge");
+    assert_eq!(slack_facts.events.len(), 2);
+    drop(reader);
+
+    fixture
+        .command()
+        .args(["purge", "--types", "content.*", "--quiet"])
+        .assert()
+        .success();
+    let remaining_content = fixture
+        .open_reader()
+        .query(
+            &QueryFilter {
+                types: vec!["content.*".to_owned()],
+                ..QueryFilter::default()
+            },
+            RETENTION_HOURS,
+        )
+        .expect("content after type-only purge");
+    assert!(remaining_content.events.is_empty());
+    let remaining_slack_facts = fixture
+        .open_reader()
+        .query(
+            &QueryFilter {
+                types: vec!["app.*".to_owned()],
+                app: Some("Slack".to_owned()),
+                ..QueryFilter::default()
+            },
+            RETENTION_HOURS,
+        )
+        .expect("Slack facts after type-only purge");
+    assert_eq!(remaining_slack_facts.events.len(), 2);
 }
 
 #[test]
@@ -486,6 +790,121 @@ fn config_init_and_content_snapshot_non_tty_confirmation_preserve_bytes_until_qu
     );
 }
 
+#[test]
+fn status_json_and_human_report_content_flags_scopes_and_store_fields() {
+    let fixture = Fixture::empty();
+    let mut config = Config::default();
+    config.capture.sources.clear();
+    config.capture.text_content = true;
+    config.capture.content_snapshot = true;
+    config.filter.text_content.include_only_apps = vec!["com.apple.Terminal".to_owned()];
+    zanei_core::config::save(&config, &fixture.config).expect("status config");
+
+    let json = fixture
+        .command()
+        .args(["status", "--json"])
+        .output()
+        .expect("status JSON");
+    assert_eq!(json.status.code(), Some(4));
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).expect("status report");
+    assert_eq!(report["capture"]["sources"], serde_json::json!([]));
+    assert_eq!(report["capture"]["text_content"], true);
+    assert_eq!(report["capture"]["content_snapshot"], true);
+    assert_eq!(
+        report["capture"].as_object().map(|value| value.len()),
+        Some(3)
+    );
+    assert_eq!(report["store"]["encryption"], "sqlcipher");
+    assert_eq!(report["store"]["retired_plaintext"], serde_json::json!([]));
+    assert!(report["degraded"].is_object());
+    assert_eq!(report["collector_failures"], serde_json::json!({}));
+
+    let human = fixture
+        .command()
+        .arg("status")
+        .output()
+        .expect("human status");
+    assert_eq!(human.status.code(), Some(4));
+    let human = String::from_utf8(human.stdout).expect("human status UTF-8");
+    assert!(human.contains("TEXT CONTENT      on (apps: only 1, sites: exclude 0)"));
+    assert!(human.contains("CONTENT SNAPSHOT  on (apps: exclude 6, sites: exclude 0)"));
+    assert!(human.contains("STORE             "));
+    assert!(human.contains("(encrypted)"));
+}
+
+#[test]
+fn doctor_reports_content_snapshot_accessibility_and_chrome_automation_requirements() {
+    let fixture = Fixture::empty();
+    let mut config = Config::default();
+    config.capture.sources.clear();
+    config.capture.content_snapshot = true;
+    zanei_core::config::save(&config, &fixture.config).expect("doctor config");
+
+    let output = fixture
+        .command()
+        .args(["doctor", "--json"])
+        .output()
+        .expect("doctor JSON");
+    assert!(matches!(output.status.code(), Some(0 | 3)));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor report");
+
+    assert_eq!(
+        report["permissions"]["accessibility"]["required_for"],
+        serde_json::json!(["content.snapshot"])
+    );
+    assert!(
+        report["permissions"]["input_monitoring"]
+            .get("required_for")
+            .is_none()
+    );
+    assert!(
+        report["permissions"]["automation"]["per_app"]
+            .get("com.google.Chrome")
+            .is_some()
+    );
+}
+
+fn mcp_tool_request(id: u64, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments }
+    })
+}
+
+fn mcp_tool(
+    stdin: &mut impl Write,
+    stdout: &mut impl BufRead,
+    id: u64,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let response = mcp_request(stdin, stdout, mcp_tool_request(id, name, arguments));
+    assert!(
+        response.get("error").is_none(),
+        "MCP tool failed: {response}"
+    );
+    response["result"]["structuredContent"].clone()
+}
+
+fn mcp_request(
+    stdin: &mut impl Write,
+    stdout: &mut impl BufRead,
+    request: serde_json::Value,
+) -> serde_json::Value {
+    mcp_write(stdin, &request);
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read MCP response");
+    serde_json::from_str(&line).expect("MCP JSON response")
+}
+
+fn mcp_write(stdin: &mut impl Write, request: &serde_json::Value) {
+    serde_json::to_writer(&mut *stdin, request).expect("write MCP request");
+    stdin.write_all(b"\n").expect("terminate MCP request");
+    stdin.flush().expect("flush MCP request");
+}
+
 fn run_injected<const N: usize>(
     fixture: &Fixture,
     app_directory: &dyn AppDirectory,
@@ -585,13 +1004,14 @@ fn event(
     data: EventData,
     window: Option<Window>,
 ) -> Event {
+    let event_type = data.event_type();
     Event {
-        version: 1,
+        version: zanei_core::schema::event_schema_version(event_type).expect("schema version"),
         id: id.to_owned(),
         ts: format_timestamp(at),
         mono_ns: 1,
         source: "test.content_commands".to_owned(),
-        event_type: data.event_type().to_owned(),
+        event_type: event_type.to_owned(),
         app: App {
             name: app_name.to_owned(),
             bundle_id: Some(format!("dev.example.{app_name}")),
@@ -605,6 +1025,25 @@ fn event(
             rules: Vec::new(),
         },
     }
+}
+
+fn content_event(id: &str, app_name: &str, at: OffsetDateTime) -> Event {
+    let text = format!("Visible snapshot for {app_name}");
+    event(
+        id,
+        app_name,
+        at,
+        EventData::ContentSnapshot(ContentSnapshotData {
+            chars: text.chars().count() as u64,
+            text: Some(text),
+            complete: true,
+            trigger: ContentSnapshotTrigger::Settle,
+        }),
+        Some(Window {
+            title: Some(format!("{app_name} window")),
+            id: Some(11),
+        }),
+    )
 }
 
 fn leaf_count(value: &toml::Value) -> usize {

@@ -31,11 +31,14 @@ use crate::{
 
 #[test]
 fn source_gate_maps_support_collector_events_to_configured_families() {
-    let gate = SourceGate::new(&[
-        CaptureSource::Window,
-        CaptureSource::Input,
-        CaptureSource::Browser,
-    ]);
+    let gate = SourceGate::new(
+        &[
+            CaptureSource::Window,
+            CaptureSource::Input,
+            CaptureSource::Browser,
+        ],
+        false,
+    );
 
     assert!(!gate.allows_type("app.activate"));
     assert!(gate.allows_type("window.focus"));
@@ -43,12 +46,21 @@ fn source_gate_maps_support_collector_events_to_configured_families() {
     assert!(gate.allows_type("input.key"));
     assert!(gate.allows_type("clipboard.copy"));
     assert!(gate.allows_type("browser.navigate"));
+    assert!(!gate.allows_type("content.snapshot"));
     assert!(!gate.allows_type("future.event"));
 }
 
 #[test]
+fn content_snapshot_gate_is_independent_from_capture_sources() {
+    let gate = SourceGate::new(&[], true);
+
+    assert!(gate.allows_type("content.snapshot"));
+    assert!(!gate.allows_type("window.focus"));
+}
+
+#[test]
 fn source_gate_drops_every_family_when_capture_is_disabled() {
-    let gate = SourceGate::new(&[]);
+    let gate = SourceGate::new(&[], false);
 
     for event_type in [
         "app.launch",
@@ -64,7 +76,7 @@ fn source_gate_drops_every_family_when_capture_is_disabled() {
 
 #[test]
 fn ui_only_gate_rejects_input_and_clipboard_events() {
-    let gate = SourceGate::new(&[CaptureSource::Ui]);
+    let gate = SourceGate::new(&[CaptureSource::Ui], false);
 
     for event_type in ["ui.focus", "ui.click", "ui.value"] {
         assert!(gate.allows_type(event_type));
@@ -192,6 +204,42 @@ fn text_content_chrome_automation_permission_matrix() {
 
         assert_eq!(CollectorSet::new(&config).required_permissions(), expected);
     }
+}
+
+#[test]
+fn content_snapshot_permission_matrix_honors_global_and_scoped_app_rules() {
+    let accessibility = Permission::Accessibility;
+    let automation = Permission::Automation {
+        bundle_id: "com.google.Chrome".to_owned(),
+    };
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources.clear();
+    config.capture.content_snapshot = true;
+
+    assert_eq!(
+        CollectorSet::new(&config).required_permissions(),
+        BTreeSet::from([accessibility.clone(), automation.clone()])
+    );
+
+    config
+        .filter
+        .content_snapshot
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    assert_eq!(
+        CollectorSet::new(&config).required_permissions(),
+        BTreeSet::from([accessibility.clone()])
+    );
+
+    config.filter.content_snapshot.exclude_apps.clear();
+    config
+        .filter
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    assert_eq!(
+        CollectorSet::new(&config).required_permissions(),
+        BTreeSet::from([accessibility])
+    );
 }
 
 #[test]

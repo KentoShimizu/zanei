@@ -734,7 +734,7 @@ fn v4_migration_copies_the_existing_permission_snapshot_to_last_known() {
 
 fn app_launch(id: &str, ts: &str, app_name: &str, bundle_id: &str) -> Event {
     Event {
-        version: crate::schema::EVENT_SCHEMA_VERSION,
+        version: crate::schema::event_schema_version("app.launch").expect("schema version"),
         id: id.to_owned(),
         ts: ts.to_owned(),
         mono_ns: 1,
@@ -754,7 +754,7 @@ fn app_launch(id: &str, ts: &str, app_name: &str, bundle_id: &str) -> Event {
 
 fn browser_navigate(id: &str, ts: &str) -> Event {
     Event {
-        version: crate::schema::EVENT_SCHEMA_VERSION,
+        version: crate::schema::event_schema_version("browser.navigate").expect("schema version"),
         id: id.to_owned(),
         ts: ts.to_owned(),
         mono_ns: 3,
@@ -782,7 +782,7 @@ fn browser_navigate(id: &str, ts: &str) -> Event {
 
 fn clipboard_copy_shortcut(id: &str, ts: &str) -> Event {
     Event {
-        version: crate::schema::EVENT_SCHEMA_VERSION,
+        version: crate::schema::event_schema_version("clipboard.copy").expect("schema version"),
         id: id.to_owned(),
         ts: ts.to_owned(),
         mono_ns: 4,

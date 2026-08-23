@@ -95,18 +95,31 @@ impl ZaneiServer {
             )));
         }
         let retention_hours = self.retention_hours()?;
-        let result = match self.reader()? {
-            Some(reader) => reader
-                .query(
-                    &QueryFilter {
+        let (result, snapshot_metadata) = match self.reader()? {
+            Some(reader) => {
+                let result = reader
+                    .query(
+                        &QueryFilter {
+                            since: Some(since.clone()),
+                            until: Some(until.clone()),
+                            ..QueryFilter::default()
+                        },
+                        retention_hours,
+                    )
+                    .map_err(store_error)?;
+                let metadata = reader
+                    .query_metadata(&zanei_core::store::MetadataFilter {
                         since: Some(since.clone()),
                         until: Some(until.clone()),
-                        ..QueryFilter::default()
-                    },
-                    retention_hours,
-                )
-                .map_err(store_error)?,
-            None => QueryResult::default(),
+                        types: vec!["content.snapshot".to_owned()],
+                        app: None,
+                        bundle_id: None,
+                        configured_retention_hours: retention_hours,
+                    })
+                    .map_err(store_error)?;
+                (result, metadata)
+            }
+            None => (QueryResult::default(), Vec::new()),
         };
         let core_format = match input.format {
             TimelineOutputFormat::Markdown => TimelineFormat::Markdown,
@@ -114,6 +127,7 @@ impl ZaneiServer {
         };
         let timeline = build(
             &result.events,
+            &snapshot_metadata,
             &TimelineOptions {
                 range: TimeRange { since, until },
                 token_budget: input.token_budget,
@@ -241,6 +255,7 @@ impl ZaneiServer {
                     .map(|source| source.as_str().to_owned())
                     .collect(),
                 text_content: config.capture.text_content,
+                content_snapshot: config.capture.content_snapshot,
             },
             permissions_ok,
         }))
