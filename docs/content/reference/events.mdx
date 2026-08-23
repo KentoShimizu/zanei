@@ -28,7 +28,7 @@ One event per line (NDJSON) in raw outputs (`query --format jsonl`, `record`, `e
 
 | Field | Description |
 | --- | --- |
-| `v` | Envelope schema version (currently `1`) |
+| `v` | Minimum envelope version required to interpret this event type. Existing event types use `1`; `content.snapshot` uses `2` |
 | `id` | ULID-based event ID, unique and time-sortable |
 | `ts` | Wall-clock timestamp (RFC3339, millisecond precision) |
 | `mono_ns` | Monotonic clock in nanoseconds — reliable ordering even across wall-clock changes |
@@ -49,7 +49,8 @@ Zanei measures these limits in UTF-8 bytes during normalization. A value at the 
 
 | Limit | Fields | Rationale |
 | --- | --- | --- |
-| 64 KiB (65,536 bytes) | `element.value`; `data.text` for `ui.value`, `input.key`, `clipboard.copy`, and `clipboard.paste` | Keeps useful text and clipboard differences while bounding per-field redaction, serialization, and in-memory batch cost |
+| 32 KiB (32,768 bytes) | `content.snapshot.data.text` at collection time | Bounds one Accessibility snapshot while preserving useful visible text; a cut-off snapshot has `data.complete: false` |
+| 64 KiB (65,536 bytes) | `element.value`; every `data.text`, including the independent safety check for `content.snapshot` | Bounds per-field redaction, serialization, and in-memory batch cost. Snapshot collection stops earlier at 32 KiB, so this is only a core safety valve for that type |
 | 4 KiB (4,096 bytes) | `window.title`; `element.title`; `data.prev_title` for `window.title`; `data.url` and `data.tab_title` for `browser.navigate` | URLs and titles are context metadata; normal values fit comfortably while abnormal OS or application payloads are rejected |
 
 The same limits are checked again after key-event coalescing and privacy redaction, because concatenation and replacement markers can increase the byte length. A browser event whose URL was removed cannot be evaluated against website filters, so it is discarded rather than bypassing those filters.
@@ -71,8 +72,9 @@ The current event types. The **Permission** column shows what must be granted fo
 | `input.scroll` | `macos.eventtap` | Scrolling | Input Monitoring |
 | `browser.navigate` | `macos.applescript` | URL / tab change. **Chrome only, currently**; Incognito always excluded | Automation |
 | `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | Clipboard use; content is opt-in | Input Monitoring |
+| `content.snapshot` | `macos.ax` | Accessibility text shown in the visible part of the frontmost window; separate opt-in | Accessibility |
 
-In `--types` filters, a trailing wildcard selects a whole family: `browser.*`, `ui.*`, and so on.
+In `--types` filters, a trailing wildcard selects a whole family: `browser.*`, `ui.*`, `content.*`, and so on.
 
 `type` is a closed enum for each envelope version. Unknown types are rejected; adding an event type requires a new `v` and a matching store migration.
 
@@ -94,6 +96,7 @@ What each type carries in `data`, and whether the envelope's `window` / `element
 | `browser.navigate` | ✓ | — | `url` (null only after size limiting), `tab_title`, `mode` (always `"normal"`), `transition` (`navigate`/`tab_switch`/null) |
 | `clipboard.copy` | ✓ / — | — | `origin` (`copy_shortcut`/`unknown`), `content_kind` (`text`/`image`/`file`/`other`), `size_bytes`, `text`. Unknown origin has no app/window attribution or body |
 | `clipboard.paste` | ✓ | — | `content_kind`, `size_bytes`, `text`, and `field_kind` of the paste target |
+| `content.snapshot` | ✓ | — | `text` (`string` or null after the core size safety rule), `chars` (pre-redaction character count after the collector limit), `complete` (whether the visible tree was read within the collection limits), `trigger` (`settle`, `refresh`, or `focus_out`). Source is `macos.ax` |
 
 `field_kind` classifies the focused input field: `text` / `search` / `url` / `email` / `number` / `other`, or null when focus is not on a text-like element. There is no `password` value. Text bodies require Accessibility to confirm a known non-secure input field; failure to confirm leaves `input.key.text` and pasted text null.
 
@@ -159,7 +162,15 @@ Only *content* (what you typed or copied) is opt-in. *Facts of use* (shortcuts, 
 
 ## Schema versioning
 
-The published JSON Schema is authoritative for `v: 1`. Its envelope, event taxonomy, contexts, and per-type payloads are closed: unknown fields and event types are rejected. Adding a field or event type requires a new `v` and a matching store migration.
+The envelope version is per event type, not a global output version. The existing 13 types require `v: 1`; `content.snapshot` requires `v: 2`. A consumer that understands only `v: 1` does not need to accept a `v: 2` event. The envelope, event taxonomy, contexts, and per-type payloads are closed: `content.snapshot` with `v: 1`, an existing type with `v: 2`, unknown fields, and unknown event types are invalid. Adding a type requires a new minimum `v` and a matching store migration.
+
+Store readers skip rows whose event type they do not recognize instead of failing the whole read. CLI `query` and `export` keep their JSON array shapes and warn with the skipped count on stderr; `--quiet` suppresses the warning. MCP `query_events`, `timeline --format json`, and structured MCP `get_timeline` report the count as `skipped_unknown_types` in their existing result objects.
+
+## Reading content snapshots
+
+`query` and MCP `query_events` do not return `content.*` when no type filter is supplied. Request `content.snapshot` or `content.*` explicitly, preferably with a narrow time range and small limit. Other event families may be requested alongside it. `export` is a backup surface and includes every type in every format by default; use `--types` to narrow it.
+
+Timeline output never includes snapshot bodies. Each session reports how many snapshots belong to it: Markdown adds `Content snapshots: N` after activity lines and omits the line for zero, while JSON always includes `content_snapshots`, including zero.
 
 ## Browser URL capture
 

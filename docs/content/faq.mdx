@@ -11,6 +11,14 @@ No. Keystroke content is not captured unless you opt in (`text_content = true`);
 
 Into one local SQLite file (`~/.local/state/zanei/store.sqlite`) and nowhere else. The file is encrypted, and its key lives in your login Keychain. The binary has no feature that transmits data — there is no endpoint, no telemetry, no account. Data is deleted automatically after 48 hours by default.
 
+## Does it take screenshots?
+
+No. Zanei does not use screenshots, OCR, screen recording, or screen-capture APIs. If you separately enable `capture.content_snapshot`, it reads text that macOS Accessibility exposes in the visible part of the frontmost window. It does not read secure-field subtrees or single-line input values, and takes no snapshot while Secure Input is active. See the [privacy model](/guides/privacy#content-snapshots-are-opt-in).
+
+## Which apps can it read content snapshots from?
+
+Only apps that expose useful text through macOS Accessibility. Coverage varies by app and UI implementation; `zanei apps` lists candidates to choose from, but does not guarantee that an app exposes readable text. Snapshots cover the visible part of the frontmost window, not a document's complete contents. Safari, Firefox, Brave, Edge, Vivaldi, and Arc are excluded from snapshots by default because their private windows cannot be identified reliably. Website filters work only for Chrome; other browsers can be controlled only by app scope.
+
 ## Which browsers can it capture URLs from?
 
 **Chrome only, for now.** Chromium's AppleScript interface reports each window's mode. Zanei uses that state to omit Incognito URL events and text-content bodies. Safari and Firefox offer no reliable equivalent, so URL capture for them is not implemented. Details and the per-browser table: [event reference](/reference/events#browser-url-capture).
@@ -44,7 +52,7 @@ To look inside with your own tools, export a plain SQLite snapshot:
 zanei export --format sqlite --since 24h --out snapshot.sqlite
 ```
 
-It has the same tables as the live store and opens in `sqlite3`, DB Browser for SQLite, or any language's SQLite bindings — and in `zanei query --store snapshot.sqlite`. The snapshot is not encrypted; treat it like any other export. For most purposes `zanei query --format jsonl` is still easier and keeps you on the stable event envelope rather than internal table layouts, which may change between versions.
+It has the same tables as the live store and opens in `sqlite3`, DB Browser for SQLite, or any language's SQLite bindings — and in `zanei query --store snapshot.sqlite`. The snapshot is not encrypted; treat it like any other export. It includes content-snapshot bodies when those events are in scope. For sharing or external processing without them, select only the other families, for example `--types app.*,window.*,ui.*,input.*,browser.*,clipboard.*`. For most purposes `zanei query --format jsonl` is still easier and keeps you on the stable event envelope rather than internal table layouts, which may change between versions.
 
 ## How is this different from ChatGPT's Computer History?
 
@@ -111,9 +119,11 @@ After `brew upgrade`, run `zanei stop && zanei start` to switch the recorder to 
 
 ## What happens to my data after upgrading?
 
-Zanei 0.3.0 and later encrypt the store. A store written by 0.2.x or earlier is plaintext SQLite, and the recorder never rewrites such a file. On the first `zanei start` after upgrading it renames the old store to `store.sqlite.plaintext-<timestamp>` next to the new, encrypted `store.sqlite`, and logs `zanei: kept the previous plaintext store as …`. Every read — `zanei query`, `zanei timeline`, `zanei export`, and the MCP server — returns the events from both files as one history, so nothing recorded before the upgrade disappears from your timeline. `zanei status` lists the set-aside file under `store.retired_plaintext`.
+Zanei 0.3.0 and later encrypt the store. A store written by 0.2.x or earlier is plaintext SQLite, and the recorder never rewrites such a file. On the first `zanei start` after upgrading it renames the old store to `store.sqlite.plaintext-<timestamp>` next to the new, encrypted `store.sqlite`, creates that new store at schema version 6, and logs `zanei: kept the previous plaintext store as …`. Every read — `zanei query`, `zanei timeline`, `zanei export`, and the MCP server — returns the events from both files as one history, so nothing recorded before the upgrade disappears from your timeline. `zanei status` lists the set-aside file under `store.retired_plaintext`.
 
 The set-aside file stays plaintext. It only holds events older than the moment it was set aside, so the recorder deletes it as soon as that moment leaves the retention window (`output.retention_hours`, 48 hours by default); a longer retention keeps it longer, a shorter one removes it sooner. Until then, events inside it that leave the window are purged from it on the same schedule as the live store. An active `zanei pause` and the event counters carry over to the new store. `zanei purge --all` deletes it immediately, and so does deleting the file yourself.
+
+A 0.2.x binary cannot open the schema-6 live store, and its strict config reader can reject `capture.content_snapshot`, `[filter.text_content]`, and `[filter.content_snapshot]`. Do not change the store metadata back to version 5. To return to 0.2.x, restore a pre-upgrade backup and remove those settings; otherwise keep a 0.3.x binary available to read the new store.
 
 ## `zanei start` fails with `Bootstrap failed: 5: Input/output error`
 
@@ -150,6 +160,8 @@ If no choice is already saved, the first successful interactive background `star
 zanei config set capture.text_content true
 zanei stop && zanei start
 ```
+
+In 0.3.0, Safari, Firefox, Brave, Edge, Vivaldi, and Arc are outside the default text-content scope even for upgraded configurations. Their body fields stay null while events and non-content facts remain. Run `zanei filter show` before changing those defaults.
 
 If content is enabled but still missing, run a short foreground session with privacy-safe diagnostics enabled:
 

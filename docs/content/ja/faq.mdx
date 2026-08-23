@@ -11,6 +11,14 @@ description: プライバシー・ブラウザ対応・データアクセス・�
 
 ローカルの SQLite ファイル（`~/.local/state/zanei/store.sqlite`）ただ一つに入り、他のどこにも行きません。このファイルは暗号化されており、鍵はログインキーチェーンにあります。バイナリにはデータを送信する機能がありません — エンドポイントもテレメトリもアカウントも存在しません。既定では 48 時間で自動削除されます。
 
+## スクリーンショットを取りますか？
+
+いいえ。Zanei はスクリーンショット・OCR・画面録画・画面収録 API を使いません。`capture.content_snapshot` を別途有効にした場合だけ、前面ウィンドウの可視範囲で macOS Accessibility が公開するテキストを読みます。secure field の subtree と単行入力欄の値は読まず、Secure Input 中は snapshot を取りません。[プライバシーモデル](/ja/guides/privacy)を参照してください。
+
+## どのアプリから content snapshot を取得できますか？
+
+macOS Accessibility で有用なテキストを公開する app だけです。対応範囲は app と UI 実装によって異なります。`zanei apps` は選択候補を表示しますが、読み取り可能な text の存在を保証しません。snapshot は前面ウィンドウの可視範囲で、document 全体ではありません。private window を確実に判定できないため、Safari・Firefox・Brave・Edge・Vivaldi・Arc は既定で snapshot scope 外です。website filter は Chrome だけに効き、他の browser は app scope だけで制御します。
+
 ## どのブラウザの URL が取れますか？Safari は？
 
 **現在は Chrome のみ**です。Chromium の AppleScript インターフェースが返す window mode を使い、incognito の URL イベントと本文を抑止します。Safari と Firefox には信頼できる同等の手段がないため、URL 捕捉は実装していません。詳細とブラウザ別の表は[イベントリファレンス](/ja/reference/events#ブラウザの-url-捕捉)へ。
@@ -44,7 +52,7 @@ zanei filter exclude-site add example.com
 zanei export --format sqlite --since 24h --out snapshot.sqlite
 ```
 
-稼働中のストアと同じテーブルを持ち、`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディングで開けます — `zanei query --store snapshot.sqlite` でも読めます。スナップショットは暗号化されていないので、他のエクスポートと同じように扱ってください。多くの用途では引き続き `zanei query --format jsonl` のほうが簡単で、バージョン間で変わり得る内部テーブル構造ではなく、安定したイベントエンベロープの上に乗れます。
+稼働中のストアと同じテーブルを持ち、`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディングで開けます — `zanei query --store snapshot.sqlite` でも読めます。スナップショットは暗号化されていないので、他のエクスポートと同じように扱ってください。scope 内なら content-snapshot 本文も含みます。共有・外部処理から除くには、たとえば `--types app.*,window.*,ui.*,input.*,browser.*,clipboard.*` で他の family だけを選びます。多くの用途では引き続き `zanei query --format jsonl` のほうが簡単で、バージョン間で変わり得る内部テーブル構造ではなく、安定したイベントエンベロープの上に乗れます。
 
 ## ChatGPT の Computer History と何が違いますか？
 
@@ -111,9 +119,11 @@ security delete-generic-password -s dev.zanei.store
 
 ## アップグレード後、データはどうなりますか？
 
-Zanei 0.3.0 以降はストアを暗号化します。0.2.x 以前が書いたストアは平文の SQLite で、recorder はこのファイルを書き換えません。アップグレード後に最初に `zanei start` したとき、旧ストアを `store.sqlite.plaintext-<日時>` という名前に変えて新しい暗号化ストア `store.sqlite` の隣に残し、`zanei: kept the previous plaintext store as …` とログに出します。`zanei query`・`zanei timeline`・`zanei export`・MCP サーバーのすべての読み取りは、両方のファイルのイベントを一つの履歴として返すので、アップグレード前に記録したものがタイムラインから消えることはありません。`zanei status` は退避したファイルを `store.retired_plaintext` に表示します。
+Zanei 0.3.0 以降はストアを暗号化します。0.2.x 以前が書いたストアは平文の SQLite で、recorder はこのファイルを書き換えません。アップグレード後に最初に `zanei start` したとき、旧ストアを `store.sqlite.plaintext-<日時>` という名前に変えて新しい暗号化ストア `store.sqlite` の隣に残し、新しい store を schema version 6 で作成して、`zanei: kept the previous plaintext store as …` とログに出します。`zanei query`・`zanei timeline`・`zanei export`・MCP サーバーのすべての読み取りは、両方のファイルのイベントを一つの履歴として返すので、アップグレード前に記録したものがタイムラインから消えることはありません。`zanei status` は退避したファイルを `store.retired_plaintext` に表示します。
 
 退避したファイルは平文のままです。中身は退避した時点より前のイベントだけなので、その時点が保持期間（`output.retention_hours`、既定 48 時間）を外れた時点で recorder がファイルごと削除します。保持期間が長ければ長く残り、短ければ早く消えます。それまでの間も、保持期間を外れたイベントは稼働中のストアと同じタイミングでファイル内から削除されます。`zanei pause` 中であればその状態とイベント数のカウンタは新しいストアに引き継がれます。`zanei purge --all` はすぐに削除し、ファイルを自分で削除しても構いません。
+
+0.2.x binary は schema 6 の live store を開けず、strict な config reader は `capture.content_snapshot`・`[filter.text_content]`・`[filter.content_snapshot]` を拒否し得ます。store metadata を version 5 に書き戻してはいけません。0.2.x に戻すには upgrade 前の backup を restore し、これらの設定を除いてください。それ以外は新しい store を読むために 0.3.x binary を残します。
 
 ## `zanei start` で `Bootstrap failed: 5: Input/output error` が表示されます
 
@@ -150,6 +160,8 @@ zanei start
 zanei config set capture.text_content true
 zanei stop && zanei start
 ```
+
+0.3.0 では、upgrade 済みの config でも Safari・Firefox・Brave・Edge・Vivaldi・Arc は既定の text-content scope 外です。これらの本文 field は null のままですが、event と内容以外の事実は残ります。既定値を変える前に `zanei filter show` を確認してください。
 
 有効なのに本文が取れない場合は、プライバシーに配慮した診断を有効にして、短時間のフォアグラウンドセッションを実行します。
 

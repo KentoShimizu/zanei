@@ -9,7 +9,7 @@ Zanei records what you do on your computer. Because that data is sensitive, the 
 
 1. **No egress.** There is no feature that sends data anywhere. Everything stays in a local SQLite file.
 2. **No screen recording.** No screenshots or screen-capture APIs. Zanei reads OS accessibility and event metadata.
-3. **No keystroke content by default.** Typing is recorded as "typing happened in this kind of field," not what was typed, unless you opt in.
+3. **No content by default.** Typing is recorded as "typing happened in this kind of field," not what was typed. Text shown in windows is not recorded. Typed content and content snapshots are separate opt-ins.
 4. **Capture-time filtering.** Events attributable to excluded apps are discarded before they reach the store. An unattributed clipboard change can still be stored with `app.name: "Unknown"` because it cannot be matched to the excluded app. Excluded Chrome sites produce no URL events or text-content bodies.
 5. **Read-only MCP exposure.** The [MCP server](/reference/mcp) is a read-only view. An agent connected only through MCP can read the timeline but cannot change what is recorded or edit filters.
 6. **Encrypted at rest.** The store file is encrypted. Its key is generated on the recorder's first start and kept in your login Keychain; it is not synced to iCloud Keychain. A copy of the file — in a backup, a sync folder, or on another machine — cannot be read without it, and deleting the key makes every copy unreadable.
@@ -23,8 +23,9 @@ Zanei records what you do on your computer. Because that data is sensitive, the 
 | UI interactions (clicks, focus moves) as element metadata | Values of password fields (`AXSecureTextField`), excluded at the source |
 | The fact of typing, scrolling, and clipboard use | URLs, tab info, and text-content bodies from Chrome Incognito windows |
 | Chrome URLs and tab titles (normal windows only) | Events attributable to excluded apps (password managers by default) |
+|  | Text shown in app windows (`content.snapshot`) |
 
-## Capturing content is opt-in
+## Typed content is opt-in
 
 Setting `capture.text_content = true` in the [configuration](/reference/config) enables recording of authorized typed characters (`input.key`), text inserted into fields (`ui.value.data.text`), and clipboard contents. For free-text fields, Zanei captures only the difference inserted within 3 seconds after a keystroke or paste in the same app and focused element; it does not capture the displayed document or the field's full value. While you keep typing, changes are batched and recorded after a 1-second pause or at most every 5 seconds. Clipboard copy text requires a matching Command-C from the same process within 500 milliseconds. `element.value` stays null for free-text and unknown elements; only an allow-list of known-safe non-text controls (buttons, checkboxes, sliders) provides it. During first-time setup, if `capture.text_content` is not already explicit in `config.toml`, the first successful interactive background `start` asks you to choose. The default answer is `N`, so content capture stays off unless you opt in. Your answer is saved and the question is not repeated. You can change it later with `zanei config set capture.text_content <true|false>`. If you opt in:
 
@@ -43,6 +44,27 @@ When content capture is enabled, Zanei requests accessibility tree construction 
 With `text_content` enabled, captured text stays in your local store for the retention window. Pair it with [filters](/guides/filters) and a short `retention_hours`.
 :::
 
+In 0.3.0, the default `[filter.text_content]` scope excludes Safari, Firefox, Brave, Edge, Vivaldi, and Arc because their private windows cannot be identified reliably. This also applies to users upgrading with `capture.text_content = true`: typed and copied bodies in those browsers become null by default, while the events and non-content facts remain. You can change the editable defaults after reviewing the warning from `zanei filter`.
+
+## Content snapshots are opt-in
+
+`capture.content_snapshot = true` records text that macOS Accessibility exposes in the visible part of the frontmost window. It does not take screenshots, use OCR, or call screen-recording APIs. A snapshot is considered after the window settles, periodically while you remain active in it, and when you leave it. Each event contains at most 32 KiB of UTF-8 text; longer or incomplete reads have `data.complete: false`.
+
+Content snapshots are independent from typed-content capture and from `capture.sources`. Zanei does not read secure-field subtrees or the values of single-line input fields, and it takes no snapshot while Secure Input is active. However, text you typed can still appear after it is rendered elsewhere in the window or in a multi-line text area. Snapshots can also contain messages, documents, and other text written by other people.
+
+Choose the scope before enabling the opt-in:
+
+```bash
+zanei apps
+zanei filter content-snapshot only-app add Terminal
+zanei config set capture.content_snapshot true
+zanei stop && zanei start
+```
+
+The store remains encrypted and normal retention applies. A plaintext SQLite export includes snapshot bodies unless you exclude them with `--types`; protect it like any other sensitive export. If you share your screen, run `zanei pause` first when the visible text should not be recorded. On employer-managed devices, follow your organization's rules for third-party messages and documents.
+
+The recorder stops creating snapshots after 128 MiB in a day. With the default 48-hour retention, that guard bounds snapshot text to about 256 MiB before database overhead; normal use is expected to be much lower because identical snapshots are not stored.
+
 ## Automatic exclusions
 
 - **Password fields** — anything macOS marks as a secure text field is dropped at the source.
@@ -55,7 +77,8 @@ For values that are captured, redactors scrub recognizable sensitive content: em
 
 ## Limitations
 
-- **Window titles from non-Chrome browsers.** Safari and Firefox offer no reliable way to detect private windows, so Zanei does not capture URLs from them, but their window titles are still recorded like any other app's, and a private window's page title can appear there. To avoid this, exclude that browser; for example, for Safari: `zanei filter exclude-app add com.apple.Safari`.
+- **Private windows outside Chrome.** Safari, Firefox, Brave, Edge, Vivaldi, and Arc do not expose a reliable private-window signal to Zanei. They are therefore excluded by default from both `[filter.text_content]` and `[filter.content_snapshot]`. These defaults are editable, but removing one can record private-window text. Their window titles are still handled by the all-events `[filter]` scope; to suppress those too, exclude the browser there, for example `zanei filter exclude-app add com.apple.Safari`.
+- **Website scopes are Chrome-only.** Chrome is the only browser for which Zanei can obtain a URL and window mode. Website rules do not apply to other browsers; those are controlled only by app scope.
 - **Window titles from Chrome Incognito and excluded-site windows.** Their text-content bodies remain null, but Accessibility can still record the title as a `window.title` event. To suppress titles too, exclude Chrome: `zanei filter exclude-app add com.google.Chrome`.
 - **Agents with shell access.** An agent with shell access can use the CLI to change recording settings, filters, and stored recordings, subject to the host's approval policy. The shipped skill instructs agents not to make these changes unless the user explicitly asks.
 - **Any process that can run `zanei` as you.** Encryption protects copies of the file, not the CLI. Anything running as your user — including an agent with shell access, which can run `zanei export` — can read the data, as can root or anything that reads process memory. Theft of the disk itself is covered by FileVault, not by Zanei.

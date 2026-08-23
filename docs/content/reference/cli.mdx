@@ -23,6 +23,7 @@ All functionality lives in a single binary, `zanei` — daemon control, permissi
 | [`timeline`](#timeline) | LLM-ready, token-budgeted timeline |
 | [`export`](#export) | Bulk dump of raw events |
 | [`purge`](#purge) | Manually delete stored events (destructive) |
+| [`apps`](#apps) | List apps available for filter selection |
 | [`filter`](#filter) | Manage capture-time allow/deny lists |
 | [`config`](#config) | Initialize, show, locate, or edit configuration |
 | [`mcp`](#mcp) | Run the stdio MCP server |
@@ -72,7 +73,7 @@ Commands with a `--format` option support these values:
 | Value | Commands | Description |
 | --- | --- | --- |
 | `jsonl` | `query`, `export`, `record` | One raw event per line (machine-readable) |
-| `json` | `query`, `export`, `timeline` | Single JSON document; for `timeline`, the structured timeline |
+| `json` | `query`, `export`, `timeline` | Single JSON document. `query` and `export` are event arrays; `timeline` is the structured timeline object |
 | `md` | `timeline` | LLM-ready Markdown (default) |
 | `table` | `query` | Human-readable table |
 | `sqlite` | `export` | Plaintext SQLite snapshot of the store for the range; requires `--out` |
@@ -97,7 +98,7 @@ Diagnostic/state commands use a separate fixed-output convention:
 
 ## `doctor`
 
-Diagnoses the granted state of required TCC permissions (Accessibility / Input Monitoring / Automation) against the configured `capture.sources`.
+Diagnoses the granted state of required TCC permissions (Accessibility / Input Monitoring / Automation) against the configured sources and content opt-ins.
 
 ```bash
 zanei doctor            # human-readable; shows granting steps and the System Settings pane if anything is missing
@@ -127,7 +128,7 @@ required permission is missing. In that combination, stdout is therefore not JSO
   "reported_by_recorder": true,
   "capture_sources": ["app", "window", "ui", "input", "browser"],
   "permissions": {
-    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value"] },
+    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"] },
     "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
     "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
   },
@@ -180,6 +181,16 @@ Record typed text and clipboard contents too? They stay in the local store like 
 Before bootstrapping, `start` uses the persisted last-known recorder permission report. If that report does not cause the question, `start` bootstraps the recorder, waits for it to become alive, and checks the current recorder report. The CLI process's local permission probe is never used for this decision because it reflects the terminal's TCC identity rather than the recorder's.
 
 Only `y` or `Y` enables capture; Enter, any other answer, EOF, or a read error selects `false`. Zanei saves the explicit value through the same path as `config set`, preserves the rest of the file, and prints `Text content will be recorded.` or `Text content stays off.`. If the question was asked after bootstrap, a `y` answer also prints `Restarting the recorder to apply text content capture...` and restarts through the canonical stop-then-start path. A false answer needs no restart because it preserves the recorder's default-off behavior. Because either answer writes the key, the question is not repeated.
+
+Immediately after this question is answered, `start` prints the following separate opt-in guidance exactly. It does not ask a content-snapshot y/N question:
+
+```text
+Content snapshots (text shown in apps you choose) are a separate opt-in. Choose the apps first
+(zanei filter content-snapshot only-app add <APP>, or exclude-app), then enable it with
+zanei config set capture.content_snapshot true.
+```
+
+If `capture.text_content` was already explicit and the question is not shown, this guidance is not shown either. The permanent entry point is the `CONTENT SNAPSHOT` status line.
 
 The question is not shown by `--foreground`, with non-TTY stdin or stderr, with `--quiet` or `--json`, while permissions are missing, or when permission state cannot be determined. A skipped start leaves the setting undecided and keeps the existing opt-in guidance. If the key is already explicitly `true` or `false`, `start` does not ask.
 
@@ -236,9 +247,7 @@ zanei status
 zanei status --json
 ```
 
-Human-readable output shows `TEXT CONTENT      on (opt-in)` when enabled and
-`TEXT CONTENT      off (opt-in: zanei config set capture.text_content true)` when disabled, so the
-privacy-sensitive opt-in state and its explicit activation command are visible without requesting JSON.
+Human-readable output shows the current app/site scope next to enabled `TEXT CONTENT` and `CONTENT SNAPSHOT` lines. Disabled lines show their explicit activation commands, so both privacy-sensitive opt-ins are visible without requesting JSON. Examples are `TEXT CONTENT      on (apps: exclude 6, sites: exclude 0)` and `CONTENT SNAPSHOT   off (opt-in: zanei config set capture.content_snapshot true)`.
 
 ```json
 {
@@ -259,7 +268,7 @@ privacy-sensitive opt-in state and its explicit activation command are visible w
   "store_write_state": "healthy",
   "degraded": {},
   "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z", "encryption": "sqlcipher" },
-  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false },
   "permissions_ok": true
 }
 ```
@@ -292,6 +301,7 @@ The JSON object always has the following fields. `integer` values are non-negati
 | `store.retired_plaintext` | string[] | Plaintext stores set aside at the encryption upgrade that reads still include, oldest first; empty once they have aged out. Human-readable output shows each as a `PREVIOUS STORE` line. One that cannot be read is skipped and reported under `degraded.retired_store` |
 | `capture.sources` | `string[]` | Sources from the current configuration. Never null |
 | `capture.text_content` | boolean | Text-content opt-in from the current configuration. Never null |
+| `capture.content_snapshot` | boolean | Frontmost-window content-snapshot opt-in from the current configuration. Independent from `capture.sources`; never null |
 | `permissions_ok` | boolean | Available permission snapshot from a fresh heartbeat whose instance matches the current owner; otherwise, including when the snapshot is absent or the heartbeat is stale, future, or missing, a local probe. Never null |
 
 Human-readable output is a fixed set of lines rather than a table selected with `--format`:
@@ -309,7 +319,8 @@ Human-readable output is a fixed set of lines rather than a table selected with 
 | `HEARTBEAT` | Freshness plus `(<N>s old)` when age exists; `-` when freshness is null |
 | `STORE WRITES` | `store_write_state`, or `-` when null |
 | `STORE` | `store.path`, followed by ` (encrypted)` or ` (plaintext; the recorder encrypts it on its next start)` when `store.encryption` is not null |
-| `TEXT CONTENT` | `on (opt-in)` or `off (opt-in: zanei config set capture.text_content true)` |
+| `TEXT CONTENT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` or `off (opt-in: zanei config set capture.text_content true)` |
+| `CONTENT SNAPSHOT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` or `off (opt-in: zanei config set capture.content_snapshot true)` |
 | `PERMISSIONS OK` | `true` or `false` |
 | `DEGRADED` | `false` for an empty map; otherwise `true` followed by one indented `component: reason` line per entry |
 
@@ -363,6 +374,8 @@ zanei query --since 2h --app Safari --format json --limit 500
 
 These are query-time filters — they narrow reads, not what gets recorded (see [filters](/guides/filters)).
 
+When `--types` is omitted, `content.*` is excluded. Request `--types content.snapshot` or `--types content.*` explicitly to read snapshot bodies; other families can be listed alongside it. `--format json` remains an array of event objects. If stored rows use unknown event types, Zanei skips them and warns with the count on stderr; global `--quiet` suppresses that warning.
+
 ## `timeline`
 
 Splits raw events into sessions, deduplicates, coalesces, and serializes an LLM-ready summary within a token budget. **The command agents call most.**
@@ -393,10 +406,11 @@ Truncated: no
 Title: Reviewing PR #42
 - Browsed 3 pages on github.com
 - Edited text in "Reviewing PR #42"
+Content snapshots: 3
 ```
 
 With `--format json`, the same session is represented by `range`, `token_estimate`, `truncated`,
-and `sessions`; session activities use the same fixed phrases. JSON sessions always include
+`skipped_unknown_types`, and `sessions`; session activities use the same fixed phrases. Every JSON session includes `content_snapshots`, including `0`. Markdown prints `Content snapshots: N` after the activity lines only when the count is nonzero. Snapshot bodies are never inlined. JSON sessions always include
 `event_ids_truncated` and include up to 100 `event_ids` when the token budget permits. `event_ids`
 may be omitted before sessions are removed.
 
@@ -407,15 +421,19 @@ Dumps every raw event in range (backup / external processing).
 ```bash
 zanei export --since 24h --format jsonl --out dump.jsonl
 zanei export --since 24h --format sqlite --out snapshot.sqlite
+zanei export --since 24h --types app.*,window.*,ui.*,input.*,browser.*,clipboard.* --format sqlite --out share.sqlite
 ```
 
 | Flag | Description |
 | --- | --- |
 | `--since` / `--until` | Time range (default `--since 24h`) |
+| `--types <TYPE,...>` | Optional event-type filter, applied to `jsonl`, `json`, and `sqlite` |
 | `--format` | `jsonl` / `json` / `sqlite` |
 | `--out <FILE>` | Output file; required for `--format sqlite` |
 
-`--format sqlite` writes a plaintext SQLite snapshot with the same tables as the live store (`events`, `daemon_state`, `daemon_permissions`, `meta`) for the requested range; retention applies like every read. `--out` is required (usage error, code 2, without it). The file is created owner-only (mode 0600) and never overwritten: an existing path fails with code 1 and `snapshot file already exists at PATH; choose another --out path`. On success it prints `Wrote a plaintext SQLite snapshot with N events to PATH` (suppressed by `--quiet`). The snapshot is not encrypted — treat it like a JSONL export. It opens in `sqlite3`, DB Browser for SQLite, any language's SQLite bindings, and `zanei query --store snapshot.sqlite`.
+Export includes every event type by default in all formats, including `content.snapshot`; unlike `query`, an omitted `--types` does not hide content. `--format json` remains an array of event objects. JSON/JSONL export skips unknown event types and warns with the count on stderr unless `--quiet` is set.
+
+`--format sqlite` writes a plaintext SQLite snapshot with the same tables as the live store (`events`, `daemon_state`, `daemon_permissions`, `meta`) for the requested range; retention applies like every read. SQLite export copies matching rows without decoding them, so unknown types are copied rather than skipped. `--out` is required (usage error, code 2, without it). The file is created owner-only (mode 0600) and never overwritten: an existing path fails with code 1 and `snapshot file already exists at PATH; choose another --out path`. On success it prints `Wrote a plaintext SQLite snapshot with N events to PATH` (suppressed by `--quiet`). The snapshot is not encrypted and contains snapshot bodies in plaintext when `content.*` is selected. Treat it like a sensitive JSONL export; use `--types` to select only the families intended for sharing or external processing. It opens in `sqlite3`, DB Browser for SQLite, any language's SQLite bindings, and `zanei query --store snapshot.sqlite`.
 
 ## `purge`
 
@@ -424,38 +442,61 @@ Deletes stored events manually, independent of retention-based auto-purge. **Des
 ```bash
 zanei purge --before 24h   # delete events older than 24 hours
 zanei purge --all          # delete everything (confirmation prompt; suppress with --quiet)
+zanei purge --types content.* --before 24h
+zanei purge --types content.* --app Slack
+zanei purge --types content.* --bundle-id com.tinyspeck.slackmacgap
 ```
 
 | Flag | Description |
 | --- | --- |
 | `--before <TIME>` | Delete events older than this |
+| `--types <TYPE,...>` | Delete only matching event types; wildcards allowed |
+| `--app <NAME>` / `--bundle-id <ID>` | Delete only events matching the app; mutually exclusive |
 | `--all` | Delete everything (asks for confirmation) |
 
-When the store does not exist, `purge` prints `Purged 0 events` and does not create one. Set-aside plaintext stores from the encryption upgrade are purged too: `--before` deletes their matching events, `--all` deletes the files.
+`--types` can be combined with `--before` and one app selector, for example to remove snapshots from an app after excluding it. This deletion is irreversible and has no dry-run mode; the command reports the applied scope and deleted count. When the store does not exist, `purge` prints `Purged 0 events` and does not create one. Set-aside plaintext stores from the encryption upgrade are purged too: scoped options delete matching rows, while `--all` deletes the files.
+
+## `apps`
+
+Lists apps available for filter selection from installed apps, running apps, and `app.activate` events still in the store.
+
+```bash
+zanei apps
+zanei apps slack
+zanei apps slack --json
+```
+
+The optional `QUERY` is a case-insensitive substring match on name or bundle ID. The table contains `NAME`, `BUNDLE ID`, `SOURCES` (`installed`, `running`, `recent`), and `LAST USED`. Recently used apps come first, then other running apps, then installed apps. No result is success (code 0) with `No apps match "QUERY".` on stderr. No TCC permission is needed, and the command works while the daemon is stopped.
+
+`--json` returns `{ "apps": [{ "name", "bundle_id", "path", "installed", "running", "last_used" }], "recent_unavailable": null }` in the same order. If the store is absent or cannot be opened, installed and running apps remain available and `recent_unavailable` contains the reason.
 
 ## `filter`
 
-Manages capture-time allow/deny lists. App matches are discarded before storage; Chrome site matches discard URL events and suppress text-content bodies while titles and interaction metadata remain. Semantics and matching rules are covered in the [filters guide](/guides/filters). Equivalent to editing `[filter]` in `config.toml`, with added validation and deduplication.
+Manages three capture-time scopes: `[filter]` for all events, `[filter.text_content]` for typed/copied bodies, and `[filter.content_snapshot]` for snapshot events. The command shape is `zanei filter [<scope>] <list> add|remove [VALUE]`; `<scope>` is omitted, `text-content`, or `content-snapshot`.
 
 ```bash
-zanei filter show                                      # all lists and the active mode
-zanei filter exclude-app add com.1password.1password
-zanei filter exclude-app remove com.1password.1password
-zanei filter only-app add com.apple.Safari
-zanei filter exclude-site add example.com
-zanei filter only-site add github.com
+zanei filter show
+zanei filter exclude-app add 1Password
+zanei filter text-content exclude-app add Slack
+zanei filter content-snapshot only-app add Terminal
+zanei filter content-snapshot exclude-site add mail.google.com
+zanei filter content-snapshot exclude-app add FutureApp --unverified
 ```
 
-| Subcommand | `[filter]` key | Meaning |
+| List | Config suffix | Meaning |
 | --- | --- | --- |
-| `exclude-app (add\|remove) <BUNDLE_ID or NAME>` | `exclude_apps` | Deny list (everything else is captured) |
-| `only-app (add\|remove) <BUNDLE_ID or NAME>` | `include_only_apps` | Allow list (when set, only listed apps are captured) |
-| `exclude-site (add\|remove) <DOMAIN>` | `exclude_websites` | Deny list for Chrome URL events and text-content bodies, matched by URL host |
-| `only-site (add\|remove) <DOMAIN>` | `include_only_websites` | Allow list for Chrome URL events and text-content bodies, matched by URL host |
+| `exclude-app` | `exclude_apps` | Exclude these apps; active in both exclude and only mode |
+| `only-app` | `include_only_apps` | A non-empty list selects only these apps |
+| `exclude-site` | `exclude_websites` | Exclude these Chrome URL hosts; active in both modes |
+| `only-site` | `include_only_websites` | A non-empty list selects only these Chrome URL hosts |
 
-- Apps: specify by `BUNDLE_ID` (recommended) or display name. `filter show` also displays the built-in default exclusions (`1Password`, `Keychain Access`, ...).
-- Changes apply on the next configuration-watch cycle, normally within 2 seconds; events that occur before then use the previous filter. No daemon restart is required.
-- Adding a single `only-app` entry switches to allow-list mode; `filter show` states the active mode.
+- Every app-list `add` accepts a display name or bundle ID, resolves it against [`zanei apps`](#apps), and saves the bundle ID when available. An unresolved value is not saved and exits with code 2, with a close candidate when available. `--unverified` explicitly saves an unresolved value with a warning.
+- `add` with no value opens a numbered, recently-used-first selector. Non-TTY use and `--quiet` require a value; omission exits with code 2. `remove` resolves against the current list, including entries for apps no longer installed.
+- `filter show` displays all three scopes, each apps/sites mode and count, resolved names, and `(not installed)` for unresolved entries. It also lists hard-coded built-in exclusions separately.
+- Both content scopes default to excluding Safari, Firefox, Brave, Edge, Vivaldi, and Arc. Adding one with `only-app` or removing it from `exclude-app` warns unless `--quiet` is set, because private-window detection is unavailable. The defaults are editable.
+- Site rules work only for Chrome. Changes apply on the next configuration-watch cycle, normally within 2 seconds; no restart is required.
+
+The exact evaluation order and the fields removed by each scope are in the [filters guide](/guides/filters).
 
 ## `config`
 
@@ -465,6 +506,7 @@ zanei config path   # print the config file path
 zanei config show   # print the effective configuration (defaults merged)
 zanei config edit   # open the config in $EDITOR
 zanei config set capture.text_content true
+zanei config set capture.content_snapshot true
 ```
 
 `config init` writes a complete, commented template containing every supported option and its
@@ -478,18 +520,38 @@ exists, it leaves the file unchanged, reports the existing path, and exits with 
 | Key | Accepted values |
 | --- | --- |
 | `capture.text_content` | `true`, `false` |
+| `capture.content_snapshot` | `true`, `false` |
 | `output.batch_interval_s` | Unsigned integer greater than zero |
 | `output.retention_hours` | Unsigned integer greater than zero |
 
 Array settings are not accepted: use [`zanei filter`](#filter) for filter lists, or
 `zanei config edit` for other arrays. Unknown keys, array keys, and invalid values exit with
 code 2 without saving. `output.retention_hours` is reloaded by a running daemon and immediately
-applied to retention purging. If the daemon is running, a successful `capture.text_content` or
+applied to retention purging. If the daemon is running, a successful `capture.text_content`, `capture.content_snapshot`, or
 `output.batch_interval_s` change prints:
 
 ```text
 Restart recording with `zanei stop && zanei start` for this to take effect.
 ```
+
+`config set capture.content_snapshot true` first prints the current app/site scope and waits for `[y/N]`, with `N` as the default. The scope summary reflects the effective lists; the default prompt is:
+
+```text
+Content snapshots record the text shown in the frontmost window, including messages and
+documents written by other people and text you typed that is on screen. Password fields and
+Chrome Incognito windows are never captured; stored text is redacted and deleted after 48 hours.
+
+Current scope (change it first if this is not what you want):
+  Apps:  every app except 6 excluded (Safari, Firefox, Brave, Edge, Vivaldi, Arc)
+  Sites: every site
+  zanei filter content-snapshot only-app add <APP>      record only these apps
+  zanei filter content-snapshot exclude-app add <APP>   everything except these
+  zanei apps                                            list apps to choose from
+
+Enable content snapshots with this scope? [y/N]
+```
+
+`N`, Enter, or EOF leaves the file unchanged. With non-TTY input, `--quiet` is required to write; without it Zanei prints the scope summary to stderr, exits with code 2, and does not save. After choosing the scope with `filter content-snapshot`, an agent can use `zanei config set capture.content_snapshot true --quiet`, must state what will be recorded, and then restart. Setting the value to `false` does not ask for confirmation.
 
 Schema: see the [configuration reference](/reference/config).
 
