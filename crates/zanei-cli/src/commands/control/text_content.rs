@@ -10,6 +10,11 @@ use crate::error::CliError;
 pub(super) const PROMPT: &str = "Record typed text and clipboard contents too? They stay in the local store like everything else (48-hour retention), password fields are always excluded, and Chrome Incognito text is never captured. You can change this anytime: zanei config set capture.text_content <true|false>  [y/N] ";
 const ENABLED_RESULT: &str = "Text content will be recorded.\n";
 const DISABLED_RESULT: &str = "Text content stays off.\n";
+const CONTENT_SNAPSHOT_GUIDANCE: &str = concat!(
+    "Content snapshots (text shown in apps you choose) are a separate opt-in. Choose the apps first\n",
+    "(zanei filter content-snapshot only-app add <APP>, or exclude-app), then enable it with\n",
+    "zanei config set capture.content_snapshot true.\n"
+);
 
 pub(super) fn maybe_prompt(
     config_path: &Path,
@@ -38,6 +43,7 @@ pub(super) fn maybe_prompt(
         DISABLED_RESULT
     })
     .map_err(CliError::PromptOutput)?;
+    write_stderr(CONTENT_SNAPSHOT_GUIDANCE).map_err(CliError::PromptOutput)?;
     Ok(Some(enabled))
 }
 
@@ -64,7 +70,10 @@ mod tests {
         );
 
         assert_eq!(prompted, Some(true));
-        assert_eq!(output, format!("{PROMPT}{ENABLED_RESULT}"));
+        assert_eq!(
+            output,
+            format!("{PROMPT}{ENABLED_RESULT}{CONTENT_SNAPSHOT_GUIDANCE}")
+        );
         assert!(
             Config::load(&fixture.config)
                 .expect("saved config")
@@ -95,7 +104,10 @@ mod tests {
                 || Ok(answer.to_owned()),
             );
             assert_eq!(prompted, Some(false));
-            assert_eq!(output, format!("{PROMPT}{DISABLED_RESULT}"));
+            assert_eq!(
+                output,
+                format!("{PROMPT}{DISABLED_RESULT}{CONTENT_SNAPSHOT_GUIDANCE}")
+            );
             assert!(
                 !Config::load(&fixture.config)
                     .expect("saved config")
@@ -192,7 +204,10 @@ mod tests {
             let (prompted, output) =
                 fixture.run(false, false, true, true, StartPermissionState::Ready, read);
             assert_eq!(prompted, Some(false));
-            assert_eq!(output, format!("{PROMPT}{DISABLED_RESULT}"));
+            assert_eq!(
+                output,
+                format!("{PROMPT}{DISABLED_RESULT}{CONTENT_SNAPSHOT_GUIDANCE}")
+            );
             assert!(
                 !Config::load(&fixture.config)
                     .expect("saved config")

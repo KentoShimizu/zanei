@@ -2,6 +2,9 @@
 
 use std::sync::mpsc::SyncSender;
 
+mod app_directory;
+
+pub use app_directory::{AppDirectory, AppDirectoryError, AppInfo};
 pub use zanei_core::RawEvent;
 
 pub const COLLECTOR_CHANNEL_CAPACITY: usize = 4_096;

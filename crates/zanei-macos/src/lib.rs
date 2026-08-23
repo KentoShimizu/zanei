@@ -1,6 +1,8 @@
 //! Native macOS collectors and permission diagnostics.
 
 #[cfg(target_os = "macos")]
+pub mod app_directory;
+#[cfg(target_os = "macos")]
 pub mod ax;
 #[cfg(target_os = "macos")]
 pub mod chrome;

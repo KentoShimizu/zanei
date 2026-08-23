@@ -1,20 +1,11 @@
-mod cli;
-mod commands;
-mod daemon;
-mod error;
-mod executable;
-mod paths;
-mod permissions;
-mod setup;
-mod store_access;
-
 use std::process::ExitCode;
 
 use clap::Parser;
+use zanei_cli::Cli;
 
 fn main() -> ExitCode {
-    let cli = cli::Cli::parse();
-    match commands::run(cli) {
+    let cli = Cli::parse();
+    match zanei_cli::run(cli) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("error: {error}");

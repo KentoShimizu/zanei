@@ -1857,6 +1857,7 @@ dependencies = [
 name = "zanei-macos"
 version = "0.2.0"
 dependencies = [
+ "tempfile",
  "thiserror",
  "zanei-collector",
  "zanei-core",

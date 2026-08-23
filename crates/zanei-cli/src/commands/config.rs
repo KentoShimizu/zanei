@@ -1,13 +1,33 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
 
-use zanei_core::config::{CaptureBoolKey, Config, apply_scalar_edit, save, save_capture_bool};
+use zanei_collector::AppDirectory;
+use zanei_core::config::{
+    CaptureBoolKey, Config, FilterScope, ScalarEditResult, apply_scalar_edit, save,
+    save_capture_bool,
+};
 
-use super::EXIT_SUCCESS;
+use super::apps;
+use super::filter::ScopeSummary;
+use super::{EXIT_SUCCESS, EXIT_USAGE};
 use crate::cli::{ConfigArgs, ConfigCommand};
 use crate::error::CliError;
+use crate::paths::Paths;
+
+const CONTENT_SNAPSHOT_WARNING: &str = concat!(
+    "Content snapshots record the text shown in the frontmost window, including messages and\n",
+    "documents written by other people and text you typed that is on screen. Password fields and\n",
+    "Chrome Incognito windows are never captured; stored text is redacted and deleted after 48 hours.\n\n",
+    "Current scope (change it first if this is not what you want):\n"
+);
+const CONTENT_SNAPSHOT_ACTIONS: &str = concat!(
+    "  zanei filter content-snapshot only-app add <APP>      record only these apps\n",
+    "  zanei filter content-snapshot exclude-app add <APP>   everything except these\n",
+    "  zanei apps                                            list apps to choose from\n\n",
+    "Enable content snapshots with this scope? [y/N]\n"
+);
 
 const CONFIG_OPTION_COMMENTS: [ConfigOptionComment; 18] = [
     ConfigOptionComment {
@@ -110,47 +130,59 @@ struct ConfigOptionComment {
 }
 
 pub fn run(
-    config_path: &Path,
-    store_path: &Path,
+    paths: &Paths,
+    app_directory: &dyn AppDirectory,
     args: ConfigArgs,
     quiet: bool,
 ) -> Result<u8, CliError> {
     match args.command {
-        ConfigCommand::Init => init(config_path)?,
-        ConfigCommand::Path => println!("{}", config_path.display()),
+        ConfigCommand::Init => init(&paths.config)?,
+        ConfigCommand::Path => println!("{}", paths.config.display()),
         ConfigCommand::Show => {
-            let config = Config::load(config_path)?;
+            let config = Config::load(&paths.config)?;
             print!("{}", toml::to_string_pretty(&config)?);
         }
-        ConfigCommand::Edit => edit(config_path)?,
+        ConfigCommand::Edit => edit(&paths.config)?,
         ConfigCommand::Set { dotted_key, value } => {
-            set(config_path, store_path, &dotted_key, &value, quiet)?;
+            return set(paths, app_directory, &dotted_key, &value, quiet);
         }
     }
     Ok(EXIT_SUCCESS)
 }
 
 fn set(
-    config_path: &Path,
-    store_path: &Path,
+    paths: &Paths,
+    app_directory: &dyn AppDirectory,
     dotted_key: &str,
     value: &str,
     quiet: bool,
-) -> Result<(), CliError> {
-    let (result, file_changed) = persist_scalar(config_path, dotted_key, value)?;
+) -> Result<u8, CliError> {
+    let config = Config::load(&paths.config)?;
+    let result = apply_scalar_edit(&config, dotted_key, value)?;
+    if dotted_key == "capture.content_snapshot" && result.config.capture.content_snapshot && !quiet
+    {
+        let candidates = apps::collect(paths, app_directory)?.apps;
+        let summary = ScopeSummary::for_scope(&config, FilterScope::ContentSnapshot, &candidates);
+        match confirm_content_snapshot(&summary, false)? {
+            EnableDecision::Persist => {}
+            EnableDecision::Cancel => return Ok(EXIT_SUCCESS),
+            EnableDecision::UsageError => return Ok(EXIT_USAGE),
+        }
+    }
+    let file_changed = persist_scalar_result(&paths.config, dotted_key, &result)?;
 
     if quiet {
-        return Ok(());
+        return Ok(EXIT_SUCCESS);
     }
     if file_changed {
-        println!("Updated {}", config_path.display());
+        println!("Updated {}", paths.config.display());
     } else {
         println!("No change: {dotted_key}");
     }
-    if result.changed && result.restart_recording && super::control::daemon_running(store_path)? {
+    if result.changed && result.restart_recording && super::control::daemon_running(&paths.store)? {
         println!("Restart recording with `zanei stop && zanei start` for this to take effect.");
     }
-    Ok(())
+    Ok(EXIT_SUCCESS)
 }
 
 pub(super) fn persist_capture_text_content(
@@ -172,6 +204,15 @@ fn persist_scalar(
 ) -> Result<(zanei_core::config::ScalarEditResult, bool), CliError> {
     let config = Config::load(config_path)?;
     let result = apply_scalar_edit(&config, dotted_key, value)?;
+    let file_changed = persist_scalar_result(config_path, dotted_key, &result)?;
+    Ok((result, file_changed))
+}
+
+fn persist_scalar_result(
+    config_path: &Path,
+    dotted_key: &str,
+    result: &ScalarEditResult,
+) -> Result<bool, CliError> {
     let capture_bool = match dotted_key {
         "capture.text_content" => Some(CaptureBoolKey::TextContent),
         "capture.content_snapshot" => Some(CaptureBoolKey::ContentSnapshot),
@@ -185,7 +226,77 @@ fn persist_scalar(
     } else {
         false
     };
-    Ok((result, file_changed))
+    Ok(file_changed)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnableDecision {
+    Persist,
+    Cancel,
+    UsageError,
+}
+
+fn decide_enable(quiet: bool, terminal: bool, answer: Option<&str>) -> EnableDecision {
+    if quiet {
+        EnableDecision::Persist
+    } else if !terminal {
+        EnableDecision::UsageError
+    } else if answer.is_some_and(|answer| matches!(answer.trim(), "y" | "Y")) {
+        EnableDecision::Persist
+    } else {
+        EnableDecision::Cancel
+    }
+}
+
+fn confirm_content_snapshot(
+    summary: &ScopeSummary,
+    quiet: bool,
+) -> Result<EnableDecision, CliError> {
+    let stdin_is_terminal = io::stdin().is_terminal();
+    let stderr_is_terminal = io::stderr().is_terminal();
+    let mut stderr = io::stderr().lock();
+    confirm_content_snapshot_with(
+        summary,
+        quiet,
+        stdin_is_terminal,
+        stderr_is_terminal,
+        || {
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer).map(|_| answer)
+        },
+        |message| {
+            stderr.write_all(message.as_bytes())?;
+            stderr.flush()
+        },
+    )
+}
+
+fn confirm_content_snapshot_with(
+    summary: &ScopeSummary,
+    quiet: bool,
+    stdin_is_terminal: bool,
+    stderr_is_terminal: bool,
+    read_answer: impl FnOnce() -> io::Result<String>,
+    mut write_stderr: impl FnMut(&str) -> io::Result<()>,
+) -> Result<EnableDecision, CliError> {
+    if quiet {
+        return Ok(EnableDecision::Persist);
+    }
+    write_stderr(&render_content_snapshot_prompt(summary)).map_err(CliError::PromptOutput)?;
+    let terminal = stdin_is_terminal && stderr_is_terminal;
+    if !terminal {
+        return Ok(EnableDecision::UsageError);
+    }
+    let answer = read_answer().map_err(CliError::Input)?;
+    Ok(decide_enable(false, true, Some(&answer)))
+}
+
+fn render_content_snapshot_prompt(summary: &ScopeSummary) -> String {
+    format!(
+        "{CONTENT_SNAPSHOT_WARNING}  Apps:  {}\n  Sites: {}\n{CONTENT_SNAPSHOT_ACTIONS}",
+        summary.prompt_apps(),
+        summary.prompt_sites(),
+    )
 }
 
 fn init(config_path: &Path) -> Result<(), CliError> {
@@ -298,9 +409,13 @@ fn edit(config_path: &Path) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::fs;
+
+    use tempfile::TempDir;
     use zanei_core::config::Config;
 
-    use super::{CONFIG_OPTION_COMMENTS, render_template};
+    use super::*;
 
     #[test]
     fn template_contains_every_option_comment_and_current_defaults() {
@@ -319,5 +434,130 @@ mod tests {
         assert!(template.contains(
             "# When non-empty, capture Chrome URL events and text-content bodies only for these hosts.\ninclude_only_websites ="
         ));
+    }
+
+    #[test]
+    fn content_snapshot_prompt_matches_the_documented_default_scope() {
+        let prompt = render_content_snapshot_prompt(&default_content_summary());
+
+        assert_eq!(
+            prompt,
+            concat!(
+                "Content snapshots record the text shown in the frontmost window, including messages and\n",
+                "documents written by other people and text you typed that is on screen. Password fields and\n",
+                "Chrome Incognito windows are never captured; stored text is redacted and deleted after 48 hours.\n\n",
+                "Current scope (change it first if this is not what you want):\n",
+                "  Apps:  every app except 6 excluded (Safari, Firefox, Brave, Edge, Vivaldi, Arc)\n",
+                "  Sites: every site\n",
+                "  zanei filter content-snapshot only-app add <APP>      record only these apps\n",
+                "  zanei filter content-snapshot exclude-app add <APP>   everything except these\n",
+                "  zanei apps                                            list apps to choose from\n\n",
+                "Enable content snapshots with this scope? [y/N]\n"
+            )
+        );
+    }
+
+    #[test]
+    fn content_snapshot_prompt_decision_covers_tty_answers_non_tty_and_quiet() {
+        for (answer, expected) in [
+            ("y\n", EnableDecision::Persist),
+            ("Y\n", EnableDecision::Persist),
+            ("n\n", EnableDecision::Cancel),
+            ("\n", EnableDecision::Cancel),
+            ("", EnableDecision::Cancel),
+        ] {
+            let output = RefCell::new(String::new());
+            let decision = confirm_content_snapshot_with(
+                &default_content_summary(),
+                false,
+                true,
+                true,
+                || Ok(answer.to_owned()),
+                |message| {
+                    output.borrow_mut().push_str(message);
+                    Ok(())
+                },
+            )
+            .expect("TTY prompt decision");
+            assert_eq!(decision, expected);
+            assert!(output.into_inner().contains("Enable content snapshots"));
+        }
+
+        let read = Cell::new(false);
+        let output = RefCell::new(String::new());
+        let non_tty = confirm_content_snapshot_with(
+            &default_content_summary(),
+            false,
+            false,
+            true,
+            || {
+                read.set(true);
+                Ok("y\n".to_owned())
+            },
+            |message| {
+                output.borrow_mut().push_str(message);
+                Ok(())
+            },
+        )
+        .expect("non-TTY decision");
+        assert_eq!(non_tty, EnableDecision::UsageError);
+        assert!(!read.get());
+        assert!(output.into_inner().contains("Current scope"));
+
+        let wrote = Cell::new(false);
+        let quiet = confirm_content_snapshot_with(
+            &default_content_summary(),
+            true,
+            false,
+            false,
+            || Ok("n\n".to_owned()),
+            |_| {
+                wrote.set(true);
+                Ok(())
+            },
+        )
+        .expect("quiet decision");
+        assert_eq!(quiet, EnableDecision::Persist);
+        assert!(!wrote.get());
+    }
+
+    #[test]
+    fn negative_enter_and_eof_leave_config_bytes_unchanged() {
+        for answer in ["n\n", "\n", ""] {
+            let directory = TempDir::new().expect("temporary config directory");
+            let path = directory.path().join("config.toml");
+            fs::write(
+                &path,
+                "# retained comment\n[capture]\ncontent_snapshot = false\n",
+            )
+            .expect("prompt config fixture");
+            let before = fs::read(&path).expect("config before prompt");
+            let config = Config::load(&path).expect("load prompt config");
+            let result = apply_scalar_edit(&config, "capture.content_snapshot", "true")
+                .expect("prepare content snapshot edit");
+            let decision = confirm_content_snapshot_with(
+                &default_content_summary(),
+                false,
+                true,
+                true,
+                || Ok(answer.to_owned()),
+                |_| Ok(()),
+            )
+            .expect("injected prompt");
+
+            if decision == EnableDecision::Persist {
+                persist_scalar_result(&path, "capture.content_snapshot", &result)
+                    .expect("persist accepted edit");
+            }
+            assert_eq!(
+                fs::read(&path).expect("config after prompt"),
+                before,
+                "answer {answer:?} must not write"
+            );
+        }
+    }
+
+    fn default_content_summary() -> ScopeSummary {
+        ScopeSummary::for_scope(&Config::default(), FilterScope::ContentSnapshot, &[])
     }
 }

@@ -1,6 +1,9 @@
 use std::fs;
 
+use clap::Parser;
 use time::OffsetDateTime;
+use zanei_cli::Cli;
+use zanei_collector::{AppDirectory, AppDirectoryError, AppInfo};
 use zanei_core::config::Config;
 use zanei_core::normalize::format_timestamp;
 use zanei_core::schema::{
@@ -277,7 +280,157 @@ fn purge_constraints_and_failed_retired_all_are_fail_closed() {
 }
 
 #[test]
-fn config_init_writes_eighteen_keys_and_content_snapshot_set_is_noninteractive_in_a1() {
+fn app_filter_resolution_normalizes_rejects_typos_and_removes_uninstalled_values() {
+    let fixture = Fixture::uninitialized();
+    let directory = FakeAppDirectory::terminal();
+
+    assert_eq!(
+        run_injected(&fixture, &directory, ["apps", "Terminal", "--json"])
+            .expect("apps JSON through injected directory"),
+        0
+    );
+
+    assert_eq!(
+        run_injected(
+            &fixture,
+            &directory,
+            ["filter", "content-snapshot", "only-app", "add", "Terminal"]
+        )
+        .expect("resolve display name"),
+        0
+    );
+    let config = Config::load(&fixture.config).expect("resolved config");
+    assert_eq!(
+        config.filter.content_snapshot.include_only_apps,
+        ["com.apple.Terminal"]
+    );
+
+    assert_eq!(
+        run_injected(
+            &fixture,
+            &directory,
+            [
+                "filter",
+                "content-snapshot",
+                "only-app",
+                "add",
+                "com.apple.Terminal",
+            ]
+        )
+        .expect("resolve bundle ID"),
+        0
+    );
+    let before_typo = fs::read(&fixture.config).expect("config before typo");
+    let typo = run_injected(
+        &fixture,
+        &directory,
+        ["filter", "exclude-app", "add", "Termial"],
+    )
+    .expect_err("typo must fail");
+    assert_eq!(typo.exit_code(), 2);
+    assert!(typo.to_string().contains("Did you mean Terminal"));
+    assert_eq!(
+        fs::read(&fixture.config).expect("config after typo"),
+        before_typo
+    );
+
+    run_injected(
+        &fixture,
+        &directory,
+        [
+            "filter",
+            "text-content",
+            "exclude-app",
+            "add",
+            "FutureApp",
+            "--unverified",
+        ],
+    )
+    .expect("save unverified value");
+    assert!(
+        Config::load(&fixture.config)
+            .expect("unverified config")
+            .filter
+            .text_content
+            .exclude_apps
+            .iter()
+            .any(|value| value == "FutureApp")
+    );
+    run_injected(
+        &fixture,
+        &directory,
+        [
+            "filter",
+            "text-content",
+            "exclude-app",
+            "remove",
+            "FutureApp",
+        ],
+    )
+    .expect("remove uninstalled value");
+    assert!(
+        !Config::load(&fixture.config)
+            .expect("removed config")
+            .filter
+            .text_content
+            .exclude_apps
+            .iter()
+            .any(|value| value == "FutureApp")
+    );
+}
+
+#[test]
+fn apps_json_includes_recent_fixture_and_filter_show_renders_three_scopes() {
+    let fixture = Fixture::populated();
+    let output = fixture
+        .command()
+        .args(["apps", "FixtureApp", "--json"])
+        .output()
+        .expect("apps JSON");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("apps report");
+    let apps = report["apps"].as_array().expect("apps array");
+    assert_eq!(apps.len(), 1, "{report}");
+    assert_eq!(apps[0]["name"], "FixtureApp");
+    assert!(apps[0]["last_used"].is_string());
+    assert!(report.get("recent_unavailable").is_some());
+
+    let mut config = Config::default();
+    config.filter.include_only_apps = vec!["dev.example.Global".to_owned()];
+    config.filter.text_content.include_only_websites = vec!["github.com".to_owned()];
+    config.filter.content_snapshot.include_only_apps = vec!["com.apple.Terminal".to_owned()];
+    zanei_core::config::save(&config, &fixture.config).expect("three-scope config");
+    let show = fixture
+        .command()
+        .args(["filter", "show"])
+        .output()
+        .expect("filter show");
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let stdout = String::from_utf8(show.stdout).expect("filter show UTF-8");
+    for line in [
+        "Apps (all events):",
+        "Sites (all events):",
+        "Text content — apps:",
+        "Text content — sites:",
+        "Content snapshots — apps:",
+        "Content snapshots — sites:",
+        "Built-in excluded apps:",
+        "(not installed)",
+    ] {
+        assert!(stdout.contains(line), "missing {line:?}:\n{stdout}");
+    }
+}
+
+#[test]
+fn config_init_and_content_snapshot_non_tty_confirmation_preserve_bytes_until_quiet() {
     let fixture = Fixture::uninitialized();
     fs::remove_file(&fixture.config).expect("remove fixture config");
     fixture
@@ -298,6 +451,22 @@ fn config_init_writes_eighteen_keys_and_content_snapshot_set_is_noninteractive_i
         Config::default()
     );
 
+    let before = fs::read(&fixture.config).expect("config before non-TTY enable");
+    let refused = fixture
+        .command()
+        .args(["config", "set", "capture.content_snapshot", "true"])
+        .output()
+        .expect("non-TTY content snapshot enable");
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("Current scope (change it first if this is not what you want):")
+    );
+    assert_eq!(
+        fs::read(&fixture.config).expect("config after refused non-TTY enable"),
+        before
+    );
+
     fixture
         .command()
         .args([
@@ -315,6 +484,63 @@ fn config_init_writes_eighteen_keys_and_content_snapshot_set_is_noninteractive_i
             .capture
             .content_snapshot
     );
+}
+
+fn run_injected<const N: usize>(
+    fixture: &Fixture,
+    app_directory: &dyn AppDirectory,
+    args: [&str; N],
+) -> Result<u8, zanei_cli::CliError> {
+    let mut command = vec![
+        "zanei".to_owned(),
+        "--config".to_owned(),
+        fixture.config.display().to_string(),
+        "--store".to_owned(),
+        fixture.store.display().to_string(),
+    ];
+    command.extend(args.map(str::to_owned));
+    let cli = Cli::try_parse_from(command).expect("injected CLI arguments");
+    zanei_cli::run_with_app_directory(cli, app_directory)
+}
+
+struct FakeAppDirectory {
+    installed: Vec<AppInfo>,
+    running: Vec<AppInfo>,
+}
+
+impl FakeAppDirectory {
+    fn terminal() -> Self {
+        Self {
+            installed: vec![AppInfo {
+                name: "Terminal".to_owned(),
+                bundle_id: Some("com.apple.Terminal".to_owned()),
+                path: Some("/Applications/Utilities/Terminal.app".into()),
+            }],
+            running: Vec::new(),
+        }
+    }
+}
+
+impl AppDirectory for FakeAppDirectory {
+    fn installed(&self) -> Result<Vec<AppInfo>, AppDirectoryError> {
+        Ok(self.installed.clone())
+    }
+
+    fn running(&self) -> Result<Vec<AppInfo>, AppDirectoryError> {
+        Ok(self.running.clone())
+    }
+
+    fn installed_by_id(&self, bundle_id: &str) -> Result<Option<AppInfo>, AppDirectoryError> {
+        Ok(self
+            .installed
+            .iter()
+            .find(|app| {
+                app.bundle_id
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(bundle_id))
+            })
+            .cloned())
+    }
 }
 
 fn retired_path(fixture: &Fixture) -> std::path::PathBuf {

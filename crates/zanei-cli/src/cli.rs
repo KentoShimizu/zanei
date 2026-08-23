@@ -71,6 +71,8 @@ pub enum Command {
     Export(ExportArgs),
     #[command(about = "Delete stored events manually (destructive)")]
     Purge(PurgeArgs),
+    #[command(about = "List apps available for filter selection")]
+    Apps(AppsArgs),
     #[command(about = "Manage capture-time allow and deny lists")]
     Filter(FilterArgs),
     #[command(about = "Initialize, show, locate, or edit configuration")]
@@ -299,8 +301,16 @@ pub struct PurgeArgs {
 
 #[derive(Debug, Args)]
 pub struct FilterArgs {
+    #[arg(value_enum, value_name = "SCOPE")]
+    pub scope: Option<FilterScopeArg>,
     #[command(subcommand)]
     pub command: FilterCommand,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum FilterScopeArg {
+    TextContent,
+    ContentSnapshot,
 }
 
 #[derive(Debug, Subcommand)]
@@ -326,9 +336,19 @@ pub struct FilterMutationArgs {
 #[derive(Debug, Subcommand)]
 pub enum FilterAction {
     #[command(about = "Add an entry to the selected filter list")]
-    Add { value: String },
+    Add {
+        value: Option<String>,
+        #[arg(long, help = "Save an app value without verifying that it exists")]
+        unverified: bool,
+    },
     #[command(about = "Remove an entry from the selected filter list")]
     Remove { value: String },
+}
+
+#[derive(Debug, Args)]
+pub struct AppsArgs {
+    #[arg(value_name = "QUERY")]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Args)]
