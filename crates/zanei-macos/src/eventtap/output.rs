@@ -5,14 +5,17 @@ use std::sync::{
     mpsc::{SyncSender, TrySendError},
 };
 
+use time::OffsetDateTime;
 use zanei_collector::RawEvent;
 use zanei_core::schema::{App, EventData, Window};
 
 use crate::trace;
 use crate::{
     ffi::eventtap::NativeContext,
-    text_capture::{InputAuthorization, TextContentPolicy},
+    text_capture::{ChromeWindowKey, InputAuthorization, TextContentPolicy, TextQuarantine},
 };
+
+use super::clipboard::ClipboardOutput;
 
 const SOURCE: &str = "macos.eventtap";
 
@@ -21,6 +24,7 @@ pub(super) fn raw_event(
     context: &NativeContext,
     data: EventData,
     text_policy: &TextContentPolicy,
+    observed_at: OffsetDateTime,
 ) -> Option<RawEvent> {
     let Some(window) = context.window.as_ref() else {
         trace::trace!(
@@ -37,6 +41,7 @@ pub(super) fn raw_event(
     };
     let capture_context = text_policy.decision(&app, window.id).capture_context();
     Some(RawEvent {
+        observed_at: Some(observed_at),
         source: SOURCE.to_owned(),
         event_type: event_type.to_owned(),
         app,
@@ -50,8 +55,9 @@ pub(super) fn raw_event(
     })
 }
 
-pub(super) fn unknown_clipboard_event(data: EventData) -> RawEvent {
+pub(super) fn unknown_clipboard_event(data: EventData, observed_at: OffsetDateTime) -> RawEvent {
     RawEvent {
+        observed_at: Some(observed_at),
         source: SOURCE.to_owned(),
         event_type: "clipboard.copy".to_owned(),
         app: App {
@@ -75,6 +81,90 @@ pub(super) fn emit(
         return EmitResult::Filtered;
     };
     try_send_counted(sender, event, dropped_events)
+}
+
+pub(super) fn emit_clipboard(
+    sender: &SyncSender<RawEvent>,
+    output: Option<ClipboardOutput>,
+    quarantine: &mut TextQuarantine,
+    dropped_events: &AtomicU64,
+) -> EmitResult {
+    let Some(output) = output else {
+        return EmitResult::Filtered;
+    };
+    let observed_at = output
+        .event
+        .observed_at
+        .unwrap_or_else(OffsetDateTime::now_utc);
+    emit_or_quarantine(
+        sender,
+        Some(output.event),
+        output.chrome_version,
+        observed_at,
+        quarantine,
+        dropped_events,
+    )
+}
+
+pub(super) fn emit_or_quarantine(
+    sender: &SyncSender<RawEvent>,
+    event: Option<RawEvent>,
+    chrome_version: Option<u64>,
+    observed_at: OffsetDateTime,
+    quarantine: &mut TextQuarantine,
+    dropped_events: &AtomicU64,
+) -> EmitResult {
+    let Some(event) = event else {
+        return EmitResult::Filtered;
+    };
+    let key = event
+        .app
+        .pid
+        .zip(event.window.as_ref().and_then(|window| window.id))
+        .map(|(pid, window_id)| ChromeWindowKey { pid, window_id });
+    if let (Some(version), Some(key)) = (chrome_version, key)
+        && has_text_body(&event)
+    {
+        quarantine.hold(event, key, version, observed_at);
+        return EmitResult::Sent;
+    }
+    try_send_counted(sender, event, dropped_events)
+}
+
+pub(super) fn emit_released(
+    sender: &SyncSender<RawEvent>,
+    events: Vec<RawEvent>,
+    dropped_events: &AtomicU64,
+) -> bool {
+    events
+        .into_iter()
+        .all(|event| try_send_counted(sender, event, dropped_events).continues())
+}
+
+fn has_text_body(event: &RawEvent) -> bool {
+    match &event.data {
+        EventData::InputKey(data) => data.text.is_some(),
+        EventData::ClipboardCopy(data) => data.text.is_some() || data.size_bytes.is_some(),
+        EventData::ClipboardPaste(data) => data.text.is_some() || data.size_bytes.is_some(),
+        EventData::UiValue(data) => {
+            data.text.is_some()
+                || event
+                    .element
+                    .as_ref()
+                    .and_then(|element| element.value.as_ref())
+                    .is_some()
+        }
+        EventData::AppActivate(_)
+        | EventData::AppLaunch(_)
+        | EventData::AppTerminate(_)
+        | EventData::WindowFocus(_)
+        | EventData::WindowTitle(_)
+        | EventData::UiFocus(_)
+        | EventData::UiClick(_)
+        | EventData::InputScroll(_)
+        | EventData::BrowserNavigate(_)
+        | EventData::ContentSnapshot(_) => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

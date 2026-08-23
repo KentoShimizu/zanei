@@ -1,9 +1,13 @@
 //! Shared AX value, observation, and error shapes.
 
 use std::{ffi::c_void, fmt};
+use time::OffsetDateTime;
 
 use super::cf::CfRef;
-use crate::ffi::geometry::{AxPoint, AxSize};
+use crate::ffi::{
+    geometry::{AxPoint, AxSize},
+    window_list::NativeWindow,
+};
 
 pub(super) const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
 
@@ -26,12 +30,6 @@ pub struct AxTextRange {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NativeWindow {
-    pub title: Option<String>,
-    pub id: Option<i64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeElement {
     pub(crate) role: Option<String>,
     pub(crate) subrole: Option<String>,
@@ -45,22 +43,26 @@ pub(crate) enum NativeAxEvent {
     WindowFocused {
         pid: i32,
         window: NativeWindow,
+        observed_at: OffsetDateTime,
     },
     WindowTitleChanged {
         pid: i32,
         window: NativeWindow,
+        observed_at: OffsetDateTime,
     },
     UiFocused {
         pid: i32,
         generation: u64,
         window: Option<NativeWindow>,
         element: Option<NativeElement>,
+        observed_at: OffsetDateTime,
     },
     UiValueChanged {
         pid: i32,
         window: Option<NativeWindow>,
         element: NativeElement,
         text: Option<String>,
+        observed_at: OffsetDateTime,
     },
 }
 

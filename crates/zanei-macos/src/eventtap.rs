@@ -24,6 +24,7 @@ pub use crate::input_source::InputSourceObserver;
 
 use crate::{
     ax::ClickObservation,
+    focus_context::FocusContext,
     focused_field::FocusedFieldTracker,
     input_source::ImeState,
     secure_input::SecureInputProbe,
@@ -39,6 +40,7 @@ pub struct EventTapCollector {
     input_authorizations: Option<InputAuthorizationPublisher>,
     secure_input_probe: Option<SecureInputProbe>,
     text_policy: TextContentPolicy,
+    focus_context: FocusContext,
     ime_state: ImeState,
     input_source_prepared: bool,
     stop_sender: Option<SyncSender<()>>,
@@ -58,6 +60,7 @@ impl EventTapCollector {
         input_authorizations: Option<InputAuthorizationPublisher>,
         secure_input_probe: Option<SecureInputProbe>,
         text_policy: TextContentPolicy,
+        focus_context: FocusContext,
     ) -> Self {
         assert_eq!(
             mode.captures_clicks(),
@@ -71,6 +74,7 @@ impl EventTapCollector {
             input_authorizations,
             secure_input_probe,
             text_policy,
+            focus_context,
             ime_state: ImeState::new(),
             input_source_prepared: !mode.captures_text_content(),
             stop_sender: None,
@@ -154,6 +158,7 @@ impl Collector for EventTapCollector {
         let secure_input_probe = self.secure_input_probe.clone();
         let ime_state = self.ime_state.clone();
         let text_policy = self.text_policy.clone();
+        let focus_context = self.focus_context.clone();
         let (stop_sender, stop_receiver) = sync_channel(1);
         let (ready_sender, ready_receiver) = sync_channel(1);
         let handle = thread::Builder::new()
@@ -173,6 +178,7 @@ impl Collector for EventTapCollector {
                     secure_input_probe,
                     ime_state,
                     text_policy,
+                    focus_context,
                     ready_sender,
                 );
                 focused_fields

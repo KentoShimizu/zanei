@@ -266,6 +266,7 @@ fn chrome_app() -> App {
 
 fn raw_input(window_id: i64, website_host: &str) -> RawEvent {
     RawEvent {
+        observed_at: None,
         source: "test.privacy".to_owned(),
         event_type: "input.key".to_owned(),
         app: app(),

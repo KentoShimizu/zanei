@@ -2,12 +2,19 @@
 
 use std::{sync::atomic::Ordering, time::Instant};
 
-use super::{CallbackContext, CfMutableRef, EVENT_TARGET_UNIX_PROCESS_ID_FIELD, NativeInputTarget};
-use crate::{focused_field::FocusedFieldTracker, text_capture::InputAuthorization, trace};
+use super::{
+    CallbackContext, CfMutableRef, EVENT_TARGET_UNIX_PROCESS_ID_FIELD, NativeApp, NativeContext,
+    NativeInputTarget,
+};
+use crate::{
+    focus_context::FocusContext, focused_field::FocusedFieldTracker,
+    text_capture::InputAuthorization, trace,
+};
 
 pub(super) fn input_target(
     event: CfMutableRef,
     focused_fields: Option<&FocusedFieldTracker>,
+    focus_context: &FocusContext,
 ) -> Option<NativeInputTarget> {
     let pid = i32::try_from(unsafe {
         super::CGEventGetIntegerValueField(event, EVENT_TARGET_UNIX_PROCESS_ID_FIELD)
@@ -15,12 +22,26 @@ pub(super) fn input_target(
     .ok()
     .filter(|pid| *pid > 0)?;
     let focused_field = focused_fields.and_then(|fields| fields.focused_field(i64::from(pid)));
-    Some(NativeInputTarget { pid, focused_field })
+    let focus = focus_context
+        .current()
+        .filter(|focus| focus.app.pid == i64::from(pid))?;
+    Some(NativeInputTarget {
+        context: NativeContext {
+            app: NativeApp {
+                name: focus.app.name,
+                bundle_id: focus.app.bundle_id,
+                pid: focus.app.pid,
+            },
+            window: focus.window,
+        },
+        focused_field,
+        focus_generation: focus.generation,
+    })
 }
 
 pub(super) fn prepare_input_authorization(
     context: &CallbackContext,
-    target: Option<NativeInputTarget>,
+    target: Option<&NativeInputTarget>,
     input_at: Instant,
     secure_input: bool,
 ) -> Option<InputAuthorization> {
@@ -29,10 +50,11 @@ pub(super) fn prepare_input_authorization(
         .then_some(target)
         .flatten()
         .and_then(|target| {
+            let pid = i32::try_from(target.context.app.pid).ok()?;
             target
                 .focused_field
                 .filter(|field| field.class.is_known_text())
-                .map(|field| (target.pid, field.generation))
+                .map(|field| (pid, field.generation))
         });
     let result = match valid_target {
         Some((pid, generation)) => publisher.prepare(pid, generation, input_at).map(Some),
@@ -47,11 +69,14 @@ pub(super) fn prepare_input_authorization(
                 "field_not_text"
             };
             let rejected_pid = (!secure_input)
-                .then(|| target.map(|target| target.pid))
+                .then(|| target.and_then(|target| i32::try_from(target.context.app.pid).ok()))
                 .flatten();
             trace::trace!(
                 "component=eventtap event=key_authorization pid={} target_generation={} authorization=rejected reason={}",
-                target.map_or_else(|| "none".to_owned(), |target| target.pid.to_string()),
+                target.map_or_else(
+                    || "none".to_owned(),
+                    |target| target.context.app.pid.to_string()
+                ),
                 target
                     .and_then(|target| target.focused_field)
                     .map_or_else(|| "none".to_owned(), |field| field.generation.to_string()),
@@ -67,7 +92,10 @@ pub(super) fn prepare_input_authorization(
         Err(_) => {
             trace::trace!(
                 "component=eventtap event=key_authorization pid={} target_generation={} authorization=rejected reason=authorization_queue_full",
-                target.map_or_else(|| "none".to_owned(), |target| target.pid.to_string()),
+                target.map_or_else(
+                    || "none".to_owned(),
+                    |target| target.context.app.pid.to_string()
+                ),
                 target
                     .and_then(|target| target.focused_field)
                     .map_or_else(|| "none".to_owned(), |field| field.generation.to_string())
@@ -79,13 +107,16 @@ pub(super) fn prepare_input_authorization(
 }
 
 pub(super) fn trace_target(
-    target: Option<NativeInputTarget>,
+    target: Option<&NativeInputTarget>,
     secure_input: bool,
     ime_active: bool,
 ) {
     trace::trace!(
         "component=eventtap event=key_callback pid={} field_class={} target_generation={} secure_input={} ime_active={}",
-        target.map_or_else(|| "none".to_owned(), |target| target.pid.to_string()),
+        target.map_or_else(
+            || "none".to_owned(),
+            |target| target.context.app.pid.to_string()
+        ),
         target
             .and_then(|target| target.focused_field)
             .map_or("none", |field| trace::field_class_name(field.class)),

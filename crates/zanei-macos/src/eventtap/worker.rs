@@ -12,27 +12,30 @@ use zanei_core::schema::EventData;
 
 use super::{
     EventTapMode,
-    clipboard::{ClipboardTracker, paste_data},
+    clipboard::{ClipboardObservationTime, ClipboardTracker, paste_data},
     logic::{
         MouseObservation, click_data, is_copy_shortcut, is_paste_shortcut, key_data, scroll_data,
     },
-    output::{EmitResult, emit, raw_event, resolve_input_authorization, try_send_counted},
+    output::{
+        EmitResult, emit, emit_clipboard, emit_or_quarantine, emit_released, raw_event,
+        resolve_input_authorization, try_send_counted,
+    },
     state::{Driver, EventTapApi, MonotonicTime, TapState, WATCHDOG_INTERVAL},
     support::{
         click_button, disable_reason, elapsed, record_degraded_entries, refresh_secure_input,
-        target_pid_matches_context,
     },
 };
 use crate::{
     ax::ClickObservation,
     ffi::eventtap::{
-        self as native, EventTap, EventTapConfig, NativeContext, NativeEvent, Pasteboard,
-        WakeObserver,
+        self as native, EventTap, EventTapConfig, NativeApp, NativeContext, NativeEvent,
+        Pasteboard, WakeObserver,
     },
+    focus_context::{FocusContext, FocusSnapshot},
     focused_field::FocusedFieldTracker,
     input_source::ImeState,
     secure_input::SecureInputProbe,
-    text_capture::{InputAuthorizationPublisher, TextContentPolicy},
+    text_capture::{InputAuthorizationPublisher, TextContentPolicy, TextQuarantine},
     trace,
 };
 
@@ -49,6 +52,7 @@ struct NativeApi {
     input_authorizations: Option<InputAuthorizationPublisher>,
     ime_state: ImeState,
     secure_input_probe: Option<SecureInputProbe>,
+    focus_context: FocusContext,
 }
 
 impl NativeApi {
@@ -61,6 +65,7 @@ impl NativeApi {
         input_authorizations: Option<InputAuthorizationPublisher>,
         ime_state: ImeState,
         secure_input_probe: Option<SecureInputProbe>,
+        focus_context: FocusContext,
     ) -> Self {
         Self {
             tap: None,
@@ -71,6 +76,7 @@ impl NativeApi {
             input_authorizations,
             ime_state,
             secure_input_probe,
+            focus_context,
         }
     }
 
@@ -84,7 +90,9 @@ impl NativeApi {
 
     fn try_next_event(&self, text_policy: &TextContentPolicy) -> Option<NativeEvent> {
         self.tap.as_ref().and_then(|tap| {
-            tap.try_next_event(|target| early_text_read_allowed(target, text_policy))
+            tap.try_next_event(|target| {
+                early_text_read_allowed(target, text_policy, &self.focus_context)
+            })
         })
     }
 }
@@ -111,6 +119,7 @@ impl EventTapApi for NativeApi {
             input_authorizations: self.input_authorizations.clone(),
             ime_state: self.ime_state.clone(),
             secure_input_probe: self.secure_input_probe.clone(),
+            focus_context: self.focus_context.clone(),
         })
         .ok();
         self.tap.is_some()
@@ -140,6 +149,7 @@ pub(super) fn run(
     secure_input_probe: Option<SecureInputProbe>,
     ime_state: ImeState,
     text_policy: TextContentPolicy,
+    focus_context: FocusContext,
     ready_sender: SyncSender<()>,
 ) {
     let capture_text_content = mode.captures_text_content();
@@ -153,6 +163,7 @@ pub(super) fn run(
             input_authorizations,
             ime_state.clone(),
             secure_input_probe,
+            focus_context.clone(),
         ),
         elapsed(started_at),
     );
@@ -174,24 +185,38 @@ pub(super) fn run(
     let mut clipboard = mode
         .captures_input()
         .then(|| ClipboardTracker::new(pasteboard.change_count()));
+    let chrome_tracker = text_policy.chrome_tracker();
+    let mut quarantine = TextQuarantine::new(&chrome_tracker);
     let mut last_watchdog = Instant::now();
     let _ = ready_sender.try_send(());
 
     while stop_receiver.try_recv().is_err() {
+        if !emit_released(
+            &event_sender,
+            quarantine.release(time::OffsetDateTime::now_utc(), &chrome_tracker),
+            &dropped_events,
+        ) {
+            return;
+        }
         let secure_input_before = refresh_secure_input(&mut driver, &secure_input_enabled);
         if let Some(clipboard) = clipboard.as_mut() {
             let change_before_events = pasteboard.change_count();
             if clipboard.has_changed(change_before_events) {
-                let context_before_events = native::current_context();
+                let context_before_events = focus_context.current().map(native_context);
                 let copy = clipboard.copy_event(
                     change_before_events,
                     context_before_events.as_ref(),
-                    Instant::now(),
+                    ClipboardObservationTime {
+                        monotonic: Instant::now(),
+                        wall: time::OffsetDateTime::now_utc(),
+                    },
                     |include_content| pasteboard.content(include_content),
                     secure_input_before,
                     &text_policy,
                 );
-                if !emit(&event_sender, copy, &dropped_events).continues() {
+                if !emit_clipboard(&event_sender, copy, &mut quarantine, &dropped_events)
+                    .continues()
+                {
                     return;
                 }
             }
@@ -217,7 +242,9 @@ pub(super) fn run(
                         | NativeEvent::MouseDown { .. }
                 )
             });
-        let context = needs_context.then(native::current_context).flatten();
+        let context = needs_context
+            .then(|| focus_context.current().map(native_context))
+            .flatten();
 
         for event in events {
             if !handle_native_event(
@@ -234,6 +261,8 @@ pub(super) fn run(
                 secure_input_now,
                 &mut clipboard,
                 &text_policy,
+                &focus_context,
+                &mut quarantine,
             ) {
                 return;
             }
@@ -248,12 +277,15 @@ pub(super) fn run(
             let copy = clipboard.copy_event(
                 change_count,
                 context.as_ref(),
-                Instant::now(),
+                ClipboardObservationTime {
+                    monotonic: Instant::now(),
+                    wall: time::OffsetDateTime::now_utc(),
+                },
                 |include_content| pasteboard.content(include_content),
                 secure_input_now,
                 &text_policy,
             );
-            if !emit(&event_sender, copy, &dropped_events).continues() {
+            if !emit_clipboard(&event_sender, copy, &mut quarantine, &dropped_events).continues() {
                 return;
             }
         }
@@ -271,27 +303,44 @@ pub(super) fn run(
         );
         publish_current_health(&driver, wake_recovery_degraded, &current_degraded);
     }
+    let _ = emit_released(
+        &event_sender,
+        quarantine.flush(&chrome_tracker),
+        &dropped_events,
+    );
 }
 
-fn early_text_read_allowed(
-    target: Option<crate::ffi::eventtap::NativeInputTarget>,
+pub(super) fn early_text_read_allowed(
+    target: Option<&crate::ffi::eventtap::NativeInputTarget>,
     text_policy: &TextContentPolicy,
+    focus_context: &FocusContext,
 ) -> bool {
-    let (Some(target), Some(context)) = (target, native::current_context()) else {
+    let Some(target) = target else {
         return false;
     };
-    if i64::from(target.pid) != context.app.pid {
+    if target.focus_generation != focus_context.generation() {
         return false;
     }
+    let window_id = target.context.window.as_ref().and_then(|window| window.id);
     let app = zanei_core::schema::App {
-        name: context.app.name,
-        bundle_id: context.app.bundle_id,
-        pid: Some(context.app.pid),
+        name: target.context.app.name.clone(),
+        bundle_id: target.context.app.bundle_id.clone(),
+        pid: Some(target.context.app.pid),
     };
-    let window_id = context.window.and_then(|window| window.id);
     text_policy
         .input_decision(&app, window_id, target.focused_field)
         .is_allowed()
+}
+
+fn native_context(focus: FocusSnapshot) -> NativeContext {
+    NativeContext {
+        app: NativeApp {
+            name: focus.app.name,
+            bundle_id: focus.app.bundle_id,
+            pid: focus.app.pid,
+        },
+        window: focus.window,
+    }
 }
 
 fn publish_current_health<A: EventTapApi>(
@@ -320,6 +369,8 @@ pub(super) fn handle_native_event<A: EventTapApi>(
     secure_input_enabled: bool,
     clipboard: &mut Option<ClipboardTracker>,
     text_policy: &TextContentPolicy,
+    focus_context: &FocusContext,
+    quarantine: &mut TextQuarantine,
 ) -> bool {
     match event {
         NativeEvent::Disabled(reason) => {
@@ -332,26 +383,20 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             authorization,
             secure_input: secure_input_at_input,
             ime_active: ime_active_at_input,
+            observed_at,
         } if !secure_input_enabled && !secure_input_at_input => {
             let clipboard = clipboard
                 .as_mut()
                 .expect("input events require EventTap input capture");
-            let Some(context) = context else {
+            let Some(target) = target.as_ref() else {
                 trace::trace!(
                     "component=eventtap event=key_worker pid=none authorization=rejected reason=context_missing"
                 );
                 resolve_input_authorization(EmitResult::Filtered, authorization.as_ref());
                 return true;
             };
-            if !target_pid_matches_context(target.map(|target| target.pid), context.app.pid) {
-                trace::trace!(
-                    "component=eventtap event=key_worker pid={} authorization=rejected reason=target_pid_mismatch",
-                    context.app.pid
-                );
-                resolve_input_authorization(EmitResult::Filtered, authorization.as_ref());
-                return true;
-            }
-            let focused_field = target.and_then(|target| target.focused_field);
+            let context = &target.context;
+            let focused_field = target.focused_field;
             let field_kind = focused_field.and_then(|field| field.field_kind());
             let window_id = context.window.as_ref().and_then(|window| window.id);
             let app = zanei_core::schema::App {
@@ -359,11 +404,12 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                 bundle_id: context.app.bundle_id.clone(),
                 pid: Some(context.app.pid),
             };
-            let window_text_allowed = text_policy.decision(&app, window_id).is_allowed();
-            let input_text_allowed = capture_text_content
-                && text_policy
-                    .input_decision(&app, window_id, focused_field)
-                    .is_allowed();
+            let generation_matches = target.focus_generation == focus_context.generation();
+            let window_decision = text_policy.decision(&app, window_id);
+            let window_text_allowed = generation_matches && window_decision.is_allowed();
+            let input_decision = text_policy.input_decision(&app, window_id, focused_field);
+            let input_text_allowed =
+                capture_text_content && generation_matches && input_decision.is_allowed();
             let key_event = raw_event(
                 "input.key",
                 context,
@@ -374,8 +420,18 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                     ime_active || ime_active_at_input,
                 )),
                 text_policy,
+                observed_at,
             );
-            let key_result = emit(sender, key_event, dropped_events);
+            let key_result = emit_or_quarantine(
+                sender,
+                key_event,
+                input_text_allowed
+                    .then(|| input_decision.chrome_version())
+                    .flatten(),
+                observed_at,
+                quarantine,
+                dropped_events,
+            );
             trace::trace!(
                 "component=eventtap event=key_worker pid={} field_class={} authorization={} reason={}",
                 context.app.pid,
@@ -405,12 +461,18 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             if is_copy_shortcut(&observation) {
                 clipboard.observe_copy(
                     context,
-                    Instant::now(),
+                    ClipboardObservationTime {
+                        monotonic: Instant::now(),
+                        wall: observed_at,
+                    },
                     capture_text_content && window_text_allowed,
+                    window_text_allowed
+                        .then(|| window_decision.chrome_version())
+                        .flatten(),
                 );
             }
             if is_paste_shortcut(&observation) {
-                return emit(
+                return emit_or_quarantine(
                     sender,
                     raw_event(
                         "clipboard.paste",
@@ -421,7 +483,13 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                             field_kind,
                         )),
                         text_policy,
+                        observed_at,
                     ),
+                    input_text_allowed
+                        .then(|| input_decision.chrome_version())
+                        .flatten(),
+                    observed_at,
+                    quarantine,
                     dropped_events,
                 )
                 .continues();
@@ -438,6 +506,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
         NativeEvent::Scroll {
             vertical,
             horizontal,
+            observed_at,
         } => {
             let (Some(context), Some(data)) = (context, scroll_data(vertical, horizontal)) else {
                 return true;
@@ -449,6 +518,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                     context,
                     EventData::InputScroll(data),
                     text_policy,
+                    observed_at,
                 ),
                 dropped_events,
             )
@@ -459,6 +529,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             y,
             button,
             click_count,
+            observed_at,
         } => {
             let (Some(sender), Some(context)) = (click_sender, context) else {
                 return true;
@@ -480,6 +551,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                 y: click.y,
                 button: click_button(click.button),
                 click_count: click.click_count,
+                observed_at,
             };
             let _ = try_send_counted(sender, observation, dropped_events);
             true

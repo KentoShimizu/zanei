@@ -11,6 +11,8 @@ pub mod content_snapshot;
 #[cfg(target_os = "macos")]
 pub mod eventtap;
 #[cfg(target_os = "macos")]
+pub mod focus_context;
+#[cfg(target_os = "macos")]
 mod focused_field;
 mod input_source;
 #[cfg(target_os = "macos")]

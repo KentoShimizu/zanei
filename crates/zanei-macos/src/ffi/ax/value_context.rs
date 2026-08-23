@@ -1,6 +1,7 @@
 //! Focused and detached AX value-capture contexts.
 
 use std::time::Instant;
+use time::OffsetDateTime;
 
 use crate::{
     focused_field::FieldClass,
@@ -32,6 +33,7 @@ pub(super) struct FocusedValueContext {
     pub(super) capture: ValueCapture,
     pub(super) generation: u64,
     pub(super) field_class: FieldClass,
+    pub(super) observed_at: Option<OffsetDateTime>,
 }
 
 impl FocusedValueContext {
@@ -49,6 +51,7 @@ impl FocusedValueContext {
             capture: ValueCapture::new(capture_text_content, text_baseline, field_class),
             generation,
             field_class,
+            observed_at: None,
         }
     }
 
@@ -80,8 +83,10 @@ impl FocusedValueContext {
         &mut self,
         pid: i32,
         notification_at: Instant,
+        observed_at: OffsetDateTime,
         snapshot: ValueSnapshot,
     ) -> ValueObservation {
+        self.observed_at = Some(observed_at);
         self.element.role = snapshot.role;
         self.element.subrole = snapshot.subrole;
         self.element.value = (snapshot.field_class == FieldClass::KnownSafeNonText)
@@ -108,6 +113,7 @@ impl FocusedValueContext {
             window: self.window.clone(),
             element,
             text: emission.text,
+            observed_at: self.observed_at.unwrap_or_else(OffsetDateTime::now_utc),
         }
     }
 }

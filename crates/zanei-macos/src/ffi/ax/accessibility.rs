@@ -1,4 +1,7 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use zanei_core::{
     config::FilterConfig,
@@ -15,6 +18,7 @@ pub(crate) struct ManualAccessibilityPolicy {
     capture_text_content: bool,
     capture_content_snapshot: bool,
     filter: Arc<RwLock<FilterConfig>>,
+    generation: Arc<AtomicU64>,
 }
 
 impl ManualAccessibilityPolicy {
@@ -27,16 +31,24 @@ impl ManualAccessibilityPolicy {
             capture_text_content,
             capture_content_snapshot,
             filter: Arc::new(RwLock::new(filter)),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub(crate) fn replace_filter(&self, filter: FilterConfig) {
         match self.filter.write() {
-            Ok(mut current) => *current = filter,
+            Ok(mut current) => {
+                *current = filter;
+                self.generation.fetch_add(1, Ordering::Release);
+            }
             Err(_) => crate::trace::trace!(
                 "component=ax phase=manual_accessibility action=replace_filter result=poisoned"
             ),
         }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     pub(crate) fn allows(&self, app: &App) -> bool {

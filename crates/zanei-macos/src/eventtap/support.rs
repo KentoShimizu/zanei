@@ -46,10 +46,6 @@ pub(super) const fn click_button(value: u32) -> ClickButton {
     }
 }
 
-pub(super) fn target_pid_matches_context(target_pid: Option<i32>, context_pid: i64) -> bool {
-    target_pid.is_none_or(|pid| i64::from(pid) == context_pid)
-}
-
 pub(super) fn elapsed(started_at: Instant) -> MonotonicTime {
     MonotonicTime::from_duration(started_at.elapsed())
 }

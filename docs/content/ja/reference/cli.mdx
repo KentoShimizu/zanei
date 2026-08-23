@@ -465,7 +465,7 @@ zanei apps slack --json
 
 任意の `QUERY` は name または bundle ID の大文字小文字を無視した部分一致です。table は `NAME`・`BUNDLE ID`・`SOURCES`（`installed` / `running` / `recent`）・`LAST USED` を表示します。recent、その他の running、installed の順です。該当なしも code 0 で、stderr に `No apps match "QUERY".` を表示します。TCC 権限は不要で、daemon 停止中も動きます。
 
-`--json` は同じ順序で `{ "apps": [{ "name", "bundle_id", "path", "installed", "running", "last_used" }], "recent_unavailable": null }` を返します。store が不在または開けない場合も installed / running app は残り、`recent_unavailable` に理由が入ります。
+`--json` は同じ順序で `{ "apps": [{ "name", "bundle_id", "path", "installed", "running", "last_used" }], "recent_unavailable": null, "installed_unreadable": 0 }` を返します。store が不在または開けない場合も installed / running app は残り、`recent_unavailable` に理由が入ります。`Info.plist` がない、読めない、または不正な app bundle は読み飛ばし、その件数を `installed_unreadable` に返します。0 より大きい場合は stderr に `warning: N app bundles could not be read` も表示します。
 
 ## `filter`
 
@@ -531,7 +531,7 @@ zanei config set capture.content_snapshot true
 Restart recording with `zanei stop && zanei start` for this to take effect.
 ```
 
-`config set capture.content_snapshot true` は、先に現在の app/site scope を表示し、既定 N の `[y/N]` を待ちます。有効な list に応じて summary を作り、既定 scope では次の英語を表示します：
+`config set capture.content_snapshot true` は、先に現在の app/site scope を表示し、既定 N の `[y/N]` を待ちます。有効な list に応じて summary を作り、削除までの時間には読み込んだ `output.retention_hours` を使います。既定値では次の英語を表示します：
 
 ```text
 Content snapshots record the text shown in the frontmost window, including messages and

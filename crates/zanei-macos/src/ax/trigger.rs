@@ -1,38 +1,37 @@
-//! AX observation to content snapshot trigger projection.
+//! FocusContext transition to content-snapshot trigger projection.
 
 use std::time::Instant;
 
 use crate::{
     content_snapshot::{SnapshotTrigger, SnapshotTriggerKind, SnapshotTriggerPublisher},
-    ffi::ax::NativeAxEvent,
+    focus_context::FocusTransition,
 };
 
-use super::AxEventBuilder;
-
-pub(super) fn publish_snapshot_trigger(
+pub(super) fn publish_focus_transition(
     publisher: Option<&SnapshotTriggerPublisher>,
-    builder: &AxEventBuilder,
-    observation: &NativeAxEvent,
+    transition: Option<FocusTransition>,
 ) {
-    let Some(publisher) = publisher else {
+    let (Some(publisher), Some(transition)) = (publisher, transition) else {
         return;
     };
-    let (pid, window, kind) = match observation {
-        NativeAxEvent::WindowFocused { pid, window } => {
-            (*pid, window.clone(), SnapshotTriggerKind::Focus)
-        }
-        NativeAxEvent::WindowTitleChanged { pid, window } => {
-            (*pid, window.clone(), SnapshotTriggerKind::Title)
-        }
-        NativeAxEvent::UiFocused { .. } | NativeAxEvent::UiValueChanged { .. } => return,
-    };
-    let Some(app) = builder.app(pid) else {
+    let Some(current) = transition.current else {
         return;
     };
+    let Some(window) = current.window else {
+        return;
+    };
+    let title_only = transition.previous.as_ref().is_some_and(|previous| {
+        previous.app.pid == current.app.pid
+            && previous.window.as_ref().and_then(|window| window.id) == window.id
+    });
     publisher.publish(SnapshotTrigger {
-        app,
+        app: current.app,
         window,
-        kind,
+        kind: if title_only {
+            SnapshotTriggerKind::Title
+        } else {
+            SnapshotTriggerKind::Focus
+        },
         observed_at: Instant::now(),
     });
 }
@@ -42,49 +41,55 @@ mod tests {
     use crate::{
         content_snapshot::{SnapshotTriggerKind, snapshot_trigger_channel},
         ffi::ax::NativeWindow,
+        focus_context::FocusContext,
         workspace::{ApplicationActivationPolicy, ApplicationInfo},
     };
 
     use super::*;
-    use crate::ax::tests::text_policy;
 
-    fn app() -> ApplicationInfo {
+    fn app(pid: i64) -> ApplicationInfo {
         ApplicationInfo {
             name: "Example".to_owned(),
             bundle_id: Some("dev.example.App".to_owned()),
-            pid: 7,
+            pid,
             activation_policy: ApplicationActivationPolicy::Regular,
         }
     }
 
-    #[test]
-    fn focus_and_title_observations_publish_without_window_state() {
-        let (publisher, receiver) = snapshot_trigger_channel();
-        let mut builder = AxEventBuilder::new(text_policy());
-        builder.add_app(app());
-        let window = NativeWindow {
-            title: Some("Window".to_owned()),
-            id: Some(11),
-        };
+    fn window(id: i64, title: &str) -> NativeWindow {
+        NativeWindow {
+            title: Some(title.to_owned()),
+            id: Some(id),
+        }
+    }
 
-        publish_snapshot_trigger(
+    #[test]
+    fn activation_projects_a_focus_trigger() {
+        let context = FocusContext::new();
+        let (publisher, receiver) = snapshot_trigger_channel();
+
+        publish_focus_transition(
             Some(&publisher),
-            &builder,
-            &NativeAxEvent::WindowFocused {
-                pid: 7,
-                window: window.clone(),
-            },
-        );
-        publish_snapshot_trigger(
-            Some(&publisher),
-            &builder,
-            &NativeAxEvent::WindowTitleChanged { pid: 7, window },
+            context.activate(app(7), Some(window(11, "First"))),
         );
 
         assert_eq!(
             receiver.try_recv().expect("focus trigger").kind,
             SnapshotTriggerKind::Focus
         );
+    }
+
+    #[test]
+    fn title_only_transition_projects_a_title_trigger() {
+        let context = FocusContext::new();
+        context.activate(app(7), Some(window(11, "First")));
+        let (publisher, receiver) = snapshot_trigger_channel();
+
+        publish_focus_transition(
+            Some(&publisher),
+            context.observe_window(7, window(11, "Renamed")),
+        );
+
         assert_eq!(
             receiver.try_recv().expect("title trigger").kind,
             SnapshotTriggerKind::Title

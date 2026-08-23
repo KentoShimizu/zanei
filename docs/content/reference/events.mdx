@@ -70,10 +70,10 @@ The current event types. The **Permission** column shows what must be granted fo
 | `ui.focus` | `macos.ax` | Focused UI element changed | Accessibility |
 | `ui.click` | `macos.ax` | Click on a UI element | Accessibility (+ Input Monitoring) |
 | `ui.value` | `macos.ax` | Element value changed; newly added input is opt-in and never includes the full free-text value | Accessibility |
-| `input.key` | `macos.eventtap` | Key / shortcut. Default: fact of typing + field type; content is opt-in | Input Monitoring |
-| `input.scroll` | `macos.eventtap` | Scrolling | Input Monitoring |
-| `browser.navigate` | `macos.applescript` | URL / tab change. **Chrome only, currently**; Incognito always excluded | Automation |
-| `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | Clipboard use; content is opt-in | Input Monitoring |
+| `input.key` | `macos.eventtap` | Key / shortcut. Default: fact of typing + field type; content is opt-in | Accessibility + Input Monitoring |
+| `input.scroll` | `macos.eventtap` | Scrolling | Accessibility + Input Monitoring |
+| `browser.navigate` | `macos.applescript` | URL / tab change. **Chrome only, currently**; Incognito always excluded | Accessibility + Automation |
+| `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | Clipboard use; content is opt-in | Accessibility + Input Monitoring |
 | `content.snapshot` | `macos.ax` | Accessibility text shown in the visible part of the frontmost window; separate opt-in | Accessibility |
 
 In `--types` filters, a trailing wildcard selects a whole family: `browser.*`, `ui.*`, `content.*`, and so on.

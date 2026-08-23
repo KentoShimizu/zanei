@@ -1,6 +1,7 @@
 //! Clipboard copy attribution from keyboard intent and pasteboard changes.
 
 use std::time::{Duration, Instant};
+use time::OffsetDateTime;
 
 use zanei_collector::RawEvent;
 use zanei_core::schema::{ClipboardOrigin, ClipboardPasteData, EventData, FieldKind};
@@ -16,8 +17,21 @@ const COPY_CORRELATION_WINDOW: Duration = Duration::from_millis(500);
 #[derive(Clone)]
 struct CopyIntent {
     context: NativeContext,
-    observed_at: Instant,
+    observed_monotonic_at: Instant,
+    observed_at: OffsetDateTime,
     text_allowed: bool,
+    chrome_version: Option<u64>,
+}
+
+pub(super) struct ClipboardOutput {
+    pub(super) event: RawEvent,
+    pub(super) chrome_version: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ClipboardObservationTime {
+    pub(super) monotonic: Instant,
+    pub(super) wall: OffsetDateTime,
 }
 
 enum ClipboardChange {
@@ -45,20 +59,23 @@ impl ClipboardTracker {
     pub(super) fn observe_copy(
         &mut self,
         context: &NativeContext,
-        observed_at: Instant,
+        observed_at: ClipboardObservationTime,
         text_allowed: bool,
+        chrome_version: Option<u64>,
     ) {
         self.pending = Some(CopyIntent {
             context: context.clone(),
-            observed_at,
+            observed_monotonic_at: observed_at.monotonic,
+            observed_at: observed_at.wall,
             text_allowed,
+            chrome_version,
         });
     }
 
     fn take_change(
         &mut self,
         current_change_count: i64,
-        current_context: Option<&NativeContext>,
+        focus_at_change: Option<&NativeContext>,
         now: Instant,
     ) -> Option<ClipboardChange> {
         if !self.has_changed(current_change_count) {
@@ -69,8 +86,9 @@ impl ClipboardTracker {
             return Some(ClipboardChange::Unknown);
         };
         let same_pid =
-            current_context.is_some_and(|context| context.app.pid == intent.context.app.pid);
-        let timely = now.saturating_duration_since(intent.observed_at) <= COPY_CORRELATION_WINDOW;
+            focus_at_change.is_some_and(|context| context.app.pid == intent.context.app.pid);
+        let timely =
+            now.saturating_duration_since(intent.observed_monotonic_at) <= COPY_CORRELATION_WINDOW;
         Some(if same_pid && timely {
             ClipboardChange::Matched(intent)
         } else {
@@ -81,19 +99,19 @@ impl ClipboardTracker {
     pub(super) fn copy_event<F>(
         &mut self,
         current_change_count: i64,
-        current_context: Option<&NativeContext>,
-        now: Instant,
+        focus_at_change: Option<&NativeContext>,
+        observed_at: ClipboardObservationTime,
         read_content: F,
         secure_input: bool,
         text_policy: &TextContentPolicy,
-    ) -> Option<RawEvent>
+    ) -> Option<ClipboardOutput>
     where
         F: FnOnce(bool) -> PasteboardContent,
     {
-        match self.take_change(current_change_count, current_context, now)? {
+        match self.take_change(current_change_count, focus_at_change, observed_at.monotonic)? {
             ClipboardChange::Matched(intent) => {
-                let include_content = copy_text_allowed(secure_input, &intent, text_policy);
-                raw_event(
+                let include_content = !secure_input && intent.text_allowed;
+                let event = raw_event(
                     "clipboard.copy",
                     &intent.context,
                     EventData::ClipboardCopy(clipboard_copy(
@@ -101,11 +119,23 @@ impl ClipboardTracker {
                         ClipboardOrigin::CopyShortcut,
                     )),
                     text_policy,
-                )
+                    intent.observed_at,
+                )?;
+                Some(ClipboardOutput {
+                    event,
+                    chrome_version: include_content.then_some(intent.chrome_version).flatten(),
+                })
             }
-            ClipboardChange::Unknown => Some(unknown_clipboard_event(EventData::ClipboardCopy(
-                clipboard_copy(read_content(false), ClipboardOrigin::Unknown),
-            ))),
+            ClipboardChange::Unknown => Some(ClipboardOutput {
+                event: unknown_clipboard_event(
+                    EventData::ClipboardCopy(clipboard_copy(
+                        read_content(false),
+                        ClipboardOrigin::Unknown,
+                    )),
+                    observed_at.wall,
+                ),
+                chrome_version: None,
+            }),
         }
     }
 }
@@ -119,20 +149,6 @@ where
     F: FnOnce(bool) -> PasteboardContent,
 {
     clipboard_paste(read_content(text_allowed), field_kind)
-}
-
-fn copy_text_allowed(
-    secure_input: bool,
-    intent: &CopyIntent,
-    text_policy: &TextContentPolicy,
-) -> bool {
-    let window_id = intent.context.window.as_ref().and_then(|window| window.id);
-    let app = zanei_core::schema::App {
-        name: intent.context.app.name.clone(),
-        bundle_id: intent.context.app.bundle_id.clone(),
-        pid: Some(intent.context.app.pid),
-    };
-    !secure_input && intent.text_allowed && text_policy.decision(&app, window_id).is_allowed()
 }
 
 #[cfg(test)]
@@ -168,21 +184,29 @@ mod tests {
         }
     }
 
+    fn observed(monotonic: Instant) -> ClipboardObservationTime {
+        ClipboardObservationTime {
+            monotonic,
+            wall: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
     #[test]
     fn pasteboard_change_without_copy_intent_has_unknown_origin_and_no_body() {
         let mut tracker = ClipboardTracker::new(1);
         let filter = FilterConfig::default();
         let (_, chrome) = chrome_eligibility_channel(filter.clone());
-        let event = tracker
+        let output = tracker
             .copy_event(
                 2,
                 Some(&context(7)),
-                Instant::now(),
+                observed(Instant::now()),
                 text_content,
                 false,
                 &TextContentPolicy::new(chrome, filter),
             )
             .expect("unknown copy event remains");
+        let event = output.event;
 
         assert_eq!(event.app.name, "Unknown");
         assert_eq!(event.app.pid, None);
@@ -200,13 +224,13 @@ mod tests {
     fn copy_intent_requires_same_pid_and_short_window() {
         let now = Instant::now();
         let mut tracker = ClipboardTracker::new(1);
-        tracker.observe_copy(&context(7), now, true);
+        tracker.observe_copy(&context(7), observed(now), true, None);
         assert!(matches!(
             tracker.take_change(2, Some(&context(8)), now),
             Some(ClipboardChange::Unknown)
         ));
 
-        tracker.observe_copy(&context(7), now, true);
+        tracker.observe_copy(&context(7), observed(now), true, None);
         assert!(matches!(
             tracker.take_change(
                 3,
@@ -216,7 +240,7 @@ mod tests {
             Some(ClipboardChange::Unknown)
         ));
 
-        tracker.observe_copy(&context(7), now, true);
+        tracker.observe_copy(&context(7), observed(now), true, None);
         assert!(matches!(
             tracker.take_change(4, Some(&context(7)), now + COPY_CORRELATION_WINDOW),
             Some(ClipboardChange::Matched(_))
@@ -249,10 +273,11 @@ mod tests {
         let now = Instant::now();
         let app = context(7);
         let mut tracker = ClipboardTracker::new(1);
-        tracker.observe_copy(&app, now, true);
+        tracker.observe_copy(&app, observed(now), true, None);
         let event = tracker
-            .copy_event(2, Some(&app), now, text_content, true, &policy)
-            .expect("copy event");
+            .copy_event(2, Some(&app), observed(now), text_content, true, &policy)
+            .expect("copy event")
+            .event;
 
         let EventData::ClipboardCopy(data) = event.data else {
             panic!("expected clipboard.copy");

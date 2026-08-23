@@ -583,9 +583,8 @@ fn missing_daemon_uses_the_dedicated_exit_code() {
     assert_eq!(value["events_captured"], serde_json::Value::Null);
 }
 
-// The runner's TCC state is out of the test's control (developer machines
-// usually lack Input Monitoring, CI images usually have it), so assert that
-// doctor's exit code and JSON are consistent with whichever state is real.
+// The runner's TCC state is out of the test's control, so assert that doctor's
+// exit code and JSON are consistent with whichever required states are real.
 #[test]
 fn doctor_json_matches_the_real_permission_state() {
     let directory = TempDir::new().expect("doctor fixture");
@@ -601,22 +600,32 @@ fn doctor_json_matches_the_real_permission_state() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     assert_eq!(value["capture_sources"], serde_json::json!(["input"]));
     assert_eq!(value["reported_by_recorder"], false);
-    let granted = value["permissions"]["input_monitoring"]["status"] == "granted";
-    if granted {
+    let accessibility_granted = value["permissions"]["accessibility"]["status"] == "granted";
+    let input_granted = value["permissions"]["input_monitoring"]["status"] == "granted";
+    if accessibility_granted && input_granted {
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(value["ok"], true);
         assert_eq!(value["missing_required"], serde_json::json!([]));
     } else {
         assert_eq!(output.status.code(), Some(3));
         assert_eq!(value["ok"], false);
+        let expected_missing = [
+            (!accessibility_granted).then_some("accessibility"),
+            (!input_granted).then_some("input_monitoring"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
         assert_eq!(
             value["missing_required"],
-            serde_json::json!(["input_monitoring"])
+            serde_json::to_value(expected_missing).expect("missing permissions JSON")
         );
-        assert_eq!(
-            value["settings_pane"],
+        let expected_pane = if accessibility_granted {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
-        );
+        } else {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        };
+        assert_eq!(value["settings_pane"], expected_pane);
     }
 }
 
@@ -772,6 +781,7 @@ fn daemon_hot_reloads_retention_purges_immediately_and_reports_the_active_value(
     let now = OffsetDateTime::now_utc();
     let expired = normalize(
         RawEvent {
+            observed_at: None,
             source: "macos.workspace".to_owned(),
             event_type: "app.launch".to_owned(),
             app: App {
@@ -1161,6 +1171,7 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
     fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
     let legacy = normalize(
         RawEvent {
+            observed_at: None,
             source: "macos.workspace".to_owned(),
             event_type: "app.launch".to_owned(),
             app: App {
@@ -1297,6 +1308,7 @@ fn purge_covers_set_aside_stores_even_without_a_live_store() {
             writer.append(
                 &normalize(
                     RawEvent {
+                        observed_at: None,
                         source: "macos.workspace".to_owned(),
                         event_type: "app.launch".to_owned(),
                         app: App {

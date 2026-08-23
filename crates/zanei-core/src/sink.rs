@@ -89,6 +89,7 @@ mod tests {
     fn stream_sink_writes_one_json_event_per_line() {
         let event = normalize(
             RawEvent {
+                observed_at: None,
                 source: "macos.workspace".to_owned(),
                 event_type: "app.launch".to_owned(),
                 app: App {

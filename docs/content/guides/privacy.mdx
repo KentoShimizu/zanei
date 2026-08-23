@@ -35,6 +35,7 @@ When content capture is enabled, Zanei requests accessibility tree construction 
 - If Accessibility cannot confirm a known non-secure input field, `input.key.text` and pasted text remain null.
 - Value changes outside a 3-second authorization window opened by a confirmed keystroke or paste are not recorded as text. Rejected inputs do not open a window.
 - Chrome Incognito and website-filtered windows keep text-content bodies null. Window titles and interaction metadata can remain.
+- Chrome text-content bodies are confirmed one poll (about 1 second) after input. Text typed within about a second before switching that Chrome window to an excluded or Incognito tab is omitted.
 - Unknown UI elements do not provide `element.value`.
 - `input.key.text` is null while an input method (IME) is active and when the input-source type is unknown; committed text can be captured only as an authorized `ui.value.data.text` difference.
 - Voice input does not itself open an authorization window because it has no recorded keystroke or paste trigger. If voice text is inserted while a 3-second window opened by a preceding recorded keystroke or paste for the same app and focused-element generation is still active, that text can be included in the authorized `ui.value.data.text` difference.
@@ -63,7 +64,7 @@ zanei stop && zanei start
 
 The store remains encrypted and normal retention applies. A plaintext SQLite export includes snapshot bodies unless you exclude them with `--types`; protect it like any other sensitive export. If you share your screen, run `zanei pause` first when the visible text should not be recorded. On employer-managed devices, follow your organization's rules for third-party messages and documents.
 
-The recorder stops creating snapshots after 128 MiB in a day. With the default 48-hour retention, that guard bounds snapshot text to about 256 MiB before database overhead; normal use is expected to be much lower because identical snapshots are not stored.
+The recorder stops creating snapshots after 128 MiB in a day. This is an in-memory backstop and restarts with the daemon. With the default 48-hour retention, it bounds snapshot text to about 256 MiB before database overhead when the daemon remains running; normal use is expected to be much lower because identical snapshots are not stored.
 
 ## Automatic exclusions
 

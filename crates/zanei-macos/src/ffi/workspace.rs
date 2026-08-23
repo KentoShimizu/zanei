@@ -182,16 +182,20 @@ impl NativeWorkspaceEvents {
     }
 
     pub(crate) fn frontmost_application(&self) -> Option<NativeApplication> {
-        let _pool = AutoreleasePool::new();
-        let workspace_class = unsafe { class(c"NSWorkspace") };
-        let workspace = unsafe { send_id_0(workspace_class, sel(c"sharedWorkspace")) };
-        let app = unsafe { send_id_0(workspace, sel(c"frontmostApplication")) };
-        unsafe { decode_application(app) }
+        frontmost_application()
     }
 
     pub(crate) fn take_dropped_events(&self) -> u64 {
         self.dropped.swap(0, Ordering::Relaxed)
     }
+}
+
+pub(crate) fn frontmost_application() -> Option<NativeApplication> {
+    let _pool = AutoreleasePool::new();
+    let workspace_class = unsafe { class(c"NSWorkspace") };
+    let workspace = unsafe { send_id_0(workspace_class, sel(c"sharedWorkspace")) };
+    let app = unsafe { send_id_0(workspace, sel(c"frontmostApplication")) };
+    unsafe { decode_application(app) }
 }
 
 pub(crate) fn running_applications() -> Vec<NativeApplication> {

@@ -323,6 +323,7 @@ fn raw_event(event_type: &str, data: EventData) -> RawEvent {
     };
 
     RawEvent {
+        observed_at: None,
         source: source.to_owned(),
         event_type: event_type.to_owned(),
         app: App {

@@ -11,6 +11,7 @@ use crate::ffi::geometry::{AxFrame, AxPoint, AxSize};
 
 const AX_ERROR_SUCCESS: i32 = 0;
 const AX_ERROR_CANNOT_COMPLETE: i32 = -25_204;
+const AX_ERROR_INVALID_UI_ELEMENT: i32 = -25_202;
 const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
 const AX_ERROR_NO_VALUE: i32 = -25_212;
 const WRAPPER_CONTRACT_ERROR: i32 = -1;
@@ -82,6 +83,15 @@ impl SnapshotAxError {
 
     pub const fn is_timeout(&self) -> bool {
         self.code == AX_ERROR_CANNOT_COMPLETE
+    }
+
+    pub const fn is_invalid_ui_element(&self) -> bool {
+        self.code == AX_ERROR_INVALID_UI_ELEMENT
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn invalid_ui_element_for_test(pid: i32) -> Self {
+        ax_error("AXUIElement", AX_ERROR_INVALID_UI_ELEMENT, pid)
     }
 }
 
@@ -399,11 +409,11 @@ fn decode_attribute(
             .map(SnapshotAttributeValue::Size)
             .map(Some)
             .ok_or_else(|| ax_error("AXSize type", WRAPPER_CONTRACT_ERROR, pid)),
+        SnapshotAttribute::Value => Ok(string_value(value).map(SnapshotAttributeValue::Text)),
         SnapshotAttribute::Role
         | SnapshotAttribute::Subrole
         | SnapshotAttribute::Title
-        | SnapshotAttribute::Description
-        | SnapshotAttribute::Value => string_value(value)
+        | SnapshotAttribute::Description => string_value(value)
             .map(SnapshotAttributeValue::Text)
             .map(Some)
             .ok_or_else(|| ax_error(attribute.name(), WRAPPER_CONTRACT_ERROR, pid)),

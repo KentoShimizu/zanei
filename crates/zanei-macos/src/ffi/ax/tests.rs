@@ -189,6 +189,7 @@ fn detached_value_context_resolves_after_late_confirmation() {
         capture,
         generation: 1,
         field_class: FieldClass::KnownText(FieldKind::Text),
+        observed_at: None,
     };
     let mut detached = DeferredValueContext::new(7, context);
 
@@ -224,6 +225,7 @@ fn detached_context_without_pending_value_is_cleaned_up() {
         ),
         generation: 1,
         field_class: FieldClass::KnownText(FieldKind::Text),
+        observed_at: None,
     };
     let mut detached = DeferredValueContext::new(7, context);
 
@@ -368,6 +370,7 @@ fn failed_focus_clears_current_and_defers_previous_value() {
         capture,
         generation: 1,
         field_class: FieldClass::KnownText(FieldKind::Text),
+        observed_at: None,
     };
     let mut target = FocusedTarget::new();
     assert!(matches!(

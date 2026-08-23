@@ -15,6 +15,7 @@ use crate::{chrome::ChromeEligibilityTracker, focused_field::FocusedField};
 pub struct TextContentDecision {
     allowed: bool,
     capture_context: CaptureContext,
+    chrome_version: Option<u64>,
 }
 
 impl TextContentDecision {
@@ -26,6 +27,11 @@ impl TextContentDecision {
     #[must_use]
     pub fn capture_context(&self) -> CaptureContext {
         self.capture_context.clone()
+    }
+
+    #[must_use]
+    pub const fn chrome_version(&self) -> Option<u64> {
+        self.chrome_version
     }
 }
 
@@ -52,8 +58,14 @@ impl TextContentPolicy {
         }
     }
 
+    #[must_use]
+    pub(crate) fn chrome_tracker(&self) -> ChromeEligibilityTracker {
+        self.chrome.clone()
+    }
+
     pub(crate) fn decision(&self, app: &App, window_id: Option<i64>) -> TextContentDecision {
-        let capture_context = if app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID) {
+        let is_chrome = app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID);
+        let capture_context = if is_chrome {
             app.pid
                 .map(|pid| self.chrome.capture_context(pid, window_id))
                 .unwrap_or_default()
@@ -64,13 +76,20 @@ impl TextContentPolicy {
             .filter
             .read()
             .is_ok_and(|filter| app_is_allowed_for(PrivacyScope::TextContent, app, &filter));
-        let chrome_allowed = app.bundle_id.as_deref() != Some(CHROME_BUNDLE_ID)
+        let chrome_allowed = !is_chrome
             || app
                 .pid
                 .is_some_and(|pid| self.chrome.allows_text(pid, window_id));
         TextContentDecision {
             allowed: app_allowed && chrome_allowed,
             capture_context,
+            chrome_version: is_chrome
+                .then(|| {
+                    app.pid
+                        .zip(window_id)
+                        .and_then(|(pid, window_id)| self.chrome.state_version(pid, window_id))
+                })
+                .flatten(),
         }
     }
 
@@ -95,7 +114,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::chrome::chrome_eligibility_channel;
+    use crate::chrome::{ChromeEligibilityObservation, chrome_eligibility_channel};
     use crate::focused_field::{FieldClass, FocusedField};
 
     fn app(name: &str, bundle_id: &str, pid: i64) -> App {
@@ -151,9 +170,20 @@ mod tests {
         let chrome_app = app("Google Chrome", CHROME_BUNDLE_ID, 7);
 
         assert!(!policy.decision(&chrome_app, Some(11)).is_allowed());
-        publisher.publish_incognito(7, Some(11));
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Incognito {
+                window_id: Some(11),
+            },
+        );
         assert!(!policy.decision(&chrome_app, Some(11)).is_allowed());
-        publisher.publish_normal(7, Some(11), "https://example.com");
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: "https://example.com".to_owned(),
+            },
+        );
         let decision = policy.decision(&chrome_app, Some(11));
         assert!(decision.is_allowed());
         assert_eq!(
@@ -176,11 +206,29 @@ mod tests {
         let policy = TextContentPolicy::new(chrome, filter);
         let chrome_app = app("Google Chrome", CHROME_BUNDLE_ID, 7);
 
-        publisher.publish_normal(7, Some(11), "https://allowed.example");
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: "https://allowed.example".to_owned(),
+            },
+        );
         assert!(policy.decision(&chrome_app, Some(11)).is_allowed());
-        publisher.publish_normal(7, Some(11), "https://global.example");
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: "https://global.example".to_owned(),
+            },
+        );
         assert!(!policy.decision(&chrome_app, Some(11)).is_allowed());
-        publisher.publish_normal(7, Some(11), "https://text.example");
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: "https://text.example".to_owned(),
+            },
+        );
         assert!(!policy.decision(&chrome_app, Some(11)).is_allowed());
     }
 

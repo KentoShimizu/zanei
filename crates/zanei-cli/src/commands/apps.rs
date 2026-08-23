@@ -58,6 +58,7 @@ impl AppCandidate {
 pub(super) struct AppCollection {
     pub apps: Vec<AppCandidate>,
     pub recent_unavailable: Option<RecentUnavailable>,
+    pub installed_unreadable: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,6 +84,7 @@ impl std::fmt::Display for RecentUnavailable {
 struct AppsOutput<'a> {
     apps: &'a [AppCandidate],
     recent_unavailable: Option<String>,
+    installed_unreadable: usize,
 }
 
 pub fn run(
@@ -92,6 +94,12 @@ pub fn run(
     json: bool,
 ) -> Result<u8, CliError> {
     let mut collection = collect(paths, app_directory)?;
+    if collection.installed_unreadable > 0 {
+        eprintln!(
+            "warning: {} app bundles could not be read",
+            collection.installed_unreadable
+        );
+    }
     if let Some(query) = args.query.as_deref() {
         collection.apps.retain(|app| app.matches(query));
         if collection.apps.is_empty() {
@@ -106,6 +114,7 @@ pub fn run(
                 recent_unavailable: collection
                     .recent_unavailable
                     .map(|reason| reason.to_string()),
+                installed_unreadable: collection.installed_unreadable,
             })?
         );
     } else {
@@ -125,7 +134,7 @@ pub(super) fn collect(
     let running = app_directory.running()?;
     let (recent, recent_unavailable) = recent_apps(&paths.config, &paths.store);
     let mut apps = Vec::new();
-    for app in installed {
+    for app in installed.apps {
         merge(&mut apps, app, AppSource::Installed, None);
     }
     for app in running {
@@ -138,6 +147,7 @@ pub(super) fn collect(
     Ok(AppCollection {
         apps,
         recent_unavailable,
+        installed_unreadable: installed.unreadable,
     })
 }
 
@@ -381,6 +391,8 @@ fn relative_time(timestamp: &str, now: OffsetDateTime) -> Result<String, CliErro
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -411,5 +423,19 @@ mod tests {
         assert_eq!(apps[0].name, "Installed Name");
         assert!(apps[0].installed);
         assert_eq!(source_rank(&apps[0]), 0);
+    }
+
+    #[test]
+    fn json_contract_reports_unreadable_installed_bundles() {
+        let apps = Vec::new();
+        let value = serde_json::to_value(AppsOutput {
+            apps: &apps,
+            recent_unavailable: None,
+            installed_unreadable: 2,
+        })
+        .expect("apps output serializes");
+
+        assert_eq!(value["installed_unreadable"], json!(2));
+        assert_eq!(value["recent_unavailable"], serde_json::Value::Null);
     }
 }

@@ -5,7 +5,7 @@ use std::{
     ptr::NonNull,
 };
 
-use super::geometry::AxFrame;
+use super::geometry::{AxFrame, AxPoint, AxSize};
 
 type CfRef = *const c_void;
 type CfMutableRef = *mut c_void;
@@ -18,39 +18,18 @@ const WINDOW_LIST_OPTIONS: u32 =
     CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY | CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS;
 const FRAME_MATCH_TOLERANCE_POINTS: f64 = 1.0;
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct CgPoint {
-    pub x: f64,
-    pub y: f64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct CgSize {
-    pub width: f64,
-    pub height: f64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct CgRect {
-    pub origin: CgPoint,
-    pub size: CgSize,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct OnScreenWindow {
     pub id: i64,
     pub layer: i64,
     pub title: Option<String>,
-    pub bounds: CgRect,
+    pub bounds: AxFrame,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct NativeWindow {
-    pub(crate) title: Option<String>,
-    pub(crate) id: Option<i64>,
+pub struct NativeWindow {
+    pub title: Option<String>,
+    pub id: Option<i64>,
 }
 
 pub(crate) fn on_screen_windows(pid: i64) -> Vec<OnScreenWindow> {
@@ -112,7 +91,7 @@ pub(crate) fn window_id_for_frame_in_windows(
         .map(|window| window.id)
 }
 
-fn bounds_match_frame(bounds: CgRect, frame: AxFrame) -> bool {
+fn bounds_match_frame(bounds: AxFrame, frame: AxFrame) -> bool {
     let bounds_right = bounds.origin.x + bounds.size.width;
     let bounds_bottom = bounds.origin.y + bounds.size.height;
     let frame_right = frame.origin.x + frame.size.width;
@@ -163,14 +142,14 @@ unsafe fn dictionary_string(dictionary: CfRef, key: CfRef) -> Option<String> {
     })
 }
 
-unsafe fn dictionary_bounds(dictionary: CfRef, key: CfRef) -> Option<CgRect> {
+unsafe fn dictionary_bounds(dictionary: CfRef, key: CfRef) -> Option<AxFrame> {
     let value = unsafe { CFDictionaryGetValue(dictionary, key) };
     if value.is_null() {
         return None;
     }
-    let mut bounds = CgRect {
-        origin: CgPoint { x: 0.0, y: 0.0 },
-        size: CgSize {
+    let mut bounds = AxFrame {
+        origin: AxPoint { x: 0.0, y: 0.0 },
+        size: AxSize {
             width: 0.0,
             height: 0.0,
         },
@@ -182,7 +161,7 @@ unsafe fn dictionary_bounds(dictionary: CfRef, key: CfRef) -> Option<CgRect> {
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn CGWindowListCopyWindowInfo(options: u32, relative_window: u32) -> CfMutableRef;
-    fn CGRectMakeWithDictionaryRepresentation(dictionary: CfRef, rect: *mut CgRect) -> u8;
+    fn CGRectMakeWithDictionaryRepresentation(dictionary: CfRef, rect: *mut AxFrame) -> u8;
     static kCGWindowOwnerPID: CfRef;
     static kCGWindowLayer: CfRef;
     static kCGWindowName: CfRef;
@@ -222,7 +201,7 @@ mod tests {
         }
     }
 
-    fn window(id: i64, layer: i64, bounds: CgRect) -> OnScreenWindow {
+    fn window(id: i64, layer: i64, bounds: AxFrame) -> OnScreenWindow {
         OnScreenWindow {
             id,
             layer,
@@ -231,10 +210,10 @@ mod tests {
         }
     }
 
-    fn rect(x: f64, y: f64, width: f64, height: f64) -> CgRect {
-        CgRect {
-            origin: CgPoint { x, y },
-            size: CgSize { width, height },
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> AxFrame {
+        AxFrame {
+            origin: AxPoint { x, y },
+            size: AxSize { width, height },
         }
     }
 

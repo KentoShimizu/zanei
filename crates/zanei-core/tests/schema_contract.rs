@@ -310,6 +310,7 @@ fn normalized_snapshot(text: String, complete: bool) -> zanei_core::normalize::N
     let chars = text.chars().count() as u64;
     normalize(
         RawEvent {
+            observed_at: None,
             source: "macos.ax".to_owned(),
             event_type: "content.snapshot".to_owned(),
             app: App {

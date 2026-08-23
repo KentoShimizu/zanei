@@ -2,8 +2,10 @@
 
 mod eligibility;
 
+use eligibility::CHROME_POLL_INTERVAL;
 pub use eligibility::{
-    ChromeEligibilityPublisher, ChromeEligibilityTracker, chrome_eligibility_channel,
+    ChromeEligibilityObservation, ChromeEligibilityPublisher, ChromeEligibilityTracker,
+    chrome_eligibility_channel,
 };
 
 use std::{
@@ -27,7 +29,7 @@ use crate::{
         AppleScriptClient, AppleScriptError, Observation as NativeObservation,
         Snapshot as NativeSnapshot,
     },
-    ffi::eventtap::current_context,
+    focus_context::FocusContext,
     workspace::{ApplicationInfo, WorkspaceEvent},
 };
 
@@ -35,11 +37,11 @@ use zanei_core::privacy::CHROME_BUNDLE_ID;
 const COLLECTOR_NAME: &str = "chrome";
 const EVENT_SOURCE: &str = "macos.applescript";
 const EVENT_TYPE: &str = "browser.navigate";
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 pub struct ChromeCollector {
     workspace_events: Option<Receiver<WorkspaceEvent>>,
     eligibility: ChromeEligibilityPublisher,
+    focus_context: FocusContext,
     runtime: Option<ChromeRuntime>,
     permissions: [Permission; 1],
     metrics: ChromeMetrics,
@@ -49,10 +51,12 @@ impl ChromeCollector {
     pub fn new(
         workspace_events: Receiver<WorkspaceEvent>,
         eligibility: ChromeEligibilityPublisher,
+        focus_context: FocusContext,
     ) -> Self {
         Self {
             workspace_events: Some(workspace_events),
             eligibility,
+            focus_context,
             runtime: None,
             permissions: [Permission::Automation {
                 bundle_id: CHROME_BUNDLE_ID.to_owned(),
@@ -109,14 +113,18 @@ impl Collector for ChromeCollector {
         let worker_stop = Arc::clone(&stop);
         let metrics = self.metrics.clone();
         let eligibility = self.eligibility.clone();
+        let focus_context = self.focus_context.clone();
         let (startup_sender, startup_receiver) = sync_channel(1);
         let handle = thread::Builder::new()
             .name("zanei-chrome".to_owned())
             .spawn(move || {
                 let mut api = match AppleScriptClient::new() {
-                    Ok(api) => {
+                    Ok(client) => {
                         let _ = startup_sender.send(Ok(()));
-                        api
+                        SystemChromeApi {
+                            client,
+                            focus_context,
+                        }
                     }
                     Err(error) => {
                         metrics.degraded.fetch_add(1, Ordering::Relaxed);
@@ -189,14 +197,21 @@ trait ChromeApi {
     fn query(&mut self, pid: i64) -> Result<ChromeObservation, Self::Error>;
 }
 
-impl ChromeApi for AppleScriptClient {
+struct SystemChromeApi {
+    client: AppleScriptClient,
+    focus_context: FocusContext,
+}
+
+impl ChromeApi for SystemChromeApi {
     type Error = AppleScriptError;
 
     fn query(&mut self, pid: i64) -> Result<ChromeObservation, Self::Error> {
-        let observation = AppleScriptClient::query(self)?;
-        let window_id = current_context()
-            .filter(|context| context.app.pid == pid)
-            .and_then(|context| context.window)
+        let observation = self.client.query()?;
+        let window_id = self
+            .focus_context
+            .current()
+            .filter(|focus| focus.app.pid == pid)
+            .and_then(|focus| focus.window)
             .and_then(|window| window.id);
         Ok(match observation {
             NativeObservation::Snapshot(snapshot) => {
@@ -285,7 +300,9 @@ fn run_worker<A: ChromeApi>(
                     metrics,
                     eligibility,
                 ) {
-                    PollOutcome::Continue => state.next_poll = Some(Instant::now() + POLL_INTERVAL),
+                    PollOutcome::Continue => {
+                        state.next_poll = Some(Instant::now() + CHROME_POLL_INTERVAL);
+                    }
                     PollOutcome::Inactive => {
                         state.frontmost = None;
                         state.next_poll = None;
@@ -316,7 +333,6 @@ fn handle_workspace_event<A: ChromeApi>(
 ) -> bool {
     match event {
         WorkspaceEvent::Activated(app) if is_chrome(&app) => {
-            eligibility.clear_pid(app.pid);
             let outcome = poll_once(
                 api,
                 &mut state.navigation,
@@ -328,7 +344,7 @@ fn handle_workspace_event<A: ChromeApi>(
             match outcome {
                 PollOutcome::Continue => {
                     state.frontmost = Some(app);
-                    state.next_poll = Some(Instant::now() + POLL_INTERVAL);
+                    state.next_poll = Some(Instant::now() + CHROME_POLL_INTERVAL);
                 }
                 PollOutcome::Inactive => {
                     state.frontmost = None;
@@ -339,13 +355,13 @@ fn handle_workspace_event<A: ChromeApi>(
         }
         WorkspaceEvent::Activated(_) => {
             if let Some(app) = state.frontmost.as_ref() {
-                eligibility.clear_pid(app.pid);
+                eligibility.observe(app.pid, ChromeEligibilityObservation::Unavailable);
             }
             state.frontmost = None;
             state.next_poll = None;
         }
         WorkspaceEvent::Terminated(app) if is_chrome(&app) => {
-            eligibility.clear_pid(app.pid);
+            eligibility.observe(app.pid, ChromeEligibilityObservation::Unavailable);
             state.frontmost = None;
             state.next_poll = None;
             state.navigation.reset();
@@ -374,14 +390,19 @@ fn poll_once<A: ChromeApi>(
     metrics: &ChromeMetrics,
     eligibility: &ChromeEligibilityPublisher,
 ) -> PollOutcome {
-    eligibility.clear_pid(app.pid);
     match api.query(app.pid) {
         Ok(ChromeObservation::Snapshot(snapshot)) => {
-            eligibility.publish_normal(app.pid, snapshot.window_id, &snapshot.url);
+            eligibility.observe(
+                app.pid,
+                ChromeEligibilityObservation::Normal {
+                    window_id: snapshot.window_id,
+                    url: snapshot.url.clone(),
+                },
+            );
             let navigation = match tracker.observe(snapshot) {
                 Ok(navigation) => navigation,
                 Err(_) => {
-                    eligibility.clear_pid(app.pid);
+                    eligibility.observe(app.pid, ChromeEligibilityObservation::Unavailable);
                     metrics.degraded.fetch_add(1, Ordering::Relaxed);
                     return PollOutcome::Stop;
                 }
@@ -403,20 +424,29 @@ fn poll_once<A: ChromeApi>(
             }
         }
         Ok(ChromeObservation::Incognito { window_id }) => {
-            eligibility.publish_incognito(app.pid, window_id);
+            eligibility.observe(
+                app.pid,
+                ChromeEligibilityObservation::Incognito { window_id },
+            );
             tracker.reset();
             PollOutcome::Continue
         }
         Ok(ChromeObservation::NoWindow) => {
+            eligibility.observe(app.pid, ChromeEligibilityObservation::Unavailable);
             tracker.reset();
             PollOutcome::Continue
         }
         Ok(ChromeObservation::NotRunning) => {
+            eligibility.observe(app.pid, ChromeEligibilityObservation::Unavailable);
             tracker.reset();
             PollOutcome::Inactive
         }
-        Ok(ChromeObservation::NotFrontmost) => PollOutcome::Inactive,
+        Ok(ChromeObservation::NotFrontmost) => {
+            eligibility.observe(app.pid, ChromeEligibilityObservation::Unavailable);
+            PollOutcome::Inactive
+        }
         Err(_) => {
+            eligibility.observe(app.pid, ChromeEligibilityObservation::Unavailable);
             metrics.degraded.fetch_add(1, Ordering::Relaxed);
             PollOutcome::Stop
         }
@@ -426,6 +456,7 @@ fn poll_once<A: ChromeApi>(
 fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
     let website_host = zanei_core::privacy::website_host(&navigation.snapshot.url);
     RawEvent {
+        observed_at: None,
         source: EVENT_SOURCE.to_owned(),
         event_type: EVENT_TYPE.to_owned(),
         app: App {

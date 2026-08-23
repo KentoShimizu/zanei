@@ -64,6 +64,12 @@ impl From<SnapshotAxError> for SnapshotReadError {
     }
 }
 
+impl SnapshotReadError {
+    fn ends_root_walk(&self) -> bool {
+        matches!(self, Self::Ax(error) if error.is_invalid_ui_element())
+    }
+}
+
 #[derive(Debug)]
 pub struct SnapshotWalkError {
     pub(crate) source: SnapshotReadError,
@@ -134,11 +140,20 @@ pub struct SnapshotWalkOutput {
     pub elapsed: Duration,
     pub complete: bool,
     pub cutoff: Option<SnapshotCutoff>,
+    pub degraded_nodes: usize,
 }
 
 enum Work<N> {
-    Visit(N),
-    Children { node: N, index: usize },
+    Visit {
+        node: N,
+        is_root: bool,
+    },
+    Children {
+        node: N,
+        index: usize,
+        is_root: bool,
+        degraded: bool,
+    },
 }
 
 pub(crate) fn walk_snapshot<N: SnapshotNode>(
@@ -156,16 +171,27 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
         ax_calls: 0,
         text: TextAssembler::new(budget.text_bytes),
         cutoff: None,
+        degraded_nodes: 0,
     };
-    let mut stack = vec![Work::Visit(root)];
+    let mut stack = vec![Work::Visit {
+        node: root,
+        is_root: true,
+    }];
     while let Some(work) = stack.pop() {
         if !context.can_continue() {
             break;
         }
         match work {
-            Work::Visit(node) => visit_node(node, window_frame, &mut stack, &mut context)?,
-            Work::Children { node, index } => {
-                load_children(node, index, &mut stack, &mut context)?;
+            Work::Visit { node, is_root } => {
+                visit_node(node, is_root, window_frame, &mut stack, &mut context)?;
+            }
+            Work::Children {
+                node,
+                index,
+                is_root,
+                degraded,
+            } => {
+                load_children(node, index, is_root, degraded, &mut stack, &mut context)?;
             }
         }
     }
@@ -176,11 +202,13 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
         elapsed: clock.elapsed(),
         complete: context.cutoff.is_none(),
         cutoff: context.cutoff,
+        degraded_nodes: context.degraded_nodes,
     })
 }
 
 fn visit_node<'a, N: SnapshotNode>(
     node: N,
+    is_root: bool,
     window_frame: AxFrame,
     stack: &mut Vec<Work<N>>,
     context: &mut WalkContext<'a>,
@@ -190,7 +218,21 @@ fn visit_node<'a, N: SnapshotNode>(
         return Ok(());
     }
     context.nodes += 1;
-    let attributes = context.read(|_| node.safe_attributes())?;
+    let attributes = match context.read_node(is_root, || node.safe_attributes())? {
+        NodeRead::Value(attributes) => attributes,
+        NodeRead::Degraded => {
+            context.degraded_nodes = context.degraded_nodes.saturating_add(1);
+            if context.can_continue() {
+                stack.push(Work::Children {
+                    node,
+                    index: 0,
+                    is_root,
+                    degraded: true,
+                });
+            }
+            return Ok(());
+        }
+    };
     if !context.can_continue()
         || attributes
             .frame
@@ -199,7 +241,10 @@ fn visit_node<'a, N: SnapshotNode>(
         return Ok(());
     }
     let class = classify_role(attributes.role.as_deref(), attributes.subrole.as_deref());
-    let fragments = node_fragments(&node, class, &attributes, context)?;
+    let (fragments, degraded) = node_fragments(&node, is_root, class, &attributes, context)?;
+    if degraded {
+        context.degraded_nodes = context.degraded_nodes.saturating_add(1);
+    }
     for fragment in fragments {
         if !context.text.push(&fragment) {
             context.cutoff = Some(SnapshotCutoff::Bytes);
@@ -207,7 +252,12 @@ fn visit_node<'a, N: SnapshotNode>(
         }
     }
     if class.descends() && context.can_continue() {
-        stack.push(Work::Children { node, index: 0 });
+        stack.push(Work::Children {
+            node,
+            index: 0,
+            is_root,
+            degraded,
+        });
     }
     Ok(())
 }
@@ -215,10 +265,21 @@ fn visit_node<'a, N: SnapshotNode>(
 fn load_children<'a, N: SnapshotNode>(
     node: N,
     index: usize,
+    is_root: bool,
+    degraded: bool,
     stack: &mut Vec<Work<N>>,
     context: &mut WalkContext<'a>,
 ) -> Result<(), SnapshotWalkError> {
-    let children = context.read(|_| node.children_range(index, CHILDREN_BATCH_SIZE))?;
+    let children =
+        match context.read_node(is_root, || node.children_range(index, CHILDREN_BATCH_SIZE))? {
+            NodeRead::Value(children) => children,
+            NodeRead::Degraded => {
+                if !degraded {
+                    context.degraded_nodes = context.degraded_nodes.saturating_add(1);
+                }
+                return Ok(());
+            }
+        };
     if !context.can_continue() {
         return Ok(());
     }
@@ -226,36 +287,57 @@ fn load_children<'a, N: SnapshotNode>(
         stack.push(Work::Children {
             node,
             index: index.saturating_add(children.len()),
+            is_root,
+            degraded,
         });
     }
-    stack.extend(children.into_iter().rev().map(Work::Visit));
+    stack.extend(children.into_iter().rev().map(|node| Work::Visit {
+        node,
+        is_root: false,
+    }));
     Ok(())
 }
 
 fn node_fragments(
     node: &impl SnapshotNode,
+    is_root: bool,
     class: SnapshotNodeClass,
     attributes: &NodeSafeAttributes,
     context: &mut WalkContext<'_>,
-) -> Result<Vec<String>, SnapshotWalkError> {
+) -> Result<(Vec<String>, bool), SnapshotWalkError> {
     let mut fragments = Vec::new();
+    let mut degraded = false;
     match class {
         SnapshotNodeClass::SecureInput | SnapshotNodeClass::Menu => {}
         SnapshotNodeClass::SingleLineInput | SnapshotNodeClass::Container => {
             push_unique(&mut fragments, attributes.title.as_deref());
         }
         SnapshotNodeClass::MultiLineText => {
-            let range = context.read(|_| node.visible_range())?;
+            let range = match context.read_node(is_root, || node.visible_range())? {
+                NodeRead::Value(range) => range,
+                NodeRead::Degraded => {
+                    degraded = true;
+                    None
+                }
+            };
             if let Some(range) = range
                 && context.can_continue()
             {
-                let text = context.read(|_| node.string_for_range(range))?;
-                push_unique(&mut fragments, text.as_deref());
+                match context.read_node(is_root, || node.string_for_range(range))? {
+                    NodeRead::Value(text) => push_unique(&mut fragments, text.as_deref()),
+                    NodeRead::Degraded => degraded = true,
+                }
             }
         }
         SnapshotNodeClass::ReadableText => {
             let value = if context.can_continue() {
-                context.read(|_| node.value())?
+                match context.read_node(is_root, || node.value())? {
+                    NodeRead::Value(value) => value,
+                    NodeRead::Degraded => {
+                        degraded = true;
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -271,7 +353,10 @@ fn node_fragments(
             push_unique(&mut fragments, attributes.description.as_deref());
         }
     }
-    Ok(fragments)
+    if degraded {
+        fragments.clear();
+    }
+    Ok((fragments, degraded))
 }
 
 fn push_unique(fragments: &mut Vec<String>, value: Option<&str>) {
@@ -291,6 +376,12 @@ struct WalkContext<'a> {
     ax_calls: usize,
     text: TextAssembler,
     cutoff: Option<SnapshotCutoff>,
+    degraded_nodes: usize,
+}
+
+enum NodeRead<T> {
+    Value(T),
+    Degraded,
 }
 
 impl WalkContext<'_> {
@@ -309,16 +400,21 @@ impl WalkContext<'_> {
         true
     }
 
-    fn read<T>(
+    fn read_node<T>(
         &mut self,
-        call: impl FnOnce(&mut Self) -> Result<T, SnapshotReadError>,
-    ) -> Result<T, SnapshotWalkError> {
+        is_root: bool,
+        call: impl FnOnce() -> Result<T, SnapshotReadError>,
+    ) -> Result<NodeRead<T>, SnapshotWalkError> {
         self.ax_calls = self.ax_calls.saturating_add(1);
-        call(self).map_err(|source| SnapshotWalkError {
-            source,
-            nodes: self.nodes,
-            elapsed: self.clock.elapsed(),
-        })
+        match call() {
+            Ok(value) => Ok(NodeRead::Value(value)),
+            Err(source) if is_root && source.ends_root_walk() => Err(SnapshotWalkError {
+                source,
+                nodes: self.nodes,
+                elapsed: self.clock.elapsed(),
+            }),
+            Err(_) => Ok(NodeRead::Degraded),
+        }
     }
 }
 

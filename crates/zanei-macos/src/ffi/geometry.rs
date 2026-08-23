@@ -14,6 +14,7 @@ pub struct AxSize {
     pub height: f64,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AxFrame {
     pub origin: AxPoint,

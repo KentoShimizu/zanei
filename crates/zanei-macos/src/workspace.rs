@@ -13,12 +13,9 @@ use std::{
 use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
 use zanei_core::schema::{App, EmptyData, EventData, Window};
 
-use crate::ffi::{
-    eventtap,
-    workspace::{
-        NativeApplication, NativeApplicationActivationPolicy, NativeWorkspaceEvent,
-        NativeWorkspaceEvents, NativeWorkspaceObserver,
-    },
+use crate::ffi::workspace::{
+    NativeApplication, NativeApplicationActivationPolicy, NativeWorkspaceEvent,
+    NativeWorkspaceEvents, NativeWorkspaceObserver,
 };
 
 const WORKSPACE_CHANNEL_CAPACITY: usize = 256;
@@ -225,13 +222,10 @@ impl WorkspaceApi for NativeWorkspaceEvents {
     }
 
     fn front_window(&self, pid: i64) -> Option<Window> {
-        eventtap::current_context()
-            .filter(|context| context.app.pid == pid)
-            .and_then(|context| context.window)
-            .map(|window| Window {
-                title: window.title,
-                id: window.id,
-            })
+        crate::ffi::window_list::front_window(pid).map(|window| Window {
+            title: window.title,
+            id: window.id,
+        })
     }
 
     fn take_dropped_events(&self) -> u64 {
@@ -303,6 +297,7 @@ impl ActivationTracker {
             return None;
         }
         let event = RawEvent {
+            observed_at: None,
             source: "macos.workspace".to_owned(),
             event_type: "app.activate".to_owned(),
             app: app.raw_app(),
@@ -371,6 +366,7 @@ fn lifecycle_raw_event(
     data: fn(EmptyData) -> EventData,
 ) -> RawEvent {
     RawEvent {
+        observed_at: None,
         source: "macos.workspace".to_owned(),
         event_type: event_type.to_owned(),
         app: app.raw_app(),

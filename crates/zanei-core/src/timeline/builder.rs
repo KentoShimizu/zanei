@@ -148,24 +148,45 @@ fn assign_content_snapshots(
     let mut timed = metadata
         .iter()
         .map(|item| {
-            OffsetDateTime::parse(&item.ts, &Rfc3339).map_err(|_| TimelineError::InvalidTimestamp {
-                event_id: item.id.clone(),
-                timestamp: item.ts.clone(),
-            })
+            let at = OffsetDateTime::parse(&item.ts, &Rfc3339).map_err(|_| {
+                TimelineError::InvalidTimestamp {
+                    event_id: item.id.clone(),
+                    timestamp: item.ts.clone(),
+                }
+            })?;
+            Ok::<_, TimelineError>((at, item))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    timed.sort_unstable();
-    for at in timed {
-        let insertion = sessions
-            .partition_point(|session| session.events.first().is_some_and(|event| event.at <= at));
-        if let Some(session) = insertion
-            .checked_sub(1)
+        .collect::<Result<Vec<_>, TimelineError>>()?;
+    timed.sort_unstable_by_key(|(at, _)| *at);
+    for (at, item) in timed {
+        let started_before =
+            |session: &RawSession| session.events.first().is_some_and(|event| event.at <= at);
+        let matching = sessions.iter().rposition(|session| {
+            started_before(session) && snapshot_matches_session(item, session)
+        });
+        let by_time = sessions.iter().rposition(started_before);
+        if let Some(session) = matching
+            .or(by_time)
             .and_then(|index| sessions.get_mut(index))
         {
-            session.content_snapshots += 1;
+            session.content_snapshots = session.content_snapshots.saturating_add(1);
         }
     }
     Ok(())
+}
+
+fn snapshot_matches_session(metadata: &EventMetadata, session: &RawSession) -> bool {
+    let Some(event) = session.events.first().map(|item| &item.event) else {
+        return false;
+    };
+    match metadata.bundle_id.as_deref() {
+        Some(bundle_id) => event
+            .app
+            .bundle_id
+            .as_deref()
+            .is_some_and(|session_bundle| session_bundle.eq_ignore_ascii_case(bundle_id)),
+        None => event.app.name.eq_ignore_ascii_case(&metadata.app_name),
+    }
 }
 
 fn sessions_for_granularity(sessions: &[RawSession], granularity: Granularity) -> Vec<RawSession> {

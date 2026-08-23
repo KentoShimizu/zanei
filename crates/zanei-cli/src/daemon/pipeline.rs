@@ -477,6 +477,7 @@ mod tests {
             id: None,
         });
         zanei_collector::RawEvent {
+            observed_at: None,
             source: "test.collector".to_owned(),
             event_type: event_type.to_owned(),
             app: App {

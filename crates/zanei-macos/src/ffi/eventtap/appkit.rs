@@ -1,7 +1,7 @@
 //! AppKit and window-context bindings used from the EventTap worker.
 
 use std::{
-    ffi::{CStr, c_char, c_int, c_void},
+    ffi::{CStr, c_char, c_void},
     mem,
     ptr::{self, NonNull},
     sync::{
@@ -11,8 +11,6 @@ use std::{
 };
 
 use crate::eventtap::logic::{PasteboardContent, PasteboardKind};
-use crate::ffi::window_list::front_window;
-
 pub(crate) use crate::ffi::window_list::NativeWindow;
 
 type ObjcId = *mut c_void;
@@ -34,35 +32,6 @@ pub(crate) struct NativeApp {
 pub(crate) struct NativeContext {
     pub(crate) app: NativeApp,
     pub(crate) window: Option<NativeWindow>,
-}
-
-pub(crate) fn current_context() -> Option<NativeContext> {
-    let _pool = AutoreleasePool::new();
-    // SAFETY: Selectors match NSWorkspace and NSRunningApplication signatures.
-    unsafe {
-        let workspace = msg_id(
-            objc_getClass(c"NSWorkspace".as_ptr()),
-            sel(c"sharedWorkspace"),
-        );
-        let application = msg_id(workspace, sel(c"frontmostApplication"));
-        if application.is_null() {
-            return None;
-        }
-        let name = ns_string(msg_id(application, sel(c"localizedName")))?;
-        let bundle_id = ns_string(msg_id(application, sel(c"bundleIdentifier")));
-        let pid = msg_i32(application, sel(c"processIdentifier"));
-        if pid <= 0 {
-            return None;
-        }
-        Some(NativeContext {
-            app: NativeApp {
-                name,
-                bundle_id,
-                pid: i64::from(pid),
-            },
-            window: front_window(i64::from(pid)),
-        })
-    }
 }
 
 pub(crate) struct Pasteboard;
@@ -316,7 +285,6 @@ macro_rules! msg_send_fn {
 }
 
 msg_send_fn!(msg_id, ObjcId, ());
-msg_send_fn!(msg_i32, c_int, ());
 msg_send_fn!(msg_i64, i64, ());
 msg_send_fn!(msg_usize, usize, ());
 msg_send_fn!(msg_c_string, *const c_char, ());

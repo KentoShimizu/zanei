@@ -35,6 +35,7 @@ Zanei は PC 上での操作を記録します。機微なデータなので既�
 - Accessibility が既知の非 secure 入力欄を確認できない場合、`input.key.text` とペースト本文は null のままです。
 - confirmed な打鍵またはペーストが開く 3 秒の認可窓外にある値変化は、テキストを記録しません。rejected な入力は窓を開きません。
 - Chrome の incognito・サイト除外中は本文が null のままです。ウィンドウタイトルと操作メタデータは残り得ます。
+- Chrome の本文は入力から 1 poll（約 1 秒）後に確定します。その Chrome ウィンドウを除外サイトまたは incognito のタブへ切り替える前、約 1 秒以内に入力したテキストは省かれます。
 - 不明な UI 要素は `element.value` を記録しません。
 - IME 使用中、および入力ソース種別が不明なときの `input.key.text` は null です。確定文字列は認可された `ui.value.data.text` の差分としてのみ捕捉されます。
 - 音声入力自体は、記録済みの打鍵またはペーストのトリガーを伴わないため認可窓を開きません。ただし、同じアプリ・同じフォーカス要素世代への直前の打鍵またはペーストが開いた 3 秒の窓が有効な間に音声テキストが挿入されると、そのテキストが認可された `ui.value.data.text` の差分に含まれ得ます。
@@ -63,7 +64,7 @@ zanei stop && zanei start
 
 ストアは暗号化され、通常の保持期間が適用されます。plain SQLite export は `--types` で除外しない限り snapshot 本文を含むため、他の機微な export と同様に保護してください。画面共有中に表示テキストを記録したくない場合は、先に `zanei pause` を実行します。会社管理の端末では、第三者の message・document に関する所属組織の規則に従ってください。
 
-recorder は 1 日の snapshot 本文が 128 MiB に達すると新しい snapshot の生成を止めます。既定の 48 時間保持では database overhead を除いて約 256 MiB が上限の目安です。同じ本文は重複保存しないため、通常利用はこれより大幅に少ない想定です。
+recorder は 1 日の snapshot 本文が 128 MiB に達すると新しい snapshot の生成を止めます。これはメモリ内の backstop で、daemon の再起動時にリセットされます。daemon が動き続ける場合、既定の 48 時間保持では database overhead を除いて約 256 MiB が上限の目安です。同じ本文は重複保存しないため、通常利用はこれより大幅に少ない想定です。
 
 ## 自動除外
 

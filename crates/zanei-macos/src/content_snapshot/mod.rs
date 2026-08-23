@@ -12,7 +12,7 @@ mod worker;
 use std::{
     fmt,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, MutexGuard, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, Sender, SyncSender, channel, sync_channel},
     },
@@ -23,7 +23,10 @@ use std::{
 use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
 use zanei_core::config::FilterConfig;
 
-use crate::{SecureInputProbe, chrome::ChromeEligibilityTracker, workspace::WorkspaceEvent};
+use crate::{
+    SecureInputProbe, chrome::ChromeEligibilityTracker, focus_context::FocusContext,
+    workspace::WorkspaceEvent,
+};
 
 use self::policy::SnapshotPolicy;
 use self::state::SnapshotState;
@@ -45,20 +48,21 @@ const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const FILTER_REPLACE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct ContentSnapshotCollector {
-    trigger_receiver: Option<SnapshotTriggerReceiver>,
-    lifecycle_receiver: Option<Receiver<WorkspaceEvent>>,
+    channels: Arc<Mutex<WorkerChannels>>,
     secure_input: SecureInputProbe,
     chrome: ChromeEligibilityTracker,
+    focus_context: FocusContext,
     filter: FilterConfig,
-    state: Option<SnapshotState>,
     worker: Option<Worker>,
     health: SharedHealth,
+    #[cfg(test)]
+    panic_next_worker: Arc<AtomicBool>,
 }
 
 struct Worker {
     stop: Arc<AtomicBool>,
     control: Sender<Control>,
-    handle: JoinHandle<WorkerChannels>,
+    handle: JoinHandle<()>,
 }
 
 struct WorkerChannels {
@@ -80,6 +84,7 @@ struct SharedHealth {
     dropped: Arc<AtomicU64>,
     failures: Arc<AtomicU64>,
     degraded: Arc<RwLock<Option<String>>>,
+    processed_triggers: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -106,17 +111,23 @@ impl ContentSnapshotCollector {
         lifecycle_receiver: Receiver<WorkspaceEvent>,
         secure_input: SecureInputProbe,
         chrome: ChromeEligibilityTracker,
+        focus_context: FocusContext,
         filter: FilterConfig,
     ) -> Self {
         Self {
-            trigger_receiver: Some(trigger_receiver),
-            lifecycle_receiver: Some(lifecycle_receiver),
+            channels: Arc::new(Mutex::new(WorkerChannels {
+                trigger: trigger_receiver,
+                lifecycle: lifecycle_receiver,
+                state: SnapshotState::new(std::time::Instant::now()),
+            })),
             secure_input,
             chrome,
+            focus_context,
             filter,
-            state: Some(SnapshotState::new(std::time::Instant::now())),
             worker: None,
             health: SharedHealth::default(),
+            #[cfg(test)]
+            panic_next_worker: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -168,6 +179,16 @@ impl ContentSnapshotCollector {
                 }
             })
     }
+
+    #[cfg(test)]
+    pub(crate) fn panic_next_worker_for_test(&self) {
+        self.panic_next_worker.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn processed_triggers_for_test(&self) -> u64 {
+        self.health.processed_triggers.load(Ordering::Acquire)
+    }
 }
 
 impl Collector for ContentSnapshotCollector {
@@ -185,24 +206,6 @@ impl Collector for ContentSnapshotCollector {
                 collector: self.name().to_owned(),
             });
         }
-        let trigger = self
-            .trigger_receiver
-            .take()
-            .ok_or_else(|| CollectorError::Start {
-                collector: self.name().to_owned(),
-                message: "snapshot trigger channel is unavailable".to_owned(),
-            })?;
-        let lifecycle = self
-            .lifecycle_receiver
-            .take()
-            .ok_or_else(|| CollectorError::Start {
-                collector: self.name().to_owned(),
-                message: "snapshot lifecycle channel is unavailable".to_owned(),
-            })?;
-        let state = self.state.take().ok_or_else(|| CollectorError::Start {
-            collector: self.name().to_owned(),
-            message: "snapshot state is unavailable".to_owned(),
-        })?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let (control, controls) = channel();
@@ -212,9 +215,23 @@ impl Collector for ContentSnapshotCollector {
             self.secure_input.clone(),
         );
         let health = self.health.clone();
+        let focus_context = self.focus_context.clone();
+        let channels = Arc::clone(&self.channels);
+        #[cfg(test)]
+        let panic_next_worker = Arc::clone(&self.panic_next_worker);
         let handle = thread::Builder::new()
             .name("zanei-content".to_owned())
             .spawn(move || {
+                let mut channels = lock_channels(&channels);
+                #[cfg(test)]
+                if panic_next_worker.swap(false, Ordering::AcqRel) {
+                    panic!("injected content snapshot worker panic");
+                }
+                let WorkerChannels {
+                    trigger,
+                    lifecycle,
+                    state,
+                } = &mut *channels;
                 worker::run_worker(
                     trigger,
                     lifecycle,
@@ -224,7 +241,8 @@ impl Collector for ContentSnapshotCollector {
                     policy,
                     health,
                     state,
-                )
+                    focus_context,
+                );
             })
             .map_err(|error| CollectorError::Start {
                 collector: self.name().to_owned(),
@@ -244,17 +262,20 @@ impl Collector for ContentSnapshotCollector {
         };
         worker.stop.store(true, Ordering::Release);
         let _ = worker.control.send(Control::Stop);
-        if let Ok(channels) = worker.handle.join() {
-            while channels.trigger.try_recv().is_ok() {}
-            channels.lifecycle.try_iter().for_each(drop);
-            self.trigger_receiver = Some(channels.trigger);
-            self.lifecycle_receiver = Some(channels.lifecycle);
-            self.state = Some(channels.state);
-        }
+        let _ = worker.handle.join();
+        let channels = lock_channels(&self.channels);
+        while channels.trigger.try_recv().is_ok() {}
+        channels.lifecycle.try_iter().for_each(drop);
         if let Ok(mut degraded) = self.health.degraded.write() {
             *degraded = None;
         }
     }
+}
+
+fn lock_channels(channels: &Mutex<WorkerChannels>) -> MutexGuard<'_, WorkerChannels> {
+    channels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl Drop for ContentSnapshotCollector {

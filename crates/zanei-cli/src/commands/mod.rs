@@ -102,8 +102,8 @@ struct UnsupportedAppDirectory;
 impl AppDirectory for UnsupportedAppDirectory {
     fn installed(
         &self,
-    ) -> Result<Vec<zanei_collector::AppInfo>, zanei_collector::AppDirectoryError> {
-        Ok(Vec::new())
+    ) -> Result<zanei_collector::InstalledApps, zanei_collector::AppDirectoryError> {
+        Ok(zanei_collector::InstalledApps::default())
     }
 
     fn running(&self) -> Result<Vec<zanei_collector::AppInfo>, zanei_collector::AppDirectoryError> {

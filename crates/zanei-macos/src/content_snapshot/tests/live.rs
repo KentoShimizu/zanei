@@ -4,8 +4,10 @@ use zanei_collector::Permission;
 
 use crate::{
     content_snapshot::{SnapshotAxApplication, worker::test_live_scan},
-    ffi::eventtap::current_context,
-    ffi::{window_list, workspace::running_applications},
+    ffi::{
+        window_list,
+        workspace::{frontmost_application, running_applications},
+    },
     permission::{PermissionStatus, permission_status},
 };
 
@@ -28,24 +30,25 @@ fn live_frontmost_content_snapshot_metrics() {
         );
         return;
     }
-    let Some(context) = current_context() else {
+    let Some(app) = frontmost_application() else {
         println!("SKIP: no frontmost regular application context is available");
         return;
     };
-    let Some(expected_window_id) = context.window.as_ref().and_then(|window| window.id) else {
+    let Some(window) = window_list::front_window(i64::from(app.pid)) else {
         println!("SKIP: the frontmost application has no CG window id");
         return;
     };
-    let Ok(pid) = i32::try_from(context.app.pid) else {
-        println!("SKIP: the frontmost application pid does not fit macOS AX pid_t");
+    let Some(expected_window_id) = window.id else {
+        println!("SKIP: the frontmost application has no CG window id");
         return;
     };
+    let pid = app.pid;
     let output = test_live_scan(pid, expected_window_id)
         .expect("walk frontmost AX tree")
         .expect("frontmost window changed during probe");
     println!(
         "app={} window_id={} nodes={} ax_calls={} elapsed_ms={} bytes={} complete={} cutoff={}",
-        context.app.name,
+        app.name,
         expected_window_id,
         output.nodes,
         output.ax_calls,
@@ -147,7 +150,10 @@ fn accessibility_is_granted() -> bool {
     }
 }
 
-fn edge_deltas(frame: crate::ffi::geometry::AxFrame, bounds: window_list::CgRect) -> [f64; 4] {
+fn edge_deltas(
+    frame: crate::ffi::geometry::AxFrame,
+    bounds: crate::ffi::geometry::AxFrame,
+) -> [f64; 4] {
     [
         (frame.origin.x - bounds.origin.x).abs(),
         (frame.origin.y - bounds.origin.y).abs(),

@@ -14,10 +14,12 @@ use crate::{
     InputAuthorizations, SecureInputProbe, secure_input::SecureInputProbeError,
     text_capture::TextContentPolicy,
 };
+use time::OffsetDateTime;
 use zanei_core::schema::App;
 
 use super::{
-    AXObserverGetRunLoopSource, ObserverContext, QueuedNotification, TargetKind, add_notification,
+    AXObserverGetRunLoopSource, ManualAccessibilityPolicy, ObserverContext, QueuedNotification,
+    TargetKind, add_notification,
     cf::{add_current_run_loop_source, run_loop_tick, string_value},
     create_observer,
     element::{
@@ -84,6 +86,7 @@ impl NativeAx {
             observer.update_attach(app, manual_accessibility);
             return Ok(observer.focused_element_or_clear(
                 Instant::now(),
+                OffsetDateTime::now_utc(),
                 secure_input,
                 &mut self.authorizations,
             ));
@@ -137,6 +140,7 @@ impl NativeAx {
         app_observer.refresh_window_target();
         let focused = app_observer.focused_element_or_clear(
             Instant::now(),
+            OffsetDateTime::now_utc(),
             secure_input,
             &mut self.authorizations,
         );
@@ -162,6 +166,30 @@ impl NativeAx {
         }
         self.authorizations.remove_pid(pid);
         events
+    }
+
+    pub(crate) fn focused_window(
+        &mut self,
+        pid: i32,
+    ) -> Result<Option<super::NativeWindow>, NativeAxError> {
+        let Some(observer) = self.observers.get_mut(&pid) else {
+            return Ok(None);
+        };
+        Ok(observer
+            .focused_window_event(OffsetDateTime::now_utc())?
+            .map(|event| match event {
+                NativeAxEvent::WindowFocused { window, .. } => window,
+                NativeAxEvent::WindowTitleChanged { .. }
+                | NativeAxEvent::UiFocused { .. }
+                | NativeAxEvent::UiValueChanged { .. } => unreachable!(),
+            }))
+    }
+
+    pub(crate) fn reconcile_manual_accessibility(&mut self, policy: &ManualAccessibilityPolicy) {
+        for observer in self.observers.values_mut() {
+            let allowed = policy.allows(observer.app());
+            observer.reconcile_manual_accessibility(allowed);
+        }
     }
 
     pub(crate) fn poll(&mut self, timeout: Duration) -> Vec<NativeAxEvent> {
@@ -299,7 +327,10 @@ impl NativeAx {
             return Ok(Vec::new());
         };
         match name.as_str() {
-            "AXFocusedWindowChanged" => Ok(observer.focused_window_event()?.into_iter().collect()),
+            "AXFocusedWindowChanged" => Ok(observer
+                .focused_window_event(queued.observed_at)?
+                .into_iter()
+                .collect()),
             "AXWindowCreated" => {
                 observer.refresh_window_target();
                 Ok(Vec::new())
@@ -311,12 +342,14 @@ impl NativeAx {
                     .map(|window| NativeAxEvent::WindowTitleChanged {
                         pid: queued.pid,
                         window,
+                        observed_at: queued.observed_at,
                     })
                     .into_iter()
                     .collect())
             }
             "AXFocusedUIElementChanged" => Ok(observer.focused_element_or_clear(
                 queued.notification_at,
+                queued.observed_at,
                 secure_input,
                 &mut self.authorizations,
             )),
@@ -335,6 +368,7 @@ impl NativeAx {
                 if matched {
                     observer.value_changed_events(
                         queued.notification_at,
+                        queued.observed_at,
                         secure_input,
                         &mut self.authorizations,
                     )

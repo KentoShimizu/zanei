@@ -10,8 +10,11 @@ use std::{
 
 use zanei_core::{
     config::FilterConfig,
-    schema::{EventData, FieldKind},
+    schema::{App, EventData, FieldKind},
 };
+
+mod manual_accessibility;
+mod title;
 
 use super::{
     ApplicationActivationPolicy, ApplicationInfo, AxApi, AxEventBuilder, ClickObservation,
@@ -19,8 +22,9 @@ use super::{
     publish_focus_observation, run_ax_loop,
 };
 use crate::{
-    chrome::chrome_eligibility_channel,
+    chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
     ffi::ax::{ManualAccessibilityPolicy, NativeElement, NativeWindow},
+    focus_context::FocusContext,
     focused_field::{FieldClass, FocusedField, focused_field_channel},
     text_capture::{TextContentPolicy, input_authorization_channel},
 };
@@ -70,35 +74,6 @@ fn element(role: &str, subrole: Option<&str>) -> NativeElement {
 }
 
 #[test]
-fn title_changes_include_the_previous_title() {
-    let mut builder = builder();
-    builder.add_app(app());
-    let first = NativeWindow {
-        title: Some("First".to_owned()),
-        id: Some(1),
-    };
-    let second = NativeWindow {
-        title: Some("Second".to_owned()),
-        id: Some(1),
-    };
-    let _ = builder.event(NativeAxEvent::WindowFocused {
-        pid: 7,
-        window: first,
-    });
-    let event = builder
-        .event(NativeAxEvent::WindowTitleChanged {
-            pid: 7,
-            window: second,
-        })
-        .unwrap();
-
-    let EventData::WindowTitle(data) = event.data else {
-        panic!("expected a window.title payload");
-    };
-    assert_eq!(data.prev_title.as_deref(), Some("First"));
-}
-
-#[test]
 fn ui_events_derive_field_kind_from_the_ax_snapshot() {
     let mut builder = builder();
     builder.add_app(app());
@@ -108,6 +83,7 @@ fn ui_events_derive_field_kind_from_the_ax_snapshot() {
             generation: 1,
             window: Some(window()),
             element: Some(element("AXTextField", Some("AXSearchField"))),
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
         })
         .expect("search field focus should emit");
     let value = builder
@@ -116,6 +92,7 @@ fn ui_events_derive_field_kind_from_the_ax_snapshot() {
             window: Some(window()),
             element: element("AXIncrementor", None),
             text: Some("1".to_owned()),
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
         })
         .expect("numeric value change should emit");
 
@@ -142,13 +119,17 @@ fn chrome_ui_value_text_follows_window_eligibility() {
         activation_policy: ApplicationActivationPolicy::Regular,
     });
 
-    publisher.publish_incognito(7, Some(1));
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Incognito { window_id: Some(1) },
+    );
     let incognito = builder
         .event(NativeAxEvent::UiValueChanged {
             pid: 7,
             window: Some(window()),
             element: element("AXTextField", None),
             text: Some("private".to_owned()),
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
         })
         .expect("ui.value metadata remains available");
     let EventData::UiValue(incognito) = incognito.data else {
@@ -156,13 +137,20 @@ fn chrome_ui_value_text_follows_window_eligibility() {
     };
     assert_eq!(incognito.text, None);
 
-    publisher.publish_normal(7, Some(1), "https://example.com");
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(1),
+            url: "https://example.com".to_owned(),
+        },
+    );
     let normal = builder
         .event(NativeAxEvent::UiValueChanged {
             pid: 7,
             window: Some(window()),
             element: element("AXTextField", None),
             text: Some("normal".to_owned()),
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
         })
         .expect("ui.value event");
     let EventData::UiValue(normal) = normal.data else {
@@ -188,6 +176,7 @@ fn cleared_focus_does_not_emit_a_ui_focus_event() {
         generation: 2,
         window: None,
         element: None,
+        observed_at: time::OffsetDateTime::UNIX_EPOCH,
     };
 
     publish_focus_observation(Some(&publisher), &cleared);
@@ -199,12 +188,18 @@ fn cleared_focus_does_not_emit_a_ui_focus_event() {
 #[derive(Default)]
 struct FakeAxApi {
     running_applications: Vec<ApplicationInfo>,
+    frontmost_application: Option<ApplicationInfo>,
     attached_pids: Vec<i32>,
     attach_observations: Vec<NativeAxEvent>,
     attach_results: VecDeque<Result<Vec<NativeAxEvent>, ()>>,
     current_degraded_observers: Option<Arc<AtomicU64>>,
     observed_degraded_observers: Option<u64>,
     stop_after_poll: Option<Arc<AtomicBool>>,
+    stop_after_polls: Option<usize>,
+    polls: usize,
+    attached_apps: Vec<App>,
+    reconciled_manual_accessibility: Vec<bool>,
+    replacement_on_first_poll: Option<(ManualAccessibilityPolicy, FilterConfig)>,
 }
 
 impl AxApi for FakeAxApi {
@@ -214,13 +209,18 @@ impl AxApi for FakeAxApi {
         self.running_applications.clone()
     }
 
+    fn frontmost_application(&self) -> Option<ApplicationInfo> {
+        self.frontmost_application.clone()
+    }
+
     fn attach(
         &mut self,
         pid: i32,
-        _app: zanei_core::schema::App,
+        app: App,
         _manual_accessibility: bool,
     ) -> Result<Vec<NativeAxEvent>, Self::AttachError> {
         self.attached_pids.push(pid);
+        self.attached_apps.push(app);
         self.attach_results
             .pop_front()
             .unwrap_or_else(|| Ok(std::mem::take(&mut self.attach_observations)))
@@ -230,12 +230,34 @@ impl AxApi for FakeAxApi {
         Vec::new()
     }
 
+    fn focused_window(&mut self, _pid: i32) -> Result<Option<NativeWindow>, Self::AttachError> {
+        Ok(None)
+    }
+
+    fn reconcile_manual_accessibility(&mut self, policy: &ManualAccessibilityPolicy) {
+        self.reconciled_manual_accessibility
+            .extend(self.attached_apps.iter().map(|app| policy.allows(app)));
+    }
+
     fn poll(&mut self, _timeout: Duration) -> Vec<NativeAxEvent> {
+        self.polls = self.polls.saturating_add(1);
+        if self.polls == 1
+            && let Some((policy, filter)) = self.replacement_on_first_poll.take()
+        {
+            policy.replace_filter(filter);
+        }
         self.observed_degraded_observers = self
             .current_degraded_observers
             .as_ref()
             .map(|current| current.load(Ordering::Relaxed));
-        if let Some(stop) = self.stop_after_poll.as_ref() {
+        if self.stop_after_polls.is_none()
+            && let Some(stop) = self.stop_after_poll.as_ref()
+        {
+            stop.store(true, Ordering::Release);
+        }
+        if self.stop_after_polls == Some(self.polls)
+            && let Some(stop) = self.stop_after_poll.as_ref()
+        {
             stop.store(true, Ordering::Release);
         }
         Vec::new()
@@ -265,6 +287,24 @@ fn run_fake_ax_loop(
     degraded_operations: &AtomicU64,
     current_degraded_observers: Arc<AtomicU64>,
 ) {
+    run_fake_ax_loop_with_policy(
+        api,
+        stop,
+        lifecycle_receiver,
+        degraded_operations,
+        current_degraded_observers,
+        manual_accessibility_policy(),
+    );
+}
+
+fn run_fake_ax_loop_with_policy(
+    api: &mut FakeAxApi,
+    stop: &AtomicBool,
+    lifecycle_receiver: &Receiver<WorkspaceEvent>,
+    degraded_operations: &AtomicU64,
+    current_degraded_observers: Arc<AtomicU64>,
+    manual_policy: ManualAccessibilityPolicy,
+) {
     let (_click_sender, click_receiver) = click_channel();
     let (output_sender, _output_receiver) = sync_channel(1);
     api.current_degraded_observers = Some(Arc::clone(&current_degraded_observers));
@@ -276,7 +316,8 @@ fn run_fake_ax_loop(
         &click_receiver,
         None,
         text_policy(),
-        manual_accessibility_policy(),
+        manual_policy,
+        FocusContext::new(),
         None,
         &AtomicU64::new(0),
         degraded_operations,
@@ -373,6 +414,7 @@ fn attach_publishes_the_initial_focused_field() {
             generation: 4,
             window: Some(window()),
             element: Some(element("AXTextArea", None)),
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
         }],
         ..FakeAxApi::default()
     };
@@ -518,6 +560,7 @@ fn initial_focus_snapshot_authorizes_same_generation_input() {
         generation: 4,
         window: Some(window()),
         element: Some(element("AXTextArea", None)),
+        observed_at: time::OffsetDateTime::UNIX_EPOCH,
     };
     publish_focus_observation(Some(&focused_publisher), &focus);
     let focused = focused_tracker

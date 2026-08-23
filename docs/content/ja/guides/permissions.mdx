@@ -9,13 +9,14 @@ description: Zanei が要求する TCC 権限の一覧、付与手順、zanei do
 
 | 権限 | System Settings 上の項目 | 何のために使うか | 関係するイベント型 |
 | --- | --- | --- | --- |
-| アクセシビリティ | Accessibility | ウィンドウタイトル・フォーカス・UI 要素・可視 content snapshot の取得 | `window.*` `ui.*` `content.snapshot` |
+| アクセシビリティ | Accessibility | 共有する前面ウィンドウ識別、ウィンドウタイトル・フォーカス・UI 要素・可視 content snapshot の取得 | `window.*` `ui.*` `input.*` `clipboard.*` `browser.navigate` `content.snapshot` |
 | 入力監視 | Input Monitoring | キー・スクロール・クリックの検知 | `input.*` `ui.click` `clipboard.*` |
 | オートメーション | Automation（対象アプリごと） | Chrome の URL と window eligibility を取得し、URL 捕捉と content 抑止に使用 | `browser.navigate`、Chrome の `ui.value`/`input.key`/clipboard 本文と `content.snapshot` |
 
 2 つの性質があります。
 
 - アプリの起動・終了・前面切替（`app.*`）は権限なしで記録できます。何も付与しなくても、アプリ単位の行動履歴は記録されます。
+- `input` と `browser` は、event を app と window に結び付ける単一の前面ウィンドウ識別に Accessibility を使います。event の検出自体には、それぞれ入力監視と Automation も使います。
 - 権限が必須になるのは、それを必要とする機能が有効な場合だけです。`capture.content_snapshot` は `capture.sources` から独立しており、`window` がなくても Accessibility が必要です。snapshot 単独では入力監視は不要です。
 - `browser` がない場合も、`text_content` が有効かつ `ui` または `input` を含むとき、または content-snapshot scope が Chrome を含み得るときは Chrome Automation が必要です。関連 scope が Chrome を完全に除外する場合は不要です。
 

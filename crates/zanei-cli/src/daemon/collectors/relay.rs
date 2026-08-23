@@ -159,6 +159,7 @@ mod tests {
 
     fn raw() -> zanei_collector::RawEvent {
         zanei_collector::RawEvent {
+            observed_at: None,
             source: "test.collector".to_owned(),
             event_type: "app.launch".to_owned(),
             app: App {

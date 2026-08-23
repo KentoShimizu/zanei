@@ -5,7 +5,7 @@ use std::process::Stdio;
 use clap::Parser;
 use time::OffsetDateTime;
 use zanei_cli::Cli;
-use zanei_collector::{AppDirectory, AppDirectoryError, AppInfo};
+use zanei_collector::{AppDirectory, AppDirectoryError, AppInfo, InstalledApps};
 use zanei_core::config::Config;
 use zanei_core::normalize::format_timestamp;
 use zanei_core::schema::{
@@ -941,8 +941,11 @@ impl FakeAppDirectory {
 }
 
 impl AppDirectory for FakeAppDirectory {
-    fn installed(&self) -> Result<Vec<AppInfo>, AppDirectoryError> {
-        Ok(self.installed.clone())
+    fn installed(&self) -> Result<InstalledApps, AppDirectoryError> {
+        Ok(InstalledApps {
+            apps: self.installed.clone(),
+            unreadable: 0,
+        })
     }
 
     fn running(&self) -> Result<Vec<AppInfo>, AppDirectoryError> {

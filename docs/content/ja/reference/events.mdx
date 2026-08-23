@@ -70,10 +70,10 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `ui.focus` | `macos.ax` | フォーカス UI 要素の変更 | アクセシビリティ |
 | `ui.click` | `macos.ax` | UI 要素へのクリック | アクセシビリティ（+ 入力監視） |
 | `ui.value` | `macos.ax` | 要素値の変化。新たに増えた入力内容のみ opt-in で記録し、自由入力の全体値は記録しない | アクセシビリティ |
-| `input.key` | `macos.eventtap` | キー / ショートカット。既定は「入力の事実 + フィールド種別」。内容は opt-in | 入力監視 |
-| `input.scroll` | `macos.eventtap` | スクロール | 入力監視 |
-| `browser.navigate` | `macos.applescript` | URL / タブの変化。**現在は Chrome のみ**。incognito は常に除外 | オートメーション |
-| `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | クリップボード操作。内容は opt-in | 入力監視 |
+| `input.key` | `macos.eventtap` | キー / ショートカット。既定は「入力の事実 + フィールド種別」。内容は opt-in | アクセシビリティ + 入力監視 |
+| `input.scroll` | `macos.eventtap` | スクロール | アクセシビリティ + 入力監視 |
+| `browser.navigate` | `macos.applescript` | URL / タブの変化。**現在は Chrome のみ**。incognito は常に除外 | アクセシビリティ + オートメーション |
+| `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | クリップボード操作。内容は opt-in | アクセシビリティ + 入力監視 |
 | `content.snapshot` | `macos.ax` | 前面ウィンドウの可視範囲に表示された Accessibility text。別の opt-in | アクセシビリティ |
 
 `--types` フィルタでは末尾ワイルドカードでファミリー全体を選べます：`browser.*`・`ui.*`・`content.*` など。

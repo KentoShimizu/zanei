@@ -17,8 +17,14 @@ pub(super) fn estimated_permissions(config: &Config) -> BTreeSet<Permission> {
     let sources = &config.capture.sources;
     let capture_ui = sources.contains(&CaptureSource::Ui);
     let capture_input = sources.contains(&CaptureSource::Input);
+    let capture_browser = sources.contains(&CaptureSource::Browser);
     let mut permissions = BTreeSet::new();
-    if sources.contains(&CaptureSource::Window) || capture_ui || config.capture.content_snapshot {
+    if sources.contains(&CaptureSource::Window)
+        || capture_ui
+        || capture_input
+        || capture_browser
+        || config.capture.content_snapshot
+    {
         permissions.insert(Permission::Accessibility);
     }
     if capture_input || capture_ui {
@@ -78,6 +84,17 @@ pub(super) fn accessibility_events(
     }
     if sources.contains(&CaptureSource::Ui) {
         events.extend(["ui.focus", "ui.click", "ui.value"]);
+    }
+    if sources.contains(&CaptureSource::Input) {
+        events.extend([
+            "input.key",
+            "input.scroll",
+            "clipboard.copy",
+            "clipboard.paste",
+        ]);
+    }
+    if sources.contains(&CaptureSource::Browser) {
+        events.push("browser.navigate");
     }
     if content_snapshot_enabled {
         events.push("content.snapshot");

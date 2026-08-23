@@ -43,13 +43,13 @@ impl AxEventBuilder {
             .retain(|(window_pid, _), _| *window_pid != pid);
     }
 
-    pub(super) fn app(&self, pid: i32) -> Option<ApplicationInfo> {
-        self.apps.get(&pid).cloned()
-    }
-
     pub(super) fn event(&mut self, event: NativeAxEvent) -> Option<RawEvent> {
         match event {
-            NativeAxEvent::WindowFocused { pid, window } => {
+            NativeAxEvent::WindowFocused {
+                pid,
+                window,
+                observed_at,
+            } => {
                 self.previous_titles
                     .insert((pid, window.id), window.title.clone());
                 self.raw(
@@ -58,9 +58,14 @@ impl AxEventBuilder {
                     Some(window),
                     None,
                     EventData::WindowFocus(EmptyData {}),
+                    observed_at,
                 )
             }
-            NativeAxEvent::WindowTitleChanged { pid, window } => {
+            NativeAxEvent::WindowTitleChanged {
+                pid,
+                window,
+                observed_at,
+            } => {
                 let previous = self
                     .previous_titles
                     .insert((pid, window.id), window.title.clone())
@@ -73,12 +78,14 @@ impl AxEventBuilder {
                     EventData::WindowTitle(WindowTitleData {
                         prev_title: previous,
                     }),
+                    observed_at,
                 )
             }
             NativeAxEvent::UiFocused {
                 pid,
                 window,
                 element,
+                observed_at,
                 ..
             } => {
                 let Some(element) = element else {
@@ -96,6 +103,7 @@ impl AxEventBuilder {
                     window,
                     Some(element),
                     EventData::UiFocus(UiFocusData { field_kind: kind }),
+                    observed_at,
                 )
             }
             NativeAxEvent::UiValueChanged {
@@ -103,6 +111,7 @@ impl AxEventBuilder {
                 window,
                 element,
                 mut text,
+                observed_at,
             } => {
                 let Some(app) = self.apps.get(&pid) else {
                     crate::trace::trace!(
@@ -132,6 +141,7 @@ impl AxEventBuilder {
                         value_len,
                         text,
                     }),
+                    observed_at,
                 )
             }
         }
@@ -151,6 +161,7 @@ impl AxEventBuilder {
                 button: click.button,
                 click_count: click.click_count,
             }),
+            click.observed_at,
         )
     }
 
@@ -161,6 +172,7 @@ impl AxEventBuilder {
         window: Option<NativeWindow>,
         element: Option<NativeElement>,
         data: EventData,
+        observed_at: time::OffsetDateTime,
     ) -> Option<RawEvent> {
         let Some(app) = self.apps.get(&pid) else {
             crate::trace::trace!(
@@ -183,6 +195,7 @@ impl AxEventBuilder {
             .decision(&app.raw_app(), window.id)
             .capture_context();
         let event = RawEvent {
+            observed_at: Some(observed_at),
             source: "macos.ax".to_owned(),
             event_type: event_type.to_owned(),
             app: zanei_core::schema::App {

@@ -1,6 +1,7 @@
 //! Focused and retired AX value lifecycle.
 
 use std::{sync::atomic::Ordering, time::Instant};
+use time::OffsetDateTime;
 
 use crate::{
     focused_field::FieldClass,
@@ -17,7 +18,8 @@ use crate::ffi::ax::{
 impl AppObserver {
     pub(in crate::ffi::ax) fn value_changed_events(
         &mut self,
-        observed_at: Instant,
+        notification_at: Instant,
+        observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
@@ -56,7 +58,8 @@ impl AppObserver {
             if snapshot.degraded {
                 self.degraded.fetch_add(1, Ordering::Relaxed);
             }
-            let observation = context.observation(self.context.pid, observed_at, snapshot);
+            let observation =
+                context.observation(self.context.pid, notification_at, observed_at, snapshot);
             let value_event = context
                 .capture
                 .observe(observation, authorizations)
@@ -65,7 +68,7 @@ impl AppObserver {
         };
         let mut events = Vec::new();
         if class_changed {
-            events.push(self.focus_event());
+            events.push(self.focus_event(observed_at));
         }
         events.extend(value_event);
         Ok(events)
@@ -219,6 +222,7 @@ impl AppObserver {
     pub(super) fn resolve_focus_change(
         &mut self,
         notification_at: Instant,
+        observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> FocusChangeResolution {
@@ -253,7 +257,8 @@ impl AppObserver {
                 }
             };
         }
-        let observation = context.observation(self.context.pid, notification_at, snapshot);
+        let observation =
+            context.observation(self.context.pid, notification_at, observed_at, snapshot);
         match context
             .capture
             .resolve_focus_change(observation, authorizations)

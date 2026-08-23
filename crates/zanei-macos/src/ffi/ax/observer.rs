@@ -9,6 +9,7 @@ use std::{
     },
     time::Instant,
 };
+use time::OffsetDateTime;
 
 use crate::{
     focused_field::{FieldClass, field_class},
@@ -110,6 +111,14 @@ impl AppObserver {
 
     pub(super) fn update_attach(&mut self, app: App, manual_accessibility: bool) {
         self.app = app;
+        self.reconcile_manual_accessibility(manual_accessibility);
+    }
+
+    pub(super) fn app(&self) -> &App {
+        &self.app
+    }
+
+    pub(super) fn reconcile_manual_accessibility(&mut self, manual_accessibility: bool) {
         if self.manual_accessibility == manual_accessibility {
             return;
         }
@@ -134,7 +143,10 @@ impl AppObserver {
         target.is_some_and(|target| cf_equal(target.as_ptr(), element))
     }
 
-    pub(super) fn focused_window_event(&mut self) -> Result<Option<NativeAxEvent>, NativeAxError> {
+    pub(super) fn focused_window_event(
+        &mut self,
+        observed_at: OffsetDateTime,
+    ) -> Result<Option<NativeAxEvent>, NativeAxError> {
         let target = copy_element(self.application.as_ptr(), "AXFocusedWindow")?;
         let window_result = target
             .as_ref()
@@ -147,19 +159,21 @@ impl AppObserver {
         Ok(window.map(|window| NativeAxEvent::WindowFocused {
             pid: self.context.pid,
             window,
+            observed_at,
         }))
     }
 
     pub(super) fn focused_element_events(
         &mut self,
         notification_at: Instant,
+        observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
         let target = copy_element(self.application.as_ptr(), "AXFocusedUIElement")?;
         if self.same_value_target(target.as_ref()) {
             self.refresh_current_field_class(secure_input, authorizations);
-            return Ok(vec![self.focus_event()]);
+            return Ok(vec![self.focus_event(observed_at)]);
         }
 
         let snapshot = target
@@ -175,22 +189,28 @@ impl AppObserver {
             .flatten();
         let prepared = self.prepare_focused_target(target, snapshot);
         let (prepared, focus_change) = after_target_preparation(prepared, || {
-            self.resolve_focus_change(notification_at, secure_input, authorizations)
+            self.resolve_focus_change(notification_at, observed_at, secure_input, authorizations)
         })?;
         let (event, defer_previous) = focus_change.into_parts();
         let mut events = event.into_iter().collect::<Vec<_>>();
         self.commit_focused_target(prepared, defer_previous);
-        events.push(self.focus_event());
+        events.push(self.focus_event(observed_at));
         Ok(events)
     }
 
     pub(super) fn focused_element_or_clear(
         &mut self,
         notification_at: Instant,
+        observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Vec<NativeAxEvent> {
-        match self.focused_element_events(notification_at, secure_input, authorizations) {
+        match self.focused_element_events(
+            notification_at,
+            observed_at,
+            secure_input,
+            authorizations,
+        ) {
             Ok(events) => events,
             Err(error) => {
                 crate::trace::trace!(
@@ -201,7 +221,7 @@ impl AppObserver {
                 );
                 self.record_degraded();
                 self.clear_focused_target();
-                vec![self.focus_event()]
+                vec![self.focus_event(observed_at)]
             }
         }
     }
@@ -222,7 +242,7 @@ impl AppObserver {
         }
     }
 
-    fn focus_event(&self) -> NativeAxEvent {
+    fn focus_event(&self, observed_at: OffsetDateTime) -> NativeAxEvent {
         NativeAxEvent::UiFocused {
             pid: self.context.pid,
             generation: self.focused_target.generation(),
@@ -235,6 +255,7 @@ impl AppObserver {
                 .current()
                 .filter(|target| target.context.field_class != FieldClass::SecureText)
                 .map(|target| target.context.element.clone()),
+            observed_at,
         }
     }
 

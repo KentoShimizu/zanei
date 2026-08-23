@@ -2,6 +2,7 @@
 
 mod appkit;
 mod authorization;
+mod types;
 
 use std::{
     ffi::{c_double, c_ulong, c_void},
@@ -15,21 +16,24 @@ use std::{
 };
 
 #[cfg(test)]
-pub(crate) use appkit::{NativeApp, NativeWindow};
-pub(crate) use appkit::{NativeContext, Pasteboard, WakeObserver, current_context};
+pub(crate) use appkit::NativeWindow;
+pub(crate) use appkit::{NativeApp, NativeContext, Pasteboard, WakeObserver};
 
 use crate::{
     eventtap::{
         EventTapMode,
         logic::{KeyModifiers, KeyObservation},
     },
-    focused_field::{FocusedField, FocusedFieldTracker},
+    focus_context::FocusContext,
+    focused_field::FocusedFieldTracker,
     input_source::ImeState,
     secure_input::{SecureInputProbe, SecureInputProbeError},
     text_capture::{InputAuthorization, InputAuthorizationPublisher},
 };
 
 use authorization::{input_target, prepare_input_authorization, trace_target};
+use time::OffsetDateTime;
+pub(crate) use types::{NativeDisableReason, NativeEvent, NativeInputTarget};
 
 type CfRef = *const c_void;
 type CfMutableRef = *mut c_void;
@@ -56,40 +60,6 @@ const FLAG_ALTERNATE: u64 = 1 << 19;
 const FLAG_COMMAND: u64 = 1 << 20;
 const FLAG_SECONDARY_FN: u64 = 1 << 23;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeDisableReason {
-    Timeout,
-    UserInput,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum NativeEvent {
-    Key {
-        observation: KeyObservation,
-        target: Option<NativeInputTarget>,
-        authorization: Option<InputAuthorization>,
-        secure_input: bool,
-        ime_active: bool,
-    },
-    Scroll {
-        vertical: f64,
-        horizontal: f64,
-    },
-    MouseDown {
-        x: f64,
-        y: f64,
-        button: u32,
-        click_count: i64,
-    },
-    Disabled(NativeDisableReason),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct NativeInputTarget {
-    pub(crate) pid: i32,
-    pub(crate) focused_field: Option<FocusedField>,
-}
-
 #[derive(Debug)]
 struct RetainedEvent(NonNull<c_void>);
 
@@ -107,8 +77,17 @@ enum QueuedEvent {
         authorization: Option<InputAuthorization>,
         secure_input: bool,
         ime_active: bool,
+        observed_at: OffsetDateTime,
     },
     Disabled(NativeDisableReason),
+}
+
+struct DecodeContext {
+    input_target: Option<NativeInputTarget>,
+    authorization: Option<InputAuthorization>,
+    secure_input: bool,
+    ime_active: bool,
+    observed_at: OffsetDateTime,
 }
 
 struct CallbackContext {
@@ -119,6 +98,7 @@ struct CallbackContext {
     input_authorizations: Option<InputAuthorizationPublisher>,
     ime_state: ImeState,
     secure_input_probe: Option<SecureInputProbe>,
+    focus_context: FocusContext,
     capture_text_content: bool,
 }
 
@@ -140,6 +120,7 @@ pub(crate) struct EventTapConfig {
     pub(crate) input_authorizations: Option<InputAuthorizationPublisher>,
     pub(crate) ime_state: ImeState,
     pub(crate) secure_input_probe: Option<SecureInputProbe>,
+    pub(crate) focus_context: FocusContext,
 }
 
 impl EventTap {
@@ -153,6 +134,7 @@ impl EventTap {
             input_authorizations: config.input_authorizations,
             ime_state: config.ime_state,
             secure_input_probe: config.secure_input_probe,
+            focus_context: config.focus_context,
             capture_text_content: config.mode.captures_text_content(),
         });
         let mask = event_mask_for(config.mode);
@@ -213,7 +195,7 @@ impl EventTap {
 
     pub(crate) fn try_next_event(
         &self,
-        text_read_allowed: impl FnOnce(Option<NativeInputTarget>) -> bool,
+        text_read_allowed: impl FnOnce(Option<&NativeInputTarget>) -> bool,
     ) -> Option<NativeEvent> {
         match self.receiver.try_recv() {
             Ok(QueuedEvent::Disabled(reason)) => Some(NativeEvent::Disabled(reason)),
@@ -223,12 +205,16 @@ impl EventTap {
                 authorization,
                 secure_input,
                 ime_active,
+                observed_at,
             }) => Some(decode_event(
                 &event,
-                input_target,
-                authorization,
-                secure_input,
-                ime_active,
+                DecodeContext {
+                    input_target,
+                    authorization,
+                    secure_input,
+                    ime_active,
+                    observed_at,
+                },
                 self.capture_text_content,
                 text_read_allowed,
             )),
@@ -275,6 +261,7 @@ extern "C" fn event_callback(
                 return event;
             };
             let occurred_at = Instant::now();
+            let observed_at = OffsetDateTime::now_utc();
             let secure_input = event_type == EVENT_KEY_DOWN
                 && secure_input_active(
                     context.capture_text_content,
@@ -283,14 +270,25 @@ extern "C" fn event_callback(
                 );
             let ime_active = event_type == EVENT_KEY_DOWN && context.ime_state.active();
             let input_target = (event_type == EVENT_KEY_DOWN)
-                .then(|| input_target(event.as_ptr(), context.focused_fields.as_ref()))
+                .then(|| {
+                    input_target(
+                        event.as_ptr(),
+                        context.focused_fields.as_ref(),
+                        &context.focus_context,
+                    )
+                })
                 .flatten();
             if event_type == EVENT_KEY_DOWN {
-                trace_target(input_target, secure_input, ime_active);
+                trace_target(input_target.as_ref(), secure_input, ime_active);
             }
             let authorization = (event_type == EVENT_KEY_DOWN)
                 .then(|| {
-                    prepare_input_authorization(context, input_target, occurred_at, secure_input)
+                    prepare_input_authorization(
+                        context,
+                        input_target.as_ref(),
+                        occurred_at,
+                        secure_input,
+                    )
                 })
                 .flatten();
             // SAFETY: retain transfers one reference before the borrowed callback event expires.
@@ -301,6 +299,7 @@ extern "C" fn event_callback(
                 event: RetainedEvent(event),
                 secure_input,
                 ime_active,
+                observed_at,
             }
         }
     };
@@ -360,13 +359,17 @@ const fn secure_input_error(error: SecureInputProbeError) -> &'static str {
 
 fn decode_event(
     event: &RetainedEvent,
-    input_target: Option<NativeInputTarget>,
-    authorization: Option<InputAuthorization>,
-    secure_input: bool,
-    ime_active: bool,
+    context: DecodeContext,
     capture_text_content: bool,
-    text_read_allowed: impl FnOnce(Option<NativeInputTarget>) -> bool,
+    text_read_allowed: impl FnOnce(Option<&NativeInputTarget>) -> bool,
 ) -> NativeEvent {
+    let DecodeContext {
+        input_target,
+        authorization,
+        secure_input,
+        ime_active,
+        observed_at,
+    } = context;
     // SAFETY: event owns a valid CGEventRef while all fields are read.
     unsafe {
         let raw = event.0.as_ptr();
@@ -374,6 +377,7 @@ fn decode_event(
             EVENT_KEY_DOWN => {
                 let flags = CGEventGetFlags(raw);
                 let known_text_field = input_target
+                    .as_ref()
                     .and_then(|target| target.focused_field)
                     .is_some_and(|field| field.class.is_known_text());
                 NativeEvent::Key {
@@ -395,7 +399,7 @@ fn decode_event(
                             secure_input,
                             ime_active,
                             known_text_field,
-                            text_read_allowed(input_target),
+                            text_read_allowed(input_target.as_ref()),
                         )
                         .then(|| event_text(raw)),
                     },
@@ -403,6 +407,7 @@ fn decode_event(
                     authorization,
                     secure_input,
                     ime_active,
+                    observed_at,
                 }
             }
             EVENT_SCROLL_WHEEL => {
@@ -412,6 +417,7 @@ fn decode_event(
                 NativeEvent::Scroll {
                     vertical: CGEventGetDoubleValueField(raw, SCROLL_FIXED_AXIS_1_FIELD),
                     horizontal: CGEventGetDoubleValueField(raw, SCROLL_FIXED_AXIS_2_FIELD),
+                    observed_at,
                 }
             }
             _ => {
@@ -428,6 +434,7 @@ fn decode_event(
                     ))
                     .unwrap_or(u32::MAX),
                     click_count: CGEventGetIntegerValueField(raw, MOUSE_CLICK_STATE_FIELD),
+                    observed_at,
                 }
             }
         }

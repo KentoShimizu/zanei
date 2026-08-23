@@ -195,6 +195,7 @@ fn coalesced_input_text_is_dropped_when_the_combined_bytes_exceed_the_limit() {
 
 fn base(event_type: &str, data: EventData) -> RawEvent {
     RawEvent {
+        observed_at: None,
         source: "macos.eventtap".to_owned(),
         event_type: event_type.to_owned(),
         app: App {

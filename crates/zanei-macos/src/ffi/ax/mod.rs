@@ -10,13 +10,14 @@ mod types;
 mod value_context;
 
 pub use crate::ffi::geometry::{AxFrame, AxPoint, AxSize};
+pub use crate::ffi::window_list::NativeWindow;
 pub(crate) use accessibility::ManualAccessibilityPolicy;
 pub(crate) use runtime::NativeAx;
 pub use snapshot::{
     SnapshotAttribute, SnapshotAttributeResult, SnapshotAttributeValue, SnapshotAxApplication,
     SnapshotAxElement, SnapshotAxError,
 };
-pub use types::{AxTextRange, NativeWindow};
+pub use types::AxTextRange;
 pub(crate) use types::{NativeAxError, NativeAxEvent, NativeElement, NativeHitTest};
 
 use std::{
@@ -31,6 +32,7 @@ use std::{
 };
 
 use cf::{CfRef, OwnedCf, cf_string};
+use time::OffsetDateTime;
 use types::AX_ERROR_ATTRIBUTE_UNSUPPORTED;
 
 const AX_ERROR_SUCCESS: i32 = 0;
@@ -52,6 +54,7 @@ struct QueuedNotification {
     element: OwnedCf,
     notification: OwnedCf,
     notification_at: Instant,
+    observed_at: OffsetDateTime,
 }
 
 extern "C" fn observer_callback(
@@ -80,6 +83,7 @@ extern "C" fn observer_callback(
         element,
         notification,
         notification_at: Instant::now(),
+        observed_at: OffsetDateTime::now_utc(),
     }) {
         Ok(()) => {
             crate::trace::trace!(

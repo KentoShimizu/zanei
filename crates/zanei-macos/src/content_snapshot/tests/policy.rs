@@ -3,7 +3,7 @@ use std::{thread, time::Duration};
 use zanei_core::config::{FilterConfig, ScopedFilterConfig};
 
 use crate::{
-    chrome::chrome_eligibility_channel,
+    chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
     content_snapshot::{
         ActivityError,
         policy::{ActivityProbe, SnapshotPolicy},
@@ -87,13 +87,36 @@ fn chrome_unknown_incognito_global_site_and_snapshot_site_fail_closed() {
         SnapshotPolicy::with_activity(config, tracker, disconnected_probe(), FakeActivity(Ok(0.0)));
 
     assert!(!policy.chrome_allows(&chrome, 11));
-    publisher.publish_incognito(7, Some(11));
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Incognito {
+            window_id: Some(11),
+        },
+    );
     assert!(!policy.chrome_allows(&chrome, 11));
-    publisher.publish_normal(7, Some(11), "https://global.example/page");
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://global.example/page".to_owned(),
+        },
+    );
     assert!(!policy.chrome_allows(&chrome, 11));
-    publisher.publish_normal(7, Some(11), "https://snapshot.example/page");
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://snapshot.example/page".to_owned(),
+        },
+    );
     assert!(!policy.chrome_allows(&chrome, 11));
-    publisher.publish_normal(7, Some(11), "https://public.example/page");
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://public.example/page".to_owned(),
+        },
+    );
     assert!(policy.chrome_allows(&chrome, 11));
     assert_eq!(
         policy.capture_context(&chrome, 11).website_host.as_deref(),

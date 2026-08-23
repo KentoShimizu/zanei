@@ -84,7 +84,8 @@ impl Normalizer {
     pub fn push(&mut self, raw: RawEvent) -> Result<Vec<NormalizedEvent>, NormalizeError> {
         let elapsed = self.monotonic_origin.elapsed().as_nanos();
         let mono_ns = u64::try_from(elapsed).map_err(|_| NormalizeError::MonotonicClockOverflow)?;
-        self.push_at(raw, OffsetDateTime::now_utc(), mono_ns)
+        let wall_time = raw.observed_at.unwrap_or_else(OffsetDateTime::now_utc);
+        self.push_at(raw, wall_time, mono_ns)
     }
 
     pub fn push_at(
@@ -167,6 +168,7 @@ pub fn normalize(
     let random = ulid::Ulid::new().random();
     let id = ulid::Ulid::from_parts(timestamp_ms, random);
     let RawEvent {
+        observed_at: _,
         source,
         event_type,
         app,

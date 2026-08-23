@@ -9,6 +9,12 @@ pub struct AppInfo {
     pub path: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InstalledApps {
+    pub apps: Vec<AppInfo>,
+    pub unreadable: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppDirectoryError {
     #[error("failed to {operation} at {path}: {source}")]
@@ -40,7 +46,7 @@ impl AppDirectoryError {
 }
 
 pub trait AppDirectory {
-    fn installed(&self) -> Result<Vec<AppInfo>, AppDirectoryError>;
+    fn installed(&self) -> Result<InstalledApps, AppDirectoryError>;
 
     fn running(&self) -> Result<Vec<AppInfo>, AppDirectoryError>;
 

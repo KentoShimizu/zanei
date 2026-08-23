@@ -233,11 +233,13 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
 
     config.capture.sources = vec![CaptureSource::Input];
     let collectors = CollectorSet::new(&config);
-    assert!(collectors.ax.is_none());
+    assert!(collectors.ax.is_some());
     assert!(collectors.eventtap.is_some());
     assert_eq!(
         collectors.required_permissions(),
-        [Permission::InputMonitoring].into_iter().collect()
+        [Permission::Accessibility, Permission::InputMonitoring]
+            .into_iter()
+            .collect()
     );
 
     config.capture.text_content = true;
@@ -247,6 +249,7 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
     assert_eq!(
         collectors.required_permissions(),
         [
+            Permission::Accessibility,
             Permission::InputMonitoring,
             Permission::Automation {
                 bundle_id: "com.google.Chrome".to_owned(),
@@ -260,9 +263,12 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
     config.capture.sources = vec![CaptureSource::Browser];
     assert_eq!(
         CollectorSet::new(&config).required_permissions(),
-        [Permission::Automation {
-            bundle_id: "com.google.Chrome".to_owned(),
-        }]
+        [
+            Permission::Accessibility,
+            Permission::Automation {
+                bundle_id: "com.google.Chrome".to_owned(),
+            },
+        ]
         .into_iter()
         .collect()
     );
@@ -291,7 +297,11 @@ fn text_content_chrome_automation_permission_matrix() {
         ),
         (
             CaptureSource::Input,
-            BTreeSet::from([Permission::InputMonitoring, automation.clone()]),
+            BTreeSet::from([
+                Permission::Accessibility,
+                Permission::InputMonitoring,
+                automation.clone(),
+            ]),
         ),
     ] {
         config.capture.sources = vec![source];

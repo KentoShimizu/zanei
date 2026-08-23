@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use zanei_collector::{AppDirectory, AppDirectoryError, AppInfo};
+use zanei_collector::{AppDirectory, AppDirectoryError, AppInfo, InstalledApps};
 
 use crate::ffi::app_directory::{
     BundleMetadata, application_path_for_bundle_id, ensure_workspace_available, home_directory,
@@ -19,7 +19,7 @@ const INFO_PLIST_RELATIVE_PATH: &str = "Contents/Info.plist";
 pub struct MacosAppDirectory;
 
 impl AppDirectory for MacosAppDirectory {
-    fn installed(&self) -> Result<Vec<AppInfo>, AppDirectoryError> {
+    fn installed(&self) -> Result<InstalledApps, AppDirectoryError> {
         let home = home_directory().map_err(platform_error)?;
         installed_in_roots(&[
             PathBuf::from("/Applications"),
@@ -41,16 +41,20 @@ impl AppDirectory for MacosAppDirectory {
     }
 }
 
-fn installed_in_roots(roots: &[PathBuf]) -> Result<Vec<AppInfo>, AppDirectoryError> {
+fn installed_in_roots(roots: &[PathBuf]) -> Result<InstalledApps, AppDirectoryError> {
     let mut bundle_paths = Vec::new();
     for root in roots {
         collect_bundle_paths(root, &mut bundle_paths)?;
     }
     bundle_paths.sort();
-    bundle_paths
-        .iter()
-        .map(|path| read_app_info(path))
-        .collect()
+    let mut installed = InstalledApps::default();
+    for path in bundle_paths {
+        match read_app_info(&path) {
+            Ok(app) => installed.apps.push(app),
+            Err(_) => installed.unreadable = installed.unreadable.saturating_add(1),
+        }
+    }
+    Ok(installed)
 }
 
 fn collect_bundle_paths(
@@ -68,46 +72,29 @@ fn collect_bundle_paths(
             ));
         }
     };
-    for entry in entries {
-        let entry = entry.map_err(|source| {
-            AppDirectoryError::file_system("read application directory entry", root, source)
-        })?;
+    for entry in entries.flatten() {
         let path = entry.path();
         if is_app_bundle(&path) {
             bundle_paths.push(path);
             continue;
         }
-        let file_type = entry.file_type().map_err(|source| {
-            AppDirectoryError::file_system("inspect application directory entry", &path, source)
-        })?;
-        if file_type.is_dir() {
-            collect_nested_bundle_paths(&path, bundle_paths)?;
+        if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            collect_nested_bundle_paths(&path, bundle_paths);
         }
     }
     Ok(())
 }
 
-fn collect_nested_bundle_paths(
-    directory: &Path,
-    bundle_paths: &mut Vec<PathBuf>,
-) -> Result<(), AppDirectoryError> {
-    let entries = fs::read_dir(directory).map_err(|source| {
-        AppDirectoryError::file_system("list nested application directory", directory, source)
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| {
-            AppDirectoryError::file_system(
-                "read nested application directory entry",
-                directory,
-                source,
-            )
-        })?;
+fn collect_nested_bundle_paths(directory: &Path, bundle_paths: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
         let path = entry.path();
         if is_app_bundle(&path) {
             bundle_paths.push(path);
         }
     }
-    Ok(())
 }
 
 fn is_app_bundle(path: &Path) -> bool {
@@ -225,8 +212,23 @@ mod tests {
         create_app(&utilities.join("Deeper"), "Ignored.app", None, None, None);
 
         let apps = installed_in_roots(&[directory.path().to_path_buf()]).expect("installed apps");
-        let names: Vec<_> = apps.into_iter().map(|app| app.name).collect();
+        let names: Vec<_> = apps.apps.into_iter().map(|app| app.name).collect();
         assert_eq!(names, ["Direct", "Nested"]);
+    }
+
+    #[test]
+    fn installed_scan_counts_unreadable_app_bundles_and_keeps_valid_apps() {
+        let directory = TempDir::new().expect("temporary application directory");
+        create_app(directory.path(), "Valid.app", None, None, None);
+        fs::create_dir_all(directory.path().join("Missing.app"))
+            .expect("plist-less application bundle");
+
+        let installed =
+            installed_in_roots(&[directory.path().to_path_buf()]).expect("installed apps");
+
+        assert_eq!(installed.apps.len(), 1);
+        assert_eq!(installed.apps[0].name, "Valid");
+        assert_eq!(installed.unreadable, 1);
     }
 
     #[test]

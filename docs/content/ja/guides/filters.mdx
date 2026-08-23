@@ -54,7 +54,7 @@ app / site の各軸で `include_only_*` が非空なら only mode、空なら e
 
 website rule は URL と private-window mode を取得できる Chrome だけに効きます。他の browser は app rule だけで制御します。
 
-起動時だけの例外が 1 つあります。recorder が Chrome と通信するかどうか（したがって Automation が必要かどうか）は記録開始時に決まります。その時点で Chrome が content snapshot の scope から除外されていて、あとから含めた場合、Chrome の content snapshot は `zanei stop && zanei start` の後に始まります。それ以外の scope 変更は数秒以内に反映されます。
+起動時だけの例外が 1 つあります。recorder が Chrome と通信するかどうか（したがって Automation が必要かどうか）は記録開始時に決まります。その時点で Chrome が content snapshot の scope から除外されていて、あとから含めた場合、Chrome の content snapshot は `zanei restart` の後に始まります。それ以外の scope 変更は数秒以内に反映されます。app mutation によって Chrome を対象へ加え、現在の topology が Chrome window を追跡していない可能性がある場合、CLI はこの restart note を表示します。
 
 ## アプリを選ぶ
 
@@ -68,7 +68,7 @@ zanei apps slack --json    # 機械可読の候補
 
 値を省略した `add` は、recent 順の番号選択を開きます。非 TTY または `--quiet` では値が必須で、省略すると code 2 です。`remove` は現在の list 内で解決するため、uninstall 済みの entry も削除できます。`zanei filter show` は解決済み entry に表示名を付け、手編集した未解決値には `(not installed)` を付けます。
 
-`zanei apps [QUERY] [--json]` は TCC 権限が不要で、daemon 停止中も動きます。table は name・bundle ID・installed/running/recent source・last use を表示します。JSON は `{ "apps": [...], "recent_unavailable": null }` です。store から recent app を取得できない場合も installed / running は残り、`recent_unavailable` に理由が入ります。
+`zanei apps [QUERY] [--json]` は TCC 権限が不要で、daemon 停止中も動きます。table は name・bundle ID・installed/running/recent source・last use を表示します。JSON は `{ "apps": [...], "recent_unavailable": null, "installed_unreadable": 0 }` です。store から recent app を取得できない場合も installed / running は残り、`recent_unavailable` に理由が入ります。`installed_unreadable` は metadata を読めなかった app bundle の件数です。
 
 ## Browser の既定除外
 

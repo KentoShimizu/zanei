@@ -154,6 +154,25 @@ fn snapshot_counts_use_the_last_session_start_at_or_before_the_timestamp() {
 }
 
 #[test]
+fn snapshot_counts_prefer_the_latest_session_of_the_same_app() {
+    let events = vec![
+        activate("Safari", "com.apple.Safari", 0),
+        activate("Slack", "com.tinyspeck.slackmacgap", 60),
+    ];
+    let metadata = vec![
+        snapshot_for_app(61, 1, "Safari", Some("com.apple.Safari")),
+        snapshot_for_app(62, 2, "Slack", Some("com.tinyspeck.slackmacgap")),
+        snapshot_for_app(63, 3, "Unknown", Some("dev.example.unknown")),
+    ];
+
+    let timeline = build(&events, &metadata, &options(Granularity::Fine, usize::MAX))
+        .expect("timeline should build");
+
+    assert_eq!(timeline.sessions[0].content_snapshots, 1);
+    assert_eq!(timeline.sessions[1].content_snapshots, 2);
+}
+
+#[test]
 fn markdown_omits_zero_snapshot_counts_and_includes_nonzero_counts() {
     let events = vec![activate("Safari", "com.apple.Safari", 0)];
     let mut markdown_options = options(Granularity::Coarse, usize::MAX);
@@ -336,6 +355,7 @@ fn navigate(app: &str, bundle_id: &str, seconds: i64, url: &str) -> Event {
 fn event(app: &str, bundle_id: &str, seconds: i64, event_type: &str, data: EventData) -> Event {
     normalize(
         RawEvent {
+            observed_at: None,
             source: "macos.workspace".to_owned(),
             event_type: event_type.to_owned(),
             app: App {
@@ -359,13 +379,22 @@ fn event(app: &str, bundle_id: &str, seconds: i64, event_type: &str, data: Event
 }
 
 fn snapshot_metadata(seconds: i64, id: u64) -> EventMetadata {
+    snapshot_for_app(seconds, id, "Example", Some("com.example.App"))
+}
+
+fn snapshot_for_app(
+    seconds: i64,
+    id: u64,
+    app_name: &str,
+    bundle_id: Option<&str>,
+) -> EventMetadata {
     EventMetadata {
         id: format!("snapshot-{id}"),
         ts: zanei_core::normalize::format_timestamp(
             OffsetDateTime::UNIX_EPOCH + Duration::seconds(seconds),
         ),
-        bundle_id: Some("com.example.App".to_owned()),
-        app_name: "Example".to_owned(),
+        bundle_id: bundle_id.map(str::to_owned),
+        app_name: app_name.to_owned(),
         window_id: Some(1),
     }
 }

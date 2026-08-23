@@ -54,7 +54,7 @@ The order is fixed:
 
 Website rules work only for Chrome because it is the only supported browser that exposes both URL and private-window mode. Other browsers are controlled only by app rules.
 
-One startup-time exception: whether the recorder talks to Chrome at all (and therefore whether Automation is required) is decided when recording starts. If Chrome was excluded from the content-snapshot scope at that moment and you include it later, content snapshots for Chrome start after `zanei stop && zanei start`; every other scope change applies within a few seconds.
+One startup-time exception: whether the recorder talks to Chrome at all (and therefore whether Automation is required) is decided when recording starts. If Chrome was excluded from the content-snapshot scope at that moment and you include it later, content snapshots for Chrome start after `zanei restart`; every other scope change applies within a few seconds. When an app mutation admits Chrome and the running topology may not track its windows, the CLI prints this restart note.
 
 ## Choosing apps
 
@@ -68,7 +68,7 @@ For every app list, `add` accepts a display name or bundle ID, resolves it again
 
 Running `add` without a value opens a numbered selector ordered by recent use. In a non-TTY or with `--quiet`, a value is required and omission exits with code 2. `remove` resolves against the current list, so an uninstalled entry can still be removed. `zanei filter show` adds display names to resolved entries and marks unresolved hand-edited values as `(not installed)`.
 
-`zanei apps [QUERY] [--json]` needs no TCC permission and works while the daemon is stopped. The table shows name, bundle ID, installed/running/recent sources, and last use. JSON returns `{ "apps": [...], "recent_unavailable": null }`; if the store cannot provide recent apps, installed and running results remain and `recent_unavailable` explains why.
+`zanei apps [QUERY] [--json]` needs no TCC permission and works while the daemon is stopped. The table shows name, bundle ID, installed/running/recent sources, and last use. JSON returns `{ "apps": [...], "recent_unavailable": null, "installed_unreadable": 0 }`; if the store cannot provide recent apps, installed and running results remain and `recent_unavailable` explains why, while `installed_unreadable` counts app bundles whose metadata could not be read.
 
 ## Default browser exclusions
 

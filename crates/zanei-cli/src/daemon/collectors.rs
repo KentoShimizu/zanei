@@ -15,6 +15,7 @@ use zanei_macos::{
     chrome::{ChromeCollector, ChromeEligibilityPublisher, chrome_eligibility_channel},
     content_snapshot::{ContentSnapshotCollector, snapshot_trigger_channel},
     eventtap::{EventTapCollector, EventTapMode, InputSourceObserver},
+    focus_context::FocusContext,
     focused_field_channel, input_authorization_channel,
     workspace::{WorkspaceCollector, WorkspaceEvent, WorkspaceObserver, notification_channel},
 };
@@ -45,9 +46,9 @@ impl CollectorSet {
     pub(crate) fn new(config: &Config) -> Self {
         let sources = &config.capture.sources;
         let capture_app = sources.contains(&CaptureSource::App);
+        let capture_window = sources.contains(&CaptureSource::Window);
         let capture_ui = sources.contains(&CaptureSource::Ui);
         let capture_content = config.capture.content_snapshot;
-        let capture_ax = sources.contains(&CaptureSource::Window) || capture_ui || capture_content;
         let capture_input = sources.contains(&CaptureSource::Input);
         let capture_browser = sources.contains(&CaptureSource::Browser);
         let chrome = App {
@@ -59,8 +60,15 @@ impl CollectorSet {
             || capture_content
                 && PrivacyFilter::new(config.filter.clone())
                     .content_snapshot_app_is_allowed(&chrome);
+        let capture_ax = capture_window
+            || capture_ui
+            || capture_input
+            || capture_browser
+            || capture_content
+            || needs_chrome_privacy;
         let (chrome_eligibility, chrome_tracker) =
             chrome_eligibility_channel(config.filter.clone());
+        let focus_context = FocusContext::new();
         let text_policy = TextContentPolicy::new(chrome_tracker.clone(), config.filter.clone());
 
         let mut subscribers = Vec::new();
@@ -107,6 +115,7 @@ impl CollectorSet {
                     lifecycle,
                     secure_input,
                     chrome_tracker,
+                    focus_context.clone(),
                     config.filter.clone(),
                 )))
             }
@@ -127,6 +136,7 @@ impl CollectorSet {
                     filter: config.filter.clone(),
                     text_policy: text_policy.clone(),
                     snapshot_trigger_publisher,
+                    focus_context: focus_context.clone(),
                 },
             ))
         });
@@ -149,10 +159,15 @@ impl CollectorSet {
                 authorization_publisher,
                 secure_input_probe,
                 text_policy.clone(),
+                focus_context.clone(),
             ))
         });
         let chrome = chrome_lifecycle.map(|lifecycle| {
-            Managed::new(ChromeCollector::new(lifecycle, chrome_eligibility.clone()))
+            Managed::new(ChromeCollector::new(
+                lifecycle,
+                chrome_eligibility.clone(),
+                focus_context,
+            ))
         });
 
         Self {

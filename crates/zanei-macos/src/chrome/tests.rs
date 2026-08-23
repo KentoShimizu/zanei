@@ -171,7 +171,13 @@ fn wake_invalidates_text_eligibility_until_the_next_poll() {
         next_poll: Some(Instant::now()),
     };
     let (eligibility, text) = chrome_eligibility_channel(FilterConfig::default());
-    eligibility.publish_normal(42, Some(7), "https://example.com");
+    eligibility.observe(
+        42,
+        super::ChromeEligibilityObservation::Normal {
+            window_id: Some(7),
+            url: "https://example.com".to_owned(),
+        },
+    );
     assert!(text.allows_text(42, Some(7)));
 
     assert!(handle_workspace_event(

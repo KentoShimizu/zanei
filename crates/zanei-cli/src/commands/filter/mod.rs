@@ -2,9 +2,10 @@ use std::path::Path;
 
 use zanei_collector::AppDirectory;
 use zanei_core::config::{
-    Config, ConfigError, FilterEdit, FilterList, FilterScope,
+    CaptureSource, Config, ConfigError, FilterEdit, FilterList, FilterScope,
     PRIVATE_WINDOW_UNDETECTABLE_BROWSER_BUNDLE_IDS, edit_filter,
 };
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 
 mod prompt;
 mod render;
@@ -91,6 +92,7 @@ fn mutate_app(
                 CliError::InvalidValue("--unverified requires an app value".to_owned())
             })?;
             let changed = persist(&paths.config, scope, list, FilterEdit::Add, &value)?;
+            note_chrome_topology(&paths.config, scope, list, FilterEdit::Add, &value, changed)?;
             if !quiet && changed {
                 println!("Added {value}");
             }
@@ -129,6 +131,14 @@ fn mutate_app(
                 FilterEdit::Add,
                 &selected.stored_value,
             )?;
+            note_chrome_topology(
+                &paths.config,
+                scope,
+                list,
+                FilterEdit::Add,
+                &selected.stored_value,
+                changed,
+            )?;
             if !quiet {
                 if changed {
                     println!("{}", selected.added_message());
@@ -151,6 +161,14 @@ fn mutate_app(
                 FilterEdit::Remove,
                 &selected.stored_value,
             )?;
+            note_chrome_topology(
+                &paths.config,
+                scope,
+                list,
+                FilterEdit::Remove,
+                &selected.stored_value,
+                changed,
+            )?;
             if !quiet {
                 if changed {
                     println!("Removed {}", selected.stored_value);
@@ -162,6 +180,45 @@ fn mutate_app(
         }
     }
     Ok(())
+}
+
+fn note_chrome_topology(
+    config_path: &Path,
+    scope: FilterScope,
+    list: FilterList,
+    edit: FilterEdit,
+    value: &str,
+    changed: bool,
+) -> Result<(), CliError> {
+    let config = Config::load(config_path)?;
+    if chrome_topology_note_required(&config, scope, list, edit, value, changed) {
+        eprintln!(
+            "note: if the daemon started while Chrome was excluded, run `zanei restart` so Chrome windows are tracked"
+        );
+    }
+    Ok(())
+}
+
+fn chrome_topology_note_required(
+    config: &Config,
+    scope: FilterScope,
+    list: FilterList,
+    edit: FilterEdit,
+    value: &str,
+    changed: bool,
+) -> bool {
+    let admits_chrome = changed
+        && value.eq_ignore_ascii_case(CHROME_BUNDLE_ID)
+        && matches!(scope, FilterScope::AllEvents | FilterScope::ContentSnapshot)
+        && matches!(
+            (list, edit),
+            (FilterList::ExcludeApps, FilterEdit::Remove)
+                | (FilterList::IncludeOnlyApps, FilterEdit::Add)
+        );
+    let topology_may_exclude_chrome = !config.capture.text_content
+        || !config.capture.sources.contains(&CaptureSource::Ui)
+        || !config.capture.sources.contains(&CaptureSource::Input);
+    admits_chrome && topology_may_exclude_chrome
 }
 
 fn resolve_add_with_lookup(
@@ -306,5 +363,62 @@ fn warn_private_browser(
             "warning: private-window detection is unavailable for {}; private-window content may be captured",
             app.name
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chrome_topology_note_is_limited_to_admitting_content_mutations() {
+        let config = Config::default();
+        assert!(chrome_topology_note_required(
+            &config,
+            FilterScope::ContentSnapshot,
+            FilterList::ExcludeApps,
+            FilterEdit::Remove,
+            CHROME_BUNDLE_ID,
+            true,
+        ));
+        assert!(chrome_topology_note_required(
+            &config,
+            FilterScope::AllEvents,
+            FilterList::IncludeOnlyApps,
+            FilterEdit::Add,
+            CHROME_BUNDLE_ID,
+            true,
+        ));
+        assert!(!chrome_topology_note_required(
+            &config,
+            FilterScope::TextContent,
+            FilterList::IncludeOnlyApps,
+            FilterEdit::Add,
+            CHROME_BUNDLE_ID,
+            true,
+        ));
+        assert!(!chrome_topology_note_required(
+            &config,
+            FilterScope::ContentSnapshot,
+            FilterList::ExcludeApps,
+            FilterEdit::Remove,
+            CHROME_BUNDLE_ID,
+            false,
+        ));
+    }
+
+    #[test]
+    fn full_text_topology_does_not_need_the_restart_note() {
+        let mut config = Config::default();
+        config.capture.text_content = true;
+
+        assert!(!chrome_topology_note_required(
+            &config,
+            FilterScope::ContentSnapshot,
+            FilterList::IncludeOnlyApps,
+            FilterEdit::Add,
+            CHROME_BUNDLE_ID,
+            true,
+        ));
     }
 }

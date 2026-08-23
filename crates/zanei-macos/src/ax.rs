@@ -4,7 +4,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+        mpsc::{Receiver, SyncSender, sync_channel},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -12,15 +12,13 @@ use std::{
 
 use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
 use zanei_core::config::FilterConfig;
-use zanei_core::schema::{App, ClickButton};
+use zanei_core::schema::ClickButton;
 
 use crate::{
     InputAuthorizations, SecureInputProbe,
     content_snapshot::SnapshotTriggerPublisher,
-    ffi::{
-        ax::{ManualAccessibilityPolicy, NativeAx, NativeAxError, NativeAxEvent, NativeHitTest},
-        workspace::running_applications,
-    },
+    ffi::ax::{ManualAccessibilityPolicy, NativeAxEvent},
+    focus_context::FocusContext,
     focused_field::{FocusedField, FocusedFieldPublisher, field_class},
     text_capture::TextContentPolicy,
     workspace::{ApplicationActivationPolicy, ApplicationInfo, WorkspaceEvent},
@@ -30,11 +28,18 @@ use self::{event::AxEventBuilder, health::ObserverHealth};
 
 pub use crate::ffi::ax::NativeWindow;
 
+#[cfg(test)]
+use crate::ffi::ax::NativeHitTest;
+
 mod event;
 mod health;
+mod output;
+mod runtime;
 mod trigger;
 
-use trigger::publish_snapshot_trigger;
+use output::AxOutput;
+use runtime::{AxApi, SystemAxApi};
+use trigger::publish_focus_transition;
 
 const CLICK_CHANNEL_CAPACITY: usize = 1_024;
 const MAX_CLICK_OBSERVATIONS_PER_TICK: usize = 1;
@@ -48,6 +53,7 @@ pub struct ClickObservation {
     pub y: f64,
     pub button: ClickButton,
     pub click_count: u64,
+    pub observed_at: time::OffsetDateTime,
 }
 
 #[must_use]
@@ -64,6 +70,7 @@ pub struct AxCollector {
     capture_text_content: bool,
     text_policy: TextContentPolicy,
     manual_accessibility_policy: ManualAccessibilityPolicy,
+    focus_context: FocusContext,
     snapshot_trigger_publisher: Option<SnapshotTriggerPublisher>,
     worker: Option<Worker>,
     dropped_events: Arc<AtomicU64>,
@@ -78,6 +85,7 @@ pub struct AxCollectorOptions {
     pub filter: FilterConfig,
     pub text_policy: TextContentPolicy,
     pub snapshot_trigger_publisher: Option<SnapshotTriggerPublisher>,
+    pub focus_context: FocusContext,
 }
 
 impl AxCollector {
@@ -102,6 +110,7 @@ impl AxCollector {
                 options.capture_content_snapshot,
                 options.filter,
             ),
+            focus_context: options.focus_context,
             snapshot_trigger_publisher: options.snapshot_trigger_publisher,
             worker: None,
             dropped_events: Arc::new(AtomicU64::new(0)),
@@ -181,6 +190,7 @@ impl Collector for AxCollector {
         let capture_text_content = self.capture_text_content;
         let text_policy = self.text_policy.clone();
         let manual_accessibility_policy = self.manual_accessibility_policy.clone();
+        let focus_context = self.focus_context.clone();
         let snapshot_trigger_publisher = self.snapshot_trigger_publisher.clone();
         let handle = thread::Builder::new()
             .name("zanei-ax".to_owned())
@@ -196,6 +206,7 @@ impl Collector for AxCollector {
                     capture_text_content,
                     text_policy,
                     manual_accessibility_policy,
+                    focus_context,
                     snapshot_trigger_publisher,
                     &dropped_events,
                     &degraded_operations,
@@ -251,6 +262,7 @@ fn run_ax(
     capture_text_content: bool,
     text_policy: TextContentPolicy,
     manual_accessibility_policy: ManualAccessibilityPolicy,
+    focus_context: FocusContext,
     snapshot_trigger_publisher: Option<SnapshotTriggerPublisher>,
     dropped_events: &AtomicU64,
     degraded_operations: &AtomicU64,
@@ -271,6 +283,7 @@ fn run_ax(
         focused_field_publisher,
         text_policy,
         manual_accessibility_policy,
+        focus_context,
         snapshot_trigger_publisher.as_ref(),
         dropped_events,
         degraded_operations,
@@ -289,11 +302,13 @@ fn run_ax_loop(
     focused_field_publisher: Option<&FocusedFieldPublisher>,
     text_policy: TextContentPolicy,
     manual_accessibility_policy: ManualAccessibilityPolicy,
+    focus_context: FocusContext,
     snapshot_trigger_publisher: Option<&SnapshotTriggerPublisher>,
     dropped_events: &AtomicU64,
     degraded_operations: &AtomicU64,
     current_degraded_observers: Arc<AtomicU64>,
 ) {
+    let mut output = AxOutput::new(sender, dropped_events, text_policy.clone());
     let mut builder = AxEventBuilder::new(text_policy);
     let mut observer_health = ObserverHealth::new(current_degraded_observers);
     for app in api.running_applications() {
@@ -306,16 +321,51 @@ fn run_ax_loop(
             degraded_operations,
             &mut observer_health,
         );
-        send_events(sender, pending, dropped_events);
+        output.send_all(pending);
     }
+    if let Some(app) = api.frontmost_application() {
+        let window = i32::try_from(app.pid)
+            .ok()
+            .and_then(|pid| api.focused_window(pid).ok().flatten());
+        publish_focus_transition(
+            snapshot_trigger_publisher,
+            focus_context.activate(app, window),
+        );
+    }
+    let mut manual_accessibility_generation = manual_accessibility_policy.generation();
 
     while !stop.load(Ordering::Acquire) {
+        output.release_due();
+        let current_generation = manual_accessibility_policy.generation();
+        if current_generation != manual_accessibility_generation {
+            api.reconcile_manual_accessibility(&manual_accessibility_policy);
+            manual_accessibility_generation = current_generation;
+        }
         for event in lifecycle_receiver.try_iter() {
             if let WorkspaceEvent::Activated(app) = &event {
                 observer_health.mark_used(app.pid);
             }
             match event {
-                WorkspaceEvent::Activated(app) | WorkspaceEvent::Launched(app) => {
+                WorkspaceEvent::Activated(app) => {
+                    let pending = attach_app(
+                        api,
+                        &mut builder,
+                        app.clone(),
+                        focused_field_publisher,
+                        &manual_accessibility_policy,
+                        degraded_operations,
+                        &mut observer_health,
+                    );
+                    output.send_all(pending);
+                    let window = i32::try_from(app.pid)
+                        .ok()
+                        .and_then(|pid| api.focused_window(pid).ok().flatten());
+                    publish_focus_transition(
+                        snapshot_trigger_publisher,
+                        focus_context.activate(app, window),
+                    );
+                }
+                WorkspaceEvent::Launched(app) => {
                     let pending = attach_app(
                         api,
                         &mut builder,
@@ -325,19 +375,21 @@ fn run_ax_loop(
                         degraded_operations,
                         &mut observer_health,
                     );
-                    send_events(sender, pending, dropped_events);
+                    output.send_all(pending);
                 }
                 WorkspaceEvent::Terminated(app) => {
+                    publish_focus_transition(
+                        snapshot_trigger_publisher,
+                        focus_context.terminate(app.pid),
+                    );
                     observer_health.remove(app.pid);
                     if let Ok(pid) = i32::try_from(app.pid) {
                         let pending = api.detach(pid);
                         send_observations(
-                            sender,
+                            &mut output,
                             &mut builder,
                             pending,
                             focused_field_publisher,
-                            snapshot_trigger_publisher,
-                            dropped_events,
                         );
                         builder.remove_app(pid);
                         remove_focused_field(focused_field_publisher, pid);
@@ -353,14 +405,21 @@ fn run_ax_loop(
             if let Some(hit) = api.hit_test(click)
                 && let Some(event) = builder.click_event(hit, click)
             {
-                send_output(sender, event, dropped_events);
+                output.send(event);
             }
         }
         for observation in api.poll(AX_RUN_LOOP_SLICE) {
-            publish_snapshot_trigger(snapshot_trigger_publisher, &builder, &observation);
+            let transition = match &observation {
+                NativeAxEvent::WindowFocused { pid, window, .. }
+                | NativeAxEvent::WindowTitleChanged { pid, window, .. } => {
+                    focus_context.observe_window(*pid, window.clone())
+                }
+                NativeAxEvent::UiFocused { .. } | NativeAxEvent::UiValueChanged { .. } => None,
+            };
+            publish_focus_transition(snapshot_trigger_publisher, transition);
             publish_focus_observation(focused_field_publisher, &observation);
             if let Some(event) = builder.event(observation) {
-                send_output(sender, event, dropped_events);
+                output.send(event);
             }
         }
         let native_drops = api.take_dropped_events();
@@ -368,55 +427,25 @@ fn run_ax_loop(
         degraded_operations.fetch_add(api.take_degraded_operations(), Ordering::Relaxed);
     }
     send_observations(
-        sender,
+        &mut output,
         &mut builder,
         api.flush_pending(),
         focused_field_publisher,
-        snapshot_trigger_publisher,
-        dropped_events,
     );
+    output.flush();
     observer_health.clear();
 }
 
 fn send_observations(
-    sender: &SyncSender<RawEvent>,
+    output: &mut AxOutput<'_>,
     builder: &mut AxEventBuilder,
     observations: Vec<NativeAxEvent>,
     focused_field_publisher: Option<&FocusedFieldPublisher>,
-    snapshot_trigger_publisher: Option<&SnapshotTriggerPublisher>,
-    dropped_events: &AtomicU64,
 ) {
     for observation in observations {
-        publish_snapshot_trigger(snapshot_trigger_publisher, builder, &observation);
         publish_focus_observation(focused_field_publisher, &observation);
         if let Some(event) = builder.event(observation) {
-            send_output(sender, event, dropped_events);
-        }
-    }
-}
-
-fn send_events(sender: &SyncSender<RawEvent>, events: Vec<RawEvent>, dropped_events: &AtomicU64) {
-    for event in events {
-        send_output(sender, event, dropped_events);
-    }
-}
-
-fn send_output(sender: &SyncSender<RawEvent>, event: RawEvent, dropped_events: &AtomicU64) {
-    match sender.try_send(event) {
-        Ok(()) => {}
-        Err(TrySendError::Full(event)) => {
-            crate::trace::trace!(
-                "component=ax phase=output action=drop event={} reason=output_full",
-                event.event_type
-            );
-            dropped_events.fetch_add(1, Ordering::Relaxed);
-        }
-        Err(TrySendError::Disconnected(event)) => {
-            crate::trace::trace!(
-                "component=ax phase=output action=drop event={} reason=output_disconnected",
-                event.event_type
-            );
-            dropped_events.fetch_add(1, Ordering::Relaxed);
+            output.send(event);
         }
     }
 }
@@ -495,94 +524,6 @@ fn update_focused_field(
 fn remove_focused_field(publisher: Option<&FocusedFieldPublisher>, pid: i32) {
     if let Some(publisher) = publisher {
         publisher.remove(pid);
-    }
-}
-
-trait AxApi {
-    type AttachError;
-
-    fn running_applications(&self) -> Vec<ApplicationInfo>;
-    fn attach(
-        &mut self,
-        pid: i32,
-        app: App,
-        manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxEvent>, Self::AttachError>;
-    fn detach(&mut self, pid: i32) -> Vec<NativeAxEvent>;
-    fn poll(&mut self, timeout: Duration) -> Vec<NativeAxEvent>;
-    fn flush_pending(&mut self) -> Vec<NativeAxEvent>;
-    fn hit_test(&self, click: ClickObservation) -> Option<NativeHitTest>;
-    fn take_dropped_events(&self) -> u64;
-    fn take_degraded_operations(&self) -> u64;
-}
-
-struct SystemAxApi {
-    native: NativeAx,
-}
-
-impl SystemAxApi {
-    fn new(
-        capture_text_content: bool,
-        authorizations: InputAuthorizations,
-        secure_input_probe: Option<SecureInputProbe>,
-        text_policy: TextContentPolicy,
-    ) -> Self {
-        Self {
-            native: NativeAx::new(
-                capture_text_content,
-                authorizations,
-                secure_input_probe,
-                text_policy,
-            ),
-        }
-    }
-
-    fn into_authorizations(self) -> InputAuthorizations {
-        self.native.into_authorizations()
-    }
-}
-
-impl AxApi for SystemAxApi {
-    type AttachError = NativeAxError;
-
-    fn running_applications(&self) -> Vec<ApplicationInfo> {
-        running_applications()
-            .into_iter()
-            .map(ApplicationInfo::from)
-            .collect()
-    }
-
-    fn attach(
-        &mut self,
-        pid: i32,
-        app: App,
-        manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
-        self.native.attach(pid, app, manual_accessibility)
-    }
-
-    fn detach(&mut self, pid: i32) -> Vec<NativeAxEvent> {
-        self.native.detach(pid)
-    }
-
-    fn poll(&mut self, timeout: Duration) -> Vec<NativeAxEvent> {
-        self.native.poll(timeout)
-    }
-
-    fn flush_pending(&mut self) -> Vec<NativeAxEvent> {
-        self.native.flush_pending()
-    }
-
-    fn hit_test(&self, click: ClickObservation) -> Option<NativeHitTest> {
-        self.native.hit_test(click.pid, click.x, click.y)
-    }
-
-    fn take_dropped_events(&self) -> u64 {
-        self.native.take_dropped_events()
-    }
-
-    fn take_degraded_operations(&self) -> u64 {
-        self.native.take_degraded_operations()
     }
 }
 

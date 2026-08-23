@@ -25,29 +25,31 @@ use crate::{
         walker::{InstantWalkClock, SnapshotWalkError, WalkClock, walk_snapshot},
     },
     ffi::window_list::window_id_for_frame,
+    focus_context::FocusContext,
     workspace::WorkspaceEvent,
 };
 
-use super::{Control, SharedHealth, WORKER_POLL_INTERVAL, WorkerChannels};
+use super::{Control, SharedHealth, WORKER_POLL_INTERVAL};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_worker(
-    trigger: SnapshotTriggerReceiver,
-    lifecycle: Receiver<WorkspaceEvent>,
+    trigger: &SnapshotTriggerReceiver,
+    lifecycle: &Receiver<WorkspaceEvent>,
     controls: Receiver<Control>,
     stop: Arc<AtomicBool>,
     sender: SyncSender<RawEvent>,
     mut policy: SnapshotPolicy,
     health: SharedHealth,
-    mut state: SnapshotState,
-) -> WorkerChannels {
+    state: &mut SnapshotState,
+    focus_context: FocusContext,
+) {
     debug_assert_eq!(std::thread::current().name(), Some("zanei-content"));
     let mut scheduler = SnapshotScheduler::default();
     while !stop.load(Ordering::Acquire) {
         if service_controls(&controls, &mut policy, &mut scheduler) {
             break;
         }
-        service_lifecycle(&lifecycle, &mut scheduler, &mut state);
+        service_lifecycle(lifecycle, &mut scheduler, state);
         let wait = scheduler
             .next_deadline()
             .map_or(WORKER_POLL_INTERVAL, |deadline| {
@@ -57,24 +59,30 @@ pub(super) fn run_worker(
                     .min(WORKER_POLL_INTERVAL)
             });
         match trigger.recv_timeout(wait) {
-            Ok(observation) => scheduler.observe(observation),
+            Ok(observation) => {
+                health.processed_triggers.fetch_add(1, Ordering::Relaxed);
+                scheduler.observe(observation);
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
         while let Some(candidate) = scheduler.take_due(Instant::now()) {
-            process_candidate(candidate, &policy, &mut state, &sender, &stop, &health);
+            process_candidate(
+                candidate,
+                &policy,
+                state,
+                &sender,
+                &stop,
+                &health,
+                &focus_context,
+            );
             if stop.load(Ordering::Acquire) {
                 break;
             }
         }
-        update_degraded(&health, &mut state, Instant::now());
+        update_degraded(&health, state, Instant::now());
     }
     scheduler.stop();
-    WorkerChannels {
-        trigger,
-        lifecycle,
-        state,
-    }
 }
 
 fn service_controls(
@@ -125,12 +133,30 @@ fn process_candidate(
     sender: &SyncSender<RawEvent>,
     stop: &AtomicBool,
     health: &SharedHealth,
+    focus_context: &FocusContext,
 ) {
     let now = Instant::now();
     let Some(key) = candidate.key() else {
         trace_candidate(&candidate, "window_id", 0, Duration::ZERO, 0, false, None);
         return;
     };
+    if candidate.trigger != ContentSnapshotTrigger::FocusOut
+        && !focus_context.current().is_some_and(|focus| {
+            focus.app.pid == key.pid
+                && focus.window.as_ref().and_then(|window| window.id) == Some(key.window_id)
+        })
+    {
+        trace_candidate(
+            &candidate,
+            "focus_context_stale",
+            0,
+            Duration::ZERO,
+            0,
+            false,
+            None,
+        );
+        return;
+    }
     if candidate.trigger == ContentSnapshotTrigger::FocusOut
         && !SnapshotScheduler::focus_out_allows(state.last_saved_at(key), now)
     {
@@ -212,6 +238,10 @@ fn process_candidate(
             return;
         }
     };
+    health.failures.fetch_add(
+        u64::try_from(output.degraded_nodes).expect("degraded node count must fit u64"),
+        Ordering::Relaxed,
+    );
     if stop.load(Ordering::Acquire) {
         trace_output(&candidate, "stopped", &output);
         return;
@@ -287,6 +317,7 @@ fn initial_time_cutoff(clock: &impl WalkClock, ax_calls: usize) -> Option<Snapsh
         elapsed,
         complete: false,
         cutoff: Some(SnapshotCutoff::Time),
+        degraded_nodes: 0,
     })
 }
 
@@ -353,6 +384,7 @@ pub(super) fn build_raw_event(
     let chars =
         u64::try_from(text.chars().count()).expect("the 32 KiB design limit always fits in u64");
     RawEvent {
+        observed_at: None,
         source: "macos.ax".to_owned(),
         event_type: "content.snapshot".to_owned(),
         app: candidate.target.app.raw_app(),
@@ -430,14 +462,9 @@ fn update_degraded(health: &SharedHealth, state: &mut SnapshotState, now: Instan
 }
 
 fn trace_output(candidate: &ScheduledSnapshot, gate: &str, output: &SnapshotWalkOutput) {
-    trace_candidate(
-        candidate,
-        gate,
-        output.nodes,
-        output.elapsed,
-        output.text.len(),
-        output.complete,
-        output.cutoff,
+    crate::trace::trace!(
+        "{}",
+        trace_summary(candidate, gate, TraceMetrics::from(output))
     );
 }
 
@@ -452,19 +479,45 @@ fn trace_candidate(
 ) {
     crate::trace::trace!(
         "{}",
-        trace_summary(candidate, gate, nodes, elapsed, bytes, complete, cutoff)
+        trace_summary(
+            candidate,
+            gate,
+            TraceMetrics {
+                nodes,
+                degraded_nodes: 0,
+                elapsed,
+                bytes,
+                complete,
+                cutoff,
+            },
+        )
     );
 }
 
-fn trace_summary(
-    candidate: &ScheduledSnapshot,
-    gate: &str,
+#[derive(Clone, Copy)]
+struct TraceMetrics {
     nodes: usize,
+    degraded_nodes: usize,
     elapsed: Duration,
     bytes: usize,
     complete: bool,
     cutoff: Option<SnapshotCutoff>,
-) -> String {
+}
+
+impl From<&SnapshotWalkOutput> for TraceMetrics {
+    fn from(output: &SnapshotWalkOutput) -> Self {
+        Self {
+            nodes: output.nodes,
+            degraded_nodes: output.degraded_nodes,
+            elapsed: output.elapsed,
+            bytes: output.text.len(),
+            complete: output.complete,
+            cutoff: output.cutoff,
+        }
+    }
+}
+
+fn trace_summary(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetrics) -> String {
     let trigger = match candidate.trigger {
         ContentSnapshotTrigger::Settle => "settle",
         ContentSnapshotTrigger::Refresh => "refresh",
@@ -476,14 +529,15 @@ fn trace_summary(
         .id
         .map_or_else(|| "none".to_owned(), |window_id| window_id.to_string());
     format!(
-        "component=content_snapshot trigger={} gate={} nodes={} elapsed_ms={} bytes={} complete={} cutoff={} pid={} window_id={}",
+        "component=content_snapshot trigger={} gate={} nodes={} degraded_nodes={} elapsed_ms={} bytes={} complete={} cutoff={} pid={} window_id={}",
         trigger,
         gate,
-        nodes,
-        elapsed.as_millis(),
-        bytes,
-        complete,
-        cutoff.map_or("none", SnapshotCutoff::trace_name),
+        metrics.nodes,
+        metrics.degraded_nodes,
+        metrics.elapsed.as_millis(),
+        metrics.bytes,
+        metrics.complete,
+        metrics.cutoff.map_or("none", SnapshotCutoff::trace_name),
         candidate.target.app.pid,
         window_id
     )
@@ -494,11 +548,14 @@ pub(super) fn test_trace_summary(candidate: &ScheduledSnapshot) -> String {
     trace_summary(
         candidate,
         "emit",
-        42,
-        Duration::from_millis(17),
-        512,
-        true,
-        None,
+        TraceMetrics {
+            nodes: 42,
+            degraded_nodes: 0,
+            elapsed: Duration::from_millis(17),
+            bytes: 512,
+            complete: true,
+            cutoff: None,
+        },
     )
 }
 

@@ -16,12 +16,13 @@ use crate::cli::{ConfigArgs, ConfigCommand};
 use crate::error::CliError;
 use crate::paths::Paths;
 
-const CONTENT_SNAPSHOT_WARNING: &str = concat!(
+const CONTENT_SNAPSHOT_WARNING_PREFIX: &str = concat!(
     "Content snapshots record the text shown in the frontmost window, including messages and\n",
     "documents written by other people and text you typed that is on screen. Password fields and\n",
-    "Chrome Incognito windows are never captured; stored text is redacted and deleted after 48 hours.\n\n",
-    "Current scope (change it first if this is not what you want):\n"
+    "Chrome Incognito windows are never captured; stored text is redacted and deleted after "
 );
+const CONTENT_SNAPSHOT_WARNING_SUFFIX: &str =
+    " hours.\n\nCurrent scope (change it first if this is not what you want):\n";
 const CONTENT_SNAPSHOT_ACTIONS: &str = concat!(
     "  zanei filter content-snapshot only-app add <APP>      record only these apps\n",
     "  zanei filter content-snapshot exclude-app add <APP>   everything except these\n",
@@ -163,7 +164,7 @@ fn set(
     {
         let candidates = apps::collect(paths, app_directory)?.apps;
         let summary = ScopeSummary::for_scope(&config, FilterScope::ContentSnapshot, &candidates);
-        match confirm_content_snapshot(&summary, false)? {
+        match confirm_content_snapshot(&summary, config.output.retention_hours, false)? {
             EnableDecision::Persist => {}
             EnableDecision::Cancel => return Ok(EXIT_SUCCESS),
             EnableDecision::UsageError => return Ok(EXIT_USAGE),
@@ -250,6 +251,7 @@ fn decide_enable(quiet: bool, terminal: bool, answer: Option<&str>) -> EnableDec
 
 fn confirm_content_snapshot(
     summary: &ScopeSummary,
+    retention_hours: u64,
     quiet: bool,
 ) -> Result<EnableDecision, CliError> {
     let stdin_is_terminal = io::stdin().is_terminal();
@@ -257,6 +259,7 @@ fn confirm_content_snapshot(
     let mut stderr = io::stderr().lock();
     confirm_content_snapshot_with(
         summary,
+        retention_hours,
         quiet,
         stdin_is_terminal,
         stderr_is_terminal,
@@ -273,6 +276,7 @@ fn confirm_content_snapshot(
 
 fn confirm_content_snapshot_with(
     summary: &ScopeSummary,
+    retention_hours: u64,
     quiet: bool,
     stdin_is_terminal: bool,
     stderr_is_terminal: bool,
@@ -282,7 +286,8 @@ fn confirm_content_snapshot_with(
     if quiet {
         return Ok(EnableDecision::Persist);
     }
-    write_stderr(&render_content_snapshot_prompt(summary)).map_err(CliError::PromptOutput)?;
+    write_stderr(&render_content_snapshot_prompt(summary, retention_hours))
+        .map_err(CliError::PromptOutput)?;
     let terminal = stdin_is_terminal && stderr_is_terminal;
     if !terminal {
         return Ok(EnableDecision::UsageError);
@@ -291,9 +296,9 @@ fn confirm_content_snapshot_with(
     Ok(decide_enable(false, true, Some(&answer)))
 }
 
-fn render_content_snapshot_prompt(summary: &ScopeSummary) -> String {
+fn render_content_snapshot_prompt(summary: &ScopeSummary, retention_hours: u64) -> String {
     format!(
-        "{CONTENT_SNAPSHOT_WARNING}  Apps:  {}\n  Sites: {}\n{CONTENT_SNAPSHOT_ACTIONS}",
+        "{CONTENT_SNAPSHOT_WARNING_PREFIX}{retention_hours}{CONTENT_SNAPSHOT_WARNING_SUFFIX}  Apps:  {}\n  Sites: {}\n{CONTENT_SNAPSHOT_ACTIONS}",
         summary.prompt_apps(),
         summary.prompt_sites(),
     )
@@ -438,14 +443,14 @@ mod tests {
 
     #[test]
     fn content_snapshot_prompt_matches_the_documented_default_scope() {
-        let prompt = render_content_snapshot_prompt(&default_content_summary());
+        let prompt = render_content_snapshot_prompt(&default_content_summary(), 72);
 
         assert_eq!(
             prompt,
             concat!(
                 "Content snapshots record the text shown in the frontmost window, including messages and\n",
                 "documents written by other people and text you typed that is on screen. Password fields and\n",
-                "Chrome Incognito windows are never captured; stored text is redacted and deleted after 48 hours.\n\n",
+                "Chrome Incognito windows are never captured; stored text is redacted and deleted after 72 hours.\n\n",
                 "Current scope (change it first if this is not what you want):\n",
                 "  Apps:  every app except 6 excluded (Safari, Firefox, Brave, Edge, Vivaldi, Arc)\n",
                 "  Sites: every site\n",
@@ -469,6 +474,7 @@ mod tests {
             let output = RefCell::new(String::new());
             let decision = confirm_content_snapshot_with(
                 &default_content_summary(),
+                48,
                 false,
                 true,
                 true,
@@ -487,6 +493,7 @@ mod tests {
         let output = RefCell::new(String::new());
         let non_tty = confirm_content_snapshot_with(
             &default_content_summary(),
+            48,
             false,
             false,
             true,
@@ -507,6 +514,7 @@ mod tests {
         let wrote = Cell::new(false);
         let quiet = confirm_content_snapshot_with(
             &default_content_summary(),
+            48,
             true,
             false,
             false,
@@ -537,6 +545,7 @@ mod tests {
                 .expect("prepare content snapshot edit");
             let decision = confirm_content_snapshot_with(
                 &default_content_summary(),
+                48,
                 false,
                 true,
                 true,

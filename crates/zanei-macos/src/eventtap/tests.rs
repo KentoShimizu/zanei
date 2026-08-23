@@ -20,8 +20,7 @@ use super::{
     },
     output::{EmitResult, emit, resolve_input_authorization, try_send_counted},
     state::{Driver, EventTapApi, MonotonicTime},
-    support::target_pid_matches_context,
-    worker::handle_native_event,
+    worker::{early_text_read_allowed, handle_native_event},
 };
 use crate::{
     ax::{ClickObservation, click_channel},
@@ -29,8 +28,10 @@ use crate::{
     ffi::eventtap::{
         NativeApp, NativeContext, NativeEvent, NativeInputTarget, NativeWindow, Pasteboard,
     },
+    focus_context::FocusContext,
     focused_field::{FieldClass, FocusedField, FocusedFieldTracker, focused_field_channel},
     text_capture::{InputAuthorization, TextContentPolicy, input_authorization_channel},
+    workspace::{ApplicationActivationPolicy, ApplicationInfo},
 };
 
 fn text_policy() -> TextContentPolicy {
@@ -41,6 +42,7 @@ fn text_policy() -> TextContentPolicy {
 
 fn raw() -> RawEvent {
     RawEvent {
+        observed_at: None,
         source: "macos.eventtap".to_owned(),
         event_type: "app.launch".to_owned(),
         app: App {
@@ -97,6 +99,52 @@ fn window() -> NativeWindow {
     }
 }
 
+#[test]
+fn tap_time_focus_generation_mismatch_denies_text() {
+    let focus_context = FocusContext::new();
+    focus_context.activate(
+        ApplicationInfo {
+            name: "Test".to_owned(),
+            bundle_id: Some("dev.zanei.test".to_owned()),
+            pid: 501,
+            activation_policy: ApplicationActivationPolicy::Regular,
+        },
+        Some(window()),
+    );
+    let target = NativeInputTarget {
+        context: context(Some(window())),
+        focused_field: Some(FocusedField {
+            generation: 1,
+            class: FieldClass::KnownText(FieldKind::Text),
+        }),
+        focus_generation: 1,
+    };
+    assert!(early_text_read_allowed(
+        Some(&target),
+        &text_policy(),
+        &focus_context,
+    ));
+
+    focus_context.activate(
+        ApplicationInfo {
+            name: "Other".to_owned(),
+            bundle_id: Some("dev.zanei.other".to_owned()),
+            pid: 502,
+            activation_policy: ApplicationActivationPolicy::Regular,
+        },
+        Some(NativeWindow {
+            title: Some("Other".to_owned()),
+            id: Some(12),
+        }),
+    );
+
+    assert!(!early_text_read_allowed(
+        Some(&target),
+        &text_policy(),
+        &focus_context,
+    ));
+}
+
 fn key_event(
     target: Option<NativeInputTarget>,
     authorization: Option<InputAuthorization>,
@@ -111,6 +159,7 @@ fn key_event(
         authorization,
         secure_input: false,
         ime_active: false,
+        observed_at: time::OffsetDateTime::UNIX_EPOCH,
     }
 }
 
@@ -127,6 +176,20 @@ fn handle_event(
     );
     let pasteboard = Pasteboard::new();
     let mut clipboard = Some(ClipboardTracker::new(0));
+    let focus_context = FocusContext::new();
+    if let Some(context) = context {
+        focus_context.activate(
+            ApplicationInfo {
+                name: context.app.name.clone(),
+                bundle_id: context.app.bundle_id.clone(),
+                pid: context.app.pid,
+                activation_policy: ApplicationActivationPolicy::Regular,
+            },
+            context.window.clone(),
+        );
+    }
+    let policy = text_policy();
+    let mut quarantine = crate::text_capture::TextQuarantine::new(&policy.chrome_tracker());
     handle_native_event(
         event,
         &mut driver,
@@ -140,7 +203,9 @@ fn handle_event(
         false,
         false,
         &mut clipboard,
-        &text_policy(),
+        &policy,
+        &focus_context,
+        &mut quarantine,
     )
 }
 
@@ -152,7 +217,14 @@ fn full_raw_event_channel_increments_drop_counter_through_worker() {
     let context = context(Some(window()));
 
     assert!(handle_event(
-        key_event(None, None),
+        key_event(
+            Some(NativeInputTarget {
+                context: context.clone(),
+                focused_field: None,
+                focus_generation: 1,
+            }),
+            None,
+        ),
         &sender,
         None,
         Some(&context),
@@ -174,6 +246,7 @@ fn disconnected_click_channel_increments_drop_counter() {
             y: 2.0,
             button: ClickButton::Left,
             click_count: 1,
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
         },
         &dropped,
     );
@@ -203,6 +276,7 @@ fn click_only_mode_skips_input_source_and_secure_input_state() {
         None,
         None,
         text_policy(),
+        FocusContext::new(),
     );
     collector
         .secure_input_enabled
@@ -255,6 +329,7 @@ fn windowless_click_does_not_increment_drop_counter() {
             y: 2.0,
             button: 0,
             click_count: 1,
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
         },
         &sender,
         Some(&click_sender),
@@ -283,6 +358,7 @@ fn contextless_click_is_filtered_without_incrementing_drop_counter() {
             y: 2.0,
             button: 0,
             click_count: 1,
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
         },
         &sender,
         Some(&click_sender),
@@ -294,7 +370,7 @@ fn contextless_click_is_filtered_without_incrementing_drop_counter() {
 }
 
 #[test]
-fn mismatched_target_pid_is_filtered_without_incrementing_drop_counter() {
+fn tap_time_target_wins_when_worker_focus_has_moved() {
     let (sender, receiver) = sync_channel(1);
     let dropped = AtomicU64::new(0);
     let context = context(Some(window()));
@@ -307,8 +383,16 @@ fn mismatched_target_pid_is_filtered_without_incrementing_drop_counter() {
     assert!(handle_event(
         key_event(
             Some(NativeInputTarget {
-                pid: 502,
+                context: NativeContext {
+                    app: NativeApp {
+                        name: "Other".to_owned(),
+                        bundle_id: Some("dev.zanei.other".to_owned()),
+                        pid: 502,
+                    },
+                    window: Some(window()),
+                },
                 focused_field: None,
+                focus_generation: 1,
             }),
             Some(authorization),
         ),
@@ -317,7 +401,11 @@ fn mismatched_target_pid_is_filtered_without_incrementing_drop_counter() {
         Some(&context),
         &dropped,
     ));
-    assert!(receiver.try_recv().is_err());
+    let event = receiver
+        .try_recv()
+        .expect("tap-time target should remain attributable");
+    assert_eq!(event.app.pid, Some(502));
+    assert_eq!(event.app.bundle_id.as_deref(), Some("dev.zanei.other"));
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
     assert!(!authorizations.matching_for_test(502, 3, input_at));
 }
@@ -397,13 +485,6 @@ fn missing_ax_tracker_keeps_field_kind_null() {
         focused_fields.and_then(|tracker| tracker.focused_field(501)),
         None
     );
-}
-
-#[test]
-fn annotated_target_pid_must_match_the_worker_context() {
-    assert!(target_pid_matches_context(Some(501), 501));
-    assert!(target_pid_matches_context(None, 501));
-    assert!(!target_pid_matches_context(Some(502), 501));
 }
 
 #[test]

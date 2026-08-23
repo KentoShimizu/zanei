@@ -9,13 +9,14 @@ Depending on `capture.sources` and the two content opt-ins, Zanei uses up to thr
 
 | Permission | System Settings item | Used for | Related event types |
 | --- | --- | --- | --- |
-| Accessibility | Accessibility | Window titles, focus, UI elements, visible content snapshots | `window.*` `ui.*` `content.snapshot` |
+| Accessibility | Accessibility | The shared frontmost-window identity, window titles, focus, UI elements, visible content snapshots | `window.*` `ui.*` `input.*` `clipboard.*` `browser.navigate` `content.snapshot` |
 | Input Monitoring | Input Monitoring | Detecting keys, scrolling, clicks | `input.*` `ui.click` `clipboard.*` |
 | Automation | Automation (per target app) | Reading Chrome URL/window eligibility for URL capture and content suppression | `browser.navigate`; Chrome `ui.value`/`input.key`/clipboard bodies and `content.snapshot` |
 
 Two important properties:
 
 - App launch, termination, and switching (`app.*`) require no permissions. With nothing granted, Zanei still records app-level activity.
+- `input` and `browser` use Accessibility for the single frontmost-window identity that binds their events to an app and window; their event detection still uses Input Monitoring and Automation respectively.
 - A permission counts as required only when a feature that needs it is enabled. `capture.content_snapshot` is independent from `capture.sources`: it requires Accessibility even when `window` is absent. Snapshot capture by itself does not require Input Monitoring.
 - Without `browser`, Chrome Automation is still required when `text_content` is enabled with `ui` or `input`, or when Chrome can be included by the content-snapshot scope. It is not required when the relevant scope excludes Chrome completely.
 

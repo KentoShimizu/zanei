@@ -348,6 +348,8 @@ pub struct CaptureContext {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawEvent {
+    /// Source-observed wall time. Normalization falls back to ingestion time when absent.
+    pub observed_at: Option<OffsetDateTime>,
     pub source: String,
     pub event_type: String,
     pub app: App,

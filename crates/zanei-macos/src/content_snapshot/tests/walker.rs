@@ -31,6 +31,8 @@ struct FakeNode {
     visible: Option<String>,
     children: Vec<Self>,
     fail_safe_read: bool,
+    fail_value_read: bool,
+    root_invalid: bool,
     call_micros: u64,
     elapsed_micros: Arc<AtomicU64>,
     metrics: Metrics,
@@ -48,6 +50,8 @@ impl FakeNode {
             visible: None,
             children: Vec::new(),
             fail_safe_read: false,
+            fail_value_read: false,
+            root_invalid: false,
             call_micros: 0,
             elapsed_micros: Arc::new(AtomicU64::new(0)),
             metrics: Metrics::default(),
@@ -77,6 +81,10 @@ impl SnapshotNode for FakeNode {
         self.tick();
         if self.fail_safe_read {
             Err(SnapshotReadError::Contract("CopyMultiple failed"))
+        } else if self.root_invalid {
+            Err(SnapshotReadError::Ax(
+                crate::content_snapshot::SnapshotAxError::invalid_ui_element_for_test(7),
+            ))
         } else {
             Ok(self.attributes.clone())
         }
@@ -85,7 +93,11 @@ impl SnapshotNode for FakeNode {
     fn value(&self) -> Result<Option<String>, SnapshotReadError> {
         self.tick();
         self.metrics.value_reads.fetch_add(1, Ordering::Relaxed);
-        Ok(self.value.clone())
+        if self.fail_value_read {
+            Err(SnapshotReadError::Contract("non-text AXValue"))
+        } else {
+            Ok(self.value.clone())
+        }
     }
 
     fn visible_range(&self) -> Result<Option<AxTextRange>, SnapshotReadError> {
@@ -245,22 +257,15 @@ fn node_time_and_utf8_byte_budgets_report_specific_cutoffs() {
 }
 
 #[test]
-fn copy_multiple_failure_aborts_the_snapshot_and_offscreen_nodes_are_excluded() {
-    let mut failed = FakeNode::new("AXStaticText");
+fn node_failures_are_degraded_and_offscreen_nodes_are_excluded() {
+    let mut failed = FakeNode::new("AXGroup");
+    let mut failed_child = FakeNode::new("AXStaticText");
+    failed_child.fail_safe_read = true;
+    failed.children.push(failed_child);
     failed.fail_safe_read = true;
-    let clock = FakeClock(Arc::clone(&failed.elapsed_micros));
-    let error = walk_snapshot(
-        failed,
-        frame(0.0, 0.0, 100.0, 100.0),
-        generous_budget(),
-        &clock,
-        || false,
-    )
-    .expect_err("CopyMultiple failure");
-    assert!(matches!(
-        error.source,
-        SnapshotReadError::Contract("CopyMultiple failed")
-    ));
+    let output = walk(failed, generous_budget());
+    assert!(output.complete);
+    assert_eq!(output.degraded_nodes, 2);
 
     let mut root = FakeNode::new("AXGroup");
     let mut outside = FakeNode::new("AXStaticText");
@@ -272,4 +277,47 @@ fn copy_multiple_failure_aborts_the_snapshot_and_offscreen_nodes_are_excluded() 
     let output = walk(root, generous_budget());
     assert!(output.text.is_empty());
     assert!(output.complete);
+}
+
+#[test]
+fn numeric_values_drop_only_the_affected_nodes() {
+    let mut root = FakeNode::new("AXGroup");
+    let mut checkbox = FakeNode::new("AXCheckBox");
+    checkbox.fail_value_read = true;
+    checkbox.attributes.title = Some("Checked option".to_owned());
+    let mut heading = FakeNode::new("AXHeading");
+    heading.fail_value_read = true;
+    heading.attributes.title = Some("Heading".to_owned());
+    let mut text = FakeNode::new("AXStaticText");
+    text.value = Some("Visible text".to_owned());
+    root.children = vec![checkbox, heading, text];
+    let shared = root.clone();
+    root = root.with_shared(&shared);
+
+    let output = walk(root, generous_budget());
+
+    assert!(output.complete);
+    assert_eq!(output.degraded_nodes, 2);
+    assert_eq!(output.text, "Visible text");
+}
+
+#[test]
+fn invalid_window_root_ends_the_walk() {
+    let mut root = FakeNode::new("AXWindow");
+    root.root_invalid = true;
+    let clock = FakeClock(Arc::clone(&root.elapsed_micros));
+
+    let error = walk_snapshot(
+        root,
+        frame(0.0, 0.0, 100.0, 100.0),
+        generous_budget(),
+        &clock,
+        || false,
+    )
+    .expect_err("invalid window root");
+
+    assert!(matches!(
+        error.source,
+        SnapshotReadError::Ax(error) if error.is_invalid_ui_element()
+    ));
 }
