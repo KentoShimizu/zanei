@@ -20,6 +20,7 @@ const RETIRED_INFIX: &str = ".plaintext-";
 const TIMESTAMP_FORMAT: &str = "[year][month][day]T[hour][minute][second]Z";
 const TIMESTAMP_LENGTH: usize = "20260823T031500Z".len();
 const COMPANION_SUFFIXES: [&str; 2] = ["-wal", "-shm"];
+#[cfg(feature = "write")]
 const MAX_NAME_ATTEMPTS: u32 = 1_000;
 
 /// A plaintext store the recorder set aside, found next to the live store.
@@ -131,6 +132,7 @@ fn parse_timestamp(text: &str) -> Option<OffsetDateTime> {
         .map(PrimitiveDateTime::assume_utc)
 }
 
+#[cfg(feature = "write")]
 fn format_timestamp(at: OffsetDateTime) -> Result<String, StoreError> {
     let format = format_description::parse_borrowed::<2>(TIMESTAMP_FORMAT)
         .map_err(|error| StoreError::KeyGeneration(format!("timestamp format: {error}")))?;
@@ -164,8 +166,8 @@ mod write {
         parse_timestamp, remove_retired, retired_plaintext_stores,
     };
     use crate::store::{
-        SkippedRetired, StoreError, StoreFormat, StoreWriter, retention_boundary, retention_cutoff,
-        sibling, store_uri,
+        PurgeFilter, SkippedRetired, StoreError, StoreFormat, StoreWriter, retention_boundary,
+        retention_cutoff, sibling, store_uri,
     };
 
     /// Renames the plaintext store at `store_path` (and its WAL companions) to
@@ -287,7 +289,8 @@ mod write {
         // Probe before opening: this process holds no connection to the
         // retired file yet, so the lock rule from `StoreFormat::probe` holds.
         if StoreFormat::probe(path)? == StoreFormat::Plaintext {
-            StoreWriter::open_known(path, StoreFormat::Plaintext, None)?.purge_before(cutoff)?;
+            StoreWriter::open_known(path, StoreFormat::Plaintext, None)?
+                .purge(&PurgeFilter::before_all(cutoff))?;
         }
         Ok(())
     }

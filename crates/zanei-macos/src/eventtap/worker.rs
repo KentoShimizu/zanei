@@ -344,6 +344,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                     field_kind,
                     ime_active || ime_active_at_input,
                 )),
+                text_policy,
             );
             let key_result = emit(sender, key_event, dropped_events);
             trace::trace!(
@@ -390,6 +391,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                             input_text_allowed,
                             field_kind,
                         )),
+                        text_policy,
                     ),
                     dropped_events,
                 )
@@ -413,7 +415,12 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             };
             emit(
                 sender,
-                raw_event("input.scroll", context, EventData::InputScroll(data)),
+                raw_event(
+                    "input.scroll",
+                    context,
+                    EventData::InputScroll(data),
+                    text_policy,
+                ),
                 dropped_events,
             )
             .continues()

@@ -26,6 +26,7 @@ pub(super) enum GetTimelineOutput {
         sessions: Vec<SessionOutput>,
         token_estimate: usize,
         truncated: bool,
+        skipped_unknown_types: u64,
     },
 }
 
@@ -49,12 +50,14 @@ impl GetTimelineOutput {
         sessions: Vec<Session>,
         token_estimate: usize,
         truncated: bool,
+        skipped_unknown_types: u64,
     ) -> Self {
         Self::Structured {
             range: range.into(),
             sessions: sessions.into_iter().map(SessionOutput::from).collect(),
             token_estimate,
             truncated,
+            skipped_unknown_types,
         }
     }
 }
@@ -64,6 +67,7 @@ pub(super) struct QueryEventsOutput {
     pub(super) range: RangeOutput,
     pub(super) count: usize,
     pub(super) truncated: bool,
+    pub(super) skipped_unknown_types: u64,
     #[schemars(with = "Vec<serde_json::Value>")]
     pub(super) events: Vec<Event>,
 }

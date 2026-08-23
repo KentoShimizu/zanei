@@ -9,7 +9,10 @@ use zanei_collector::RawEvent;
 use zanei_core::schema::{App, EventData, Window};
 
 use crate::trace;
-use crate::{ffi::eventtap::NativeContext, text_capture::InputAuthorization};
+use crate::{
+    ffi::eventtap::NativeContext,
+    text_capture::{InputAuthorization, TextContentPolicy},
+};
 
 const SOURCE: &str = "macos.eventtap";
 
@@ -17,6 +20,7 @@ pub(super) fn raw_event(
     event_type: &str,
     context: &NativeContext,
     data: EventData,
+    text_policy: &TextContentPolicy,
 ) -> Option<RawEvent> {
     let Some(window) = context.window.as_ref() else {
         trace::trace!(
@@ -26,6 +30,8 @@ pub(super) fn raw_event(
         );
         return None;
     };
+    let capture_context =
+        text_policy.capture_context(context.app.bundle_id.as_deref(), context.app.pid, window.id);
     Some(RawEvent {
         source: SOURCE.to_owned(),
         event_type: event_type.to_owned(),
@@ -40,6 +46,7 @@ pub(super) fn raw_event(
         }),
         element: None,
         data,
+        capture_context,
     })
 }
 
@@ -55,6 +62,7 @@ pub(super) fn unknown_clipboard_event(data: EventData) -> RawEvent {
         window: None,
         element: None,
         data,
+        capture_context: Default::default(),
     }
 }
 

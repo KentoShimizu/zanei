@@ -100,6 +100,7 @@ impl ClipboardTracker {
                         read_content(include_content),
                         ClipboardOrigin::CopyShortcut,
                     )),
+                    text_policy,
                 )
             }
             ClipboardChange::Unknown => Some(unknown_clipboard_event(EventData::ClipboardCopy(

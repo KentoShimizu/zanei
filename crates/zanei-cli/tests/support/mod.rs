@@ -206,6 +206,7 @@ fn synthetic_events(now: OffsetDateTime) -> Vec<Event> {
                 mono_ns,
             )
             .expect("normalize fixture event")
+            .event
         })
         .collect()
 }
@@ -326,6 +327,7 @@ fn raw_event(event_type: &str, data: EventData) -> RawEvent {
             value: None,
         }),
         data,
+        capture_context: Default::default(),
     }
 }
 

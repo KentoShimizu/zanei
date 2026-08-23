@@ -80,7 +80,7 @@ impl Sink for StoreSink {
 #[cfg(test)]
 mod tests {
     use crate::normalize::normalize;
-    use crate::schema::{App, EmptyData, EventData, RawEvent};
+    use crate::schema::{App, CaptureContext, EmptyData, EventData, RawEvent};
     use time::OffsetDateTime;
 
     use super::{Sink, StreamSink};
@@ -99,6 +99,7 @@ mod tests {
                 window: None,
                 element: None,
                 data: EventData::AppLaunch(EmptyData::default()),
+                capture_context: CaptureContext::default(),
             },
             OffsetDateTime::UNIX_EPOCH,
             0,
@@ -106,13 +107,13 @@ mod tests {
         .expect("fixture wall time is representable");
         let mut sink = StreamSink::new(Vec::new());
 
-        sink.write(&event).expect("event should serialize");
+        sink.write(&event.event).expect("event should serialize");
         sink.flush().expect("memory writer should flush");
         let bytes = sink.into_inner();
 
         assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
         let decoded: crate::schema::Event =
             serde_json::from_slice(&bytes).expect("line should contain one event");
-        assert_eq!(decoded, event);
+        assert_eq!(decoded, event.event);
     }
 }

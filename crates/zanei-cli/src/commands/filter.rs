@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use zanei_core::config::{Config, ConfigError, FilterEdit, FilterList, edit_filter};
+use zanei_core::config::{Config, ConfigError, FilterEdit, FilterList, FilterScope, edit_filter};
 use zanei_core::privacy::{BUILT_IN_EXCLUDED_APP_NAMES, BUILT_IN_EXCLUDED_BUNDLE_IDS};
 
 use super::EXIT_SUCCESS;
@@ -43,12 +43,15 @@ fn mutate(
         FilterAction::Add { value } => (FilterEdit::Add, value),
         FilterAction::Remove { value } => (FilterEdit::Remove, value),
     };
-    let result = edit_filter(config_path, list, edit, &value).map_err(|error| match error {
-        ConfigError::DuplicateValue { .. } | ConfigError::InvalidListValue { .. } => {
-            CliError::InvalidValue(error.to_string())
-        }
-        other => CliError::Config(other),
-    })?;
+    let result =
+        edit_filter(config_path, FilterScope::AllEvents, list, edit, &value).map_err(|error| {
+            match error {
+                ConfigError::DuplicateValue { .. } | ConfigError::InvalidListValue { .. } => {
+                    CliError::InvalidValue(error.to_string())
+                }
+                other => CliError::Config(other),
+            }
+        })?;
     if !quiet {
         if result.changed {
             println!("Updated {}", config_path.display());

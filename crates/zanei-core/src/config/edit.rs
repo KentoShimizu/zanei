@@ -44,6 +44,7 @@ pub struct ScalarEditResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScalarConfigKey {
     CaptureTextContent,
+    CaptureContentSnapshot,
     OutputBatchIntervalSeconds,
     OutputRetentionHours,
 }
@@ -52,6 +53,7 @@ impl ScalarConfigKey {
     fn parse(dotted_key: &str) -> Result<Self, ConfigSetError> {
         match dotted_key {
             "capture.text_content" => Ok(Self::CaptureTextContent),
+            "capture.content_snapshot" => Ok(Self::CaptureContentSnapshot),
             "output.batch_interval_s" => Ok(Self::OutputBatchIntervalSeconds),
             "output.retention_hours" => Ok(Self::OutputRetentionHours),
             "capture.sources"
@@ -59,6 +61,14 @@ impl ScalarConfigKey {
             | "filter.include_only_apps"
             | "filter.exclude_websites"
             | "filter.include_only_websites"
+            | "filter.text_content.exclude_apps"
+            | "filter.text_content.include_only_apps"
+            | "filter.text_content.exclude_websites"
+            | "filter.text_content.include_only_websites"
+            | "filter.content_snapshot.exclude_apps"
+            | "filter.content_snapshot.include_only_apps"
+            | "filter.content_snapshot.exclude_websites"
+            | "filter.content_snapshot.include_only_websites"
             | "filter.redactors" => Err(ConfigSetError::ArrayKey(dotted_key.to_owned())),
             _ => Err(ConfigSetError::UnknownKey(dotted_key.to_owned())),
         }
@@ -67,6 +77,7 @@ impl ScalarConfigKey {
     const fn name(self) -> &'static str {
         match self {
             Self::CaptureTextContent => "capture.text_content",
+            Self::CaptureContentSnapshot => "capture.content_snapshot",
             Self::OutputBatchIntervalSeconds => "output.batch_interval_s",
             Self::OutputRetentionHours => "output.retention_hours",
         }
@@ -75,7 +86,9 @@ impl ScalarConfigKey {
     const fn restart_recording(self) -> bool {
         matches!(
             self,
-            Self::CaptureTextContent | Self::OutputBatchIntervalSeconds
+            Self::CaptureTextContent
+                | Self::CaptureContentSnapshot
+                | Self::OutputBatchIntervalSeconds
         )
     }
 }
@@ -91,6 +104,9 @@ pub fn apply_scalar_edit(
     match key {
         ScalarConfigKey::CaptureTextContent => {
             edited.capture.text_content = parse_bool(key, value)?;
+        }
+        ScalarConfigKey::CaptureContentSnapshot => {
+            edited.capture.content_snapshot = parse_bool(key, value)?;
         }
         ScalarConfigKey::OutputBatchIntervalSeconds => {
             edited.output.batch_interval_s = parse_u64(key, value)?;
@@ -144,6 +160,14 @@ pub enum FilterList {
     IncludeOnlyWebsites,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FilterScope {
+    #[default]
+    AllEvents,
+    TextContent,
+    ContentSnapshot,
+}
+
 impl FilterList {
     const fn is_website(self) -> bool {
         matches!(self, Self::ExcludeWebsites | Self::IncludeOnlyWebsites)
@@ -165,13 +189,14 @@ pub struct FilterEditResult {
 
 pub fn edit_filter(
     path: impl AsRef<Path>,
+    scope: FilterScope,
     list: FilterList,
     edit: FilterEdit,
     value: &str,
 ) -> Result<FilterEditResult, ConfigError> {
     let path = path.as_ref();
     let config = Config::load(path)?;
-    let result = apply_filter_edit(&config, list, edit, value)?;
+    let result = apply_filter_edit(&config, scope, list, edit, value)?;
     if result.changed {
         save(&result.config, path)?;
     }
@@ -218,15 +243,16 @@ pub(super) fn save_encoded(encoded: &str, path: impl AsRef<Path>) -> Result<(), 
 
 fn apply_filter_edit(
     config: &Config,
+    scope: FilterScope,
     list: FilterList,
     edit: FilterEdit,
     value: &str,
 ) -> Result<FilterEditResult, ConfigError> {
     config.validate()?;
-    validate_edit_value(config, list, value)?;
+    validate_edit_value(config, scope, list, value)?;
 
     let mut edited = config.clone();
-    let values = filter_values_mut(&mut edited, list);
+    let values = filter_values_mut(&mut edited, scope, list);
     let existing = values.iter().position(|current| same_value(current, value));
     let changed = match (edit, existing) {
         (FilterEdit::Add, None) => {
@@ -250,21 +276,57 @@ fn apply_filter_edit(
     })
 }
 
-fn validate_edit_value(config: &Config, list: FilterList, value: &str) -> Result<(), ConfigError> {
+fn validate_edit_value(
+    config: &Config,
+    scope: FilterScope,
+    list: FilterList,
+    value: &str,
+) -> Result<(), ConfigError> {
     let mut candidate = config.clone();
-    let values = filter_values_mut(&mut candidate, list);
+    let values = filter_values_mut(&mut candidate, scope, list);
     if !values.iter().any(|current| same_value(current, value)) {
         values.push(value.to_owned());
     }
     candidate.validate()
 }
 
-fn filter_values_mut(config: &mut Config, list: FilterList) -> &mut Vec<String> {
-    match list {
-        FilterList::ExcludeApps => &mut config.filter.exclude_apps,
-        FilterList::IncludeOnlyApps => &mut config.filter.include_only_apps,
-        FilterList::ExcludeWebsites => &mut config.filter.exclude_websites,
-        FilterList::IncludeOnlyWebsites => &mut config.filter.include_only_websites,
+fn filter_values_mut(
+    config: &mut Config,
+    scope: FilterScope,
+    list: FilterList,
+) -> &mut Vec<String> {
+    let filter = &mut config.filter;
+    match (scope, list) {
+        (FilterScope::AllEvents, FilterList::ExcludeApps) => &mut filter.exclude_apps,
+        (FilterScope::AllEvents, FilterList::IncludeOnlyApps) => &mut filter.include_only_apps,
+        (FilterScope::AllEvents, FilterList::ExcludeWebsites) => &mut filter.exclude_websites,
+        (FilterScope::AllEvents, FilterList::IncludeOnlyWebsites) => {
+            &mut filter.include_only_websites
+        }
+        (FilterScope::TextContent, FilterList::ExcludeApps) => {
+            &mut filter.text_content.exclude_apps
+        }
+        (FilterScope::TextContent, FilterList::IncludeOnlyApps) => {
+            &mut filter.text_content.include_only_apps
+        }
+        (FilterScope::TextContent, FilterList::ExcludeWebsites) => {
+            &mut filter.text_content.exclude_websites
+        }
+        (FilterScope::TextContent, FilterList::IncludeOnlyWebsites) => {
+            &mut filter.text_content.include_only_websites
+        }
+        (FilterScope::ContentSnapshot, FilterList::ExcludeApps) => {
+            &mut filter.content_snapshot.exclude_apps
+        }
+        (FilterScope::ContentSnapshot, FilterList::IncludeOnlyApps) => {
+            &mut filter.content_snapshot.include_only_apps
+        }
+        (FilterScope::ContentSnapshot, FilterList::ExcludeWebsites) => {
+            &mut filter.content_snapshot.exclude_websites
+        }
+        (FilterScope::ContentSnapshot, FilterList::IncludeOnlyWebsites) => {
+            &mut filter.content_snapshot.include_only_websites
+        }
     }
 }
 
@@ -355,6 +417,7 @@ mod tests {
         let path = test_path("dedupe");
         let added = edit_filter(
             &path,
+            FilterScope::AllEvents,
             FilterList::IncludeOnlyApps,
             FilterEdit::Add,
             "com.apple.Safari",
@@ -364,6 +427,7 @@ mod tests {
 
         let duplicate = edit_filter(
             &path,
+            FilterScope::AllEvents,
             FilterList::IncludeOnlyApps,
             FilterEdit::Add,
             "COM.APPLE.SAFARI",
@@ -377,6 +441,7 @@ mod tests {
 
         let removed = edit_filter(
             &path,
+            FilterScope::AllEvents,
             FilterList::IncludeOnlyApps,
             FilterEdit::Remove,
             "COM.APPLE.SAFARI",
@@ -399,7 +464,7 @@ mod tests {
                 "https://example.com",
             ),
         ] {
-            assert!(edit_filter(&path, list, edit, value).is_err());
+            assert!(edit_filter(&path, FilterScope::AllEvents, list, edit, value).is_err());
             assert!(!path.exists());
         }
         remove_test_tree(&path);
@@ -429,8 +494,14 @@ mod tests {
     fn add_warns_for_snapshot_public_suffixes_only() {
         for suffix in ["com", "co.jp"] {
             let path = test_path(&format!("suffix-{}", suffix.replace('.', "-")));
-            let result = edit_filter(&path, FilterList::ExcludeWebsites, FilterEdit::Add, suffix)
-                .expect("public suffix is valid configuration syntax");
+            let result = edit_filter(
+                &path,
+                FilterScope::AllEvents,
+                FilterList::ExcludeWebsites,
+                FilterEdit::Add,
+                suffix,
+            )
+            .expect("public suffix is valid configuration syntax");
             assert!(result.public_suffix_warning, "{suffix}");
             remove_test_tree(&path);
         }
@@ -438,6 +509,7 @@ mod tests {
         let path = test_path("registrable-domain");
         let result = edit_filter(
             &path,
+            FilterScope::AllEvents,
             FilterList::ExcludeWebsites,
             FilterEdit::Add,
             "example.com",

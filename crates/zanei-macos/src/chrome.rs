@@ -31,7 +31,7 @@ use crate::{
     workspace::{ApplicationInfo, WorkspaceEvent},
 };
 
-const CHROME_BUNDLE_ID: &str = "com.google.Chrome";
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 const COLLECTOR_NAME: &str = "chrome";
 const EVENT_SOURCE: &str = "macos.applescript";
 const EVENT_TYPE: &str = "browser.navigate";
@@ -424,6 +424,7 @@ fn poll_once<A: ChromeApi>(
 }
 
 fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
+    let website_host = zanei_core::privacy::website_host(&navigation.snapshot.url);
     RawEvent {
         source: EVENT_SOURCE.to_owned(),
         event_type: EVENT_TYPE.to_owned(),
@@ -444,6 +445,7 @@ fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
             mode: BrowserMode::Normal,
             transition: navigation.transition,
         }),
+        capture_context: zanei_core::schema::CaptureContext { website_host },
     }
 }
 

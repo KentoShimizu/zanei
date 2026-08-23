@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use edit::{
-    ConfigSetError, FilterEdit, FilterEditResult, FilterList, ScalarEditResult, apply_scalar_edit,
-    edit_filter, save,
+    ConfigSetError, FilterEdit, FilterEditResult, FilterList, FilterScope, ScalarEditResult,
+    apply_scalar_edit, edit_filter, save,
 };
-pub use scalar_file::{capture_text_content_is_explicit, save_capture_text_content};
+pub use scalar_file::{CaptureBoolKey, capture_bool_is_explicit, save_capture_bool};
 pub use time_expression::{TimeExpressionError, parse_duration_expression, parse_time_expression};
 
 pub const CONFIG_WATCH_INTERVAL: StdDuration = StdDuration::from_secs(2);
@@ -25,6 +25,14 @@ pub const DEFAULT_BATCH_INTERVAL_SECONDS: u64 = 5;
 pub const DEFAULT_RETENTION_HOURS: u64 = 48;
 
 const DEFAULT_EXCLUDED_APPS: [&str; 2] = ["1Password", "Keychain Access"];
+pub const PRIVATE_WINDOW_UNDETECTABLE_BROWSER_BUNDLE_IDS: [&str; 6] = [
+    "com.apple.Safari",
+    "org.mozilla.firefox",
+    "com.brave.Browser",
+    "com.microsoft.edgemac",
+    "com.vivaldi.Vivaldi",
+    "company.thebrowser.Browser",
+];
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,6 +106,7 @@ impl Config {
 pub struct CaptureConfig {
     pub sources: Vec<CaptureSource>,
     pub text_content: bool,
+    pub content_snapshot: bool,
 }
 
 impl Default for CaptureConfig {
@@ -111,6 +120,7 @@ impl Default for CaptureConfig {
                 CaptureSource::Browser,
             ],
             text_content: false,
+            content_snapshot: false,
         }
     }
 }
@@ -123,6 +133,8 @@ pub struct FilterConfig {
     pub exclude_websites: Vec<String>,
     pub include_only_websites: Vec<String>,
     pub redactors: Vec<RedactorKind>,
+    pub text_content: ScopedFilterConfig,
+    pub content_snapshot: ScopedFilterConfig,
 }
 
 impl Default for FilterConfig {
@@ -137,6 +149,30 @@ impl Default for FilterConfig {
                 RedactorKind::CreditCard,
                 RedactorKind::Token,
             ],
+            text_content: ScopedFilterConfig::default(),
+            content_snapshot: ScopedFilterConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScopedFilterConfig {
+    pub exclude_apps: Vec<String>,
+    pub include_only_apps: Vec<String>,
+    pub exclude_websites: Vec<String>,
+    pub include_only_websites: Vec<String>,
+}
+
+impl Default for ScopedFilterConfig {
+    fn default() -> Self {
+        Self {
+            exclude_apps: PRIVATE_WINDOW_UNDETECTABLE_BROWSER_BUNDLE_IDS
+                .map(str::to_owned)
+                .to_vec(),
+            include_only_apps: Vec::new(),
+            exclude_websites: Vec::new(),
+            include_only_websites: Vec::new(),
         }
     }
 }

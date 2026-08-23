@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use zanei_core::config::{Config, parse_time_expression};
 use zanei_core::normalize::format_timestamp;
-use zanei_core::store::{QueryFilter, StoreError, StoreReader};
+use zanei_core::store::{QueryFilter, QueryResult, StoreError, StoreReader};
 use zanei_core::timeline::{
     Granularity, MIN_TIMELINE_TOKEN_BUDGET_TOKENS, TimeRange, TimelineFormat, TimelineOptions,
     build, serialize,
@@ -95,7 +95,7 @@ impl ZaneiServer {
             )));
         }
         let retention_hours = self.retention_hours()?;
-        let events = match self.reader()? {
+        let result = match self.reader()? {
             Some(reader) => reader
                 .query(
                     &QueryFilter {
@@ -106,14 +106,14 @@ impl ZaneiServer {
                     retention_hours,
                 )
                 .map_err(store_error)?,
-            None => Vec::new(),
+            None => QueryResult::default(),
         };
         let core_format = match input.format {
             TimelineOutputFormat::Markdown => TimelineFormat::Markdown,
             TimelineOutputFormat::Structured => TimelineFormat::Json,
         };
         let timeline = build(
-            &events,
+            &result.events,
             &TimelineOptions {
                 range: TimeRange { since, until },
                 token_budget: input.token_budget,
@@ -142,6 +142,7 @@ impl ZaneiServer {
                 timeline.sessions,
                 timeline.token_estimate,
                 timeline.truncated,
+                result.skipped_unknown_types,
             ),
         };
         Ok(Json(output))
@@ -169,20 +170,21 @@ impl ZaneiServer {
         };
         filter.validate().map_err(store_error)?;
         let retention_hours = self.retention_hours()?;
-        let mut events = match self.reader()? {
+        let mut result = match self.reader()? {
             Some(reader) => reader
                 .query(&filter, retention_hours)
                 .map_err(store_error)?,
-            None => Vec::new(),
+            None => QueryResult::default(),
         };
-        let truncated = events.len() > input.limit;
-        events.truncate(input.limit);
+        let truncated = result.events.len() > input.limit;
+        result.events.truncate(input.limit);
 
         Ok(Json(QueryEventsOutput {
             range: RangeOutput { since, until },
-            count: events.len(),
+            count: result.events.len(),
             truncated,
-            events,
+            skipped_unknown_types: result.skipped_unknown_types,
+            events: result.events,
         }))
     }
 

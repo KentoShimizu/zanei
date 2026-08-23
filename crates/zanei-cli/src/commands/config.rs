@@ -3,13 +3,13 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use zanei_core::config::{Config, apply_scalar_edit, save, save_capture_text_content};
+use zanei_core::config::{CaptureBoolKey, Config, apply_scalar_edit, save, save_capture_bool};
 
 use super::EXIT_SUCCESS;
 use crate::cli::{ConfigArgs, ConfigCommand};
 use crate::error::CliError;
 
-const CONFIG_OPTION_COMMENTS: [ConfigOptionComment; 9] = [
+const CONFIG_OPTION_COMMENTS: [ConfigOptionComment; 18] = [
     ConfigOptionComment {
         section: "capture",
         key: "sources",
@@ -19,6 +19,11 @@ const CONFIG_OPTION_COMMENTS: [ConfigOptionComment; 9] = [
         section: "capture",
         key: "text_content",
         description: "Capture typed, field, and clipboard content (explicit opt-in).",
+    },
+    ConfigOptionComment {
+        section: "capture",
+        key: "content_snapshot",
+        description: "Capture frontmost-window Accessibility text (explicit opt-in).",
     },
     ConfigOptionComment {
         section: "filter",
@@ -44,6 +49,46 @@ const CONFIG_OPTION_COMMENTS: [ConfigOptionComment; 9] = [
         section: "filter",
         key: "redactors",
         description: "Redactors applied to captured values: email, credit_card, and token.",
+    },
+    ConfigOptionComment {
+        section: "filter.text_content",
+        key: "exclude_apps",
+        description: "Apps whose typed and clipboard bodies stay null.",
+    },
+    ConfigOptionComment {
+        section: "filter.text_content",
+        key: "include_only_apps",
+        description: "When non-empty, retain typed bodies only for these apps.",
+    },
+    ConfigOptionComment {
+        section: "filter.text_content",
+        key: "exclude_websites",
+        description: "Chrome hosts whose typed and clipboard bodies stay null.",
+    },
+    ConfigOptionComment {
+        section: "filter.text_content",
+        key: "include_only_websites",
+        description: "When non-empty, retain typed bodies only for these Chrome hosts.",
+    },
+    ConfigOptionComment {
+        section: "filter.content_snapshot",
+        key: "exclude_apps",
+        description: "Apps where content snapshots are not created.",
+    },
+    ConfigOptionComment {
+        section: "filter.content_snapshot",
+        key: "include_only_apps",
+        description: "When non-empty, create content snapshots only for these apps.",
+    },
+    ConfigOptionComment {
+        section: "filter.content_snapshot",
+        key: "exclude_websites",
+        description: "Chrome hosts where content snapshots are not created.",
+    },
+    ConfigOptionComment {
+        section: "filter.content_snapshot",
+        key: "include_only_websites",
+        description: "When non-empty, create snapshots only for these Chrome hosts.",
     },
     ConfigOptionComment {
         section: "output",
@@ -127,8 +172,13 @@ fn persist_scalar(
 ) -> Result<(zanei_core::config::ScalarEditResult, bool), CliError> {
     let config = Config::load(config_path)?;
     let result = apply_scalar_edit(&config, dotted_key, value)?;
-    let file_changed = if dotted_key == "capture.text_content" {
-        save_capture_text_content(&result.config, config_path)?
+    let capture_bool = match dotted_key {
+        "capture.text_content" => Some(CaptureBoolKey::TextContent),
+        "capture.content_snapshot" => Some(CaptureBoolKey::ContentSnapshot),
+        _ => None,
+    };
+    let file_changed = if let Some(key) = capture_bool {
+        save_capture_bool(&result.config, config_path, key)?
     } else if result.changed {
         save(&result.config, config_path)?;
         true

@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
+use serde::Serialize;
 use time::OffsetDateTime;
 use zanei_core::config::{Config, parse_time_expression};
 use zanei_core::normalize::format_timestamp;
@@ -19,11 +20,19 @@ use crate::cli::{
 use crate::error::CliError;
 use crate::store_access::{self, KeyPrompt};
 
+#[derive(Serialize)]
+struct TimelineQueryReport<'a> {
+    #[serde(flatten)]
+    timeline: &'a zanei_core::timeline::Timeline,
+    skipped_unknown_types: u64,
+}
+
 pub fn query(
     config_path: &Path,
     store_path: &Path,
     args: QueryArgs,
     json: bool,
+    quiet: bool,
 ) -> Result<u8, CliError> {
     let (since, until) = range(&args.since, &args.until)?;
     let types = args
@@ -40,20 +49,17 @@ pub fn query(
         bundle_id: args.bundle_id,
         limit: Some(args.limit),
     };
-    filter.validate().map_err(|error| match error {
-        StoreError::InvalidTypePattern(_) => CliError::InvalidValue(error.to_string()),
-        other => CliError::Store(other),
-    })?;
     let configured_retention_hours = Config::load(config_path)?.output.retention_hours;
-    let events = store_access::open_reader(store_path, KeyPrompt::Allowed)?
+    let result = store_access::open_reader(store_path, KeyPrompt::Allowed)?
         .query(&filter, configured_retention_hours)?;
     let format = if json { QueryFormat::Json } else { args.format };
     let mut stdout = io::stdout().lock();
     match format {
-        QueryFormat::Jsonl => write_jsonl(&events, &mut stdout)?,
-        QueryFormat::Json => write_json(&events, &mut stdout)?,
-        QueryFormat::Table => write_table(&events, &mut stdout)?,
+        QueryFormat::Jsonl => write_jsonl(&result.events, &mut stdout)?,
+        QueryFormat::Json => write_json(&result.events, &mut stdout)?,
+        QueryFormat::Table => write_table(&result.events, &mut stdout)?,
     }
+    warn_unknown_types(result.skipped_unknown_types, quiet);
     Ok(EXIT_SUCCESS)
 }
 
@@ -62,10 +68,11 @@ pub fn timeline(
     store_path: &Path,
     args: TimelineArgs,
     json: bool,
+    quiet: bool,
 ) -> Result<u8, CliError> {
     let configured_retention_hours = Config::load(config_path)?.output.retention_hours;
     let (since, until) = range(&args.since, &args.until)?;
-    let events = store_access::open_reader(store_path, KeyPrompt::Allowed)?.query(
+    let result = store_access::open_reader(store_path, KeyPrompt::Allowed)?.query(
         &QueryFilter {
             since: Some(since.clone()),
             until: Some(until.clone()),
@@ -82,7 +89,7 @@ pub fn timeline(
         }
     };
     let timeline = build(
-        &events,
+        &result.events,
         &TimelineOptions {
             range: TimeRange { since, until },
             token_budget: args.token_budget,
@@ -93,7 +100,17 @@ pub fn timeline(
             format,
         },
     )?;
-    println!("{}", serialize(&timeline, format)?);
+    let output = match format {
+        TimelineFormat::Json => serde_json::to_string(&TimelineQueryReport {
+            timeline: &timeline,
+            skipped_unknown_types: result.skipped_unknown_types,
+        })?,
+        TimelineFormat::Markdown => serialize(&timeline, format)?,
+    };
+    println!("{output}");
+    if format == TimelineFormat::Markdown {
+        warn_unknown_types(result.skipped_unknown_types, quiet);
+    }
     Ok(EXIT_SUCCESS)
 }
 
@@ -106,6 +123,12 @@ pub fn export(
 ) -> Result<u8, CliError> {
     let configured_retention_hours = Config::load(config_path)?.output.retention_hours;
     let (since, until) = range(&args.since, &args.until)?;
+    let types = args
+        .types
+        .as_deref()
+        .map(parse_types)
+        .transpose()?
+        .unwrap_or_else(|| vec!["*".to_owned()]);
     let format = if json {
         ExportFormat::Json
     } else {
@@ -119,15 +142,17 @@ pub fn export(
             store_path,
             since,
             until,
+            types,
             configured_retention_hours,
             &out,
             quiet,
         );
     }
-    let events = store_access::open_reader(store_path, KeyPrompt::Allowed)?.query(
+    let result = store_access::open_reader(store_path, KeyPrompt::Allowed)?.query(
         &QueryFilter {
             since: Some(since),
             until: Some(until),
+            types,
             ..QueryFilter::default()
         },
         configured_retention_hours,
@@ -136,16 +161,17 @@ pub fn export(
         Some(path) => {
             let file = File::create(&path).map_err(|source| CliError::io(&path, source))?;
             let mut writer = BufWriter::new(file);
-            write_export(&events, format, &mut writer)?;
+            write_export(&result.events, format, &mut writer)?;
             writer
                 .flush()
                 .map_err(|source| CliError::io(path, source))?;
         }
         None => {
             let mut stdout = io::stdout().lock();
-            write_export(&events, format, &mut stdout)?;
+            write_export(&result.events, format, &mut stdout)?;
         }
     }
+    warn_unknown_types(result.skipped_unknown_types, quiet);
     Ok(EXIT_SUCCESS)
 }
 
@@ -168,6 +194,7 @@ fn export_sqlite(
     store_path: &Path,
     since: String,
     until: String,
+    types: Vec<String>,
     configured_retention_hours: u64,
     out: &Path,
     quiet: bool,
@@ -189,6 +216,7 @@ fn export_sqlite(
     let filter = QueryFilter {
         since: Some(since),
         until: Some(until),
+        types,
         ..QueryFilter::default()
     };
     let report = store_access::store_key_for(store_path, KeyPrompt::Allowed).and_then(|key| {
@@ -230,12 +258,27 @@ fn range(since: &str, until: &str) -> Result<(String, String), CliError> {
     Ok((format_timestamp(since), format_timestamp(until)))
 }
 
-fn parse_types(input: &str) -> Result<Vec<String>, CliError> {
+pub(super) fn parse_types(input: &str) -> Result<Vec<String>, CliError> {
     let types: Vec<_> = input.split(',').map(str::trim).map(str::to_owned).collect();
     if types.iter().any(String::is_empty) {
         return Err(CliError::InvalidValue(
             "--types contains an empty event type".to_owned(),
         ));
     }
+    QueryFilter {
+        types: types.clone(),
+        ..QueryFilter::default()
+    }
+    .validate()
+    .map_err(|error| match error {
+        StoreError::InvalidTypePattern(_) => CliError::InvalidValue(error.to_string()),
+        other => CliError::Store(other),
+    })?;
     Ok(types)
+}
+
+fn warn_unknown_types(skipped_unknown_types: u64, quiet: bool) {
+    if skipped_unknown_types > 0 && !quiet {
+        eprintln!("warning: skipped {skipped_unknown_types} events with unknown types");
+    }
 }

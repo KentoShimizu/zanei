@@ -31,7 +31,13 @@ pub(crate) fn enforce_size_limits(event: &mut Event) {
         }
         EventData::ClipboardCopy(data) => drop_oversized(&mut data.text, TEXT_FIELD_MAX_BYTES),
         EventData::ClipboardPaste(data) => drop_oversized(&mut data.text, TEXT_FIELD_MAX_BYTES),
-        _ => false,
+        EventData::AppActivate(_)
+        | EventData::AppLaunch(_)
+        | EventData::AppTerminate(_)
+        | EventData::WindowFocus(_)
+        | EventData::UiFocus(_)
+        | EventData::UiClick(_)
+        | EventData::InputScroll(_) => false,
     };
 
     if truncated {

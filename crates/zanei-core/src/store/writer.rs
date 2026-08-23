@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::time::Duration as StdDuration;
 
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, Transaction, params, params_from_iter};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -16,6 +16,43 @@ use super::{
     STORE_SCHEMA_VERSION, STORE_TABLES, StoreError, StoreFormat, StoreKey, apply_key,
     retention_cutoff, store_uri, verify_key,
 };
+
+/// A parameterized event selection for destructive store operations.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PurgeFilter {
+    pub types: Vec<String>,
+    pub before: Option<String>,
+    pub app: Option<String>,
+    pub bundle_id: Option<String>,
+}
+
+impl PurgeFilter {
+    #[must_use]
+    pub fn all() -> Self {
+        Self {
+            types: vec!["*".to_owned()],
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn before_all(before: impl Into<String>) -> Self {
+        Self {
+            types: vec!["*".to_owned()],
+            before: Some(before.into()),
+            ..Self::default()
+        }
+    }
+
+    fn selection(&self) -> super::EventSelection {
+        super::EventSelection {
+            types: self.types.clone(),
+            before: self.before.clone(),
+            app: self.app.clone(),
+            bundle_id: self.bundle_id.clone(),
+        }
+    }
+}
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
 const STORE_PRAGMAS: &str = "
@@ -150,20 +187,15 @@ impl StoreWriter {
         Ok(prepared.len())
     }
 
-    pub fn purge_before(&mut self, cutoff: &str) -> Result<usize, StoreError> {
-        let cutoff = parse_timestamp("cutoff", cutoff)?;
-        let cutoff = crate::normalize::format_timestamp(cutoff);
+    pub fn purge(&mut self, filter: &PurgeFilter) -> Result<usize, StoreError> {
+        let mut conditions = Vec::new();
+        let mut parameters = Vec::new();
+        filter
+            .selection()
+            .append_predicate(&mut conditions, &mut parameters)?;
+        let sql = format!("DELETE FROM events WHERE {}", conditions.join(" AND "));
         let transaction = self.connection.transaction()?;
-        let deleted = transaction.execute("DELETE FROM events WHERE ts < ?1", [&cutoff])?;
-        transaction.commit()?;
-        self.connection
-            .execute_batch("PRAGMA incremental_vacuum;")?;
-        Ok(deleted)
-    }
-
-    pub fn purge_all(&mut self) -> Result<usize, StoreError> {
-        let transaction = self.connection.transaction()?;
-        let deleted = transaction.execute("DELETE FROM events", [])?;
+        let deleted = transaction.execute(&sql, params_from_iter(parameters.iter()))?;
         transaction.commit()?;
         self.connection
             .execute_batch("PRAGMA incremental_vacuum;")?;
@@ -176,7 +208,7 @@ impl StoreWriter {
         retention_hours: u64,
     ) -> Result<usize, StoreError> {
         let cutoff = retention_cutoff(now, retention_hours)?;
-        self.purge_before(&cutoff)
+        self.purge(&PurgeFilter::before_all(cutoff))
     }
 
     pub fn write_daemon_state(&self, state: &DaemonState) -> Result<(), StoreError> {

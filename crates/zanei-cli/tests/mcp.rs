@@ -79,9 +79,19 @@ fn mcp_stdio_exposes_three_tools_and_contract_results() {
     assert!(status["oldest_event_ts"].is_string());
 
     let query = client.call_tool("query_events", json!({}));
-    assert_keys(&query, &["count", "events", "range", "truncated"]);
+    assert_keys(
+        &query,
+        &[
+            "count",
+            "events",
+            "range",
+            "skipped_unknown_types",
+            "truncated",
+        ],
+    );
     assert_eq!(query["count"], KNOWN_EVENT_TYPES.len());
     assert_eq!(query["truncated"], false);
+    assert_eq!(query["skipped_unknown_types"], 0);
     let events = query["events"].as_array().expect("query events array");
     assert_eq!(events.len(), KNOWN_EVENT_TYPES.len());
     assert_keys(
@@ -158,6 +168,7 @@ fn tool_results_validate_against_the_listed_output_schemas() {
         "get_timeline",
         json!({ "format": "structured", "granularity": "fine" }),
     );
+    assert_eq!(structured["skipped_unknown_types"], 0);
     assert_eq!(structured["sessions"][0]["event_ids_truncated"], false);
 
     for (name, output) in [
@@ -381,10 +392,12 @@ fn assert_empty_results(client: &mut McpClient) {
     let query = client.call_tool("query_events", json!({}));
     assert_eq!(query["count"], 0);
     assert_eq!(query["truncated"], false);
+    assert_eq!(query["skipped_unknown_types"], 0);
     assert_eq!(query["events"], json!([]));
 
     let timeline = client.call_tool("get_timeline", json!({ "format": "structured" }));
     assert_eq!(timeline["truncated"], false);
+    assert_eq!(timeline["skipped_unknown_types"], 0);
     assert_eq!(timeline["sessions"], json!([]));
 }
 

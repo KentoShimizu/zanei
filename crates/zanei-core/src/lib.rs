@@ -7,4 +7,4 @@ pub mod store;
 pub mod text_delta;
 pub mod timeline;
 
-pub use schema::RawEvent;
+pub use schema::{CaptureContext, RawEvent};

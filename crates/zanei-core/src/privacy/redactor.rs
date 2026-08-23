@@ -66,7 +66,13 @@ fn redact_payload(data: &mut EventData, rule: RedactorKind) -> bool {
             let url_changed = redact_optional(value.url.as_option_mut(), rule);
             url_changed | redact_optional(&mut value.tab_title, rule)
         }
-        _ => false,
+        EventData::AppActivate(_)
+        | EventData::AppLaunch(_)
+        | EventData::AppTerminate(_)
+        | EventData::WindowFocus(_)
+        | EventData::UiFocus(_)
+        | EventData::UiClick(_)
+        | EventData::InputScroll(_) => false,
     }
 }
 

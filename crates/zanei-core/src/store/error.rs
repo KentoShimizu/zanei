@@ -1,5 +1,8 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::path::PathBuf;
+
+use super::StoreFormat;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreFailureKind {
@@ -71,6 +74,11 @@ pub enum StoreError {
     InvalidTypePattern(String),
     InvalidDaemonMode(String),
     InvalidDaemonState(&'static str),
+    UnexpectedStoreFormat {
+        path: PathBuf,
+        expected: StoreFormat,
+        actual: StoreFormat,
+    },
     UnsupportedSchemaVersion(i64),
     NumericOverflow(&'static str),
 }
@@ -101,6 +109,7 @@ impl StoreError {
             | Self::InvalidTimestamp { .. }
             | Self::InvalidDaemonMode(_)
             | Self::InvalidDaemonState(_)
+            | Self::UnexpectedStoreFormat { .. }
             | Self::UnsupportedSchemaVersion(_)
             | Self::NumericOverflow(_) => StoreFailureKind::Corrupt,
             Self::Io { .. }
@@ -159,6 +168,17 @@ impl Display for StoreError {
             Self::InvalidDaemonState(message) => {
                 write!(formatter, "invalid daemon state: {message}")
             }
+            Self::UnexpectedStoreFormat {
+                path,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "unexpected store format at {}: expected {}, found {}",
+                path.display(),
+                expected.as_str(),
+                actual.as_str()
+            ),
             Self::UnsupportedSchemaVersion(version) => {
                 write!(formatter, "unsupported store schema version: {version}")
             }
@@ -182,6 +202,7 @@ impl Error for StoreError {
             | Self::InvalidTypePattern(_)
             | Self::InvalidDaemonMode(_)
             | Self::InvalidDaemonState(_)
+            | Self::UnexpectedStoreFormat { .. }
             | Self::UnsupportedSchemaVersion(_)
             | Self::NumericOverflow(_) => None,
         }

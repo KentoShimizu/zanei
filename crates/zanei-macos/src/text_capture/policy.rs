@@ -1,8 +1,9 @@
 //! Cross-collector authorization for text-bearing event fields.
 
 use crate::{chrome::ChromeEligibilityTracker, focused_field::FocusedField};
+use zanei_core::schema::CaptureContext;
 
-const CHROME_BUNDLE_ID: &str = "com.google.Chrome";
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 
 #[derive(Clone)]
 pub struct TextContentPolicy {
@@ -32,6 +33,19 @@ impl TextContentPolicy {
     ) -> bool {
         focused_field.is_some_and(|field| field.class.is_known_text())
             && self.allows_window(bundle_id, pid, window_id)
+    }
+
+    pub(crate) fn capture_context(
+        &self,
+        bundle_id: Option<&str>,
+        pid: i64,
+        window_id: Option<i64>,
+    ) -> CaptureContext {
+        if bundle_id == Some(CHROME_BUNDLE_ID) {
+            self.chrome.capture_context(pid, window_id)
+        } else {
+            CaptureContext::default()
+        }
     }
 }
 

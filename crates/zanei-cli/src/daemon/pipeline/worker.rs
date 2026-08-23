@@ -12,7 +12,7 @@ use std::{
 
 use zanei_collector::RawEvent;
 use zanei_core::{
-    normalize::Normalizer,
+    normalize::{NormalizedEvent, Normalizer},
     privacy::PrivacyFilter,
     schema::Event,
     sink::{Sink, StreamSink},
@@ -183,7 +183,7 @@ impl Worker {
         }
     }
 
-    fn write_events(&mut self, events: Vec<Event>) -> Result<(), DaemonError> {
+    fn write_events(&mut self, events: Vec<NormalizedEvent>) -> Result<(), DaemonError> {
         for event in events {
             let event = self.filter.process(event);
             if let Some(event) = event {

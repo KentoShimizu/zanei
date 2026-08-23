@@ -248,9 +248,11 @@ fn event(app: &str, bundle_id: &str, seconds: i64, event_type: &str, data: Event
             }),
             element: None,
             data,
+            capture_context: Default::default(),
         },
         OffsetDateTime::UNIX_EPOCH + Duration::seconds(seconds),
         u64::try_from(seconds).expect("fixture seconds are non-negative") * 1_000_000_000,
     )
     .expect("fixture wall time is representable")
+    .event
 }

@@ -169,6 +169,7 @@ mod tests {
             window: None,
             element: None,
             data: EventData::AppLaunch(EmptyData {}),
+            capture_context: Default::default(),
         }
     }
 }

@@ -331,7 +331,7 @@ fn config_init_creates_a_complete_template_and_never_overwrites() {
             .lines()
             .filter(|line| line.starts_with("# "))
             .count(),
-        9
+        18
     );
 
     let sentinel = "# keep this existing file\n";
@@ -484,7 +484,7 @@ fn purge_all_quiet_deletes_fixture_events_without_prompt() {
         .open_reader()
         .query(&QueryFilter::default(), 48)
         .expect("remaining events");
-    assert!(events.is_empty());
+    assert!(events.events.is_empty());
 }
 
 #[test]
@@ -778,11 +778,13 @@ fn daemon_hot_reloads_retention_purges_immediately_and_reports_the_active_value(
             window: None,
             element: None,
             data: EventData::AppLaunch(EmptyData::default()),
+            capture_context: Default::default(),
         },
         now - time::Duration::hours(2),
         1,
     )
-    .expect("normalize expired fixture");
+    .expect("normalize expired fixture")
+    .event;
     StoreWriter::open_with_key(&store, Some(&read_key(&key_file_for(&store))))
         .and_then(|mut writer| writer.append(&expired))
         .expect("store expired fixture");
@@ -1080,7 +1082,7 @@ fn export_sqlite_writes_a_plaintext_snapshot_any_sqlite_client_can_open() {
         .expect("snapshot opens without a key")
         .query(&QueryFilter::default(), 48)
         .expect("snapshot events");
-    assert_eq!(events.len(), KNOWN_EVENT_TYPES.len());
+    assert_eq!(events.events.len(), KNOWN_EVENT_TYPES.len());
 
     let via_cli = command(&fixture.config, &out)
         .args(["query", "--since", "1h", "--format", "json"])
@@ -1159,11 +1161,13 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
             window: None,
             element: None,
             data: EventData::AppLaunch(EmptyData::default()),
+            capture_context: Default::default(),
         },
         OffsetDateTime::now_utc() - time::Duration::minutes(5),
         1,
     )
-    .expect("normalize legacy fixture");
+    .expect("normalize legacy fixture")
+    .event;
     StoreWriter::open(&store)
         .and_then(|mut writer| {
             writer.append(&legacy)?;
@@ -1214,7 +1218,7 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
         .expect("open new store")
         .query(&QueryFilter::default(), 48)
         .expect("merged events");
-    assert_eq!(merged, vec![legacy]);
+    assert_eq!(merged.events, vec![legacy]);
     let query = command(&config, &store)
         .args(["query", "--since", "1h", "--format", "json"])
         .output()
@@ -1293,11 +1297,13 @@ fn purge_covers_set_aside_stores_even_without_a_live_store() {
                         window: None,
                         element: None,
                         data: EventData::AppLaunch(EmptyData::default()),
+                        capture_context: Default::default(),
                     },
                     OffsetDateTime::now_utc() - time::Duration::minutes(5),
                     1,
                 )
-                .expect("normalize leftover event"),
+                .expect("normalize leftover event")
+                .event,
             )
         })
         .expect("set-aside store");

@@ -319,6 +319,11 @@ struct EventRef<'a> {
     redaction: &'a Redaction,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CaptureContext {
+    pub website_host: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawEvent {
     pub source: String,
@@ -327,6 +332,7 @@ pub struct RawEvent {
     pub window: Option<Window>,
     pub element: Option<Element>,
     pub data: EventData,
+    pub capture_context: CaptureContext,
 }
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>

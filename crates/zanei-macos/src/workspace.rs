@@ -309,6 +309,7 @@ impl ActivationTracker {
             window,
             element: None,
             data: EventData::AppActivate(EmptyData {}),
+            capture_context: Default::default(),
         };
         self.current_pid = Some(app.pid);
         self.current_bundle_id.clone_from(&app.bundle_id);
@@ -376,6 +377,7 @@ fn lifecycle_raw_event(
         window: None,
         element: None,
         data: data(EmptyData::default()),
+        capture_context: Default::default(),
     }
 }
 

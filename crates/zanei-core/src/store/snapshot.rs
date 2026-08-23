@@ -13,8 +13,8 @@ use rusqlite::{Connection, OpenFlags, params, params_from_iter};
 use time::OffsetDateTime;
 
 use super::{
-    QueryFilter, SQLCIPHER_COMPATIBILITY, STORE_TABLES, StoreError, StoreFormat, StoreKey,
-    StoreReader, file_uri, reader, retired_plaintext_stores,
+    EventSelection, QueryFilter, SQLCIPHER_COMPATIBILITY, STORE_TABLES, StoreError, StoreFormat,
+    StoreKey, StoreReader, file_uri, query, retired_plaintext_stores,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,8 +27,8 @@ pub struct SnapshotReport {
 ///
 /// `out` is taken literally, even when it looks like a `file:` URI, and must not
 /// exist yet or must be an empty file the caller created with the permissions it
-/// wants. Only `since`, `until`, and the retention window apply; type and app
-/// filters are ignored so the snapshot stays a faithful copy.
+/// wants. `since`, `until`, `types`, and the retention window apply. App filters
+/// are intentionally ignored because the CLI does not expose them for export.
 pub fn export_plain_sqlite(
     store: &Path,
     key: Option<&StoreKey>,
@@ -40,8 +40,9 @@ pub fn export_plain_sqlite(
         let reader = StoreReader::open_with_key(store, key)?;
         let cutoff =
             reader.retention_cutoff_at(OffsetDateTime::now_utc(), configured_retention_hours)?;
-        let since = reader::normalized_bound("since", filter.since.as_deref())?;
-        let until = reader::normalized_bound("until", filter.until.as_deref())?;
+        filter.validate()?;
+        let since = query::normalized_bound("since", filter.since.as_deref())?;
+        let until = query::normalized_bound("until", filter.until.as_deref())?;
         (cutoff, since, until)
     };
 
@@ -58,7 +59,8 @@ pub fn export_plain_sqlite(
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     snapshot.execute_batch(STORE_TABLES)?;
-    let conditions = RangeConditions::new(&cutoff, since.as_deref(), until.as_deref());
+    let conditions =
+        CopyConditions::new(&cutoff, since.as_deref(), until.as_deref(), &filter.types)?;
 
     // Sources are attached one at a time: SQLite allows ten attached databases,
     // and the number of set-aside stores is not bounded.
@@ -76,8 +78,13 @@ pub fn export_plain_sqlite(
     let mut events = main_copy?;
 
     for retired in retired_plaintext_stores(store)? {
-        if StoreFormat::probe(&retired.path)? != StoreFormat::Plaintext {
-            continue;
+        let actual = StoreFormat::probe(&retired.path)?;
+        if actual != StoreFormat::Plaintext {
+            return Err(StoreError::UnexpectedStoreFormat {
+                path: retired.path,
+                expected: StoreFormat::Plaintext,
+                actual,
+            });
         }
         // `KEY ''` keeps SQLCipher from applying any key to this plaintext file.
         snapshot.execute(
@@ -116,13 +123,18 @@ pub(super) fn attach_encrypted_source(
     Ok(())
 }
 
-struct RangeConditions {
+struct CopyConditions {
     sql: String,
     parameters: Vec<SqlValue>,
 }
 
-impl RangeConditions {
-    fn new(cutoff: &str, since: Option<&str>, until: Option<&str>) -> Self {
+impl CopyConditions {
+    fn new(
+        cutoff: &str,
+        since: Option<&str>,
+        until: Option<&str>,
+        types: &[String],
+    ) -> Result<Self, StoreError> {
         let mut conditions = vec!["ts >= ?".to_owned()];
         let mut parameters = vec![SqlValue::Text(cutoff.to_owned())];
         if let Some(since) = since {
@@ -133,10 +145,15 @@ impl RangeConditions {
             conditions.push("ts <= ?".to_owned());
             parameters.push(SqlValue::Text(until.to_owned()));
         }
-        Self {
+        EventSelection {
+            types: types.to_vec(),
+            ..EventSelection::default()
+        }
+        .append_predicate(&mut conditions, &mut parameters)?;
+        Ok(Self {
             sql: conditions.join(" AND "),
             parameters,
-        }
+        })
     }
 }
 
@@ -147,7 +164,7 @@ impl RangeConditions {
 fn copy_events(
     snapshot: &Connection,
     alias: &str,
-    conditions: &RangeConditions,
+    conditions: &CopyConditions,
 ) -> Result<u64, StoreError> {
     let sql = format!(
         "INSERT OR IGNORE INTO events(id, ts, mono_ns, source, type, bundle_id, app_name, pid, \

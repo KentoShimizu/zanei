@@ -11,10 +11,10 @@ use crate::schema::{
 };
 
 use super::{
-    DaemonMode, DaemonPermissions, DaemonState, LockedReason, PermissionState, QueryFilter,
-    StoreError, StoreFailureKind, StoreFormat, StoreKey, StoreReader, StoreStatus, StoreWriter,
-    export_plain_sqlite, purge_retired_plaintext, remove_retired, retired_plaintext_stores,
-    set_aside_plaintext,
+    DaemonMode, DaemonPermissions, DaemonState, LockedReason, PermissionState, PurgeFilter,
+    QueryFilter, StoreError, StoreFailureKind, StoreFormat, StoreKey, StoreReader, StoreStatus,
+    StoreWriter, export_plain_sqlite, purge_retired_plaintext, remove_retired,
+    retired_plaintext_stores, set_aside_plaintext,
 };
 
 static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
@@ -39,7 +39,8 @@ fn writes_reads_filters_and_rejects_unknown_types() {
     let all = reader
         .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
         .expect("query all");
-    assert_eq!(all, vec![first.clone(), browser.clone()]);
+    assert_eq!(all.events, vec![first.clone(), browser.clone()]);
+    assert_eq!(all.skipped_unknown_types, 0);
 
     let filtered = reader
         .query(
@@ -54,7 +55,7 @@ fn writes_reads_filters_and_rejects_unknown_types() {
             TEST_RETENTION_HOURS,
         )
         .expect("query filtered");
-    assert_eq!(filtered, vec![browser]);
+    assert_eq!(filtered.events, vec![browser.clone()]);
 
     let invalid_pattern = reader.query(
         &QueryFilter {
@@ -72,10 +73,11 @@ fn writes_reads_filters_and_rejects_unknown_types() {
             [&first.id],
         )
         .expect("write unknown type fixture");
-    let error = reader
+    let result = reader
         .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-        .expect_err("unknown v1 type must fail closed");
-    assert!(error.to_string().contains("unknown event type"));
+        .expect("unknown type is reported and skipped");
+    assert_eq!(result.events, [browser]);
+    assert_eq!(result.skipped_unknown_types, 1);
 }
 
 #[test]
@@ -96,10 +98,10 @@ fn truncated_marker_round_trips_through_the_store() {
         .and_then(|reader| reader.query(&QueryFilter::default(), TEST_RETENTION_HOURS))
         .expect("query truncated event");
 
-    assert_eq!(stored, [event]);
-    assert!(stored[0].is_truncated());
+    assert_eq!(stored.events, [event]);
+    assert!(stored.events[0].is_truncated());
     assert_eq!(
-        serde_json::to_value(&stored[0]).expect("serialize stored event")["truncated"],
+        serde_json::to_value(&stored.events[0]).expect("serialize stored event")["truncated"],
         true
     );
 }
@@ -128,7 +130,7 @@ fn query_excludes_events_older_than_retention_cutoff() {
         .and_then(|reader| reader.query(&QueryFilter::default(), 1))
         .expect("query retained events");
 
-    assert_eq!(events, [retained]);
+    assert_eq!(events.events, [retained]);
 }
 
 #[test]
@@ -159,7 +161,8 @@ fn query_prefers_fresh_daemon_retention_and_falls_back_for_untrusted_heartbeats(
     assert_eq!(
         reader
             .query(&QueryFilter::default(), 1)
-            .expect("query fresh daemon retention"),
+            .expect("query fresh daemon retention")
+            .events,
         [older, recent.clone()]
     );
 
@@ -172,7 +175,8 @@ fn query_prefers_fresh_daemon_retention_and_falls_back_for_untrusted_heartbeats(
     assert_eq!(
         reader
             .query(&QueryFilter::default(), 1)
-            .expect("query configured retention after stale heartbeat"),
+            .expect("query configured retention after stale heartbeat")
+            .events,
         std::slice::from_ref(&recent)
     );
 
@@ -182,7 +186,8 @@ fn query_prefers_fresh_daemon_retention_and_falls_back_for_untrusted_heartbeats(
     assert_eq!(
         reader
             .query(&QueryFilter::default(), 1)
-            .expect("query configured retention after future heartbeat"),
+            .expect("query configured retention after future heartbeat")
+            .events,
         std::slice::from_ref(&recent)
     );
 
@@ -192,7 +197,8 @@ fn query_prefers_fresh_daemon_retention_and_falls_back_for_untrusted_heartbeats(
     assert_eq!(
         reader
             .query(&QueryFilter::default(), 1)
-            .expect("query configured retention without heartbeat"),
+            .expect("query configured retention without heartbeat")
+            .events,
         [recent]
     );
 }
@@ -231,7 +237,7 @@ fn query_retention_resolution_ignores_unrelated_corrupt_status_fields() {
     let events = StoreReader::open(database.path())
         .and_then(|reader| reader.query(&QueryFilter::default(), 48))
         .expect("query must depend only on heartbeat and retention status fields");
-    assert_eq!(events, [event]);
+    assert_eq!(events.events, [event]);
 }
 
 #[test]
@@ -252,8 +258,8 @@ fn required_empty_window_presence_round_trips_through_nullable_store_columns() {
     let stored = StoreReader::open(database.path())
         .and_then(|reader| reader.query(&QueryFilter::default(), TEST_RETENTION_HOURS))
         .expect("read required empty windows");
-    assert_eq!(stored, [browser, copy]);
-    assert!(stored.iter().all(|event| event.window.is_some()));
+    assert_eq!(stored.events, [browser, copy]);
+    assert!(stored.events.iter().all(|event| event.window.is_some()));
 }
 
 #[test]
@@ -285,7 +291,7 @@ fn purge_uses_an_exclusive_cutoff_and_retention_window() {
 
     assert_eq!(
         writer
-            .purge_before("2026-08-16T09:00:00Z")
+            .purge(&PurgeFilter::before_all("2026-08-16T09:00:00Z"))
             .expect("purge before"),
         1
     );
@@ -297,8 +303,8 @@ fn purge_uses_an_exclusive_cutoff_and_retention_window() {
     let remaining = reader
         .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
         .expect("query events");
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].ts, "2026-08-16T10:00:00.000Z");
+    assert_eq!(remaining.events.len(), 1);
+    assert_eq!(remaining.events[0].ts, "2026-08-16T10:00:00.000Z");
 }
 
 #[test]
@@ -327,9 +333,19 @@ fn purge_all_removes_every_event_and_oldest_timestamp_becomes_empty() {
         Some("2026-08-16T08:00:00.000Z".to_owned())
     );
 
-    assert_eq!(writer.purge_all().expect("purge every event"), 2);
+    assert_eq!(
+        writer
+            .purge(&PurgeFilter::all())
+            .expect("purge every event"),
+        2
+    );
     assert_eq!(reader.oldest_event_ts().expect("read empty store"), None);
-    assert_eq!(writer.purge_all().expect("purge empty store"), 0);
+    assert_eq!(
+        writer
+            .purge(&PurgeFilter::all())
+            .expect("purge empty store"),
+        0
+    );
 }
 
 #[test]
@@ -957,7 +973,8 @@ fn encrypted_store_round_trips_through_keyed_reader_and_writer() {
     assert_eq!(
         reader
             .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-            .expect("query encrypted store"),
+            .expect("query encrypted store")
+            .events,
         vec![first.clone()]
     );
 
@@ -999,6 +1016,7 @@ fn encrypted_store_round_trips_through_keyed_reader_and_writer() {
         reader
             .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
             .expect("query after second write")
+            .events
             .len(),
         2
     );
@@ -1096,7 +1114,7 @@ fn plaintext_snapshot_keeps_one_copy_of_an_event_present_in_two_sources() {
     let copied = StoreReader::open(snapshot.path())
         .and_then(|reader| reader.query(&QueryFilter::default(), TEST_RETENTION_HOURS))
         .expect("snapshot events");
-    assert_eq!(copied, vec![event]);
+    assert_eq!(copied.events, vec![event]);
 }
 
 #[test]
@@ -1238,7 +1256,8 @@ fn plaintext_snapshot_copies_the_requested_range_into_a_regular_sqlite_file() {
     assert_eq!(
         reader
             .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-            .expect("query snapshot"),
+            .expect("query snapshot")
+            .events,
         vec![events[1].clone()]
     );
 
@@ -1322,7 +1341,8 @@ fn set_aside_renames_the_plaintext_store_and_readers_merge_it_back() {
     assert_eq!(
         reader
             .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-            .expect("merged query"),
+            .expect("merged query")
+            .events,
         vec![old_a.clone(), old_b.clone(), new_c]
     );
     assert_eq!(
@@ -1339,13 +1359,15 @@ fn set_aside_renames_the_plaintext_store_and_readers_merge_it_back() {
                 },
                 TEST_RETENTION_HOURS,
             )
-            .expect("filtered merged query"),
+            .expect("filtered merged query")
+            .events,
         vec![old_b]
     );
     assert!(
         reader
             .query(&QueryFilter::default(), 1)
             .expect("retention applies to set-aside stores")
+            .events
             .is_empty()
     );
     drop(reader);
@@ -1403,6 +1425,7 @@ fn retired_stores_leave_with_the_retention_window_and_unreadable_ones_are_skippe
         reader
             .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
             .expect("query still works")
+            .events
             .is_empty()
     );
     drop(reader);
@@ -1475,7 +1498,8 @@ fn plaintext_snapshot_includes_set_aside_stores_and_takes_the_output_path_litera
         StoreReader::open(&literal)
             .expect("open snapshot")
             .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-            .expect("snapshot events"),
+            .expect("snapshot events")
+            .events,
         vec![old, new]
     );
     remove_retired(&retired).expect("remove retired");
@@ -1547,7 +1571,8 @@ fn set_aside_follows_a_symlinked_store_and_keeps_the_link() {
     assert_eq!(
         reader
             .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
-            .expect("merged query via link"),
+            .expect("merged query via link")
+            .events,
         vec![old, new]
     );
     drop(reader);
@@ -1680,6 +1705,7 @@ fn many_set_aside_stores_are_exported_but_only_nine_are_attached_for_reads() {
         reader
             .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
             .expect("merged query")
+            .events
             .len(),
         9
     );

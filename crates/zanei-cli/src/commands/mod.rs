@@ -39,8 +39,10 @@ pub fn run(cli: Cli) -> Result<u8, CliError> {
         Command::Resume => control::resume(&paths.store, cli.quiet),
         Command::Status => status::run(&paths, cli.json),
         Command::Record(args) => record::run(&paths.config, args),
-        Command::Query(args) => read::query(&paths.config, &paths.store, args, cli.json),
-        Command::Timeline(args) => read::timeline(&paths.config, &paths.store, args, cli.json),
+        Command::Query(args) => read::query(&paths.config, &paths.store, args, cli.json, cli.quiet),
+        Command::Timeline(args) => {
+            read::timeline(&paths.config, &paths.store, args, cli.json, cli.quiet)
+        }
         Command::Export(args) => {
             read::export(&paths.config, &paths.store, args, cli.json, cli.quiet)
         }

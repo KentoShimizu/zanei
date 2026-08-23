@@ -487,6 +487,7 @@ mod tests {
             window,
             element: None,
             data,
+            capture_context: Default::default(),
         }
     }
 

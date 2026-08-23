@@ -50,6 +50,7 @@ fn raw() -> RawEvent {
         window: None,
         element: None,
         data: EventData::AppLaunch(EmptyData::default()),
+        capture_context: Default::default(),
     }
 }
 

@@ -173,6 +173,9 @@ impl AxEventBuilder {
             );
             return None;
         };
+        let capture_context =
+            self.text_policy
+                .capture_context(app.bundle_id.as_deref(), app.pid, window.id);
         let event = RawEvent {
             source: "macos.ax".to_owned(),
             event_type: event_type.to_owned(),
@@ -191,6 +194,7 @@ impl AxEventBuilder {
                 value: element.value,
             }),
             data,
+            capture_context,
         };
         crate::trace::trace!(
             "component=ax phase=builder action=emit pid={} event={}",

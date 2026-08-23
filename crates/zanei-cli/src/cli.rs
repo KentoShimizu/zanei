@@ -238,6 +238,12 @@ pub struct ExportArgs {
     pub until: String,
     #[arg(
         long,
+        value_name = "TYPE,...",
+        help = "Export comma-separated event types; trailing wildcards are allowed"
+    )]
+    pub types: Option<String>,
+    #[arg(
+        long,
         value_enum,
         default_value = "jsonl",
         help = "Write events in this output format"
@@ -260,7 +266,12 @@ pub enum ExportFormat {
 }
 
 #[derive(Debug, Args)]
-#[command(group(ArgGroup::new("range").required(true).multiple(false).args(["before", "all"])))]
+#[command(group(
+    ArgGroup::new("selection")
+        .required(true)
+        .multiple(true)
+        .args(["before", "all", "types"])
+))]
 pub struct PurgeArgs {
     #[arg(
         long,
@@ -268,8 +279,22 @@ pub struct PurgeArgs {
         help = "Delete events older than this time expression"
     )]
     pub before: Option<String>,
-    #[arg(long, help = "Delete every stored event; prompts unless --quiet")]
+    #[arg(
+        long,
+        conflicts_with_all = ["before", "types", "app", "bundle_id"],
+        help = "Delete every stored event; prompts unless --quiet"
+    )]
     pub all: bool,
+    #[arg(
+        long,
+        value_name = "TYPE,...",
+        help = "Delete comma-separated event types; trailing wildcards are allowed"
+    )]
+    pub types: Option<String>,
+    #[arg(long, requires = "types", conflicts_with = "bundle_id")]
+    pub app: Option<String>,
+    #[arg(long, requires = "types", conflicts_with = "app")]
+    pub bundle_id: Option<String>,
 }
 
 #[derive(Debug, Args)]

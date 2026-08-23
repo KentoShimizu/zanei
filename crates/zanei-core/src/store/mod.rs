@@ -6,10 +6,13 @@
 //! it sets the file aside (see [`retired`]) and readers merge it back in.
 
 mod error;
+mod event_row;
 mod key;
 mod key_store;
+mod query;
 mod reader;
 mod retired;
+mod selection;
 mod snapshot;
 mod types;
 
@@ -21,18 +24,20 @@ use rusqlite::Connection;
 pub use error::{LockedReason, StoreError, StoreFailureKind};
 pub use key::{STORE_KEY_BYTES, StoreFormat, StoreKey};
 pub use key_store::{KeyStore, KeyStoreError, KeyStoreInteraction, load_or_create};
+pub use query::{QueryFilter, QueryResult};
 pub use reader::{SkippedRetired, StoreReader};
 pub use retired::{RetiredPlaintext, remove_retired, resolve_store_path, retired_plaintext_stores};
+pub use selection::EventSelection;
 pub use snapshot::{SnapshotReport, export_plain_sqlite};
 pub use types::{
     DaemonMode, DaemonPermissions, DaemonState, HEARTBEAT_STALE_AFTER_SECONDS, PermissionState,
-    QueryFilter, StoreStatus,
+    StoreStatus,
 };
 
 #[cfg(feature = "write")]
 pub use retired::{RetiredRetention, purge_retired_plaintext, set_aside_plaintext};
 #[cfg(feature = "write")]
-pub use writer::StoreWriter;
+pub use writer::{PurgeFilter, StoreWriter};
 
 const LEGACY_STORE_SCHEMA_VERSION: i64 = 1;
 const DAEMON_IDENTITY_STORE_SCHEMA_VERSION: i64 = 2;

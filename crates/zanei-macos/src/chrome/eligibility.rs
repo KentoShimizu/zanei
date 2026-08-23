@@ -5,7 +5,11 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use zanei_core::{config::FilterConfig, privacy::website_is_allowed};
+use zanei_core::{
+    config::FilterConfig,
+    privacy::{website_host, website_is_allowed},
+    schema::CaptureContext,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChromeWindowEligibility {
@@ -16,7 +20,13 @@ pub(crate) enum ChromeWindowEligibility {
 
 struct EligibilityState {
     filter: FilterConfig,
-    windows: HashMap<(i32, i64), ChromeWindowEligibility>,
+    windows: HashMap<(i32, i64), ChromeWindowState>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChromeWindowState {
+    eligibility: ChromeWindowEligibility,
+    website_host: Option<String>,
 }
 
 #[derive(Clone)]
@@ -39,7 +49,13 @@ impl ChromeEligibilityPublisher {
             } else {
                 ChromeWindowEligibility::ExcludedSite
             };
-            state.windows.insert((pid, window_id), eligibility);
+            state.windows.insert(
+                (pid, window_id),
+                ChromeWindowState {
+                    eligibility,
+                    website_host: website_host(url),
+                },
+            );
         }
     }
 
@@ -52,9 +68,13 @@ impl ChromeEligibilityPublisher {
             state
                 .windows
                 .retain(|(window_pid, _), _| *window_pid != pid);
-            state
-                .windows
-                .insert((pid, window_id), ChromeWindowEligibility::Incognito);
+            state.windows.insert(
+                (pid, window_id),
+                ChromeWindowState {
+                    eligibility: ChromeWindowEligibility::Incognito,
+                    website_host: None,
+                },
+            );
         }
     }
 
@@ -94,8 +114,29 @@ impl ChromeEligibilityTracker {
             return false;
         };
         self.state.read().is_ok_and(|state| {
-            state.windows.get(&(pid, window_id)) == Some(&ChromeWindowEligibility::Normal)
+            state
+                .windows
+                .get(&(pid, window_id))
+                .is_some_and(|window| window.eligibility == ChromeWindowEligibility::Normal)
         })
+    }
+
+    pub(crate) fn capture_context(&self, pid: i64, window_id: Option<i64>) -> CaptureContext {
+        let (Ok(pid), Some(window_id)) = (i32::try_from(pid), window_id) else {
+            return CaptureContext::default();
+        };
+        self.state
+            .read()
+            .ok()
+            .and_then(|state| {
+                state
+                    .windows
+                    .get(&(pid, window_id))
+                    .map(|window| CaptureContext {
+                        website_host: window.website_host.clone(),
+                    })
+            })
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -105,7 +146,7 @@ impl ChromeEligibilityTracker {
             .ok()?
             .windows
             .get(&(i32::try_from(pid).ok()?, window_id))
-            .copied()
+            .map(|window| window.eligibility)
     }
 }
 
@@ -156,6 +197,10 @@ mod tests {
             Some(ChromeWindowEligibility::ExcludedSite)
         );
         assert!(!tracker.allows_text(7, Some(11)));
+        assert_eq!(
+            tracker.capture_context(7, Some(11)).website_host.as_deref(),
+            Some("private.example")
+        );
     }
 
     #[test]

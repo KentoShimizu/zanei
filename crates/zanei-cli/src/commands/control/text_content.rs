@@ -1,7 +1,7 @@
 use std::io;
 use std::path::Path;
 
-use zanei_core::config::capture_text_content_is_explicit;
+use zanei_core::config::{CaptureBoolKey, capture_bool_is_explicit};
 
 use super::super::config::persist_capture_text_content;
 use super::super::doctor::StartPermissionState;
@@ -20,7 +20,7 @@ pub(super) fn maybe_prompt(
     read_answer: impl FnOnce() -> io::Result<String>,
     mut write_stderr: impl FnMut(&str) -> io::Result<()>,
 ) -> Result<Option<bool>, CliError> {
-    if capture_text_content_is_explicit(config_path)?
+    if capture_bool_is_explicit(config_path, CaptureBoolKey::TextContent)?
         || output_suppressed
         || !stdin_is_terminal()
         || !stderr_is_terminal()
@@ -47,7 +47,7 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
-    use zanei_core::config::{Config, capture_text_content_is_explicit};
+    use zanei_core::config::{CaptureBoolKey, Config, capture_bool_is_explicit};
 
     use super::*;
 
@@ -71,7 +71,10 @@ mod tests {
                 .capture
                 .text_content
         );
-        assert!(capture_text_content_is_explicit(&fixture.config).expect("explicit decision"));
+        assert!(
+            capture_bool_is_explicit(&fixture.config, CaptureBoolKey::TextContent)
+                .expect("explicit decision")
+        );
         assert!(
             fs::read_to_string(&fixture.config)
                 .expect("saved config source")
@@ -99,7 +102,10 @@ mod tests {
                     .capture
                     .text_content
             );
-            assert!(capture_text_content_is_explicit(&fixture.config).expect("explicit decision"));
+            assert!(
+                capture_bool_is_explicit(&fixture.config, CaptureBoolKey::TextContent)
+                    .expect("explicit decision")
+            );
 
             let read_again = Cell::new(false);
             let (prompted_again, output_again) = fixture.run(
@@ -167,7 +173,10 @@ mod tests {
             assert_eq!(prompted, None);
             assert!(output.is_empty());
             assert!(!read.get());
-            assert!(!capture_text_content_is_explicit(&fixture.config).expect("undetermined"));
+            assert!(
+                !capture_bool_is_explicit(&fixture.config, CaptureBoolKey::TextContent)
+                    .expect("undetermined")
+            );
         }
     }
 

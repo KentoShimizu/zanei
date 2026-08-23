@@ -1814,6 +1814,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "jsonschema",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
