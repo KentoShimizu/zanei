@@ -246,7 +246,7 @@ pub struct ExportArgs {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Write output to this file instead of stdout"
+        help = "Write output to this file instead of stdout; required for --format sqlite"
     )]
     pub out: Option<PathBuf>,
 }
@@ -255,6 +255,8 @@ pub struct ExportArgs {
 pub enum ExportFormat {
     Jsonl,
     Json,
+    /// A plain SQLite file with the store's tables (requires --out)
+    Sqlite,
 }
 
 #[derive(Debug, Args)]

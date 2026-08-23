@@ -6,12 +6,13 @@ use std::time::Instant;
 use time::OffsetDateTime;
 use zanei_core::config::{Config, parse_duration_expression};
 use zanei_core::normalize::format_timestamp;
-use zanei_core::store::{DaemonMode, StoreWriter};
+use zanei_core::store::DaemonMode;
 
 use super::doctor::{StartPermissionState, require_recorder_for_start};
 use super::{EXIT_MISSING_PERMISSIONS, EXIT_NO_DAEMON, EXIT_SUCCESS};
 use crate::error::CliError;
 use crate::paths::Paths;
+use crate::store_access::{self, KeyAccess, KeyPrompt};
 
 mod start_permissions;
 mod text_content;
@@ -260,7 +261,7 @@ pub fn pause(store_path: &Path, duration: Option<&str>, quiet: bool) -> Result<u
         }
         return Ok(EXIT_NO_DAEMON);
     }
-    let writer = StoreWriter::open(store_path)?;
+    let writer = store_access::open_writer(store_path, KeyAccess::Existing, KeyPrompt::Allowed)?;
     writer.set_paused_until(Some(&paused_until))?;
     if !quiet {
         println!("Zanei recording paused");
@@ -275,7 +276,7 @@ pub fn resume(store_path: &Path, quiet: bool) -> Result<u8, CliError> {
         }
         return Ok(EXIT_NO_DAEMON);
     }
-    let writer = StoreWriter::open(store_path)?;
+    let writer = store_access::open_writer(store_path, KeyAccess::Existing, KeyPrompt::Allowed)?;
     writer.set_paused_until(None)?;
     if !quiet {
         println!("Zanei recording resumed");

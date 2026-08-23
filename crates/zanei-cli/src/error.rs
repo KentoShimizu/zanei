@@ -53,6 +53,8 @@ pub enum CliError {
     Toml(#[from] toml::ser::Error),
     #[error("configuration file already exists at {0}")]
     ConfigAlreadyExists(PathBuf),
+    #[error("snapshot file already exists at {0}; choose another --out path")]
+    SnapshotAlreadyExists(PathBuf),
     #[error("configuration template is out of sync with option {0}")]
     ConfigTemplateOutOfSync(String),
     #[error(

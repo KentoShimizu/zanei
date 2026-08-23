@@ -38,7 +38,7 @@ Activity history is sensitive data, so the defaults are conservative:
 
 | Principle | Implementation |
 | --- | --- |
-| **Local-only** | There is no network path for sending your data anywhere. |
+| **Local-only, encrypted at rest** | There is no network path for sending your data anywhere. The store file is encrypted; the key stays in your login Keychain. |
 | **No screen recording** | No screenshots, no screen-capture APIs. Only OS accessibility and event information. |
 | **No keystroke content by default** | Only the fact that typing happened and the field type are recorded. Capturing content is an explicit opt-in. |
 | **Sensitive data excluded** | Password fields, Chrome Incognito URLs, and password managers are excluded by default. |

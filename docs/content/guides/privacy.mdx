@@ -12,6 +12,7 @@ Zanei records what you do on your computer. Because that data is sensitive, the 
 3. **No keystroke content by default.** Typing is recorded as "typing happened in this kind of field," not what was typed, unless you opt in.
 4. **Capture-time filtering.** Events attributable to excluded apps are discarded before they reach the store. An unattributed clipboard change can still be stored with `app.name: "Unknown"` because it cannot be matched to the excluded app. Excluded Chrome sites produce no URL events or text-content bodies.
 5. **Read-only MCP exposure.** The [MCP server](/reference/mcp) is a read-only view. An agent connected only through MCP can read the timeline but cannot change what is recorded or edit filters.
+6. **Encrypted at rest.** The store file is encrypted. Its key is generated on the recorder's first start and kept in your login Keychain; it is not synced to iCloud Keychain. A copy of the file — in a backup, a sync folder, or on another machine — cannot be read without it, and deleting the key makes every copy unreadable.
 
 ## What is recorded with the default configuration
 
@@ -57,6 +58,7 @@ For values that are captured, redactors scrub recognizable sensitive content: em
 - **Window titles from non-Chrome browsers.** Safari and Firefox offer no reliable way to detect private windows, so Zanei does not capture URLs from them, but their window titles are still recorded like any other app's, and a private window's page title can appear there. To avoid this, exclude that browser; for example, for Safari: `zanei filter exclude-app add com.apple.Safari`.
 - **Window titles from Chrome Incognito and excluded-site windows.** Their text-content bodies remain null, but Accessibility can still record the title as a `window.title` event. To suppress titles too, exclude Chrome: `zanei filter exclude-app add com.google.Chrome`.
 - **Agents with shell access.** An agent with shell access can use the CLI to change recording settings, filters, and stored recordings, subject to the host's approval policy. The shipped skill instructs agents not to make these changes unless the user explicitly asks.
+- **Any process that can run `zanei` as you.** Encryption protects copies of the file, not the CLI. Anything running as your user — including an agent with shell access, which can run `zanei export` — can read the data, as can root or anything that reads process memory. Theft of the disk itself is covered by FileVault, not by Zanei.
 - **After an agent reads your data.** The MCP server and CLI do not send anything anywhere, but an agent that reads your timeline will typically send it to its LLM provider. That handoff is governed by the agent. The shipped skill instructs agents to narrow the time range before sending.
 
 ## Intended use

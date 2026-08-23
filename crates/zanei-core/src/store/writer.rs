@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io;
 use std::path::Path;
 use std::time::Duration as StdDuration;
 
@@ -10,77 +12,88 @@ use crate::schema::Event;
 
 use super::{
     COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
-    DaemonState, LEGACY_STORE_SCHEMA_VERSION, RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION,
-    StoreError, retention_cutoff,
+    DaemonState, LEGACY_STORE_SCHEMA_VERSION, LockedReason, RETENTION_STORE_SCHEMA_VERSION,
+    STORE_SCHEMA_VERSION, STORE_TABLES, StoreError, StoreFormat, StoreKey, apply_key,
+    retention_cutoff, store_uri, verify_key,
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
-const DATABASE_SCHEMA: &str = "
+const STORE_PRAGMAS: &str = "
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 PRAGMA busy_timeout=5000;
 PRAGMA auto_vacuum=INCREMENTAL;
-
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    ts TEXT NOT NULL,
-    mono_ns INTEGER NOT NULL,
-    source TEXT NOT NULL,
-    type TEXT NOT NULL,
-    bundle_id TEXT,
-    app_name TEXT,
-    pid INTEGER,
-    window_title TEXT,
-    window_id INTEGER,
-    element_json TEXT,
-    data_json TEXT,
-    redaction_json TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(type, ts);
-CREATE INDEX IF NOT EXISTS idx_events_bundle_ts ON events(bundle_id, ts);
-
-CREATE TABLE IF NOT EXISTS daemon_state (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    pid INTEGER,
-    started_at TEXT,
-    instance_id TEXT,
-    mode TEXT,
-    heartbeat_at TEXT,
-    retention_hours INTEGER CHECK (retention_hours > 0),
-    paused_until TEXT,
-    events_captured INTEGER NOT NULL DEFAULT 0,
-    events_dropped INTEGER NOT NULL DEFAULT 0,
-    last_event_ts TEXT,
-    degraded_json TEXT,
-    collector_failures_json TEXT NOT NULL DEFAULT '{}',
-    last_known_permissions_json TEXT
-);
-INSERT OR IGNORE INTO daemon_state(id) VALUES (1);
-
-CREATE TABLE IF NOT EXISTS daemon_permissions (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    snapshot_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS meta (
-    schema_version INTEGER NOT NULL
-);
-INSERT INTO meta(schema_version)
-SELECT 5 WHERE NOT EXISTS (SELECT 1 FROM meta);
 ";
 
 pub struct StoreWriter {
     connection: Connection,
+    format: StoreFormat,
 }
 
 impl StoreWriter {
+    /// Opens or creates a plaintext store. Encrypted stores fail with
+    /// [`LockedReason::KeyMissing`]; use [`Self::open_with_key`] for those.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let connection = Connection::open(path)?;
+        Self::open_with_key(path, None)
+    }
+
+    /// Opens a store for writing, creating it when it does not exist.
+    ///
+    /// A new store is encrypted when `key` is given. An existing store keeps its
+    /// format: plaintext stores ignore the key (the recorder sets them aside
+    /// with [`super::set_aside_plaintext`] instead of rewriting them), encrypted
+    /// stores require it. New files are created owner-readable only.
+    pub fn open_with_key(
+        path: impl AsRef<Path>,
+        key: Option<&StoreKey>,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let format = StoreFormat::probe(path)?;
+        Self::open_known(path, format, key)
+    }
+
+    /// Like [`Self::open_with_key`] for a caller that already probed the format.
+    /// Required when this process holds another connection to the store: a
+    /// fresh probe would release that connection's file lock (see
+    /// [`StoreFormat::probe`]).
+    pub fn open_known(
+        path: impl AsRef<Path>,
+        format: StoreFormat,
+        key: Option<&StoreKey>,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if format == StoreFormat::Missing {
+            create_private_file(path)?;
+        }
+        let connection = Connection::open(store_uri(path)?)?;
         connection.busy_timeout(StdDuration::from_millis(BUSY_TIMEOUT_MILLISECONDS))?;
-        connection.execute_batch(DATABASE_SCHEMA)?;
+        let format = match (format, key) {
+            (StoreFormat::Encrypted, Some(key)) => {
+                apply_key(&connection, key)?;
+                verify_key(&connection)?;
+                StoreFormat::Encrypted
+            }
+            (StoreFormat::Encrypted, None) => {
+                return Err(StoreError::Locked(LockedReason::KeyMissing));
+            }
+            (StoreFormat::Missing, Some(key)) => {
+                apply_key(&connection, key)?;
+                StoreFormat::Encrypted
+            }
+            (StoreFormat::Missing, None) | (StoreFormat::Plaintext, _) => StoreFormat::Plaintext,
+            // Opening a damaged file without a key lets SQLite report the corruption.
+            (StoreFormat::Unrecognized, _) => StoreFormat::Unrecognized,
+        };
+        connection.execute_batch(STORE_PRAGMAS)?;
+        connection.execute_batch(STORE_TABLES)?;
         migrate_schema(&connection)?;
-        Ok(Self { connection })
+        Ok(Self { connection, format })
+    }
+
+    /// The on-disk format the store was opened (or created) as.
+    #[must_use]
+    pub const fn format(&self) -> StoreFormat {
+        self.format
     }
 
     pub fn append(&mut self, event: &Event) -> Result<(), StoreError> {
@@ -183,6 +196,38 @@ impl StoreWriter {
         Ok(())
     }
 
+    /// Carries the parts of the previous store's daemon state that outlive a
+    /// store swap into this one: an active pause request (so an upgrade never
+    /// silently resumes recording), the cumulative counters, the last event
+    /// time, collector failure history, and the last permission report. The
+    /// recorder identity and heartbeat are left to the next heartbeat.
+    pub fn adopt_daemon_state(&self, previous: &super::StoreStatus) -> Result<(), StoreError> {
+        validate_paused_until(previous.paused_until.as_deref())?;
+        validate_optional_timestamp("last_event_ts", previous.last_event_ts.as_deref())?;
+        let events_captured = signed("events_captured", previous.events_captured)?;
+        let events_dropped = signed("events_dropped", previous.events_dropped)?;
+        let collector_failures_json = serialize_collector_failures(&previous.collector_failures)?;
+        let last_known_permissions_json = previous
+            .last_known_permissions
+            .as_ref()
+            .map(serialize_permissions)
+            .transpose()?;
+        self.connection.execute(
+            "UPDATE daemon_state SET paused_until = ?1, events_captured = ?2, \
+             events_dropped = ?3, last_event_ts = ?4, collector_failures_json = ?5, \
+             last_known_permissions_json = ?6 WHERE id = 1",
+            params![
+                previous.paused_until,
+                events_captured,
+                events_dropped,
+                previous.last_event_ts,
+                collector_failures_json,
+                last_known_permissions_json,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn increment_events_dropped(&self, count: u64) -> Result<(), StoreError> {
         let count = signed("events_dropped", count)?;
         self.connection.execute(
@@ -190,6 +235,24 @@ impl StoreWriter {
             [count],
         )?;
         Ok(())
+    }
+}
+
+/// Creates `path` as an empty file only the owner can read, leaving an existing
+/// (empty) file alone. SQLite treats an empty file as a new database and copies
+/// its mode to the journal files it creates next to it.
+fn create_private_file(path: &Path) -> Result<(), StoreError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(StoreError::io("create the store file", error)),
     }
 }
 

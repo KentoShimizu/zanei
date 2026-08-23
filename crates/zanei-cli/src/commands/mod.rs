@@ -7,6 +7,7 @@ mod purge;
 mod read;
 mod record;
 mod status;
+pub(crate) use status::RETIRED_STORE_DEGRADED_COMPONENT;
 
 use zanei_core::config::Config;
 use zanei_core::store::DaemonMode;
@@ -40,12 +41,19 @@ pub fn run(cli: Cli) -> Result<u8, CliError> {
         Command::Record(args) => record::run(&paths.config, args),
         Command::Query(args) => read::query(&paths.config, &paths.store, args, cli.json),
         Command::Timeline(args) => read::timeline(&paths.config, &paths.store, args, cli.json),
-        Command::Export(args) => read::export(&paths.config, &paths.store, args, cli.json),
+        Command::Export(args) => {
+            read::export(&paths.config, &paths.store, args, cli.json, cli.quiet)
+        }
         Command::Purge(args) => purge::run(&paths.store, args, cli.quiet),
         Command::Filter(args) => filter::run(&paths.config, args, cli.quiet),
         Command::Config(args) => config::run(&paths.config, &paths.store, args, cli.quiet),
         Command::Mcp => {
-            zanei_mcp::run(paths.store, paths.config, mcp_permissions_ok)?;
+            zanei_mcp::run(
+                paths.store,
+                paths.config,
+                mcp_permissions_ok,
+                crate::store_access::mcp_store_key,
+            )?;
             Ok(EXIT_SUCCESS)
         }
         Command::Setup(args) => {

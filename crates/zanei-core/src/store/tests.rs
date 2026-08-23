@@ -11,8 +11,10 @@ use crate::schema::{
 };
 
 use super::{
-    DaemonMode, DaemonPermissions, DaemonState, PermissionState, QueryFilter, StoreError,
-    StoreFailureKind, StoreReader, StoreStatus, StoreWriter,
+    DaemonMode, DaemonPermissions, DaemonState, LockedReason, PermissionState, QueryFilter,
+    StoreError, StoreFailureKind, StoreFormat, StoreKey, StoreReader, StoreStatus, StoreWriter,
+    export_plain_sqlite, purge_retired_plaintext, remove_retired, retired_plaintext_stores,
+    set_aside_plaintext,
 };
 
 static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
@@ -914,4 +916,826 @@ impl Drop for TestDatabase {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+#[test]
+fn encrypted_store_round_trips_through_keyed_reader_and_writer() {
+    let database = TestDatabase::new("encrypted");
+    let key = StoreKey::generate().expect("generate key");
+    let first = app_launch(
+        "evt_01K00000000000000000000101",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    {
+        let mut writer = StoreWriter::open_with_key(database.path(), Some(&key))
+            .expect("create encrypted store");
+        assert_eq!(writer.format(), StoreFormat::Encrypted);
+        writer.append(&first).expect("append event");
+    }
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe"),
+        StoreFormat::Encrypted
+    );
+    let header = std::fs::read(database.path()).expect("read store")[..16].to_vec();
+    assert_ne!(header.as_slice(), b"SQLite format 3\0");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(database.path())
+            .expect("store metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    let reader =
+        StoreReader::open_with_key(database.path(), Some(&key)).expect("open encrypted reader");
+    assert_eq!(reader.format(), StoreFormat::Encrypted);
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query encrypted store"),
+        vec![first.clone()]
+    );
+
+    let Err(locked) = StoreReader::open(database.path()) else {
+        panic!("reader without key must fail");
+    };
+    assert!(matches!(
+        locked,
+        StoreError::Locked(LockedReason::KeyMissing)
+    ));
+    assert_eq!(locked.failure_kind(), StoreFailureKind::Locked);
+    let other = StoreKey::generate().expect("generate other key");
+    let Err(mismatch) = StoreReader::open_with_key(database.path(), Some(&other)) else {
+        panic!("wrong key must fail");
+    };
+    assert!(matches!(
+        mismatch,
+        StoreError::Locked(LockedReason::KeyMismatch)
+    ));
+    assert_eq!(mismatch.failure_kind(), StoreFailureKind::Locked);
+    let Err(writer_locked) = StoreWriter::open(database.path()) else {
+        panic!("writer without key must fail");
+    };
+    assert!(matches!(
+        writer_locked,
+        StoreError::Locked(LockedReason::KeyMissing)
+    ));
+
+    let mut writer =
+        StoreWriter::open_with_key(database.path(), Some(&key)).expect("reopen encrypted writer");
+    assert_eq!(writer.format(), StoreFormat::Encrypted);
+    writer
+        .append(&browser_navigate(
+            "evt_01K00000000000000000000102",
+            "2026-08-16T09:01:00.000Z",
+        ))
+        .expect("append second event");
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query after second write")
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn plaintext_store_ignores_a_supplied_key() {
+    let database = TestDatabase::new("plaintext-key");
+    StoreWriter::open(database.path()).expect("plaintext store");
+    let key = StoreKey::generate().expect("generate key");
+
+    let reader = StoreReader::open_with_key(database.path(), Some(&key))
+        .expect("plaintext store opens with a key on hand");
+    assert_eq!(reader.format(), StoreFormat::Plaintext);
+    let writer = StoreWriter::open_with_key(database.path(), Some(&key))
+        .expect("plaintext writer with a key on hand");
+    assert_eq!(writer.format(), StoreFormat::Plaintext);
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe"),
+        StoreFormat::Plaintext
+    );
+}
+
+#[test]
+fn format_probe_distinguishes_missing_plaintext_and_encrypted() {
+    let database = TestDatabase::new("probe");
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe missing"),
+        StoreFormat::Missing
+    );
+    std::fs::write(database.path(), b"").expect("write empty file");
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe empty"),
+        StoreFormat::Missing
+    );
+    std::fs::write(database.path(), b"definitely not a database").expect("write garbage");
+    // A foreign header that is not a whole number of pages is damage, not ciphertext.
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe garbage"),
+        StoreFormat::Unrecognized
+    );
+    assert_eq!(
+        StoreReader::open(database.path())
+            .err()
+            .expect("garbage store must not open")
+            .failure_kind(),
+        StoreFailureKind::Corrupt
+    );
+    std::fs::write(database.path(), vec![0xA5_u8; 8192]).expect("write page-aligned noise");
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe page-aligned noise"),
+        StoreFormat::Encrypted
+    );
+    std::fs::remove_file(database.path()).expect("remove garbage");
+    StoreWriter::open(database.path()).expect("plaintext store");
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe plaintext"),
+        StoreFormat::Plaintext
+    );
+}
+
+#[test]
+fn plaintext_snapshot_keeps_one_copy_of_an_event_present_in_two_sources() {
+    let database = TestDatabase::new("snapshot-duplicate");
+    let snapshot = TestDatabase::new("snapshot-duplicate-output");
+    let event = app_launch(
+        "evt_01K00000000000000000000701",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    // The same event in a plaintext store that was set aside and in the
+    // encrypted store that replaced it, as after restoring a backup.
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| writer.append(&event))
+        .expect("plaintext store");
+    set_aside_plaintext(database.path(), timestamp("2026-08-16T10:00:00Z"))
+        .expect("set aside")
+        .expect("a plaintext store was set aside");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key))
+        .and_then(|mut writer| writer.append(&event))
+        .expect("encrypted store");
+
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export with an event present twice");
+
+    assert_eq!(report.events, 1);
+    let copied = StoreReader::open(snapshot.path())
+        .and_then(|reader| reader.query(&QueryFilter::default(), TEST_RETENTION_HOURS))
+        .expect("snapshot events");
+    assert_eq!(copied, vec![event]);
+}
+
+#[test]
+fn attached_encrypted_source_uses_the_pinned_file_format() {
+    let database = TestDatabase::new("attach-compatibility");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key))
+        .and_then(|mut writer| {
+            writer.append(&app_launch(
+                "evt_01K00000000000000000000801",
+                "2026-08-16T09:00:00.000Z",
+                "Safari",
+                "com.apple.Safari",
+            ))
+        })
+        .expect("encrypted store");
+    let probe = rusqlite::Connection::open_in_memory().expect("scratch connection");
+
+    super::snapshot::attach_encrypted_source(&probe, database.path(), &key)
+        .expect("attach the way the snapshot does");
+
+    // `ATTACH … KEY` reads the first page at once, so only settings in force
+    // before it count; a wrong generation makes the attach itself fail with
+    // "file is not a database" (checked by hand against generation 3).
+    let mut statement = probe
+        .prepare("PRAGMA src.cipher_settings")
+        .expect("settings of the attached source");
+    let settings: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query settings")
+        .collect::<Result<_, _>>()
+        .expect("settings rows");
+    for expected in [
+        "PRAGMA kdf_iter = 256000;",
+        "PRAGMA cipher_page_size = 4096;",
+        "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;",
+        "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;",
+    ] {
+        assert!(settings.iter().any(|s| s == expected), "{settings:?}");
+    }
+    assert_eq!(
+        probe
+            .query_row("SELECT count(*) FROM src.events", [], |row| row
+                .get::<_, i64>(0))
+            .expect("read"),
+        1
+    );
+}
+
+#[test]
+fn plaintext_snapshot_handles_non_ascii_paths() {
+    let database = TestDatabase::new("スナップショット-source");
+    let snapshot = TestDatabase::new("スナップショット-output");
+    let key = StoreKey::generate().expect("generate key");
+    {
+        let mut writer =
+            StoreWriter::open_with_key(database.path(), Some(&key)).expect("encrypted store");
+        writer
+            .append(&app_launch(
+                "evt_01K00000000000000000000601",
+                "2026-08-16T09:00:00.000Z",
+                "Safari",
+                "com.apple.Safari",
+            ))
+            .expect("append");
+    }
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export snapshot from a non-ASCII path");
+    assert_eq!(report.events, 1);
+}
+
+#[test]
+fn plaintext_snapshot_copies_the_requested_range_into_a_regular_sqlite_file() {
+    let database = TestDatabase::new("snapshot-source");
+    let snapshot = TestDatabase::new("snapshot-output");
+    let key = StoreKey::generate().expect("generate key");
+    let events = [
+        app_launch(
+            "evt_01K00000000000000000000301",
+            "2026-08-16T09:00:00.000Z",
+            "Safari",
+            "com.apple.Safari",
+        ),
+        browser_navigate("evt_01K00000000000000000000302", "2026-08-16T09:01:00.000Z"),
+        app_launch(
+            "evt_01K00000000000000000000303",
+            "2026-08-16T09:02:00.000Z",
+            "Finder",
+            "com.apple.finder",
+        ),
+    ];
+    {
+        let mut writer =
+            StoreWriter::open_with_key(database.path(), Some(&key)).expect("encrypted store");
+        writer.append_batch(&events).expect("append events");
+    }
+
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter {
+            since: Some("2026-08-16T09:00:30Z".to_owned()),
+            until: Some("2026-08-16T09:01:30Z".to_owned()),
+            ..QueryFilter::default()
+        },
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export snapshot");
+    assert_eq!(report.events, 1);
+    assert_eq!(
+        StoreFormat::probe(snapshot.path()).expect("probe snapshot"),
+        StoreFormat::Plaintext
+    );
+    assert_eq!(
+        StoreFormat::probe(database.path()).expect("probe source"),
+        StoreFormat::Encrypted
+    );
+
+    let plain = rusqlite::Connection::open(snapshot.path()).expect("open snapshot without a key");
+    let count: i64 = plain
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .expect("count snapshot events");
+    assert_eq!(count, 1);
+    let version: i64 = plain
+        .query_row("SELECT schema_version FROM meta", [], |row| row.get(0))
+        .expect("snapshot schema version");
+    assert_eq!(version, super::STORE_SCHEMA_VERSION);
+    drop(plain);
+
+    let reader = StoreReader::open(snapshot.path()).expect("reader opens the snapshot");
+    assert_eq!(reader.format(), StoreFormat::Plaintext);
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query snapshot"),
+        vec![events[1].clone()]
+    );
+
+    let plain_source = TestDatabase::new("snapshot-plain-source");
+    let plain_snapshot = TestDatabase::new("snapshot-plain-output");
+    {
+        let mut writer = StoreWriter::open(plain_source.path()).expect("plaintext store");
+        writer.append_batch(&events).expect("append events");
+    }
+    let report = export_plain_sqlite(
+        plain_source.path(),
+        None,
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        plain_snapshot.path(),
+    )
+    .expect("export plaintext snapshot");
+    assert_eq!(report.events, 3);
+}
+
+#[test]
+fn set_aside_renames_the_plaintext_store_and_readers_merge_it_back() {
+    let database = TestDatabase::new("retire");
+    let old_a = app_launch(
+        "evt_01K00000000000000000000701",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    let old_b = browser_navigate("evt_01K00000000000000000000702", "2026-08-16T09:01:00.000Z");
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| writer.append_batch(&[old_a.clone(), old_b.clone()]))
+        .expect("plaintext store");
+    let at = OffsetDateTime::parse("2026-08-23T03:15:00Z", &Rfc3339).expect("time");
+
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("a plaintext store is set aside");
+    assert!(!database.path().exists());
+    assert!(retired.path.exists());
+    for suffix in ["-wal", "-shm"] {
+        assert!(
+            !PathBuf::from(format!("{}{suffix}", database.path().display())).exists(),
+            "nothing is left under the live store's name"
+        );
+    }
+    assert_eq!(retired.set_aside_at, at);
+    assert!(
+        retired
+            .path
+            .to_string_lossy()
+            .ends_with(".plaintext-20260823T031500Z")
+    );
+    assert_eq!(
+        StoreFormat::probe(&retired.path).expect("probe retired"),
+        StoreFormat::Plaintext
+    );
+    assert_eq!(
+        retired_plaintext_stores(database.path()).expect("list retired"),
+        vec![retired.clone()]
+    );
+    assert!(
+        set_aside_plaintext(database.path(), at)
+            .expect("nothing to set aside")
+            .is_none()
+    );
+
+    let key = StoreKey::generate().expect("generate key");
+    let new_c = app_launch(
+        "evt_01K00000000000000000000703",
+        "2026-08-16T09:02:00.000Z",
+        "Finder",
+        "com.apple.finder",
+    );
+    StoreWriter::open_with_key(database.path(), Some(&key))
+        .and_then(|mut writer| writer.append(&new_c))
+        .expect("encrypted store");
+    let reader = StoreReader::open_with_key(database.path(), Some(&key)).expect("merged reader");
+    assert_eq!(reader.retired_stores(), std::slice::from_ref(&retired));
+    assert!(reader.skipped_retired().is_empty());
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("merged query"),
+        vec![old_a.clone(), old_b.clone(), new_c]
+    );
+    assert_eq!(
+        reader.oldest_event_ts().expect("oldest"),
+        Some(old_a.ts.clone())
+    );
+    assert_eq!(
+        reader
+            .query(
+                &QueryFilter {
+                    since: Some("2026-08-16T09:00:30Z".to_owned()),
+                    limit: Some(1),
+                    ..QueryFilter::default()
+                },
+                TEST_RETENTION_HOURS,
+            )
+            .expect("filtered merged query"),
+        vec![old_b]
+    );
+    assert!(
+        reader
+            .query(&QueryFilter::default(), 1)
+            .expect("retention applies to set-aside stores")
+            .is_empty()
+    );
+    drop(reader);
+
+    // A second plaintext store set aside in the same second gets a suffix.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", database.path().display()));
+    }
+    StoreWriter::open(database.path()).expect("plaintext store again");
+    let second = set_aside_plaintext(database.path(), at)
+        .expect("set aside again")
+        .expect("second set-aside");
+    assert!(
+        second
+            .path
+            .to_string_lossy()
+            .ends_with(".plaintext-20260823T031500Z-1")
+    );
+    remove_retired(&retired).expect("remove first");
+    remove_retired(&second).expect("remove second");
+}
+
+#[test]
+fn retired_stores_leave_with_the_retention_window_and_unreadable_ones_are_skipped() {
+    let database = TestDatabase::new("retire-purge");
+    StoreWriter::open(database.path()).expect("plaintext store");
+    let at = OffsetDateTime::parse("2026-08-23T00:00:00Z", &Rfc3339).expect("time");
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("set aside");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key)).expect("encrypted store");
+
+    let report = purge_retired_plaintext(database.path(), at + time::Duration::hours(1), 2)
+        .expect("purge within retention");
+    assert!(
+        report.removed.is_empty() && report.skipped.is_empty(),
+        "{report:?}"
+    );
+    assert!(retired.path.exists());
+
+    let garbage = PathBuf::from(format!(
+        "{}.plaintext-20260822T000000Z",
+        database.path().display()
+    ));
+    std::fs::write(&garbage, b"not a store").expect("write garbage");
+    let reader = StoreReader::open_with_key(database.path(), Some(&key)).expect("reader");
+    assert_eq!(reader.retired_stores(), std::slice::from_ref(&retired));
+    assert_eq!(reader.skipped_retired().len(), 1);
+    assert_eq!(
+        reader.skipped_retired()[0].path,
+        std::fs::canonicalize(&garbage).expect("canonical garbage path")
+    );
+    assert!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("query still works")
+            .is_empty()
+    );
+    drop(reader);
+
+    let report = purge_retired_plaintext(database.path(), at + time::Duration::hours(3), 2)
+        .expect("purge past retention");
+    assert_eq!(report.removed.len(), 2, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert!(!retired.path.exists());
+    assert!(!garbage.exists());
+}
+
+#[test]
+fn plaintext_snapshot_includes_set_aside_stores_and_takes_the_output_path_literally() {
+    let database = TestDatabase::new("snapshot-retired");
+    let old = app_launch(
+        "evt_01K00000000000000000000801",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| writer.append(&old))
+        .expect("plaintext store");
+    let at = OffsetDateTime::parse("2026-08-23T00:00:00Z", &Rfc3339).expect("time");
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("set aside");
+    let key = StoreKey::generate().expect("generate key");
+    let new = browser_navigate("evt_01K00000000000000000000802", "2026-08-16T09:01:00.000Z");
+    StoreWriter::open_with_key(database.path(), Some(&key))
+        .and_then(|mut writer| writer.append(&new))
+        .expect("encrypted store");
+
+    // A relative name starting with `file:` looks like a SQLite URI; the snapshot
+    // must still land in a file of exactly that name.
+    struct Cleanup(Vec<PathBuf>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let literal = PathBuf::from(format!(
+        "file:zanei-snapshot-{}-{}.sqlite?mode=rw",
+        std::process::id(),
+        NEXT_DATABASE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let decoy = PathBuf::from(
+        literal
+            .to_string_lossy()
+            .trim_start_matches("file:")
+            .trim_end_matches("?mode=rw")
+            .to_owned(),
+    );
+    let _cleanup = Cleanup(vec![literal.clone(), decoy.clone()]);
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        &literal,
+    )
+    .expect("export snapshot to a URI-looking name");
+    assert_eq!(report.events, 2);
+    assert!(literal.exists(), "the snapshot must be the literal file");
+    assert!(!decoy.exists(), "the URI must not be interpreted");
+    assert_eq!(
+        StoreReader::open(&literal)
+            .expect("open snapshot")
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("snapshot events"),
+        vec![old, new]
+    );
+    remove_retired(&retired).expect("remove retired");
+}
+
+#[cfg(unix)]
+#[test]
+fn set_aside_follows_a_symlinked_store_and_keeps_the_link() {
+    let target = TestDatabase::new("retire-symlink-target");
+    let link = TestDatabase::new("retire-symlink-link");
+    let old = app_launch(
+        "evt_01K00000000000000000000901",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    StoreWriter::open(target.path())
+        .and_then(|mut writer| writer.append(&old))
+        .expect("plaintext target store");
+    std::os::unix::fs::symlink(target.path(), link.path()).expect("symlink to the store");
+    let at = OffsetDateTime::parse("2026-08-23T00:00:00Z", &Rfc3339).expect("time");
+
+    let retired = set_aside_plaintext(link.path(), at)
+        .expect("set aside through the link")
+        .expect("set aside");
+    let real_parent = std::fs::canonicalize(target.path().parent().expect("target directory"))
+        .expect("canonical target directory");
+    assert_eq!(
+        retired.path.parent(),
+        Some(real_parent.as_path()),
+        "the set-aside file sits next to the real target"
+    );
+    assert!(
+        retired
+            .path
+            .file_name()
+            .expect("retired file name")
+            .to_string_lossy()
+            .starts_with(
+                &*target
+                    .path()
+                    .file_name()
+                    .expect("target name")
+                    .to_string_lossy()
+            ),
+        "the real file is what gets set aside"
+    );
+    assert!(!target.path().exists());
+    assert!(
+        std::fs::symlink_metadata(link.path())
+            .expect("link metadata")
+            .file_type()
+            .is_symlink(),
+        "the link itself is untouched"
+    );
+
+    let key = StoreKey::generate().expect("generate key");
+    let new = browser_navigate("evt_01K00000000000000000000902", "2026-08-16T09:01:00.000Z");
+    StoreWriter::open_with_key(link.path(), Some(&key))
+        .and_then(|mut writer| writer.append(&new))
+        .expect("new store created through the link");
+    assert_eq!(
+        StoreFormat::probe(target.path()).expect("probe target"),
+        StoreFormat::Encrypted,
+        "the link now points at the encrypted store"
+    );
+    let reader = StoreReader::open_with_key(link.path(), Some(&key)).expect("reader via link");
+    assert_eq!(reader.retired_stores(), std::slice::from_ref(&retired));
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("merged query via link"),
+        vec![old, new]
+    );
+    drop(reader);
+    remove_retired(&retired).expect("remove retired");
+}
+
+#[test]
+fn set_aside_store_state_is_adopted_by_the_new_store() {
+    let database = TestDatabase::new("retire-adopt");
+    StoreWriter::open(database.path())
+        .and_then(|writer| {
+            writer.write_daemon_state(&DaemonState {
+                paused_until: Some("infinity".to_owned()),
+                events_captured: 7,
+                events_dropped: 2,
+                last_event_ts: Some("2026-08-16T09:00:00.000Z".to_owned()),
+                collector_failures: BTreeMap::from([("eventtap".to_owned(), 3)]),
+                permissions: Some(DaemonPermissions {
+                    permissions_ok: false,
+                    accessibility: PermissionState::Granted,
+                    input_monitoring: PermissionState::Denied,
+                    automation: BTreeMap::new(),
+                }),
+                ..DaemonState::default()
+            })
+        })
+        .expect("paused plaintext store");
+    let at = OffsetDateTime::parse("2026-08-23T00:00:00Z", &Rfc3339).expect("time");
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("set aside");
+    let key = StoreKey::generate().expect("generate key");
+    let writer = StoreWriter::open_with_key(database.path(), Some(&key)).expect("new store");
+    let previous = StoreReader::open_known(&retired.path, StoreFormat::Plaintext, None)
+        .expect("open previous store")
+        .status()
+        .expect("previous status");
+    writer
+        .adopt_daemon_state(&previous)
+        .expect("adopt previous state");
+    drop(writer);
+
+    let status = StoreReader::open_with_key(database.path(), Some(&key))
+        .expect("reader")
+        .status()
+        .expect("status");
+    assert_eq!(status.paused_until.as_deref(), Some("infinity"));
+    assert_eq!(status.events_captured, 7);
+    assert_eq!(status.events_dropped, 2);
+    assert_eq!(
+        status.last_event_ts.as_deref(),
+        Some("2026-08-16T09:00:00.000Z")
+    );
+    assert_eq!(status.collector_failures.get("eventtap"), Some(&3));
+    assert_eq!(
+        status
+            .last_known_permissions
+            .as_ref()
+            .map(|permissions| permissions.input_monitoring),
+        Some(PermissionState::Denied)
+    );
+    assert!(!status.running);
+    remove_retired(&retired).expect("remove retired");
+}
+
+#[test]
+fn retention_purges_expired_rows_inside_a_kept_set_aside_store() {
+    let database = TestDatabase::new("retire-rows");
+    let old = app_launch(
+        "evt_01K00000000000000000001001",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| writer.append(&old))
+        .expect("plaintext store");
+    let at = OffsetDateTime::now_utc();
+    let retired = set_aside_plaintext(database.path(), at)
+        .expect("set aside")
+        .expect("set aside");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key)).expect("new store");
+
+    let report = purge_retired_plaintext(database.path(), at + time::Duration::minutes(10), 1)
+        .expect("purge");
+    assert!(
+        report.removed.is_empty() && report.skipped.is_empty(),
+        "the file itself is still within retention: {report:?}"
+    );
+    assert!(retired.path.exists());
+    let remaining: i64 = rusqlite::Connection::open(&retired.path)
+        .expect("open retired store")
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(
+        remaining, 0,
+        "expired rows are gone from the plaintext file"
+    );
+    remove_retired(&retired).expect("remove retired");
+}
+
+#[test]
+fn many_set_aside_stores_are_exported_but_only_nine_are_attached_for_reads() {
+    let database = TestDatabase::new("retire-many");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key)).expect("encrypted store");
+    for index in 0..11 {
+        let name = format!(
+            "{}.plaintext-20260823T0000{index:02}Z",
+            database.path().display()
+        );
+        StoreWriter::open(&name)
+            .and_then(|mut writer| {
+                writer.append(&app_launch(
+                    &format!("evt_01K0000000000000000000{:04}", 1100 + index),
+                    &format!("2026-08-16T09:{index:02}:00.000Z"),
+                    "Safari",
+                    "com.apple.Safari",
+                ))
+            })
+            .expect("set-aside store");
+    }
+
+    let reader = StoreReader::open_with_key(database.path(), Some(&key)).expect("reader");
+    assert_eq!(reader.retired_stores().len(), 9);
+    assert_eq!(reader.skipped_retired().len(), 2);
+    assert!(reader.skipped_retired()[0].reason.contains("more than 9"));
+    assert_eq!(
+        reader
+            .query(&QueryFilter::default(), TEST_RETENTION_HOURS)
+            .expect("merged query")
+            .len(),
+        9
+    );
+    drop(reader);
+
+    let snapshot = TestDatabase::new("retire-many-output");
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export with many set-aside stores");
+    assert_eq!(
+        report.events, 11,
+        "the snapshot copies every set-aside store"
+    );
+    for retired in retired_plaintext_stores(database.path()).expect("list") {
+        remove_retired(&retired).expect("remove retired");
+    }
+}
+
+#[test]
+fn plaintext_snapshot_keeps_the_current_schema_version_for_older_sources() {
+    let database = TestDatabase::new("snapshot-legacy-version");
+    let snapshot = TestDatabase::new("snapshot-legacy-version-output");
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| {
+            writer.append(&app_launch(
+                "evt_01K00000000000000000001201",
+                "2026-08-16T09:00:00.000Z",
+                "Safari",
+                "com.apple.Safari",
+            ))
+        })
+        .expect("plaintext store");
+    rusqlite::Connection::open(database.path())
+        .expect("open store")
+        .execute("UPDATE meta SET schema_version = 4", [])
+        .expect("label the source as an older schema version");
+
+    let report = export_plain_sqlite(
+        database.path(),
+        None,
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export from an older-version source");
+    assert_eq!(report.events, 1);
+    let version: i64 = rusqlite::Connection::open(snapshot.path())
+        .expect("open snapshot")
+        .query_row("SELECT schema_version FROM meta", [], |row| row.get(0))
+        .expect("snapshot schema version");
+    assert_eq!(version, super::STORE_SCHEMA_VERSION);
+    // A write-capable open runs the schema migration; it must find nothing to do.
+    StoreWriter::open(snapshot.path()).expect("snapshot opens for writing");
 }

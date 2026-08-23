@@ -6,6 +6,7 @@ mod executable;
 mod paths;
 mod permissions;
 mod setup;
+mod store_access;
 
 use std::process::ExitCode;
 

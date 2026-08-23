@@ -91,9 +91,11 @@ jobs:
       - name: Package artifacts
         run: |
           version="${GITHUB_REF_NAME#v}"
-          ditto -c -k --keepParent dist/Zanei.app \
-            "dist/zanei-$version-macos-universal.zip"
-          tar -czf "dist/zanei-$version-macos-universal.tar.gz" -C dist Zanei.app
+          cp THIRD_PARTY_NOTICES.md dist/
+          (cd dist && ditto -c -k Zanei.app THIRD_PARTY_NOTICES.md \
+            "zanei-$version-macos-universal.zip")
+          tar -czf "dist/zanei-$version-macos-universal.tar.gz" -C dist \
+            Zanei.app THIRD_PARTY_NOTICES.md
           (cd dist && shasum -a 256 ./*.zip ./*.tar.gz > SHA256SUMS)
 
       - name: Create GitHub release

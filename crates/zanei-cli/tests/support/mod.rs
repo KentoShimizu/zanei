@@ -18,13 +18,20 @@ use zanei_core::schema::{
     ScrollDirection, UiClickData, UiFocusData, UiValueData, Window, WindowTitleData,
 };
 use zanei_core::store::{
-    DaemonMode, DaemonPermissions, DaemonState, PermissionState, StoreReader, StoreWriter,
+    DaemonMode, DaemonPermissions, DaemonState, PermissionState, StoreKey, StoreReader, StoreWriter,
 };
 
+/// Environment variable the CLI reads the store key from instead of the Keychain.
+pub const STORE_KEY_FILE_ENV: &str = "ZANEI_STORE_KEY_FILE";
+
+/// A temporary config, store, and key file. Stores are created encrypted with
+/// the key in `key_file`, and every command the fixture spawns reads that key
+/// through `ZANEI_STORE_KEY_FILE`, so tests never touch the real Keychain.
 pub struct Fixture {
     pub directory: TempDir,
     pub config: PathBuf,
     pub store: PathBuf,
+    pub key_file: PathBuf,
 }
 
 impl Fixture {
@@ -43,6 +50,7 @@ impl Fixture {
     pub fn command(&self) -> Command {
         let mut command = Command::cargo_bin("zanei").expect("zanei binary");
         command
+            .env(STORE_KEY_FILE_ENV, &self.key_file)
             .arg("--config")
             .arg(&self.config)
             .arg("--store")
@@ -53,6 +61,7 @@ impl Fixture {
     pub fn process_command(&self) -> std::process::Command {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zanei"));
         command
+            .env(STORE_KEY_FILE_ENV, &self.key_file)
             .arg("--config")
             .arg(&self.config)
             .arg("--store")
@@ -60,11 +69,22 @@ impl Fixture {
         command
     }
 
+    /// The key every store in this fixture is encrypted with.
+    pub fn key(&self) -> StoreKey {
+        read_key(&self.key_file)
+    }
+
+    pub fn open_reader(&self) -> StoreReader {
+        StoreReader::open_with_key(&self.store, Some(&self.key())).expect("fixture reader")
+    }
+
+    pub fn open_writer(&self) -> StoreWriter {
+        StoreWriter::open_with_key(&self.store, Some(&self.key())).expect("fixture writer")
+    }
+
     pub fn set_recorder_permissions(&self, permissions_ok: bool) {
-        let status = StoreReader::open(&self.store)
-            .and_then(|reader| reader.status())
-            .expect("fixture daemon status");
-        StoreWriter::open(&self.store)
+        let status = self.open_reader().status().expect("fixture daemon status");
+        StoreWriter::open_with_key(&self.store, Some(&self.key()))
             .and_then(|writer| {
                 writer.write_daemon_state(&DaemonState {
                     pid: status.pid,
@@ -94,6 +114,7 @@ impl Fixture {
         let directory = TempDir::new().expect("fixture directory");
         let config = directory.path().join("config.toml");
         let store = directory.path().join("store.sqlite");
+        let key_file = write_key_file(directory.path());
         fs::write(
             &config,
             "[capture]\nsources = [\"app\"]\ntext_content = false\n",
@@ -101,9 +122,10 @@ impl Fixture {
         .expect("fixture config");
 
         match contents {
-            StoreContents::Populated => populate_store(&store),
+            StoreContents::Populated => populate_store(&store, &read_key(&key_file)),
             StoreContents::Empty => {
-                StoreWriter::open(&store).expect("empty fixture store");
+                StoreWriter::open_with_key(&store, Some(&read_key(&key_file)))
+                    .expect("empty fixture store");
             }
             StoreContents::Uninitialized => {}
         }
@@ -112,8 +134,22 @@ impl Fixture {
             directory,
             config,
             store,
+            key_file,
         }
     }
+}
+
+/// Writes a fresh key file into `directory` and returns its path.
+pub fn write_key_file(directory: &Path) -> PathBuf {
+    let key_file = directory.join("store.key");
+    let key = StoreKey::generate().expect("generate fixture key");
+    fs::write(&key_file, format!("{}\n", key.to_hex().as_str())).expect("write fixture key");
+    key_file
+}
+
+pub fn read_key(key_file: &Path) -> StoreKey {
+    StoreKey::from_hex(&fs::read_to_string(key_file).expect("read fixture key"))
+        .expect("parse fixture key")
 }
 
 enum StoreContents {
@@ -122,11 +158,11 @@ enum StoreContents {
     Uninitialized,
 }
 
-fn populate_store(store: &Path) {
+fn populate_store(store: &Path, key: &StoreKey) {
     let now = OffsetDateTime::now_utc();
     let started_at = format_timestamp(now - Duration::minutes(1));
     let events = synthetic_events(now);
-    let mut writer = StoreWriter::open(store).expect("fixture writer");
+    let mut writer = StoreWriter::open_with_key(store, Some(key)).expect("fixture writer");
     writer.append_batch(&events).expect("fixture events");
     writer
         .write_daemon_state(&DaemonState {
@@ -291,4 +327,26 @@ fn raw_event(event_type: &str, data: EventData) -> RawEvent {
         }),
         data,
     }
+}
+
+/// Writes a file next to `store` that looks like a set-aside plaintext store
+/// from `hours_ago` — a SQLite header over zeroed pages: classified as
+/// plaintext, unusable — and returns its path.
+pub fn damaged_set_aside_store(store: &Path, hours_ago: i64) -> PathBuf {
+    let at = OffsetDateTime::now_utc() - Duration::hours(hours_ago);
+    let mut name = store.as_os_str().to_os_string();
+    name.push(format!(
+        ".plaintext-{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    ));
+    let path = PathBuf::from(name);
+    let mut damaged = b"SQLite format 3\0".to_vec();
+    damaged.resize(4096, 0);
+    fs::write(&path, damaged).expect("damaged set-aside store");
+    path
 }
