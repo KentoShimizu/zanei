@@ -54,7 +54,7 @@ The order is fixed:
 
 Website rules work only for Chrome because it is the only supported browser that exposes both URL and private-window mode. Other browsers are controlled only by app rules.
 
-One startup-time exception: whether the recorder talks to Chrome at all (and therefore whether Automation is required) is decided when recording starts. If Chrome was excluded from the content-snapshot scope at that moment and you include it later, content snapshots for Chrome start after `zanei restart`; every other scope change applies within a few seconds. When an app mutation admits Chrome and the running topology may not track its windows, the CLI prints this restart note.
+Admitting Chrome on a filter reload starts Chrome tracking without a recorder restart; excluding it again stops that tracking. The macOS Automation prompt appears when Chrome is first admitted and the permission is first needed.
 
 ## Choosing apps
 

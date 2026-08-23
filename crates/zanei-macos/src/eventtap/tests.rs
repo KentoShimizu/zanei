@@ -23,21 +23,22 @@ use super::{
     worker::{early_text_read_allowed, handle_native_event},
 };
 use crate::{
+    CapturePolicy,
     ax::{ClickObservation, click_channel},
-    chrome::chrome_eligibility_channel,
+    chrome::{ChromeObserver, chrome_eligibility_channel},
     ffi::eventtap::{
         NativeApp, NativeContext, NativeEvent, NativeInputTarget, NativeWindow, Pasteboard,
     },
     focus_context::FocusContext,
-    focused_field::{FieldClass, FocusedField, FocusedFieldTracker, focused_field_channel},
-    text_capture::{InputAuthorization, TextContentPolicy, input_authorization_channel},
+    focused_field::{FieldClass, FocusedField},
+    text_capture::{InputAuthorization, input_authorization_channel},
     workspace::{ApplicationActivationPolicy, ApplicationInfo},
 };
 
-fn text_policy() -> TextContentPolicy {
+fn capture_policy() -> CapturePolicy {
     let filter = FilterConfig::default();
     let (_, tracker) = chrome_eligibility_channel(filter.clone());
-    TextContentPolicy::new(tracker, filter)
+    CapturePolicy::new(tracker, filter, None)
 }
 
 fn raw() -> RawEvent {
@@ -118,10 +119,11 @@ fn tap_time_focus_generation_mismatch_denies_text() {
             class: FieldClass::KnownText(FieldKind::Text),
         }),
         focus_generation: 1,
+        field_generation: 1,
     };
     assert!(early_text_read_allowed(
         Some(&target),
-        &text_policy(),
+        &capture_policy(),
         &focus_context,
     ));
 
@@ -140,7 +142,7 @@ fn tap_time_focus_generation_mismatch_denies_text() {
 
     assert!(!early_text_read_allowed(
         Some(&target),
-        &text_policy(),
+        &capture_policy(),
         &focus_context,
     ));
 }
@@ -188,8 +190,8 @@ fn handle_event(
             context.window.clone(),
         );
     }
-    let policy = text_policy();
-    let mut quarantine = crate::text_capture::TextQuarantine::new(&policy.chrome_tracker());
+    let policy = capture_policy();
+    let mut quarantine = crate::text_capture::TextQuarantine::new(ChromeObserver::new());
     handle_native_event(
         event,
         &mut driver,
@@ -222,6 +224,7 @@ fn full_raw_event_channel_increments_drop_counter_through_worker() {
                 context: context.clone(),
                 focused_field: None,
                 focus_generation: 1,
+                field_generation: 1,
             }),
             None,
         ),
@@ -274,8 +277,8 @@ fn click_only_mode_skips_input_source_and_secure_input_state() {
         Some(click_sender),
         None,
         None,
-        None,
-        text_policy(),
+        capture_policy(),
+        ChromeObserver::new(),
         FocusContext::new(),
     );
     collector
@@ -393,6 +396,7 @@ fn tap_time_target_wins_when_worker_focus_has_moved() {
                 },
                 focused_field: None,
                 focus_generation: 1,
+                field_generation: 1,
             }),
             Some(authorization),
         ),
@@ -411,27 +415,27 @@ fn tap_time_target_wins_when_worker_focus_has_moved() {
 }
 
 #[test]
-fn focused_field_tracker_feeds_key_and_paste_payloads_and_clears_by_pid() {
-    let (publisher, tracker) = focused_field_channel();
-    let focused_fields = Some(tracker);
-    publisher.update(
+fn focus_context_feeds_key_and_paste_payloads_and_clears_on_app_transition() {
+    let focus_context = FocusContext::new();
+    focus_context.activate(
+        ApplicationInfo {
+            name: "Test".to_owned(),
+            bundle_id: Some("dev.zanei.test".to_owned()),
+            pid: 501,
+            activation_policy: ApplicationActivationPolicy::Regular,
+        },
+        Some(window()),
+    );
+    focus_context.update_focused_field(
         501,
         Some(FocusedField {
             generation: 7,
             class: FieldClass::KnownText(FieldKind::Search),
         }),
     );
-    publisher.update(
-        502,
-        Some(FocusedField {
-            generation: 9,
-            class: FieldClass::KnownText(FieldKind::Text),
-        }),
-    );
-
-    let field_kind = focused_fields
-        .as_ref()
-        .and_then(|tracker| tracker.focused_field(501))
+    let field_kind = focus_context
+        .current()
+        .and_then(|focus| focus.focused_field)
         .and_then(FocusedField::field_kind);
     let key = key_data(
         &KeyObservation {
@@ -454,36 +458,30 @@ fn focused_field_tracker_feeds_key_and_paste_payloads_and_clears_by_pid() {
 
     assert_eq!(key.field_kind, Some(FieldKind::Search));
     assert_eq!(paste.field_kind, Some(FieldKind::Search));
-    assert_eq!(
-        focused_fields
-            .as_ref()
-            .and_then(|tracker| tracker.focused_field(502))
-            .and_then(FocusedField::field_kind),
-        Some(FieldKind::Text),
+    focus_context.activate(
+        ApplicationInfo {
+            name: "Other".to_owned(),
+            bundle_id: Some("dev.zanei.other".to_owned()),
+            pid: 502,
+            activation_policy: ApplicationActivationPolicy::Regular,
+        },
+        Some(window()),
     );
-
-    publisher.update(501, None);
     assert_eq!(
-        focused_fields
-            .as_ref()
-            .and_then(|tracker| tracker.focused_field(501)),
+        focus_context
+            .current()
+            .and_then(|focus| focus.focused_field),
         None
-    );
-    assert_eq!(
-        focused_fields
-            .as_ref()
-            .and_then(|tracker| tracker.focused_field(502))
-            .and_then(FocusedField::field_kind),
-        Some(FieldKind::Text),
     );
 }
 
 #[test]
-fn missing_ax_tracker_keeps_field_kind_null() {
-    let focused_fields: Option<FocusedFieldTracker> = None;
+fn missing_ax_focus_observation_keeps_field_kind_null() {
     assert_eq!(
-        focused_fields.and_then(|tracker| tracker.focused_field(501)),
-        None
+        FocusContext::new()
+            .current()
+            .and_then(|focus| focus.focused_field),
+        None,
     );
 }
 
@@ -533,19 +531,29 @@ fn disconnected_raw_event_rejects_input_authorization() {
 
 #[test]
 fn callback_snapshot_preserves_generation_after_focus_moves() {
-    let (publisher, tracker) = focused_field_channel();
-    publisher.update(
+    let focus_context = FocusContext::new();
+    focus_context.activate(
+        ApplicationInfo {
+            name: "Test".to_owned(),
+            bundle_id: Some("dev.zanei.test".to_owned()),
+            pid: 501,
+            activation_policy: ApplicationActivationPolicy::Regular,
+        },
+        Some(window()),
+    );
+    focus_context.update_focused_field(
         501,
         Some(FocusedField {
             generation: 3,
             class: FieldClass::KnownText(FieldKind::Text),
         }),
     );
-    let callback_snapshot = tracker
-        .focused_field(501)
+    let callback_snapshot = focus_context
+        .current()
+        .and_then(|focus| focus.focused_field)
         .expect("callback should see the current focused field");
 
-    publisher.update(
+    focus_context.update_focused_field(
         501,
         Some(FocusedField {
             generation: 4,
@@ -555,7 +563,10 @@ fn callback_snapshot_preserves_generation_after_focus_moves() {
 
     assert_eq!(callback_snapshot.generation, 3);
     assert_eq!(
-        tracker.focused_field(501).map(|field| field.generation),
+        focus_context
+            .current()
+            .and_then(|focus| focus.focused_field)
+            .map(|field| field.generation),
         Some(4)
     );
 }

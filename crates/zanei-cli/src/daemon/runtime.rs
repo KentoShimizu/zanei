@@ -45,7 +45,9 @@ mod heartbeat;
 mod permission;
 
 use heartbeat::initial_heartbeat;
-pub(super) use permission::{configure_eventtap_start_gate, service_permission_request_worker};
+pub(super) use permission::{
+    configure_eventtap_start_gate, queue_permission_expansion, service_permission_request_worker,
+};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const PAUSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -146,6 +148,7 @@ pub fn run_daemon(
             last_permissions: None,
             initial_input_monitoring_status,
             permission_request_worker: Some(permission_request_worker),
+            pending_permission_request: None,
             executable_guard,
         }
         .run();
@@ -328,6 +331,7 @@ struct ActiveDaemon<'a> {
     last_permissions: Option<DaemonPermissions>,
     initial_input_monitoring_status: Option<Result<PermissionStatus, PermissionError>>,
     permission_request_worker: Option<PermissionRequestWorker>,
+    pending_permission_request: Option<BTreeSet<Permission>>,
     executable_guard: ExecutableGuard,
 }
 
@@ -366,7 +370,14 @@ impl ActiveDaemon<'_> {
             if last_config_poll.elapsed() >= CONFIG_WATCH_INTERVAL {
                 let retention_promoted = match self.config_watcher.reload_if_changed() {
                     Ok(Some(config)) => {
+                        let previous_permissions = self.collectors.required_permissions();
                         self.collectors.replace_filter(config.filter.clone());
+                        queue_permission_expansion(
+                            &previous_permissions,
+                            &self.collectors.required_permissions(),
+                            &mut self.pending_permission_request,
+                        );
+                        self.start_pending_permission_request();
                         self.pipeline.replace_filter(&config.filter)?;
                         self.degraded.remove("config");
                         self.request_retention_reload(config.output.retention_hours, now)?
@@ -470,6 +481,23 @@ impl ActiveDaemon<'_> {
                 }
             },
         );
+        self.start_pending_permission_request();
+    }
+
+    fn start_pending_permission_request(&mut self) {
+        if self.permission_request_worker.is_some() {
+            return;
+        }
+        let Some(required) = self.pending_permission_request.take() else {
+            return;
+        };
+        match PermissionRequestWorker::start(required) {
+            Ok(worker) => self.permission_request_worker = Some(worker),
+            Err(error) => {
+                self.degraded
+                    .insert("permission_request".to_owned(), error.to_string());
+            }
+        }
     }
 }
 

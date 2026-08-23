@@ -25,7 +25,6 @@ use crate::{
         logic::{KeyModifiers, KeyObservation},
     },
     focus_context::FocusContext,
-    focused_field::FocusedFieldTracker,
     input_source::ImeState,
     secure_input::{SecureInputProbe, SecureInputProbeError},
     text_capture::{InputAuthorization, InputAuthorizationPublisher},
@@ -73,7 +72,7 @@ impl Drop for RetainedEvent {
 enum QueuedEvent {
     Event {
         event: RetainedEvent,
-        input_target: Option<NativeInputTarget>,
+        input_target: Option<Box<NativeInputTarget>>,
         authorization: Option<InputAuthorization>,
         secure_input: bool,
         ime_active: bool,
@@ -94,7 +93,6 @@ struct CallbackContext {
     sender: SyncSender<QueuedEvent>,
     dropped_events: Arc<AtomicU64>,
     degraded_operations: Arc<AtomicU64>,
-    focused_fields: Option<FocusedFieldTracker>,
     input_authorizations: Option<InputAuthorizationPublisher>,
     ime_state: ImeState,
     secure_input_probe: Option<SecureInputProbe>,
@@ -116,7 +114,6 @@ pub(crate) struct EventTapConfig {
     pub(crate) mode: EventTapMode,
     pub(crate) dropped_events: Arc<AtomicU64>,
     pub(crate) degraded_operations: Arc<AtomicU64>,
-    pub(crate) focused_fields: Option<FocusedFieldTracker>,
     pub(crate) input_authorizations: Option<InputAuthorizationPublisher>,
     pub(crate) ime_state: ImeState,
     pub(crate) secure_input_probe: Option<SecureInputProbe>,
@@ -130,7 +127,6 @@ impl EventTap {
             sender,
             dropped_events: config.dropped_events,
             degraded_operations: config.degraded_operations,
-            focused_fields: config.focused_fields,
             input_authorizations: config.input_authorizations,
             ime_state: config.ime_state,
             secure_input_probe: config.secure_input_probe,
@@ -209,7 +205,7 @@ impl EventTap {
             }) => Some(decode_event(
                 &event,
                 DecodeContext {
-                    input_target,
+                    input_target: input_target.map(|target| *target),
                     authorization,
                     secure_input,
                     ime_active,
@@ -270,13 +266,7 @@ extern "C" fn event_callback(
                 );
             let ime_active = event_type == EVENT_KEY_DOWN && context.ime_state.active();
             let input_target = (event_type == EVENT_KEY_DOWN)
-                .then(|| {
-                    input_target(
-                        event.as_ptr(),
-                        context.focused_fields.as_ref(),
-                        &context.focus_context,
-                    )
-                })
+                .then(|| input_target(event.as_ptr(), &context.focus_context))
                 .flatten();
             if event_type == EVENT_KEY_DOWN {
                 trace_target(input_target.as_ref(), secure_input, ime_active);
@@ -294,7 +284,7 @@ extern "C" fn event_callback(
             // SAFETY: retain transfers one reference before the borrowed callback event expires.
             unsafe { CFRetain(event.as_ptr().cast_const()) };
             QueuedEvent::Event {
-                input_target,
+                input_target: input_target.map(Box::new),
                 authorization,
                 event: RetainedEvent(event),
                 secure_input,

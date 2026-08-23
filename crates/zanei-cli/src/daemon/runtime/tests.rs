@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     sync::{
         Arc, Mutex,
@@ -23,7 +23,7 @@ use super::{
     CollectorSet, EXECUTABLE_REMOVED_MESSAGE, Pipeline, configure_eventtap_start_gate,
     ensure_pipeline_running, executable_shutdown_requested,
     initialize_permission_dependent_runtime, merge_collector_failures, normalize_pause_request,
-    service_permission_request_worker, shutdown_daemon,
+    queue_permission_expansion, service_permission_request_worker, shutdown_daemon,
 };
 use crate::daemon::{
     executable_guard::ExecutableGuard,
@@ -31,6 +31,7 @@ use crate::daemon::{
     supervisor::EventTapStartGate,
 };
 use crate::permissions::PermissionRequestOutcome;
+use zanei_collector::Permission;
 
 #[test]
 fn initial_heartbeat_is_committed_before_permission_worker_starts() {
@@ -110,6 +111,22 @@ fn initial_input_monitoring_grant_allows_immediate_eventtap_start() {
 
     assert!(granted_gate.allows_start());
     assert!(!denied_gate.allows_start());
+}
+
+#[test]
+fn newly_required_chrome_automation_is_queued_after_filter_reload() {
+    let previous = BTreeSet::from([Permission::Accessibility]);
+    let automation = Permission::Automation {
+        bundle_id: "com.google.Chrome".to_owned(),
+    };
+    let current = BTreeSet::from([Permission::Accessibility, automation.clone()]);
+    let mut pending = None;
+
+    queue_permission_expansion(&previous, &current, &mut pending);
+
+    assert_eq!(pending, Some(current.clone()));
+    queue_permission_expansion(&current, &previous, &mut pending);
+    assert_eq!(pending, None, "permission removal does not open a prompt");
 }
 
 #[test]

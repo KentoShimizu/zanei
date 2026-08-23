@@ -1,12 +1,17 @@
-//! Delayed confirmation for Chrome text bodies observed between AppleScript polls.
+//! Confirm-then-write quarantine for Chrome-dependent bodies.
+
+use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
 use zanei_collector::RawEvent;
-use zanei_core::privacy::suppress_text_content;
+use zanei_core::{
+    privacy::{PrivacyScope, suppress_text_content},
+    schema::EventData,
+};
 
-use crate::chrome::ChromeEligibilityTracker;
+use crate::{capture_policy::CapturePolicy, chrome::ChromeObserver};
 
-const POLL_LAG_MARGIN: time::Duration = time::Duration::milliseconds(250);
+const CONFIRMATION_SAFETY_CAP: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ChromeWindowKey {
@@ -14,29 +19,35 @@ pub(crate) struct ChromeWindowKey {
     pub(crate) window_id: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HeldBodyKind {
+    Text,
+    Snapshot,
+}
+
 pub(crate) struct TextQuarantine {
     held: Vec<HeldEvent>,
-    confirmation_delay: time::Duration,
+    observer: ChromeObserver,
 }
 
 struct HeldEvent {
     event: RawEvent,
     key: ChromeWindowKey,
     version_at_decision: u64,
-    due_at: OffsetDateTime,
+    held_at: Instant,
+    expires_at: Instant,
+    kind: HeldBodyKind,
 }
 
 impl TextQuarantine {
-    pub(crate) fn new(tracker: &ChromeEligibilityTracker) -> Self {
-        let poll_interval = time::Duration::try_from(tracker.poll_interval())
-            .expect("Chrome poll interval must fit time::Duration");
+    pub(crate) fn new(observer: ChromeObserver) -> Self {
         Self {
             held: Vec::new(),
-            confirmation_delay: poll_interval + POLL_LAG_MARGIN,
+            observer,
         }
     }
 
-    pub(crate) fn hold(
+    pub(crate) fn hold_text(
         &mut self,
         mut event: RawEvent,
         key: ChromeWindowKey,
@@ -44,37 +55,72 @@ impl TextQuarantine {
         observed_at: OffsetDateTime,
     ) {
         event.observed_at = Some(observed_at);
+        self.hold_at(
+            event,
+            key,
+            version_at_decision,
+            HeldBodyKind::Text,
+            Instant::now(),
+        );
+    }
+
+    pub(crate) fn hold_snapshot(
+        &mut self,
+        event: RawEvent,
+        key: ChromeWindowKey,
+        version_at_decision: u64,
+    ) {
+        self.hold_at(
+            event,
+            key,
+            version_at_decision,
+            HeldBodyKind::Snapshot,
+            Instant::now(),
+        );
+    }
+
+    fn hold_at(
+        &mut self,
+        event: RawEvent,
+        key: ChromeWindowKey,
+        version_at_decision: u64,
+        kind: HeldBodyKind,
+        held_at: Instant,
+    ) {
+        self.observer.request_observation(key.pid);
         self.held.push(HeldEvent {
             event,
             key,
             version_at_decision,
-            due_at: observed_at + self.confirmation_delay,
+            held_at,
+            expires_at: held_at + CONFIRMATION_SAFETY_CAP,
+            kind,
         });
     }
 
-    pub(crate) fn release(
-        &mut self,
-        now: OffsetDateTime,
-        tracker: &ChromeEligibilityTracker,
-    ) -> Vec<RawEvent> {
-        let mut due = Vec::new();
+    pub(crate) fn release(&mut self, now: Instant, policy: &CapturePolicy) -> Vec<RawEvent> {
+        let tracker = policy.chrome_tracker();
+        let mut released = Vec::new();
         let mut pending = Vec::with_capacity(self.held.len());
         for held in self.held.drain(..) {
-            if held.due_at <= now {
-                due.push(resolve(held, tracker));
+            if tracker
+                .observed_at(held.key.pid, held.key.window_id)
+                .is_some_and(|observed_at| observed_at > held.held_at)
+            {
+                released.extend(resolve_confirmed(held, policy));
+            } else if now >= held.expires_at {
+                released.push(resolve_unresponsive(held));
             } else {
+                self.observer.request_observation(held.key.pid);
                 pending.push(held);
             }
         }
         self.held = pending;
-        due
+        released
     }
 
-    pub(crate) fn flush(&mut self, tracker: &ChromeEligibilityTracker) -> Vec<RawEvent> {
-        self.held
-            .drain(..)
-            .map(|held| resolve(held, tracker))
-            .collect()
+    pub(crate) fn flush(&mut self) -> Vec<RawEvent> {
+        self.held.drain(..).map(resolve_unresponsive).collect()
     }
 
     #[cfg(test)]
@@ -83,13 +129,38 @@ impl TextQuarantine {
     }
 }
 
-fn resolve(mut held: HeldEvent, tracker: &ChromeEligibilityTracker) -> RawEvent {
-    let unchanged =
-        tracker.state_version(held.key.pid, held.key.window_id) == Some(held.version_at_decision);
-    if !unchanged || !tracker.allows_text(held.key.pid, Some(held.key.window_id)) {
-        suppress_text_content(&mut held.event.data, &mut held.event.element);
+fn resolve_confirmed(mut held: HeldEvent, policy: &CapturePolicy) -> Option<RawEvent> {
+    let scope = match held.kind {
+        HeldBodyKind::Text => PrivacyScope::TextContent,
+        HeldBodyKind::Snapshot => PrivacyScope::ContentSnapshot,
+    };
+    let decision = policy.decision(scope, &held.event.app, Some(held.key.window_id));
+    held.event.capture_context = decision.capture_context();
+    if !decision.is_allowed() && held.kind == HeldBodyKind::Snapshot {
+        return None;
     }
+    let unchanged = decision.chrome_version() == Some(held.version_at_decision);
+    if !decision.is_allowed() || !unchanged {
+        null_body(&mut held.event, held.kind);
+    }
+    Some(held.event)
+}
+
+fn resolve_unresponsive(mut held: HeldEvent) -> RawEvent {
+    null_body(&mut held.event, held.kind);
     held.event
+}
+
+fn null_body(event: &mut RawEvent, kind: HeldBodyKind) {
+    match kind {
+        HeldBodyKind::Text => suppress_text_content(&mut event.data, &mut event.element),
+        HeldBodyKind::Snapshot => {
+            if let EventData::ContentSnapshot(data) = &mut event.data {
+                data.text = None;
+                data.chars = 0;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -97,32 +168,48 @@ mod tests {
     use zanei_core::{
         config::{FilterConfig, ScopedFilterConfig},
         privacy::CHROME_BUNDLE_ID,
-        schema::{App, EventData, FieldKind, InputKeyData, InputKeyKind, Window},
+        schema::{
+            App, ContentSnapshotData, ContentSnapshotTrigger, EventData, FieldKind, InputKeyData,
+            InputKeyKind, Window,
+        },
     };
 
     use super::*;
     use crate::chrome::{
-        ChromeEligibilityObservation, ChromeEligibilityPublisher, chrome_eligibility_channel,
+        ChromeEligibilityObservation, ChromeEligibilityPublisher, ChromeEligibilityTracker,
+        chrome_eligibility_channel,
     };
 
-    fn setup() -> (ChromeEligibilityPublisher, ChromeEligibilityTracker) {
+    fn setup() -> (
+        ChromeEligibilityPublisher,
+        ChromeEligibilityTracker,
+        CapturePolicy,
+        ChromeObserver,
+    ) {
         let filter = FilterConfig {
             text_content: ScopedFilterConfig {
                 exclude_websites: vec!["denied.example".to_owned()],
                 ..ScopedFilterConfig::default()
             },
+            content_snapshot: ScopedFilterConfig {
+                exclude_websites: vec!["denied.example".to_owned()],
+                ..ScopedFilterConfig::default()
+            },
             ..FilterConfig::default()
         };
-        chrome_eligibility_channel(filter)
+        let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
+        let policy = CapturePolicy::new(tracker.clone(), filter, None);
+        (publisher, tracker, policy, ChromeObserver::new())
     }
 
-    fn allow(publisher: &ChromeEligibilityPublisher, url: &str) {
-        publisher.observe(
+    fn observe(publisher: &ChromeEligibilityPublisher, url: &str, at: Instant) {
+        publisher.observe_at(
             7,
             ChromeEligibilityObservation::Normal {
                 window_id: Some(11),
                 url: url.to_owned(),
             },
+            at,
         );
     }
 
@@ -153,27 +240,44 @@ mod tests {
         }
     }
 
+    fn snapshot_event() -> RawEvent {
+        let mut event = event(OffsetDateTime::UNIX_EPOCH);
+        event.source = "macos.ax".to_owned();
+        event.event_type = "content.snapshot".to_owned();
+        event.data = EventData::ContentSnapshot(ContentSnapshotData {
+            text: Some("private snapshot".to_owned()),
+            chars: 16,
+            complete: true,
+            trigger: ContentSnapshotTrigger::FocusOut,
+        });
+        event
+    }
+
     #[test]
-    fn allowed_host_changing_to_denied_before_due_time_nulls_text() {
-        let (publisher, tracker) = setup();
-        allow(&publisher, "https://allowed.example");
+    fn allowed_to_excluded_switch_then_input_within_200ms_nulls_text() {
+        let (publisher, tracker, policy, observer) = setup();
+        let before = Instant::now();
+        observe(&publisher, "https://allowed.example", before);
         let version = tracker.state_version(7, 11).expect("version");
-        let observed_at = OffsetDateTime::UNIX_EPOCH;
-        let mut quarantine = TextQuarantine::new(&tracker);
-        quarantine.hold(
-            event(observed_at),
+        let held_at = before + Duration::from_millis(10);
+        let mut quarantine = TextQuarantine::new(observer);
+        quarantine.hold_at(
+            event(OffsetDateTime::UNIX_EPOCH),
             ChromeWindowKey {
                 pid: 7,
                 window_id: 11,
             },
             version,
-            observed_at,
+            HeldBodyKind::Text,
+            held_at,
+        );
+        observe(
+            &publisher,
+            "https://denied.example",
+            held_at + Duration::from_millis(50),
         );
 
-        allow(&publisher, "https://denied.example");
-        assert!(!tracker.allows_text(7, Some(11)));
-        let released = quarantine.release(observed_at + time::Duration::seconds(2), &tracker);
-
+        let released = quarantine.release(held_at + Duration::from_millis(51), &policy);
         let EventData::InputKey(data) = &released[0].data else {
             panic!("input.key");
         };
@@ -181,89 +285,127 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_allowed_state_keeps_text_and_observation_time() {
-        let (publisher, tracker) = setup();
-        allow(&publisher, "https://allowed.example");
+    fn post_input_unchanged_observation_keeps_text_and_input_time() {
+        let (publisher, tracker, policy, observer) = setup();
+        let before = Instant::now();
+        observe(&publisher, "https://allowed.example", before);
         let version = tracker.state_version(7, 11).expect("version");
+        let held_at = before + Duration::from_millis(10);
         let observed_at = OffsetDateTime::UNIX_EPOCH;
-        let mut quarantine = TextQuarantine::new(&tracker);
-        quarantine.hold(
+        let mut quarantine = TextQuarantine::new(observer);
+        quarantine.hold_at(
             event(observed_at),
             ChromeWindowKey {
                 pid: 7,
                 window_id: 11,
             },
             version,
-            observed_at,
+            HeldBodyKind::Text,
+            held_at,
+        );
+        observe(
+            &publisher,
+            "https://allowed.example",
+            held_at + Duration::from_millis(50),
         );
 
-        let released = quarantine.release(observed_at + time::Duration::seconds(2), &tracker);
-
+        let released = quarantine.release(held_at + Duration::from_millis(51), &policy);
         let EventData::InputKey(data) = &released[0].data else {
             panic!("input.key");
         };
         assert_eq!(data.text.as_deref(), Some("private"));
         assert_eq!(released[0].observed_at, Some(observed_at));
-
-        let mut normalizer = zanei_core::normalize::Normalizer::new();
-        normalizer
-            .push(released[0].clone())
-            .expect("released event normalizes");
-        let normalized = normalizer.flush();
-        assert_eq!(
-            normalized[0].ts,
-            zanei_core::normalize::format_timestamp(observed_at)
-        );
     }
 
     #[test]
-    fn denied_decisions_are_not_held_by_the_caller() {
-        let (publisher, tracker) = setup();
-        allow(&publisher, "https://denied.example");
-        let decision_version = tracker
-            .state_version(7, 11)
-            .expect("denied state is versioned");
-        let observed_at = OffsetDateTime::UNIX_EPOCH;
-        let mut quarantine = TextQuarantine::new(&tracker);
-
-        if tracker.allows_text(7, Some(11)) {
-            quarantine.hold(
-                event(observed_at),
-                ChromeWindowKey {
-                    pid: 7,
-                    window_id: 11,
-                },
-                decision_version,
-                observed_at,
-            );
-        }
-
-        assert!(quarantine.is_empty());
-    }
-
-    #[test]
-    fn stop_flush_rechecks_current_state() {
-        let (publisher, tracker) = setup();
-        allow(&publisher, "https://allowed.example");
+    fn unresponsive_chrome_nulls_after_safety_cap() {
+        let (publisher, tracker, policy, observer) = setup();
+        let before = Instant::now();
+        observe(&publisher, "https://allowed.example", before);
         let version = tracker.state_version(7, 11).expect("version");
-        let observed_at = OffsetDateTime::UNIX_EPOCH;
-        let mut quarantine = TextQuarantine::new(&tracker);
-        quarantine.hold(
-            event(observed_at),
+        let held_at = before + Duration::from_millis(10);
+        let mut quarantine = TextQuarantine::new(observer);
+        quarantine.hold_at(
+            event(OffsetDateTime::UNIX_EPOCH),
             ChromeWindowKey {
                 pid: 7,
                 window_id: 11,
             },
             version,
-            observed_at,
+            HeldBodyKind::Text,
+            held_at,
         );
-        publisher.observe(7, ChromeEligibilityObservation::Unavailable);
 
-        let flushed = quarantine.flush(&tracker);
-
-        let EventData::InputKey(data) = &flushed[0].data else {
+        assert!(
+            quarantine
+                .release(held_at + Duration::from_secs(1), &policy)
+                .is_empty()
+        );
+        let released = quarantine.release(held_at + CONFIRMATION_SAFETY_CAP, &policy);
+        let EventData::InputKey(data) = &released[0].data else {
             panic!("input.key");
         };
         assert_eq!(data.text, None);
+        assert!(quarantine.is_empty());
+    }
+
+    #[test]
+    fn focus_out_snapshot_is_dropped_after_confirming_an_excluded_tab() {
+        let (publisher, tracker, policy, observer) = setup();
+        let before = Instant::now();
+        observe(&publisher, "https://allowed.example", before);
+        let version = tracker.state_version(7, 11).expect("version");
+        let held_at = before + Duration::from_millis(10);
+        let mut quarantine = TextQuarantine::new(observer);
+        quarantine.hold_at(
+            snapshot_event(),
+            ChromeWindowKey {
+                pid: 7,
+                window_id: 11,
+            },
+            version,
+            HeldBodyKind::Snapshot,
+            held_at,
+        );
+        observe(
+            &publisher,
+            "https://denied.example",
+            held_at + Duration::from_millis(50),
+        );
+
+        assert!(
+            quarantine
+                .release(held_at + Duration::from_millis(51), &policy)
+                .is_empty()
+        );
+        assert!(quarantine.is_empty());
+    }
+
+    #[test]
+    fn unresponsive_chrome_emits_snapshot_metadata_with_a_null_body() {
+        let (publisher, tracker, policy, observer) = setup();
+        let before = Instant::now();
+        observe(&publisher, "https://allowed.example", before);
+        let version = tracker.state_version(7, 11).expect("version");
+        let held_at = before + Duration::from_millis(10);
+        let mut quarantine = TextQuarantine::new(observer);
+        quarantine.hold_at(
+            snapshot_event(),
+            ChromeWindowKey {
+                pid: 7,
+                window_id: 11,
+            },
+            version,
+            HeldBodyKind::Snapshot,
+            held_at,
+        );
+
+        let released = quarantine.release(held_at + CONFIRMATION_SAFETY_CAP, &policy);
+        let EventData::ContentSnapshot(data) = &released[0].data else {
+            panic!("content.snapshot");
+        };
+        assert_eq!(data.text, None);
+        assert_eq!(data.chars, 0);
+        assert_eq!(data.trigger, ContentSnapshotTrigger::FocusOut);
     }
 }

@@ -8,7 +8,7 @@ use std::{
 };
 
 use zanei_collector::RawEvent;
-use zanei_core::schema::EventData;
+use zanei_core::{privacy::PrivacyScope, schema::EventData};
 
 use super::{
     EventTapMode,
@@ -27,15 +27,16 @@ use super::{
 };
 use crate::{
     ax::ClickObservation,
+    capture_policy::CapturePolicy,
+    chrome::ChromeObserver,
     ffi::eventtap::{
         self as native, EventTap, EventTapConfig, NativeApp, NativeContext, NativeEvent,
         Pasteboard, WakeObserver,
     },
     focus_context::{FocusContext, FocusSnapshot},
-    focused_field::FocusedFieldTracker,
     input_source::ImeState,
     secure_input::SecureInputProbe,
-    text_capture::{InputAuthorizationPublisher, TextContentPolicy, TextQuarantine},
+    text_capture::{InputAuthorizationPublisher, TextQuarantine},
     trace,
 };
 
@@ -48,7 +49,6 @@ struct NativeApi {
     mode: EventTapMode,
     dropped_events: Arc<AtomicU64>,
     degraded_operations: Arc<AtomicU64>,
-    focused_fields: Option<FocusedFieldTracker>,
     input_authorizations: Option<InputAuthorizationPublisher>,
     ime_state: ImeState,
     secure_input_probe: Option<SecureInputProbe>,
@@ -61,7 +61,6 @@ impl NativeApi {
         mode: EventTapMode,
         dropped_events: Arc<AtomicU64>,
         degraded_operations: Arc<AtomicU64>,
-        focused_fields: Option<FocusedFieldTracker>,
         input_authorizations: Option<InputAuthorizationPublisher>,
         ime_state: ImeState,
         secure_input_probe: Option<SecureInputProbe>,
@@ -72,7 +71,6 @@ impl NativeApi {
             mode,
             dropped_events,
             degraded_operations,
-            focused_fields,
             input_authorizations,
             ime_state,
             secure_input_probe,
@@ -88,10 +86,10 @@ impl NativeApi {
         }
     }
 
-    fn try_next_event(&self, text_policy: &TextContentPolicy) -> Option<NativeEvent> {
+    fn try_next_event(&self, capture_policy: &CapturePolicy) -> Option<NativeEvent> {
         self.tap.as_ref().and_then(|tap| {
             tap.try_next_event(|target| {
-                early_text_read_allowed(target, text_policy, &self.focus_context)
+                early_text_read_allowed(target, capture_policy, &self.focus_context)
             })
         })
     }
@@ -115,7 +113,6 @@ impl EventTapApi for NativeApi {
             mode: self.mode,
             dropped_events: Arc::clone(&self.dropped_events),
             degraded_operations: Arc::clone(&self.degraded_operations),
-            focused_fields: self.focused_fields.clone(),
             input_authorizations: self.input_authorizations.clone(),
             ime_state: self.ime_state.clone(),
             secure_input_probe: self.secure_input_probe.clone(),
@@ -139,7 +136,6 @@ pub(super) fn run(
     event_sender: SyncSender<RawEvent>,
     mode: EventTapMode,
     click_sender: Option<SyncSender<ClickObservation>>,
-    focused_fields: &mut Option<FocusedFieldTracker>,
     stop_receiver: std::sync::mpsc::Receiver<()>,
     dropped_events: Arc<AtomicU64>,
     degraded_operations: Arc<AtomicU64>,
@@ -148,7 +144,8 @@ pub(super) fn run(
     input_authorizations: Option<InputAuthorizationPublisher>,
     secure_input_probe: Option<SecureInputProbe>,
     ime_state: ImeState,
-    text_policy: TextContentPolicy,
+    capture_policy: CapturePolicy,
+    chrome_observer: ChromeObserver,
     focus_context: FocusContext,
     ready_sender: SyncSender<()>,
 ) {
@@ -159,7 +156,6 @@ pub(super) fn run(
             mode,
             Arc::clone(&dropped_events),
             Arc::clone(&degraded_operations),
-            focused_fields.clone(),
             input_authorizations,
             ime_state.clone(),
             secure_input_probe,
@@ -185,15 +181,14 @@ pub(super) fn run(
     let mut clipboard = mode
         .captures_input()
         .then(|| ClipboardTracker::new(pasteboard.change_count()));
-    let chrome_tracker = text_policy.chrome_tracker();
-    let mut quarantine = TextQuarantine::new(&chrome_tracker);
+    let mut quarantine = TextQuarantine::new(chrome_observer);
     let mut last_watchdog = Instant::now();
     let _ = ready_sender.try_send(());
 
     while stop_receiver.try_recv().is_err() {
         if !emit_released(
             &event_sender,
-            quarantine.release(time::OffsetDateTime::now_utc(), &chrome_tracker),
+            quarantine.release(Instant::now(), &capture_policy),
             &dropped_events,
         ) {
             return;
@@ -212,7 +207,7 @@ pub(super) fn run(
                     },
                     |include_content| pasteboard.content(include_content),
                     secure_input_before,
-                    &text_policy,
+                    &capture_policy,
                 );
                 if !emit_clipboard(&event_sender, copy, &mut quarantine, &dropped_events)
                     .continues()
@@ -225,7 +220,7 @@ pub(super) fn run(
         let secure_input_now = refresh_secure_input(&mut driver, &secure_input_enabled);
         let now = elapsed(started_at);
         let mut events = Vec::new();
-        while let Some(event) = driver.api_mut().try_next_event(&text_policy) {
+        while let Some(event) = driver.api_mut().try_next_event(&capture_policy) {
             events.push(event);
         }
         let pasteboard_change_count = clipboard.as_ref().map(|_| pasteboard.change_count());
@@ -260,7 +255,7 @@ pub(super) fn run(
                 ime_state.active(),
                 secure_input_now,
                 &mut clipboard,
-                &text_policy,
+                &capture_policy,
                 &focus_context,
                 &mut quarantine,
             ) {
@@ -283,7 +278,7 @@ pub(super) fn run(
                 },
                 |include_content| pasteboard.content(include_content),
                 secure_input_now,
-                &text_policy,
+                &capture_policy,
             );
             if !emit_clipboard(&event_sender, copy, &mut quarantine, &dropped_events).continues() {
                 return;
@@ -303,22 +298,20 @@ pub(super) fn run(
         );
         publish_current_health(&driver, wake_recovery_degraded, &current_degraded);
     }
-    let _ = emit_released(
-        &event_sender,
-        quarantine.flush(&chrome_tracker),
-        &dropped_events,
-    );
+    let _ = emit_released(&event_sender, quarantine.flush(), &dropped_events);
 }
 
 pub(super) fn early_text_read_allowed(
     target: Option<&crate::ffi::eventtap::NativeInputTarget>,
-    text_policy: &TextContentPolicy,
+    capture_policy: &CapturePolicy,
     focus_context: &FocusContext,
 ) -> bool {
     let Some(target) = target else {
         return false;
     };
-    if target.focus_generation != focus_context.generation() {
+    if target.focus_generation != focus_context.generation()
+        || target.field_generation != focus_context.field_generation()
+    {
         return false;
     }
     let window_id = target.context.window.as_ref().and_then(|window| window.id);
@@ -327,7 +320,7 @@ pub(super) fn early_text_read_allowed(
         bundle_id: target.context.app.bundle_id.clone(),
         pid: Some(target.context.app.pid),
     };
-    text_policy
+    capture_policy
         .input_decision(&app, window_id, target.focused_field)
         .is_allowed()
 }
@@ -368,7 +361,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
     ime_active: bool,
     secure_input_enabled: bool,
     clipboard: &mut Option<ClipboardTracker>,
-    text_policy: &TextContentPolicy,
+    capture_policy: &CapturePolicy,
     focus_context: &FocusContext,
     quarantine: &mut TextQuarantine,
 ) -> bool {
@@ -404,10 +397,12 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                 bundle_id: context.app.bundle_id.clone(),
                 pid: Some(context.app.pid),
             };
-            let generation_matches = target.focus_generation == focus_context.generation();
-            let window_decision = text_policy.decision(&app, window_id);
+            let generation_matches = target.focus_generation == focus_context.generation()
+                && target.field_generation == focus_context.field_generation();
+            let window_decision =
+                capture_policy.decision(PrivacyScope::TextContent, &app, window_id);
             let window_text_allowed = generation_matches && window_decision.is_allowed();
-            let input_decision = text_policy.input_decision(&app, window_id, focused_field);
+            let input_decision = capture_policy.input_decision(&app, window_id, focused_field);
             let input_text_allowed =
                 capture_text_content && generation_matches && input_decision.is_allowed();
             let key_event = raw_event(
@@ -419,7 +414,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                     field_kind,
                     ime_active || ime_active_at_input,
                 )),
-                text_policy,
+                capture_policy,
                 observed_at,
             );
             let key_result = emit_or_quarantine(
@@ -482,7 +477,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                             input_text_allowed,
                             field_kind,
                         )),
-                        text_policy,
+                        capture_policy,
                         observed_at,
                     ),
                     input_text_allowed
@@ -517,7 +512,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                     "input.scroll",
                     context,
                     EventData::InputScroll(data),
-                    text_policy,
+                    capture_policy,
                     observed_at,
                 ),
                 dropped_events,

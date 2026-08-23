@@ -42,4 +42,5 @@ pub(crate) struct NativeInputTarget {
     pub(crate) context: NativeContext,
     pub(crate) focused_field: Option<FocusedField>,
     pub(crate) focus_generation: u64,
+    pub(crate) field_generation: u64,
 }

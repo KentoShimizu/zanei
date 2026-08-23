@@ -178,6 +178,8 @@ timeline は snapshot 本文を inline しません。各 session は snapshot �
 
 `browser.navigate`（URL 捕捉）は現在 Chrome のみ対応します。Chromium は AppleScript でウィンドウのモード（`normal` / `incognito`）を返します。incognito は URL イベントを生成せず、本文も設定なしで null のままです。
 
+navigation はタブ・ウィンドウ・タイトル・ページ読み込みの変化時に観測します。タイトルもフォーカスも変化しないページ内 navigation では `browser.navigate` が生成されない場合があります。
+
 | ブラウザ | URL 捕捉（現在） | プライベートウィンドウ |
 | --- | --- | --- |
 | **Google Chrome** | ✅ 対応 | `mode` で incognito の URL イベントと本文を抑止 |

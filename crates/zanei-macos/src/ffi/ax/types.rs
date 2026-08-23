@@ -64,6 +64,9 @@ pub(crate) enum NativeAxEvent {
         text: Option<String>,
         observed_at: OffsetDateTime,
     },
+    PageLoaded {
+        pid: i32,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -6,7 +6,9 @@ use std::sync::{
     mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
 };
 
-use crate::{ffi::window_list::NativeWindow, workspace::ApplicationInfo};
+use crate::{
+    ffi::window_list::NativeWindow, focused_field::FocusedField, workspace::ApplicationInfo,
+};
 
 const TRANSITION_CHANNEL_CAPACITY: usize = 256;
 
@@ -15,6 +17,8 @@ pub struct FocusSnapshot {
     pub app: ApplicationInfo,
     pub window: Option<NativeWindow>,
     pub generation: u64,
+    pub(crate) focused_field: Option<FocusedField>,
+    pub(crate) field_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +37,7 @@ pub struct FocusContext {
 struct FocusState {
     current: Option<FocusSnapshot>,
     generation: u64,
+    field_generation: u64,
     subscribers: Vec<SyncSender<FocusTransition>>,
 }
 
@@ -61,6 +66,14 @@ impl FocusContext {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generation
+    }
+
+    #[must_use]
+    pub(crate) fn field_generation(&self) -> u64 {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .field_generation
     }
 
     #[must_use]
@@ -100,6 +113,25 @@ impl FocusContext {
             .and_then(|_| self.transition_to(None))
     }
 
+    pub(crate) fn update_focused_field(&self, pid: i32, focused_field: Option<FocusedField>) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(current) = state.current.as_ref() else {
+            return;
+        };
+        if current.app.pid != i64::from(pid) || current.focused_field == focused_field {
+            return;
+        }
+        state.field_generation = state.field_generation.saturating_add(1);
+        let field_generation = state.field_generation;
+        if let Some(current) = state.current.as_mut() {
+            current.focused_field = focused_field;
+            current.field_generation = field_generation;
+        }
+    }
+
     fn transition_to(
         &self,
         candidate: Option<(ApplicationInfo, Option<NativeWindow>)>,
@@ -117,11 +149,25 @@ impl FocusContext {
             }
             return None;
         }
+        let preserve_field = same_field_scope(state.current.as_ref(), candidate.as_ref());
         state.generation = state.generation.saturating_add(1);
+        if !preserve_field {
+            state.field_generation = state.field_generation.saturating_add(1);
+        }
+        let focused_field = preserve_field
+            .then(|| {
+                state
+                    .current
+                    .as_ref()
+                    .and_then(|current| current.focused_field)
+            })
+            .flatten();
         let current = candidate.map(|(app, window)| FocusSnapshot {
             app,
             window,
             generation: state.generation,
+            focused_field,
+            field_generation: state.field_generation,
         });
         let transition = FocusTransition {
             previous: std::mem::replace(&mut state.current, current.clone()),
@@ -141,6 +187,21 @@ impl FocusContext {
                 }
             });
         Some(transition)
+    }
+}
+
+fn same_field_scope(
+    current: Option<&FocusSnapshot>,
+    candidate: Option<&(ApplicationInfo, Option<NativeWindow>)>,
+) -> bool {
+    match (current, candidate) {
+        (Some(current), Some((app, window))) => {
+            current.app.pid == app.pid
+                && current.window.as_ref().and_then(|window| window.id)
+                    == window.as_ref().and_then(|window| window.id)
+        }
+        (None, None) => true,
+        (None, Some(_)) | (Some(_), None) => false,
     }
 }
 
@@ -229,6 +290,23 @@ mod tests {
     }
 
     #[test]
+    fn chromium_profile_uses_the_bounds_resolved_window_on_activation() {
+        let context = FocusContext::new();
+        let chrome = ApplicationInfo {
+            name: "Google Chrome".to_owned(),
+            bundle_id: Some("com.google.Chrome".to_owned()),
+            pid: 7,
+            activation_policy: ApplicationActivationPolicy::Regular,
+        };
+
+        context.activate(chrome, Some(window(11, "Chromium")));
+
+        let current = context.current().expect("Chromium focus");
+        assert_eq!(current.window.and_then(|window| window.id), Some(11));
+        assert_eq!(current.generation, 1);
+    }
+
+    #[test]
     fn title_only_change_increments_generation() {
         let context = FocusContext::new();
         context.activate(app(7), Some(window(11, "First")));
@@ -282,5 +360,31 @@ mod tests {
         assert!(transition.current.is_none());
         assert!(context.current().is_none());
         assert_eq!(context.generation(), 2);
+    }
+
+    #[test]
+    fn focused_field_change_has_its_own_generation_and_no_transition() {
+        use crate::focused_field::FieldClass;
+        use zanei_core::schema::FieldKind;
+
+        let context = FocusContext::new();
+        let transitions = context.subscribe();
+        context.activate(app(7), Some(window(11, "First")));
+        let _ = transitions.try_recv().expect("activation transition");
+        let focus_generation = context.generation();
+
+        context.update_focused_field(
+            7,
+            Some(FocusedField {
+                generation: 9,
+                class: FieldClass::KnownText(FieldKind::Text),
+            }),
+        );
+
+        assert_eq!(context.generation(), focus_generation);
+        assert_eq!(transitions.try_recv(), Err(TryRecvError::Empty));
+        let current = context.current().expect("focus snapshot");
+        assert_eq!(current.focused_field.map(|field| field.generation), Some(9));
+        assert_eq!(current.field_generation, 2);
     }
 }

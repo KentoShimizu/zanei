@@ -1,7 +1,7 @@
 //! Dedicated worker for opt-in, frontmost-window content snapshots.
 
 pub(crate) mod budget;
-mod policy;
+mod output;
 mod role;
 mod scheduler;
 mod state;
@@ -20,15 +20,11 @@ use std::{
     time::Duration,
 };
 
-use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
-use zanei_core::config::FilterConfig;
-
 use crate::{
-    SecureInputProbe, chrome::ChromeEligibilityTracker, focus_context::FocusContext,
-    workspace::WorkspaceEvent,
+    CapturePolicy, chrome::ChromeObserver, focus_context::FocusContext, workspace::WorkspaceEvent,
 };
+use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
 
-use self::policy::SnapshotPolicy;
 use self::state::SnapshotState;
 
 pub use crate::ffi::activity::{ActivityError, seconds_since_last_input};
@@ -49,10 +45,9 @@ const FILTER_REPLACE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct ContentSnapshotCollector {
     channels: Arc<Mutex<WorkerChannels>>,
-    secure_input: SecureInputProbe,
-    chrome: ChromeEligibilityTracker,
+    capture_policy: CapturePolicy,
+    chrome_observer: ChromeObserver,
     focus_context: FocusContext,
-    filter: FilterConfig,
     worker: Option<Worker>,
     health: SharedHealth,
     #[cfg(test)]
@@ -72,10 +67,7 @@ struct WorkerChannels {
 }
 
 enum Control {
-    ReplaceFilter {
-        filter: Box<FilterConfig>,
-        acknowledge: SyncSender<()>,
-    },
+    ReplaceFilter { acknowledge: SyncSender<()> },
     Stop,
 }
 
@@ -109,10 +101,9 @@ impl ContentSnapshotCollector {
     pub fn new(
         trigger_receiver: SnapshotTriggerReceiver,
         lifecycle_receiver: Receiver<WorkspaceEvent>,
-        secure_input: SecureInputProbe,
-        chrome: ChromeEligibilityTracker,
+        capture_policy: CapturePolicy,
+        chrome_observer: ChromeObserver,
         focus_context: FocusContext,
-        filter: FilterConfig,
     ) -> Self {
         Self {
             channels: Arc::new(Mutex::new(WorkerChannels {
@@ -120,10 +111,9 @@ impl ContentSnapshotCollector {
                 lifecycle: lifecycle_receiver,
                 state: SnapshotState::new(std::time::Instant::now()),
             })),
-            secure_input,
-            chrome,
+            capture_policy,
+            chrome_observer,
             focus_context,
-            filter,
             worker: None,
             health: SharedHealth::default(),
             #[cfg(test)]
@@ -154,21 +144,14 @@ impl ContentSnapshotCollector {
         self.worker.is_some()
     }
 
-    pub fn replace_filter(
-        &mut self,
-        filter: FilterConfig,
-    ) -> Result<(), ContentSnapshotControlError> {
-        self.filter = filter.clone();
+    pub fn filter_replaced(&mut self) -> Result<(), ContentSnapshotControlError> {
         let Some(worker) = self.worker.as_ref() else {
             return Ok(());
         };
         let (acknowledge, acknowledged) = sync_channel(0);
         worker
             .control
-            .send(Control::ReplaceFilter {
-                filter: Box::new(filter),
-                acknowledge,
-            })
+            .send(Control::ReplaceFilter { acknowledge })
             .map_err(|_| ContentSnapshotControlError::Disconnected)?;
         acknowledged
             .recv_timeout(FILTER_REPLACE_TIMEOUT)
@@ -209,11 +192,8 @@ impl Collector for ContentSnapshotCollector {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let (control, controls) = channel();
-        let policy = SnapshotPolicy::new(
-            self.filter.clone(),
-            self.chrome.clone(),
-            self.secure_input.clone(),
-        );
+        let capture_policy = self.capture_policy.clone();
+        let chrome_observer = self.chrome_observer.clone();
         let health = self.health.clone();
         let focus_context = self.focus_context.clone();
         let channels = Arc::clone(&self.channels);
@@ -238,7 +218,8 @@ impl Collector for ContentSnapshotCollector {
                     controls,
                     thread_stop,
                     sender,
-                    policy,
+                    capture_policy,
+                    chrome_observer,
                     health,
                     state,
                     focus_context,

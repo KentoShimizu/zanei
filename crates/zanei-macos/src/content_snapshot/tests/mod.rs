@@ -1,4 +1,5 @@
 mod budget;
+mod chromium;
 mod collector;
 mod event;
 mod policy;

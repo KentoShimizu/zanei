@@ -1,6 +1,12 @@
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use zanei_core::config::FilterConfig;
+use zanei_core::schema::{BrowserMode, EventData};
+
+use crate::workspace::ApplicationInfo;
 
 use super::*;
 
@@ -66,7 +72,7 @@ fn incognito_resets_tracker_and_next_normal_snapshot_has_no_transition() {
     let (sender, receiver) = sync_channel(2);
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
 
-    let outcome = poll_once(
+    let outcome = observe_once(
         &mut api,
         &mut tracker,
         &chrome_app(),
@@ -75,7 +81,7 @@ fn incognito_resets_tracker_and_next_normal_snapshot_has_no_transition() {
         &eligibility,
     );
 
-    assert!(matches!(outcome, PollOutcome::Continue));
+    assert!(matches!(outcome, ObservationOutcome::Continue));
     assert!(tracker.previous.is_none());
     assert!(receiver.try_recv().is_err());
     let navigation = tracker
@@ -97,7 +103,7 @@ fn no_window_resets_but_not_frontmost_preserves_the_previous_page() {
     let mut tracker = tracker_with_initial_snapshot();
     let mut background = FakeApi::new([Ok(ChromeObservation::NotFrontmost)]);
     assert!(matches!(
-        poll_once(
+        observe_once(
             &mut background,
             &mut tracker,
             &chrome_app(),
@@ -105,13 +111,13 @@ fn no_window_resets_but_not_frontmost_preserves_the_previous_page() {
             &ChromeMetrics::default(),
             &eligibility,
         ),
-        PollOutcome::Inactive
+        ObservationOutcome::Inactive
     ));
     assert!(tracker.previous.is_some());
 
     let mut no_window = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
     assert!(matches!(
-        poll_once(
+        observe_once(
             &mut no_window,
             &mut tracker,
             &chrome_app(),
@@ -119,7 +125,7 @@ fn no_window_resets_but_not_frontmost_preserves_the_previous_page() {
             &ChromeMetrics::default(),
             &eligibility,
         ),
-        PollOutcome::Continue
+        ObservationOutcome::Continue
     ));
     assert!(tracker.previous.is_none());
 }
@@ -142,14 +148,23 @@ fn rejects_empty_identity_and_non_absolute_url() {
 }
 
 #[test]
-fn chrome_activation_queries_immediately() {
+fn chrome_focus_transition_queries_immediately() {
     let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
     let (sender, _) = sync_channel(1);
     let mut state = ChromeWorkerState::default();
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
 
-    assert!(handle_workspace_event(
-        WorkspaceEvent::Activated(chrome_app()),
+    assert!(handle_focus_transition(
+        FocusTransition {
+            previous: None,
+            current: Some(crate::focus_context::FocusSnapshot {
+                app: chrome_app(),
+                window: None,
+                generation: 1,
+                focused_field: None,
+                field_generation: 1,
+            }),
+        },
         &mut api,
         &sender,
         &mut state,
@@ -158,17 +173,15 @@ fn chrome_activation_queries_immediately() {
     ));
     assert_eq!(api.query_count, 1);
     assert!(state.frontmost.is_some());
-    assert!(state.next_poll.is_some());
+    assert!(state.on_demand.is_none());
 }
 
 #[test]
-fn wake_invalidates_text_eligibility_until_the_next_poll() {
-    let mut api = FakeApi::new([]);
-    let (sender, _) = sync_channel(1);
+fn wake_invalidates_text_eligibility_until_the_next_trigger() {
     let mut state = ChromeWorkerState {
         navigation: NavigationTracker::default(),
         frontmost: Some(chrome_app()),
-        next_poll: Some(Instant::now()),
+        on_demand: None,
     };
     let (eligibility, text) = chrome_eligibility_channel(FilterConfig::default());
     eligibility.observe(
@@ -180,14 +193,7 @@ fn wake_invalidates_text_eligibility_until_the_next_poll() {
     );
     assert!(text.allows_text(42, Some(7)));
 
-    assert!(handle_workspace_event(
-        WorkspaceEvent::DidWake,
-        &mut api,
-        &sender,
-        &mut state,
-        &ChromeMetrics::default(),
-        &eligibility,
-    ));
+    handle_workspace_event(WorkspaceEvent::DidWake, &mut state, &eligibility);
 
     assert!(!text.allows_text(42, Some(7)));
 }
@@ -204,7 +210,7 @@ fn snapshot_produces_contract_aligned_raw_event() {
     let (sender, receiver) = sync_channel(1);
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
 
-    let outcome = poll_once(
+    let outcome = observe_once(
         &mut api,
         &mut tracker,
         &chrome_app(),
@@ -214,7 +220,7 @@ fn snapshot_produces_contract_aligned_raw_event() {
     );
     let event = receiver.try_recv().expect("raw event");
 
-    assert!(matches!(outcome, PollOutcome::Continue));
+    assert!(matches!(outcome, ObservationOutcome::Continue));
     assert_eq!(event.source, EVENT_SOURCE);
     assert_eq!(event.event_type, EVENT_TYPE);
     assert_eq!(event.app.pid, Some(42));
@@ -229,7 +235,7 @@ fn snapshot_produces_contract_aligned_raw_event() {
 }
 
 #[test]
-fn polling_moves_text_eligibility_between_private_excluded_and_normal() {
+fn observations_move_text_eligibility_between_private_excluded_and_normal() {
     let config = FilterConfig {
         exclude_websites: vec!["private.example".to_owned()],
         ..FilterConfig::default()
@@ -254,7 +260,7 @@ fn polling_moves_text_eligibility_between_private_excluded_and_normal() {
     let (sender, _) = sync_channel(3);
 
     assert!(!tracker.allows_text(42, Some(7)));
-    let _ = poll_once(
+    let _ = observe_once(
         &mut api,
         &mut navigation,
         &chrome_app(),
@@ -263,7 +269,7 @@ fn polling_moves_text_eligibility_between_private_excluded_and_normal() {
         &eligibility,
     );
     assert!(!tracker.allows_text(42, Some(7)));
-    let _ = poll_once(
+    let _ = observe_once(
         &mut api,
         &mut navigation,
         &chrome_app(),
@@ -272,7 +278,7 @@ fn polling_moves_text_eligibility_between_private_excluded_and_normal() {
         &eligibility,
     );
     assert!(!tracker.allows_text(42, Some(7)));
-    let _ = poll_once(
+    let _ = observe_once(
         &mut api,
         &mut navigation,
         &chrome_app(),
@@ -296,7 +302,7 @@ fn full_output_queue_is_counted_as_a_dropped_event() {
     let metrics = ChromeMetrics::default();
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
 
-    let outcome = poll_once(
+    let outcome = observe_once(
         &mut api,
         &mut tracker,
         &chrome_app(),
@@ -305,8 +311,96 @@ fn full_output_queue_is_counted_as_a_dropped_event() {
         &eligibility,
     );
 
-    assert!(matches!(outcome, PollOutcome::Continue));
+    assert!(matches!(outcome, ObservationOutcome::Continue));
     assert_eq!(metrics.dropped.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn no_observation_happens_without_a_trigger_for_five_simulated_seconds() {
+    let started_at = Instant::now();
+    let mut api = FakeApi::new([]);
+    let (sender, _) = sync_channel(1);
+    let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
+    let mut state = ChromeWorkerState {
+        navigation: NavigationTracker::default(),
+        frontmost: Some(chrome_app()),
+        on_demand: None,
+    };
+
+    assert!(service_on_demand(
+        started_at + Duration::from_secs(5),
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+    assert_eq!(api.query_count, 0);
+}
+
+#[test]
+fn on_demand_requests_within_debounce_coalesce_into_one_observation() {
+    let started_at = Instant::now();
+    let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
+    let (sender, _) = sync_channel(1);
+    let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
+    let mut state = ChromeWorkerState {
+        navigation: NavigationTracker::default(),
+        frontmost: Some(chrome_app()),
+        on_demand: None,
+    };
+    for offset in [Duration::ZERO, Duration::from_millis(100)] {
+        assert!(handle_observation_trigger(
+            ObservationTrigger::OnDemand { pid: 42 },
+            started_at + offset,
+            &mut api,
+            &sender,
+            &mut state,
+            &ChromeMetrics::default(),
+            &eligibility,
+        ));
+    }
+    assert!(service_on_demand(
+        started_at + Duration::from_millis(199),
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+    assert_eq!(api.query_count, 0);
+    assert!(service_on_demand(
+        started_at + Duration::from_millis(200),
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+    assert_eq!(api.query_count, 1);
+}
+
+#[test]
+fn page_load_triggers_one_observation() {
+    let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
+    let (sender, _) = sync_channel(1);
+    let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
+    let mut state = ChromeWorkerState {
+        navigation: NavigationTracker::default(),
+        frontmost: Some(chrome_app()),
+        on_demand: None,
+    };
+
+    assert!(handle_observation_trigger(
+        ObservationTrigger::PageLoaded { pid: 42 },
+        Instant::now(),
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+    assert_eq!(api.query_count, 1);
 }
 
 fn tracker_with_initial_snapshot() -> NavigationTracker {

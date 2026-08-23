@@ -2,9 +2,9 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{Receiver, SyncSender, sync_channel},
+        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -81,7 +81,7 @@ pub fn notification_channel() -> (SyncSender<WorkspaceEvent>, Receiver<Workspace
 }
 
 pub struct WorkspaceCollector {
-    subscribers: Vec<SyncSender<WorkspaceEvent>>,
+    subscribers: Arc<RwLock<Vec<SyncSender<WorkspaceEvent>>>>,
     events: Option<NativeWorkspaceEvents>,
     worker: Option<Worker>,
     dropped_events: Arc<AtomicU64>,
@@ -95,7 +95,7 @@ impl WorkspaceCollector {
     #[must_use]
     pub fn new(subscribers: Vec<SyncSender<WorkspaceEvent>>) -> Self {
         Self {
-            subscribers,
+            subscribers: Arc::new(RwLock::new(subscribers)),
             events: None,
             worker: None,
             dropped_events: Arc::new(AtomicU64::new(0)),
@@ -105,6 +105,16 @@ impl WorkspaceCollector {
     #[must_use]
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn subscribe(&self) -> Receiver<WorkspaceEvent> {
+        let (sender, receiver) = notification_channel();
+        self.subscribers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(sender);
+        receiver
     }
 
     pub fn prepare_main_thread(&mut self) -> Result<WorkspaceObserver, CollectorError> {
@@ -237,7 +247,7 @@ fn run_workspace(
     runtime: &mut impl WorkspaceApi,
     stop: &AtomicBool,
     sender: &SyncSender<RawEvent>,
-    subscribers: &[SyncSender<WorkspaceEvent>],
+    subscribers: &Arc<RwLock<Vec<SyncSender<WorkspaceEvent>>>>,
     dropped_events: &AtomicU64,
 ) {
     let mut tracker = ActivationTracker::default();
@@ -324,7 +334,7 @@ fn process_workspace_event(
     event: NativeWorkspaceEvent,
     tracker: &mut ActivationTracker,
     sender: &SyncSender<RawEvent>,
-    subscribers: &[SyncSender<WorkspaceEvent>],
+    subscribers: &Arc<RwLock<Vec<SyncSender<WorkspaceEvent>>>>,
     dropped_events: &AtomicU64,
 ) {
     let (notification, raw_event) = match event {
@@ -350,11 +360,22 @@ fn process_workspace_event(
         NativeWorkspaceEvent::DidWake => (WorkspaceEvent::DidWake, None),
     };
 
-    for subscriber in subscribers {
-        if subscriber.try_send(notification.clone()).is_err() {
-            dropped_events.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    subscribers
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(
+            |subscriber| match subscriber.try_send(notification.clone()) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) => {
+                    dropped_events.fetch_add(1, Ordering::Relaxed);
+                    true
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    dropped_events.fetch_add(1, Ordering::Relaxed);
+                    false
+                }
+            },
+        );
     if raw_event.is_some_and(|event| sender.try_send(event).is_err()) {
         dropped_events.fetch_add(1, Ordering::Relaxed);
     }
@@ -381,6 +402,7 @@ fn lifecycle_raw_event(
 mod tests {
     use std::{
         sync::{
+            Arc, RwLock,
             atomic::{AtomicBool, AtomicU64},
             mpsc::sync_channel,
         },
@@ -391,8 +413,8 @@ mod tests {
 
     use super::{
         ApplicationActivationPolicy, ApplicationInfo, EmptyData, EventData, NativeApplication,
-        NativeApplicationActivationPolicy, NativeWorkspaceEvent, WorkspaceApi, lifecycle_raw_event,
-        run_workspace,
+        NativeApplicationActivationPolicy, NativeWorkspaceEvent, WorkspaceApi, WorkspaceCollector,
+        WorkspaceEvent, lifecycle_raw_event, process_workspace_event, run_workspace,
     };
 
     #[test]
@@ -447,7 +469,7 @@ mod tests {
             &mut InitialWorkspace,
             &stopped,
             &sender,
-            &[],
+            &Arc::new(RwLock::new(Vec::new())),
             &AtomicU64::new(0),
         );
 
@@ -504,7 +526,7 @@ mod tests {
             &mut runtime,
             &AtomicBool::new(true),
             &sender,
-            &[],
+            &Arc::new(RwLock::new(Vec::new())),
             &AtomicU64::new(0),
         );
 
@@ -513,5 +535,51 @@ mod tests {
             Some(43)
         );
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn subscriber_added_after_construction_receives_future_lifecycle_events() {
+        struct NoWindow;
+
+        impl WorkspaceApi for NoWindow {
+            fn poll(&mut self, _timeout: Duration) -> Vec<NativeWorkspaceEvent> {
+                Vec::new()
+            }
+
+            fn frontmost_application(&self) -> Option<NativeApplication> {
+                None
+            }
+
+            fn front_window(&self, _pid: i64) -> Option<Window> {
+                None
+            }
+
+            fn take_dropped_events(&self) -> u64 {
+                0
+            }
+        }
+
+        let collector = WorkspaceCollector::default();
+        let late = collector.subscribe();
+        let (raw_sender, _raw_receiver) = sync_channel(1);
+        let app = NativeApplication {
+            name: "Late".to_owned(),
+            bundle_id: Some("dev.example.Late".to_owned()),
+            pid: 44,
+            activation_policy: NativeApplicationActivationPolicy::Regular,
+        };
+        process_workspace_event(
+            &NoWindow,
+            NativeWorkspaceEvent::Launched(app),
+            &mut super::ActivationTracker::default(),
+            &raw_sender,
+            &collector.subscribers,
+            &AtomicU64::new(0),
+        );
+
+        assert!(matches!(
+            late.try_recv(),
+            Ok(WorkspaceEvent::Launched(ApplicationInfo { pid: 44, .. }))
+        ));
     }
 }

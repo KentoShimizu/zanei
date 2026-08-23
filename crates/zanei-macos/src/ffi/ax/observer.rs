@@ -12,10 +12,11 @@ use std::{
 use time::OffsetDateTime;
 
 use crate::{
+    capture_policy::CapturePolicy,
     focused_field::{FieldClass, field_class},
-    text_capture::{FocusedTarget, InputAuthorizations, TextContentPolicy},
+    text_capture::{FocusedTarget, InputAuthorizations},
 };
-use zanei_core::schema::App;
+use zanei_core::{privacy::PrivacyScope, schema::App};
 
 use super::{
     NativeAxError, NativeAxEvent, ObserverContext, TargetKind,
@@ -41,7 +42,7 @@ pub(super) struct AppObserver {
     degraded: Arc<AtomicU64>,
     capture_text_content: bool,
     app: App,
-    text_policy: TextContentPolicy,
+    capture_policy: CapturePolicy,
     manual_accessibility: bool,
 }
 
@@ -80,7 +81,7 @@ impl AppObserver {
         degraded: Arc<AtomicU64>,
         capture_text_content: bool,
         app: App,
-        text_policy: TextContentPolicy,
+        capture_policy: CapturePolicy,
         manual_accessibility: bool,
     ) -> Self {
         Self {
@@ -95,7 +96,7 @@ impl AppObserver {
             degraded,
             capture_text_content,
             app,
-            text_policy,
+            capture_policy,
             manual_accessibility,
         }
     }
@@ -462,8 +463,12 @@ impl AppObserver {
     pub(super) fn text_content_allowed(&self, window: Option<&super::NativeWindow>) -> bool {
         self.capture_text_content
             && self
-                .text_policy
-                .decision(&self.app, window.and_then(|window| window.id))
+                .capture_policy
+                .decision(
+                    PrivacyScope::TextContent,
+                    &self.app,
+                    window.and_then(|window| window.id),
+                )
                 .is_allowed()
     }
 }

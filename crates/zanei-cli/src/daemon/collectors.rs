@@ -6,17 +6,19 @@ use std::{
 };
 
 use zanei_collector::{Collector, Permission, RawEvent};
-use zanei_core::config::{CaptureSource, Config, FilterConfig};
+use zanei_core::config::{CaptureConfig, CaptureSource, Config, FilterConfig};
 use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyFilter};
 use zanei_core::schema::App;
 use zanei_macos::{
-    SecureInputMonitor, TextContentPolicy,
+    CapturePolicy, SecureInputMonitor,
     ax::{AxCollector, AxCollectorOptions, click_channel},
-    chrome::{ChromeCollector, ChromeEligibilityPublisher, chrome_eligibility_channel},
+    chrome::{
+        ChromeCollector, ChromeEligibilityPublisher, ChromeObserver, chrome_eligibility_channel,
+    },
     content_snapshot::{ContentSnapshotCollector, snapshot_trigger_channel},
     eventtap::{EventTapCollector, EventTapMode, InputSourceObserver},
     focus_context::FocusContext,
-    focused_field_channel, input_authorization_channel,
+    input_authorization_channel,
     workspace::{WorkspaceCollector, WorkspaceEvent, WorkspaceObserver, notification_channel},
 };
 
@@ -36,7 +38,10 @@ pub(crate) struct CollectorSet {
     pub(super) eventtap: Option<Managed<EventTapCollector>>,
     pub(super) chrome: Option<Managed<ChromeCollector>>,
     chrome_eligibility: ChromeEligibilityPublisher,
-    text_policy: TextContentPolicy,
+    capture_policy: CapturePolicy,
+    chrome_observer: ChromeObserver,
+    focus_context: FocusContext,
+    capture: CaptureConfig,
     _secure_input_monitor: Option<SecureInputMonitor>,
     pub(super) start_errors: BTreeMap<String, String>,
     pub(super) eventtap_start_gate: super::supervisor::EventTapStartGate,
@@ -51,36 +56,26 @@ impl CollectorSet {
         let capture_content = config.capture.content_snapshot;
         let capture_input = sources.contains(&CaptureSource::Input);
         let capture_browser = sources.contains(&CaptureSource::Browser);
-        let chrome = App {
-            name: "Google Chrome".to_owned(),
-            bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
-            pid: None,
-        };
-        let needs_chrome_privacy = config.capture.text_content && (capture_ui || capture_input)
-            || capture_content
-                && PrivacyFilter::new(config.filter.clone())
-                    .content_snapshot_app_is_allowed(&chrome);
+        let chrome_required = chrome_tracking_required(&config.capture, &config.filter);
         let capture_ax = capture_window
             || capture_ui
             || capture_input
             || capture_browser
             || capture_content
-            || needs_chrome_privacy;
+            || chrome_required;
         let (chrome_eligibility, chrome_tracker) =
             chrome_eligibility_channel(config.filter.clone());
         let focus_context = FocusContext::new();
-        let text_policy = TextContentPolicy::new(chrome_tracker.clone(), config.filter.clone());
+        let chrome_observer = ChromeObserver::new();
 
         let mut subscribers = Vec::new();
         let ax_lifecycle = capture_ax.then(|| subscriber(&mut subscribers));
         let content_lifecycle = capture_content.then(|| subscriber(&mut subscribers));
-        let chrome_lifecycle =
-            (capture_browser || needs_chrome_privacy).then(|| subscriber(&mut subscribers));
-        let workspace = (capture_app || capture_ax || capture_browser || needs_chrome_privacy)
+        let chrome_lifecycle = chrome_required.then(|| subscriber(&mut subscribers));
+        let workspace = (capture_app || capture_ax || capture_browser || chrome_required)
             .then(|| Managed::new(WorkspaceCollector::new(subscribers)));
 
         let (click_sender, click_receiver) = click_channel();
-        let focused_field = (capture_ax && capture_input).then(focused_field_channel);
         let (authorization_publisher, authorizations) = input_authorization_channel();
         let authorization_publisher = (capture_ax && capture_input && config.capture.text_content)
             .then_some(authorization_publisher);
@@ -104,19 +99,23 @@ impl CollectorSet {
             } else {
                 (None, None)
             };
+        let capture_policy = CapturePolicy::new(
+            chrome_tracker.clone(),
+            config.filter.clone(),
+            secure_input_probe.clone(),
+        );
         let content_snapshot = match (
             snapshot_trigger_receiver,
             content_lifecycle,
             secure_input_probe.clone(),
         ) {
-            (Some(trigger), Some(lifecycle), Some(secure_input)) => {
+            (Some(trigger), Some(lifecycle), Some(_secure_input)) => {
                 Some(Managed::new(ContentSnapshotCollector::new(
                     trigger,
                     lifecycle,
-                    secure_input,
-                    chrome_tracker,
+                    capture_policy.clone(),
+                    chrome_observer.clone(),
                     focus_context.clone(),
-                    config.filter.clone(),
                 )))
             }
             _ => None,
@@ -125,16 +124,14 @@ impl CollectorSet {
             Managed::new(AxCollector::new(
                 lifecycle,
                 click_receiver,
-                focused_field
-                    .as_ref()
-                    .map(|(publisher, _)| publisher.clone()),
                 authorizations,
                 AxCollectorOptions {
                     secure_input_probe: secure_input_probe.clone(),
                     capture_text_content: config.capture.text_content,
                     capture_content_snapshot: config.capture.content_snapshot,
                     filter: config.filter.clone(),
-                    text_policy: text_policy.clone(),
+                    capture_policy: capture_policy.clone(),
+                    chrome_observer: Some(chrome_observer.clone()),
                     snapshot_trigger_publisher,
                     focus_context: focus_context.clone(),
                 },
@@ -155,10 +152,10 @@ impl CollectorSet {
             Managed::new(EventTapCollector::new(
                 mode,
                 click_sender,
-                focused_field.map(|(_, tracker)| tracker),
                 authorization_publisher,
                 secure_input_probe,
-                text_policy.clone(),
+                capture_policy.clone(),
+                chrome_observer.clone(),
                 focus_context.clone(),
             ))
         });
@@ -166,7 +163,8 @@ impl CollectorSet {
             Managed::new(ChromeCollector::new(
                 lifecycle,
                 chrome_eligibility.clone(),
-                focus_context,
+                focus_context.clone(),
+                chrome_observer.clone(),
             ))
         });
 
@@ -177,7 +175,10 @@ impl CollectorSet {
             eventtap,
             chrome,
             chrome_eligibility,
-            text_policy,
+            capture_policy,
+            chrome_observer,
+            focus_context: focus_context.clone(),
+            capture: config.capture.clone(),
             _secure_input_monitor: secure_input_monitor,
             start_errors,
             eventtap_start_gate: super::supervisor::EventTapStartGate::open(),
@@ -189,14 +190,13 @@ impl CollectorSet {
     }
 
     pub(crate) fn replace_filter(&mut self, filter: FilterConfig) {
-        self.chrome_eligibility.replace_filter(filter.clone());
+        let chrome_required = chrome_tracking_required(&self.capture, &filter);
+        self.capture_policy.replace_filter(filter.clone());
         if let Some(ax) = &self.ax {
             ax.collector.replace_filter(filter.clone());
-        } else {
-            self.text_policy.replace_filter(filter.clone());
         }
         if let Some(content) = self.content_snapshot.as_mut() {
-            match content.collector.replace_filter(filter) {
+            match content.collector.filter_replaced() {
                 Ok(()) => {
                     self.start_errors.remove("content_snapshot");
                 }
@@ -206,6 +206,31 @@ impl CollectorSet {
                 }
             }
         }
+        match (chrome_required, self.chrome.is_some()) {
+            (true, false) => self.add_chrome_collector(),
+            (false, true) => {
+                self.remove_chrome_collector();
+                self.chrome_eligibility.clear_all();
+            }
+            (true, true) | (false, false) => {}
+        }
+    }
+
+    fn add_chrome_collector(&mut self) {
+        let Some(workspace) = self.workspace.as_ref() else {
+            self.start_errors.insert(
+                "chrome".to_owned(),
+                "workspace lifecycle collector is unavailable".to_owned(),
+            );
+            return;
+        };
+        let lifecycle = workspace.collector.subscribe();
+        self.chrome = Some(Managed::new(ChromeCollector::new(
+            lifecycle,
+            self.chrome_eligibility.clone(),
+            self.focus_context.clone(),
+            self.chrome_observer.clone(),
+        )));
     }
 
     pub(crate) fn required_permissions(&self) -> BTreeSet<Permission> {
@@ -250,6 +275,23 @@ impl CollectorSet {
             _input_source: input_source,
         }
     }
+}
+
+#[must_use]
+pub(crate) fn chrome_tracking_required(capture: &CaptureConfig, filter: &FilterConfig) -> bool {
+    let sources = &capture.sources;
+    let captures_ui_or_input =
+        sources.contains(&CaptureSource::Ui) || sources.contains(&CaptureSource::Input);
+    let captures_browser = sources.contains(&CaptureSource::Browser);
+    let chrome = App {
+        name: "Google Chrome".to_owned(),
+        bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
+        pid: None,
+    };
+    let needs_chrome_privacy = capture.text_content && captures_ui_or_input
+        || capture.content_snapshot
+            && PrivacyFilter::new(filter.clone()).content_snapshot_app_is_allowed(&chrome);
+    captures_browser || needs_chrome_privacy
 }
 
 pub(crate) struct MainThreadObservers {

@@ -8,7 +8,8 @@ use zanei_collector::Collector;
 use zanei_core::config::FilterConfig;
 
 use crate::{
-    chrome::chrome_eligibility_channel,
+    CapturePolicy,
+    chrome::{ChromeObserver, chrome_eligibility_channel},
     content_snapshot::{ContentSnapshotCollector, SnapshotTriggerKind, snapshot_trigger_channel},
     focus_context::FocusContext,
     secure_input::secure_input_test_channel,
@@ -23,13 +24,13 @@ fn worker_starts_with_the_named_thread_reloads_filter_and_restarts_cleanly() {
     let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
     let (secure_input, _secure_responder) = secure_input_test_channel();
     let (_chrome_publisher, chrome) = chrome_eligibility_channel(FilterConfig::default());
+    let policy = CapturePolicy::new(chrome, FilterConfig::default(), Some(secure_input));
     let mut collector = ContentSnapshotCollector::new(
         trigger_receiver,
         lifecycle_receiver,
-        secure_input,
-        chrome,
+        policy.clone(),
+        ChromeObserver::new(),
         FocusContext::new(),
-        FilterConfig::default(),
     );
     let (output, events) = sync_channel(4);
 
@@ -37,11 +38,12 @@ fn worker_starts_with_the_named_thread_reloads_filter_and_restarts_cleanly() {
         .start(output.clone())
         .expect("start content worker");
     assert!(collector.is_running());
+    policy.replace_filter(FilterConfig {
+        exclude_apps: vec!["dev.example.App".to_owned()],
+        ..FilterConfig::default()
+    });
     collector
-        .replace_filter(FilterConfig {
-            exclude_apps: vec!["dev.example.App".to_owned()],
-            ..FilterConfig::default()
-        })
+        .filter_replaced()
         .expect("worker acknowledges filter generation");
     collector.stop();
     assert!(!collector.is_running());
@@ -58,13 +60,13 @@ fn trigger_only_updates_scheduler_and_stop_discards_the_pending_settle() {
     let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
     let (secure_input, _secure_responder) = secure_input_test_channel();
     let (_chrome_publisher, chrome) = chrome_eligibility_channel(FilterConfig::default());
+    let policy = CapturePolicy::new(chrome, FilterConfig::default(), Some(secure_input));
     let mut collector = ContentSnapshotCollector::new(
         trigger_receiver,
         lifecycle_receiver,
-        secure_input,
-        chrome,
+        policy,
+        ChromeObserver::new(),
         FocusContext::new(),
-        FilterConfig::default(),
     );
     let (output, events) = sync_channel(4);
     collector.start(output).expect("start content worker");
@@ -88,13 +90,13 @@ fn worker_panic_preserves_owned_channels_and_restart_processes_a_trigger() {
     let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
     let (secure_input, _secure_responder) = secure_input_test_channel();
     let (_chrome_publisher, chrome) = chrome_eligibility_channel(FilterConfig::default());
+    let policy = CapturePolicy::new(chrome, FilterConfig::default(), Some(secure_input));
     let mut collector = ContentSnapshotCollector::new(
         trigger_receiver,
         lifecycle_receiver,
-        secure_input,
-        chrome,
+        policy,
+        ChromeObserver::new(),
         FocusContext::new(),
-        FilterConfig::default(),
     );
     let (output, _events) = sync_channel(4);
     collector.panic_next_worker_for_test();

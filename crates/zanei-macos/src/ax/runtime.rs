@@ -5,7 +5,7 @@ use std::time::Duration;
 use zanei_core::schema::App;
 
 use crate::{
-    InputAuthorizations, SecureInputProbe,
+    CapturePolicy, InputAuthorizations, SecureInputProbe,
     ffi::{
         ax::{
             ManualAccessibilityPolicy, NativeAx, NativeAxError, NativeAxEvent, NativeHitTest,
@@ -13,7 +13,6 @@ use crate::{
         },
         workspace::{frontmost_application, running_applications},
     },
-    text_capture::TextContentPolicy,
     workspace::ApplicationInfo,
 };
 
@@ -49,14 +48,16 @@ impl SystemAxApi {
         capture_text_content: bool,
         authorizations: InputAuthorizations,
         secure_input_probe: Option<SecureInputProbe>,
-        text_policy: TextContentPolicy,
+        capture_policy: CapturePolicy,
+        observe_chrome_loads: bool,
     ) -> Self {
         Self {
             native: NativeAx::new(
                 capture_text_content,
                 authorizations,
                 secure_input_probe,
-                text_policy,
+                capture_policy,
+                observe_chrome_loads,
             ),
         }
     }

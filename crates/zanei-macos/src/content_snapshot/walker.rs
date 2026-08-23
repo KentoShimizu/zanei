@@ -15,6 +15,10 @@ use super::{
     role::{SnapshotNodeClass, classify_role},
 };
 
+#[path = "walker/text.rs"]
+mod text;
+use text::TextAssembler;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotCutoff {
     Time,
@@ -103,6 +107,7 @@ pub(crate) trait SnapshotNode: Sized {
     fn value(&self) -> Result<Option<String>, SnapshotReadError>;
     fn visible_range(&self) -> Result<Option<AxTextRange>, SnapshotReadError>;
     fn string_for_range(&self, range: AxTextRange) -> Result<Option<String>, SnapshotReadError>;
+    fn children_count(&self) -> Result<usize, SnapshotReadError>;
     fn children_range(
         &self,
         index: usize,
@@ -151,6 +156,7 @@ enum Work<N> {
     Children {
         node: N,
         index: usize,
+        count: usize,
         is_root: bool,
         degraded: bool,
     },
@@ -188,13 +194,25 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
             Work::Children {
                 node,
                 index,
+                count,
                 is_root,
                 degraded,
             } => {
-                load_children(node, index, is_root, degraded, &mut stack, &mut context)?;
+                load_children(
+                    node,
+                    index,
+                    count,
+                    is_root,
+                    degraded,
+                    &mut stack,
+                    &mut context,
+                )?;
             }
         }
     }
+    // Account for the final native call crossing the wall-time boundary even
+    // when it discovers that no work remains.
+    let _ = context.can_continue();
     Ok(SnapshotWalkOutput {
         text: context.text.finish(),
         nodes: context.nodes,
@@ -222,10 +240,15 @@ fn visit_node<'a, N: SnapshotNode>(
         NodeRead::Value(attributes) => attributes,
         NodeRead::Degraded => {
             context.degraded_nodes = context.degraded_nodes.saturating_add(1);
-            if context.can_continue() {
+            if context.can_continue()
+                && let NodeRead::Value(count) =
+                    context.read_node(is_root, || node.children_count())?
+                && count > 0
+            {
                 stack.push(Work::Children {
                     node,
                     index: 0,
+                    count,
                     is_root,
                     degraded: true,
                 });
@@ -252,12 +275,21 @@ fn visit_node<'a, N: SnapshotNode>(
         }
     }
     if class.descends() && context.can_continue() {
-        stack.push(Work::Children {
-            node,
-            index: 0,
-            is_root,
-            degraded,
-        });
+        match context.read_node(is_root, || node.children_count())? {
+            NodeRead::Value(0) => {}
+            NodeRead::Value(count) => stack.push(Work::Children {
+                node,
+                index: 0,
+                count,
+                is_root,
+                degraded,
+            }),
+            NodeRead::Degraded => {
+                if !degraded {
+                    context.degraded_nodes = context.degraded_nodes.saturating_add(1);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -265,28 +297,30 @@ fn visit_node<'a, N: SnapshotNode>(
 fn load_children<'a, N: SnapshotNode>(
     node: N,
     index: usize,
+    count: usize,
     is_root: bool,
     degraded: bool,
     stack: &mut Vec<Work<N>>,
     context: &mut WalkContext<'a>,
 ) -> Result<(), SnapshotWalkError> {
-    let children =
-        match context.read_node(is_root, || node.children_range(index, CHILDREN_BATCH_SIZE))? {
-            NodeRead::Value(children) => children,
-            NodeRead::Degraded => {
-                if !degraded {
-                    context.degraded_nodes = context.degraded_nodes.saturating_add(1);
-                }
-                return Ok(());
+    let maximum_count = CHILDREN_BATCH_SIZE.min(count.saturating_sub(index));
+    let children = match context.read_node(is_root, || node.children_range(index, maximum_count))? {
+        NodeRead::Value(children) => children,
+        NodeRead::Degraded => {
+            if !degraded {
+                context.degraded_nodes = context.degraded_nodes.saturating_add(1);
             }
-        };
+            return Ok(());
+        }
+    };
     if !context.can_continue() {
         return Ok(());
     }
-    if children.len() == CHILDREN_BATCH_SIZE {
+    if index.saturating_add(children.len()) < count && children.len() == maximum_count {
         stack.push(Work::Children {
             node,
             index: index.saturating_add(children.len()),
+            count,
             is_root,
             degraded,
         });
@@ -418,63 +452,6 @@ impl WalkContext<'_> {
     }
 }
 
-struct TextAssembler {
-    text: String,
-    max_bytes: usize,
-    previous_empty: bool,
-}
-
-impl TextAssembler {
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            text: String::new(),
-            max_bytes,
-            previous_empty: false,
-        }
-    }
-
-    fn push(&mut self, fragment: &str) -> bool {
-        let fragment = fragment.trim();
-        if fragment.is_empty() {
-            return true;
-        }
-        for line in fragment.lines() {
-            let line = line.trim_end_matches('\r');
-            let empty = line.trim().is_empty();
-            if empty && self.previous_empty {
-                continue;
-            }
-            if !self.text.is_empty() && !self.append("\n") {
-                return false;
-            }
-            if !empty && !self.append(line) {
-                return false;
-            }
-            self.previous_empty = empty;
-        }
-        true
-    }
-
-    fn append(&mut self, value: &str) -> bool {
-        let remaining = self.max_bytes.saturating_sub(self.text.len());
-        if value.len() <= remaining {
-            self.text.push_str(value);
-            return true;
-        }
-        let mut boundary = remaining.min(value.len());
-        while boundary > 0 && !value.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        self.text.push_str(&value[..boundary]);
-        false
-    }
-
-    fn finish(mut self) -> String {
-        self.text.truncate(self.text.trim_end().len());
-        self.text
-    }
-}
-
 fn frames_intersect(left: AxFrame, right: AxFrame) -> bool {
     let left_max_x = left.origin.x + left.size.width;
     let left_max_y = left.origin.y + left.size.height;
@@ -514,6 +491,10 @@ impl SnapshotNode for SnapshotAxElement {
 
     fn string_for_range(&self, range: AxTextRange) -> Result<Option<String>, SnapshotReadError> {
         self.string_for_range(range).map_err(Into::into)
+    }
+
+    fn children_count(&self) -> Result<usize, SnapshotReadError> {
+        self.children_count().map_err(Into::into)
     }
 
     fn children_range(

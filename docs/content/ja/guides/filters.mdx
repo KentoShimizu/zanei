@@ -54,7 +54,7 @@ app / site の各軸で `include_only_*` が非空なら only mode、空なら e
 
 website rule は URL と private-window mode を取得できる Chrome だけに効きます。他の browser は app rule だけで制御します。
 
-起動時だけの例外が 1 つあります。recorder が Chrome と通信するかどうか（したがって Automation が必要かどうか）は記録開始時に決まります。その時点で Chrome が content snapshot の scope から除外されていて、あとから含めた場合、Chrome の content snapshot は `zanei restart` の後に始まります。それ以外の scope 変更は数秒以内に反映されます。app mutation によって Chrome を対象へ加え、現在の topology が Chrome window を追跡していない可能性がある場合、CLI はこの restart note を表示します。
+filter reload で Chrome を対象に加えると、recorder の再起動なしで Chrome tracking が始まり、再び除外すると停止します。macOS の Automation prompt は Chrome を初めて対象に加え、その権限が初めて必要になった時点で表示されます。
 
 ## アプリを選ぶ
 

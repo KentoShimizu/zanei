@@ -3,7 +3,7 @@ use std::time::Instant;
 use zanei_core::schema::ContentSnapshotTrigger;
 
 use crate::content_snapshot::{
-    SnapshotTriggerKind, scheduler::ScheduledSnapshot, worker::test_trace_summary,
+    SnapshotTriggerKind, output::test_trace_summary, scheduler::ScheduledSnapshot,
 };
 
 use super::support::trigger;

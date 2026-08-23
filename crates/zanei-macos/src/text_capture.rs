@@ -2,7 +2,6 @@
 
 mod authorization;
 mod focused_target;
-mod policy;
 mod quarantine;
 mod value;
 
@@ -13,7 +12,6 @@ pub use authorization::{
     InputAuthorizationPublisher, InputAuthorizations, input_authorization_channel,
 };
 pub(crate) use focused_target::FocusedTarget;
-pub use policy::TextContentPolicy;
 pub(crate) use quarantine::{ChromeWindowKey, TextQuarantine};
 pub(crate) use value::{FocusChangeCapture, ValueCapture, ValueEmission, ValueObservation};
 #[cfg(test)]

@@ -3,14 +3,18 @@
 use std::collections::HashMap;
 
 use zanei_collector::RawEvent;
-use zanei_core::schema::{
-    Element, EmptyData, EventData, UiClickData, UiFocusData, UiValueData, Window, WindowTitleData,
+use zanei_core::{
+    privacy::PrivacyScope,
+    schema::{
+        Element, EmptyData, EventData, UiClickData, UiFocusData, UiValueData, Window,
+        WindowTitleData,
+    },
 };
 
 use crate::{
+    capture_policy::CapturePolicy,
     ffi::ax::{NativeAxEvent, NativeElement, NativeHitTest, NativeWindow},
     focused_field::field_class,
-    text_capture::TextContentPolicy,
     workspace::ApplicationInfo,
 };
 
@@ -19,15 +23,15 @@ use super::ClickObservation;
 pub(super) struct AxEventBuilder {
     apps: HashMap<i32, ApplicationInfo>,
     previous_titles: HashMap<(i32, Option<i64>), Option<String>>,
-    text_policy: TextContentPolicy,
+    capture_policy: CapturePolicy,
 }
 
 impl AxEventBuilder {
-    pub(super) fn new(text_policy: TextContentPolicy) -> Self {
+    pub(super) fn new(capture_policy: CapturePolicy) -> Self {
         Self {
             apps: HashMap::new(),
             previous_titles: HashMap::new(),
-            text_policy,
+            capture_policy,
         }
     }
 
@@ -122,8 +126,8 @@ impl AxEventBuilder {
                 };
                 let window_id = window.as_ref().and_then(|window| window.id);
                 if !self
-                    .text_policy
-                    .decision(&app.raw_app(), window_id)
+                    .capture_policy
+                    .decision(PrivacyScope::TextContent, &app.raw_app(), window_id)
                     .is_allowed()
                 {
                     text = None;
@@ -144,6 +148,7 @@ impl AxEventBuilder {
                     observed_at,
                 )
             }
+            NativeAxEvent::PageLoaded { .. } => None,
         }
     }
 
@@ -191,8 +196,8 @@ impl AxEventBuilder {
             return None;
         };
         let capture_context = self
-            .text_policy
-            .decision(&app.raw_app(), window.id)
+            .capture_policy
+            .decision(PrivacyScope::TextContent, &app.raw_app(), window.id)
             .capture_context();
         let event = RawEvent {
             observed_at: Some(observed_at),

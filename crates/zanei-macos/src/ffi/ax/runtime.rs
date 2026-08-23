@@ -11,8 +11,7 @@ use std::{
 };
 
 use crate::{
-    InputAuthorizations, SecureInputProbe, secure_input::SecureInputProbeError,
-    text_capture::TextContentPolicy,
+    CapturePolicy, InputAuthorizations, SecureInputProbe, secure_input::SecureInputProbeError,
 };
 use time::OffsetDateTime;
 use zanei_core::schema::App;
@@ -45,7 +44,8 @@ pub(crate) struct NativeAx {
     capture_text_content: bool,
     authorizations: InputAuthorizations,
     secure_input_probe: Option<SecureInputProbe>,
-    text_policy: TextContentPolicy,
+    capture_policy: CapturePolicy,
+    observe_chrome_loads: bool,
 }
 
 impl NativeAx {
@@ -53,7 +53,8 @@ impl NativeAx {
         capture_text_content: bool,
         authorizations: InputAuthorizations,
         secure_input_probe: Option<SecureInputProbe>,
-        text_policy: TextContentPolicy,
+        capture_policy: CapturePolicy,
+        observe_chrome_loads: bool,
     ) -> Self {
         let (sender, receiver) = sync_channel(CALLBACK_QUEUE_CAPACITY);
         Self {
@@ -66,7 +67,8 @@ impl NativeAx {
             capture_text_content,
             authorizations,
             secure_input_probe,
-            text_policy,
+            capture_policy,
+            observe_chrome_loads,
         }
     }
 
@@ -119,6 +121,18 @@ impl NativeAx {
         {
             self.degraded.fetch_add(1, Ordering::Relaxed);
         }
+        if self.observe_chrome_loads
+            && app.bundle_id.as_deref() == Some(zanei_core::privacy::CHROME_BUNDLE_ID)
+            && add_notification(
+                observer.as_ptr(),
+                application.as_ptr(),
+                "AXLoadComplete",
+                context_pointer,
+            )
+            .is_err()
+        {
+            self.degraded.fetch_add(1, Ordering::Relaxed);
+        }
 
         // SAFETY: the observer is a live +1 AXObserver owned by this runtime.
         let source = unsafe { AXObserverGetRunLoopSource(observer.as_ptr()) };
@@ -133,7 +147,7 @@ impl NativeAx {
             Arc::clone(&self.degraded),
             self.capture_text_content,
             app,
-            self.text_policy.clone(),
+            self.capture_policy.clone(),
             manual_accessibility,
         );
         app_observer.set_manual_accessibility(true);
@@ -181,7 +195,8 @@ impl NativeAx {
                 NativeAxEvent::WindowFocused { window, .. } => window,
                 NativeAxEvent::WindowTitleChanged { .. }
                 | NativeAxEvent::UiFocused { .. }
-                | NativeAxEvent::UiValueChanged { .. } => unreachable!(),
+                | NativeAxEvent::UiValueChanged { .. }
+                | NativeAxEvent::PageLoaded { .. } => unreachable!(),
             }))
     }
 
@@ -353,6 +368,7 @@ impl NativeAx {
                 secure_input,
                 &mut self.authorizations,
             )),
+            "AXLoadComplete" => Ok(vec![NativeAxEvent::PageLoaded { pid: queued.pid }]),
             "AXValueChanged" => {
                 let matched =
                     observer.is_current_target(TargetKind::Value, queued.element.as_ptr());

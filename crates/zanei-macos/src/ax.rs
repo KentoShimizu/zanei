@@ -15,12 +15,12 @@ use zanei_core::config::FilterConfig;
 use zanei_core::schema::ClickButton;
 
 use crate::{
-    InputAuthorizations, SecureInputProbe,
+    CapturePolicy, InputAuthorizations, SecureInputProbe,
+    chrome::ChromeObserver,
     content_snapshot::SnapshotTriggerPublisher,
     ffi::ax::{ManualAccessibilityPolicy, NativeAxEvent},
     focus_context::FocusContext,
-    focused_field::{FocusedField, FocusedFieldPublisher, field_class},
-    text_capture::TextContentPolicy,
+    focused_field::{FocusedField, field_class},
     workspace::{ApplicationActivationPolicy, ApplicationInfo, WorkspaceEvent},
 };
 
@@ -64,11 +64,11 @@ pub fn click_channel() -> (SyncSender<ClickObservation>, Receiver<ClickObservati
 pub struct AxCollector {
     lifecycle_receiver: Option<Receiver<WorkspaceEvent>>,
     click_receiver: Option<Receiver<ClickObservation>>,
-    focused_field_publisher: Option<FocusedFieldPublisher>,
     authorizations: Option<InputAuthorizations>,
     secure_input_probe: Option<SecureInputProbe>,
     capture_text_content: bool,
-    text_policy: TextContentPolicy,
+    capture_policy: CapturePolicy,
+    chrome_observer: Option<ChromeObserver>,
     manual_accessibility_policy: ManualAccessibilityPolicy,
     focus_context: FocusContext,
     snapshot_trigger_publisher: Option<SnapshotTriggerPublisher>,
@@ -83,7 +83,8 @@ pub struct AxCollectorOptions {
     pub capture_text_content: bool,
     pub capture_content_snapshot: bool,
     pub filter: FilterConfig,
-    pub text_policy: TextContentPolicy,
+    pub capture_policy: CapturePolicy,
+    pub chrome_observer: Option<ChromeObserver>,
     pub snapshot_trigger_publisher: Option<SnapshotTriggerPublisher>,
     pub focus_context: FocusContext,
 }
@@ -93,18 +94,17 @@ impl AxCollector {
     pub fn new(
         lifecycle_receiver: Receiver<WorkspaceEvent>,
         click_receiver: Receiver<ClickObservation>,
-        focused_field_publisher: Option<FocusedFieldPublisher>,
         authorizations: InputAuthorizations,
         options: AxCollectorOptions,
     ) -> Self {
         Self {
             lifecycle_receiver: Some(lifecycle_receiver),
             click_receiver: Some(click_receiver),
-            focused_field_publisher,
             authorizations: Some(authorizations),
             secure_input_probe: options.secure_input_probe,
             capture_text_content: options.capture_text_content,
-            text_policy: options.text_policy,
+            capture_policy: options.capture_policy,
+            chrome_observer: options.chrome_observer,
             manual_accessibility_policy: ManualAccessibilityPolicy::new(
                 options.capture_text_content,
                 options.capture_content_snapshot,
@@ -139,7 +139,6 @@ impl AxCollector {
     }
 
     pub fn replace_filter(&self, filter: FilterConfig) {
-        self.text_policy.replace_filter(filter.clone());
         self.manual_accessibility_policy.replace_filter(filter);
     }
 }
@@ -185,10 +184,10 @@ impl Collector for AxCollector {
         let dropped_events = Arc::clone(&self.dropped_events);
         let degraded_operations = Arc::clone(&self.degraded_operations);
         let current_degraded_observers = Arc::clone(&self.current_degraded_observers);
-        let focused_field_publisher = self.focused_field_publisher.clone();
         let secure_input_probe = self.secure_input_probe.clone();
         let capture_text_content = self.capture_text_content;
-        let text_policy = self.text_policy.clone();
+        let capture_policy = self.capture_policy.clone();
+        let chrome_observer = self.chrome_observer.clone();
         let manual_accessibility_policy = self.manual_accessibility_policy.clone();
         let focus_context = self.focus_context.clone();
         let snapshot_trigger_publisher = self.snapshot_trigger_publisher.clone();
@@ -200,11 +199,11 @@ impl Collector for AxCollector {
                     &sender,
                     &lifecycle_receiver,
                     &click_receiver,
-                    focused_field_publisher.as_ref(),
                     authorizations,
                     secure_input_probe,
                     capture_text_content,
-                    text_policy,
+                    capture_policy,
+                    chrome_observer,
                     manual_accessibility_policy,
                     focus_context,
                     snapshot_trigger_publisher,
@@ -256,11 +255,11 @@ fn run_ax(
     sender: &SyncSender<RawEvent>,
     lifecycle_receiver: &Receiver<WorkspaceEvent>,
     click_receiver: &Receiver<ClickObservation>,
-    focused_field_publisher: Option<&FocusedFieldPublisher>,
     authorizations: InputAuthorizations,
     secure_input_probe: Option<SecureInputProbe>,
     capture_text_content: bool,
-    text_policy: TextContentPolicy,
+    capture_policy: CapturePolicy,
+    chrome_observer: Option<ChromeObserver>,
     manual_accessibility_policy: ManualAccessibilityPolicy,
     focus_context: FocusContext,
     snapshot_trigger_publisher: Option<SnapshotTriggerPublisher>,
@@ -272,7 +271,8 @@ fn run_ax(
         capture_text_content,
         authorizations,
         secure_input_probe,
-        text_policy.clone(),
+        capture_policy.clone(),
+        chrome_observer.is_some(),
     );
     run_ax_loop(
         &mut api,
@@ -280,8 +280,8 @@ fn run_ax(
         sender,
         lifecycle_receiver,
         click_receiver,
-        focused_field_publisher,
-        text_policy,
+        capture_policy,
+        chrome_observer,
         manual_accessibility_policy,
         focus_context,
         snapshot_trigger_publisher.as_ref(),
@@ -299,8 +299,8 @@ fn run_ax_loop(
     sender: &SyncSender<RawEvent>,
     lifecycle_receiver: &Receiver<WorkspaceEvent>,
     click_receiver: &Receiver<ClickObservation>,
-    focused_field_publisher: Option<&FocusedFieldPublisher>,
-    text_policy: TextContentPolicy,
+    capture_policy: CapturePolicy,
+    chrome_observer: Option<ChromeObserver>,
     manual_accessibility_policy: ManualAccessibilityPolicy,
     focus_context: FocusContext,
     snapshot_trigger_publisher: Option<&SnapshotTriggerPublisher>,
@@ -308,15 +308,19 @@ fn run_ax_loop(
     degraded_operations: &AtomicU64,
     current_degraded_observers: Arc<AtomicU64>,
 ) {
-    let mut output = AxOutput::new(sender, dropped_events, text_policy.clone());
-    let mut builder = AxEventBuilder::new(text_policy);
+    let mut output = AxOutput::new(
+        sender,
+        dropped_events,
+        capture_policy.clone(),
+        chrome_observer.clone().unwrap_or_default(),
+    );
+    let mut builder = AxEventBuilder::new(capture_policy);
     let mut observer_health = ObserverHealth::new(current_degraded_observers);
     for app in api.running_applications() {
         let pending = attach_app(
             api,
             &mut builder,
             app,
-            focused_field_publisher,
             &manual_accessibility_policy,
             degraded_operations,
             &mut observer_health,
@@ -351,7 +355,6 @@ fn run_ax_loop(
                         api,
                         &mut builder,
                         app.clone(),
-                        focused_field_publisher,
                         &manual_accessibility_policy,
                         degraded_operations,
                         &mut observer_health,
@@ -370,7 +373,6 @@ fn run_ax_loop(
                         api,
                         &mut builder,
                         app,
-                        focused_field_publisher,
                         &manual_accessibility_policy,
                         degraded_operations,
                         &mut observer_health,
@@ -385,14 +387,8 @@ fn run_ax_loop(
                     observer_health.remove(app.pid);
                     if let Ok(pid) = i32::try_from(app.pid) {
                         let pending = api.detach(pid);
-                        send_observations(
-                            &mut output,
-                            &mut builder,
-                            pending,
-                            focused_field_publisher,
-                        );
+                        send_observations(&mut output, &mut builder, pending, &focus_context);
                         builder.remove_app(pid);
-                        remove_focused_field(focused_field_publisher, pid);
                     }
                 }
                 WorkspaceEvent::DidWake => {}
@@ -414,10 +410,20 @@ fn run_ax_loop(
                 | NativeAxEvent::WindowTitleChanged { pid, window, .. } => {
                     focus_context.observe_window(*pid, window.clone())
                 }
-                NativeAxEvent::UiFocused { .. } | NativeAxEvent::UiValueChanged { .. } => None,
+                NativeAxEvent::UiFocused { .. }
+                | NativeAxEvent::UiValueChanged { .. }
+                | NativeAxEvent::PageLoaded { .. } => None,
             };
             publish_focus_transition(snapshot_trigger_publisher, transition);
-            publish_focus_observation(focused_field_publisher, &observation);
+            publish_focus_observation(&focus_context, &observation);
+            if let NativeAxEvent::PageLoaded { pid } = &observation
+                && focus_context
+                    .current()
+                    .is_some_and(|focus| focus.app.pid == i64::from(*pid))
+                && let Some(observer) = chrome_observer.as_ref()
+            {
+                observer.page_loaded(i64::from(*pid));
+            }
             if let Some(event) = builder.event(observation) {
                 output.send(event);
             }
@@ -430,7 +436,7 @@ fn run_ax_loop(
         &mut output,
         &mut builder,
         api.flush_pending(),
-        focused_field_publisher,
+        &focus_context,
     );
     output.flush();
     observer_health.clear();
@@ -440,10 +446,10 @@ fn send_observations(
     output: &mut AxOutput<'_>,
     builder: &mut AxEventBuilder,
     observations: Vec<NativeAxEvent>,
-    focused_field_publisher: Option<&FocusedFieldPublisher>,
+    focus_context: &FocusContext,
 ) {
     for observation in observations {
-        publish_focus_observation(focused_field_publisher, &observation);
+        publish_focus_observation(focus_context, &observation);
         if let Some(event) = builder.event(observation) {
             output.send(event);
         }
@@ -454,7 +460,6 @@ fn attach_app(
     api: &mut impl AxApi,
     builder: &mut AxEventBuilder,
     app: ApplicationInfo,
-    focused_field_publisher: Option<&FocusedFieldPublisher>,
     manual_accessibility_policy: &ManualAccessibilityPolicy,
     degraded_operations: &AtomicU64,
     observer_health: &mut ObserverHealth,
@@ -475,7 +480,6 @@ fn attach_app(
             observations
                 .into_iter()
                 .filter_map(|observation| {
-                    publish_focus_observation(focused_field_publisher, &observation);
                     matches!(&observation, NativeAxEvent::UiValueChanged { .. })
                         .then(|| builder.event(observation))
                         .flatten()
@@ -484,17 +488,13 @@ fn attach_app(
         }
         Err(_) => {
             observer_health.mark_unavailable(app.pid);
-            update_focused_field(focused_field_publisher, pid, None);
             degraded_operations.fetch_add(1, Ordering::Relaxed);
             Vec::new()
         }
     }
 }
 
-fn publish_focus_observation(
-    publisher: Option<&FocusedFieldPublisher>,
-    observation: &NativeAxEvent,
-) {
+fn publish_focus_observation(focus_context: &FocusContext, observation: &NativeAxEvent) {
     let NativeAxEvent::UiFocused {
         pid,
         generation,
@@ -508,23 +508,7 @@ fn publish_focus_observation(
         generation: *generation,
         class: field_class(element.role.as_deref(), element.subrole.as_deref()),
     });
-    update_focused_field(publisher, *pid, focused_field);
-}
-
-fn update_focused_field(
-    publisher: Option<&FocusedFieldPublisher>,
-    pid: i32,
-    focused_field: Option<FocusedField>,
-) {
-    if let Some(publisher) = publisher {
-        publisher.update(pid, focused_field);
-    }
-}
-
-fn remove_focused_field(publisher: Option<&FocusedFieldPublisher>, pid: i32) {
-    if let Some(publisher) = publisher {
-        publisher.remove(pid);
-    }
+    focus_context.update_focused_field(*pid, focused_field);
 }
 
 #[cfg(test)]

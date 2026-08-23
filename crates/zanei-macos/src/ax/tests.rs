@@ -13,6 +13,7 @@ use zanei_core::{
     schema::{App, EventData, FieldKind},
 };
 
+mod chromium;
 mod manual_accessibility;
 mod title;
 
@@ -22,21 +23,22 @@ use super::{
     publish_focus_observation, run_ax_loop,
 };
 use crate::{
+    CapturePolicy,
     chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
     ffi::ax::{ManualAccessibilityPolicy, NativeElement, NativeWindow},
     focus_context::FocusContext,
-    focused_field::{FieldClass, FocusedField, focused_field_channel},
-    text_capture::{TextContentPolicy, input_authorization_channel},
+    focused_field::{FieldClass, FocusedField},
+    text_capture::input_authorization_channel,
 };
 
-pub(super) fn text_policy() -> TextContentPolicy {
+pub(super) fn capture_policy() -> CapturePolicy {
     let filter = FilterConfig::default();
     let (_, tracker) = chrome_eligibility_channel(filter.clone());
-    TextContentPolicy::new(tracker, filter)
+    CapturePolicy::new(tracker, filter, None)
 }
 
 fn builder() -> AxEventBuilder {
-    AxEventBuilder::new(text_policy())
+    AxEventBuilder::new(capture_policy())
 }
 
 fn manual_accessibility_policy() -> ManualAccessibilityPolicy {
@@ -111,7 +113,7 @@ fn ui_events_derive_field_kind_from_the_ax_snapshot() {
 fn chrome_ui_value_text_follows_window_eligibility() {
     let filter = FilterConfig::default();
     let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
-    let mut builder = AxEventBuilder::new(TextContentPolicy::new(tracker, filter));
+    let mut builder = AxEventBuilder::new(CapturePolicy::new(tracker, filter, None));
     builder.add_app(ApplicationInfo {
         name: "Google Chrome".to_owned(),
         bundle_id: Some("com.google.Chrome".to_owned()),
@@ -163,8 +165,9 @@ fn chrome_ui_value_text_follows_window_eligibility() {
 fn cleared_focus_does_not_emit_a_ui_focus_event() {
     let mut builder = builder();
     builder.add_app(app());
-    let (publisher, tracker) = focused_field_channel();
-    publisher.update(
+    let focus_context = FocusContext::new();
+    focus_context.activate(app(), Some(window()));
+    focus_context.update_focused_field(
         7,
         Some(FocusedField {
             generation: 1,
@@ -179,10 +182,15 @@ fn cleared_focus_does_not_emit_a_ui_focus_event() {
         observed_at: time::OffsetDateTime::UNIX_EPOCH,
     };
 
-    publish_focus_observation(Some(&publisher), &cleared);
+    publish_focus_observation(&focus_context, &cleared);
 
     assert!(builder.event(cleared).is_none());
-    assert_eq!(tracker.focused_field(7), None);
+    assert_eq!(
+        focus_context
+            .current()
+            .and_then(|focus| focus.focused_field),
+        None
+    );
 }
 
 #[derive(Default)]
@@ -200,6 +208,30 @@ struct FakeAxApi {
     attached_apps: Vec<App>,
     reconciled_manual_accessibility: Vec<bool>,
     replacement_on_first_poll: Option<(ManualAccessibilityPolicy, FilterConfig)>,
+    focused_window: Option<NativeWindow>,
+}
+
+impl FakeAxApi {
+    fn chromium_profile() -> Self {
+        let chrome = ApplicationInfo {
+            name: "Google Chrome".to_owned(),
+            bundle_id: Some("com.google.Chrome".to_owned()),
+            pid: 7,
+            activation_policy: ApplicationActivationPolicy::Regular,
+        };
+        Self {
+            running_applications: vec![chrome.clone()],
+            frontmost_application: Some(chrome),
+            // Resolved from bounds because Chromium exposes no AXWindowNumber.
+            focused_window: Some(NativeWindow {
+                title: Some("Chromium".to_owned()),
+                id: Some(11),
+            }),
+            // Chromium sends no focused-window notification on activation.
+            attach_observations: Vec::new(),
+            ..Self::default()
+        }
+    }
 }
 
 impl AxApi for FakeAxApi {
@@ -231,7 +263,7 @@ impl AxApi for FakeAxApi {
     }
 
     fn focused_window(&mut self, _pid: i32) -> Result<Option<NativeWindow>, Self::AttachError> {
-        Ok(None)
+        Ok(self.focused_window.clone())
     }
 
     fn reconcile_manual_accessibility(&mut self, policy: &ManualAccessibilityPolicy) {
@@ -314,8 +346,8 @@ fn run_fake_ax_loop_with_policy(
         &output_sender,
         lifecycle_receiver,
         &click_receiver,
+        capture_policy(),
         None,
-        text_policy(),
         manual_policy,
         FocusContext::new(),
         None,
@@ -394,7 +426,6 @@ fn prohibited_application_is_skipped_before_pid_and_failure_accounting() {
         &mut api,
         &mut builder,
         app_with_policy(i64::MAX, ApplicationActivationPolicy::Prohibited),
-        None,
         &manual_accessibility_policy(),
         &degraded_operations,
         &mut observer_health,
@@ -407,35 +438,19 @@ fn prohibited_application_is_skipped_before_pid_and_failure_accounting() {
 }
 
 #[test]
-fn attach_publishes_the_initial_focused_field() {
-    let mut api = FakeAxApi {
-        attach_observations: vec![NativeAxEvent::UiFocused {
-            pid: 7,
-            generation: 4,
-            window: Some(window()),
-            element: Some(element("AXTextArea", None)),
-            observed_at: time::OffsetDateTime::UNIX_EPOCH,
-        }],
-        ..FakeAxApi::default()
+fn frontmost_focus_notification_updates_focus_context() {
+    let focus = NativeAxEvent::UiFocused {
+        pid: 7,
+        generation: 4,
+        window: Some(window()),
+        element: Some(element("AXTextArea", None)),
+        observed_at: time::OffsetDateTime::UNIX_EPOCH,
     };
-    let mut builder = builder();
-    let (publisher, tracker) = focused_field_channel();
-    let current_degraded_observers = Arc::new(AtomicU64::new(0));
-    let mut observer_health = ObserverHealth::new(Arc::clone(&current_degraded_observers));
-
-    let pending = attach_app(
-        &mut api,
-        &mut builder,
-        app(),
-        Some(&publisher),
-        &manual_accessibility_policy(),
-        &AtomicU64::new(0),
-        &mut observer_health,
-    );
-
-    assert!(pending.is_empty());
+    let context = FocusContext::new();
+    context.activate(app(), Some(window()));
+    publish_focus_observation(&context, &focus);
     assert_eq!(
-        tracker.focused_field(7),
+        context.current().and_then(|focus| focus.focused_field),
         Some(FocusedField {
             generation: 4,
             class: FieldClass::KnownText(FieldKind::Text),
@@ -554,7 +569,8 @@ fn successful_reattach_clears_activated_app_degradation() {
 
 #[test]
 fn initial_focus_snapshot_authorizes_same_generation_input() {
-    let (focused_publisher, focused_tracker) = focused_field_channel();
+    let context = FocusContext::new();
+    context.activate(app(), Some(window()));
     let focus = NativeAxEvent::UiFocused {
         pid: 7,
         generation: 4,
@@ -562,9 +578,10 @@ fn initial_focus_snapshot_authorizes_same_generation_input() {
         element: Some(element("AXTextArea", None)),
         observed_at: time::OffsetDateTime::UNIX_EPOCH,
     };
-    publish_focus_observation(Some(&focused_publisher), &focus);
-    let focused = focused_tracker
-        .focused_field(7)
+    publish_focus_observation(&context, &focus);
+    let focused = context
+        .current()
+        .and_then(|focus| focus.focused_field)
         .expect("initial focus should be available to EventTap");
     let input_at = Instant::now();
     let (authorization_publisher, mut authorizations) = input_authorization_channel();

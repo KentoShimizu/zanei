@@ -7,12 +7,16 @@ use std::sync::{
 
 use time::OffsetDateTime;
 use zanei_collector::RawEvent;
-use zanei_core::schema::{App, EventData, Window};
+use zanei_core::{
+    privacy::PrivacyScope,
+    schema::{App, EventData, Window},
+};
 
 use crate::trace;
 use crate::{
+    capture_policy::CapturePolicy,
     ffi::eventtap::NativeContext,
-    text_capture::{ChromeWindowKey, InputAuthorization, TextContentPolicy, TextQuarantine},
+    text_capture::{ChromeWindowKey, InputAuthorization, TextQuarantine},
 };
 
 use super::clipboard::ClipboardOutput;
@@ -23,7 +27,7 @@ pub(super) fn raw_event(
     event_type: &str,
     context: &NativeContext,
     data: EventData,
-    text_policy: &TextContentPolicy,
+    capture_policy: &CapturePolicy,
     observed_at: OffsetDateTime,
 ) -> Option<RawEvent> {
     let Some(window) = context.window.as_ref() else {
@@ -39,7 +43,9 @@ pub(super) fn raw_event(
         bundle_id: context.app.bundle_id.clone(),
         pid: Some(context.app.pid),
     };
-    let capture_context = text_policy.decision(&app, window.id).capture_context();
+    let capture_context = capture_policy
+        .decision(PrivacyScope::TextContent, &app, window.id)
+        .capture_context();
     Some(RawEvent {
         observed_at: Some(observed_at),
         source: SOURCE.to_owned(),
@@ -125,7 +131,7 @@ pub(super) fn emit_or_quarantine(
     if let (Some(version), Some(key)) = (chrome_version, key)
         && has_text_body(&event)
     {
-        quarantine.hold(event, key, version, observed_at);
+        quarantine.hold_text(event, key, version, observed_at);
         return EmitResult::Sent;
     }
     try_send_counted(sender, event, dropped_events)

@@ -96,6 +96,12 @@ impl CollectorSet {
         self.start_errors.clear();
     }
 
+    pub(super) fn remove_chrome_collector(&mut self) {
+        stop_collector(&mut self.chrome, StopMode::Discard);
+        self.chrome = None;
+        self.start_errors.remove("chrome");
+    }
+
     fn stop_in_order(&mut self, mode: StopMode) {
         for collector in STOP_ORDER {
             match collector {
@@ -326,7 +332,8 @@ impl RestartState {
     }
 
     fn ready(self, now: Instant, permissions_granted: bool) -> bool {
-        (self.waiting_for_permission && permissions_granted)
+        (!self.waiting_for_permission && self.next_attempt.is_none())
+            || (self.waiting_for_permission && permissions_granted)
             || self
                 .next_attempt
                 .is_some_and(|next_attempt| now >= next_attempt)

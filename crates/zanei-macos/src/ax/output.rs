@@ -6,14 +6,18 @@ use std::sync::{
 };
 
 use zanei_collector::RawEvent;
+use zanei_core::privacy::PrivacyScope;
 
-use crate::text_capture::{ChromeWindowKey, TextContentPolicy, TextQuarantine};
+use crate::{
+    capture_policy::CapturePolicy,
+    chrome::ChromeObserver,
+    text_capture::{ChromeWindowKey, TextQuarantine},
+};
 
 pub(super) struct AxOutput<'a> {
     sender: &'a SyncSender<RawEvent>,
     dropped_events: &'a AtomicU64,
-    text_policy: TextContentPolicy,
-    chrome_tracker: crate::chrome::ChromeEligibilityTracker,
+    capture_policy: CapturePolicy,
     quarantine: TextQuarantine,
 }
 
@@ -21,15 +25,14 @@ impl<'a> AxOutput<'a> {
     pub(super) fn new(
         sender: &'a SyncSender<RawEvent>,
         dropped_events: &'a AtomicU64,
-        text_policy: TextContentPolicy,
+        capture_policy: CapturePolicy,
+        chrome_observer: ChromeObserver,
     ) -> Self {
-        let chrome_tracker = text_policy.chrome_tracker();
-        let quarantine = TextQuarantine::new(&chrome_tracker);
+        let quarantine = TextQuarantine::new(chrome_observer);
         Self {
             sender,
             dropped_events,
-            text_policy,
-            chrome_tracker,
+            capture_policy,
             quarantine,
         }
     }
@@ -41,7 +44,8 @@ impl<'a> AxOutput<'a> {
     }
 
     pub(super) fn send(&mut self, event: RawEvent) {
-        let decision = self.text_policy.decision(
+        let decision = self.capture_policy.decision(
+            PrivacyScope::TextContent,
             &event.app,
             event.window.as_ref().and_then(|window| window.id),
         );
@@ -56,7 +60,7 @@ impl<'a> AxOutput<'a> {
             && let (Some(version), Some(key), Some(observed_at)) =
                 (decision.chrome_version(), key, event.observed_at)
         {
-            self.quarantine.hold(event, key, version, observed_at);
+            self.quarantine.hold_text(event, key, version, observed_at);
             return;
         }
         self.send_now(event);
@@ -65,14 +69,14 @@ impl<'a> AxOutput<'a> {
     pub(super) fn release_due(&mut self) {
         for event in self
             .quarantine
-            .release(time::OffsetDateTime::now_utc(), &self.chrome_tracker)
+            .release(std::time::Instant::now(), &self.capture_policy)
         {
             self.send_now(event);
         }
     }
 
     pub(super) fn flush(&mut self) {
-        for event in self.quarantine.flush(&self.chrome_tracker) {
+        for event in self.quarantine.flush() {
             self.send_now(event);
         }
     }

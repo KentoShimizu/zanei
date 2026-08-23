@@ -10,7 +10,7 @@ use super::{
     logic::{PasteboardContent, clipboard_copy, clipboard_paste},
     output::{raw_event, unknown_clipboard_event},
 };
-use crate::{ffi::eventtap::NativeContext, text_capture::TextContentPolicy};
+use crate::{capture_policy::CapturePolicy, ffi::eventtap::NativeContext};
 
 const COPY_CORRELATION_WINDOW: Duration = Duration::from_millis(500);
 
@@ -103,7 +103,7 @@ impl ClipboardTracker {
         observed_at: ClipboardObservationTime,
         read_content: F,
         secure_input: bool,
-        text_policy: &TextContentPolicy,
+        capture_policy: &CapturePolicy,
     ) -> Option<ClipboardOutput>
     where
         F: FnOnce(bool) -> PasteboardContent,
@@ -118,7 +118,7 @@ impl ClipboardTracker {
                         read_content(include_content),
                         ClipboardOrigin::CopyShortcut,
                     )),
-                    text_policy,
+                    capture_policy,
                     intent.observed_at,
                 )?;
                 Some(ClipboardOutput {
@@ -203,7 +203,7 @@ mod tests {
                 observed(Instant::now()),
                 text_content,
                 false,
-                &TextContentPolicy::new(chrome, filter),
+                &CapturePolicy::new(chrome, filter, None),
             )
             .expect("unknown copy event remains");
         let event = output.event;
@@ -251,7 +251,7 @@ mod tests {
     fn non_chrome_policy_is_available_to_copy_path() {
         let filter = FilterConfig::default();
         let (_, chrome) = chrome_eligibility_channel(filter.clone());
-        let policy = TextContentPolicy::new(chrome, filter);
+        let policy = CapturePolicy::new(chrome, filter, None);
         let context = context(7);
         let app = zanei_core::schema::App {
             name: context.app.name,
@@ -260,7 +260,11 @@ mod tests {
         };
         assert!(
             policy
-                .decision(&app, context.window.and_then(|window| window.id))
+                .decision(
+                    zanei_core::privacy::PrivacyScope::TextContent,
+                    &app,
+                    context.window.and_then(|window| window.id),
+                )
                 .is_allowed()
         );
     }
@@ -269,7 +273,7 @@ mod tests {
     fn secure_input_suppresses_matched_copy_body() {
         let filter = FilterConfig::default();
         let (_, chrome) = chrome_eligibility_channel(filter.clone());
-        let policy = TextContentPolicy::new(chrome, filter);
+        let policy = CapturePolicy::new(chrome, filter, None);
         let now = Instant::now();
         let app = context(7);
         let mut tracker = ClipboardTracker::new(1);
@@ -291,7 +295,7 @@ mod tests {
     fn missing_ax_tracking_suppresses_paste_body() {
         let filter = FilterConfig::default();
         let (_, chrome) = chrome_eligibility_channel(filter.clone());
-        let policy = TextContentPolicy::new(chrome, filter);
+        let policy = CapturePolicy::new(chrome, filter, None);
         let text_allowed = policy
             .input_decision(
                 &zanei_core::schema::App {

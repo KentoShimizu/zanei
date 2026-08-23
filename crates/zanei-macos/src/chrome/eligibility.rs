@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
-    time::Duration,
+    time::Instant,
 };
 
 use zanei_core::{
@@ -11,8 +11,6 @@ use zanei_core::{
     privacy::{PrivacyScope, host_is_allowed_for, website_host},
     schema::CaptureContext,
 };
-
-pub(crate) const CHROME_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ChromeWindowState {
@@ -31,6 +29,7 @@ pub enum ChromeEligibilityObservation {
 struct WindowRecord {
     state: Option<ChromeWindowState>,
     version: u64,
+    observed_at: Instant,
 }
 
 struct EligibilityState {
@@ -46,6 +45,15 @@ pub struct ChromeEligibilityPublisher {
 
 impl ChromeEligibilityPublisher {
     pub fn observe(&self, pid: i64, observation: ChromeEligibilityObservation) {
+        self.observe_at(pid, observation, Instant::now());
+    }
+
+    pub(crate) fn observe_at(
+        &self,
+        pid: i64,
+        observation: ChromeEligibilityObservation,
+        observed_at: Instant,
+    ) {
         let Ok(pid) = i32::try_from(pid) else {
             return;
         };
@@ -68,16 +76,14 @@ impl ChromeEligibilityPublisher {
             );
             return;
         };
-        mark_disappeared_windows(&mut state, pid, active_key);
+        mark_disappeared_windows(&mut state, pid, active_key, observed_at);
         let Some(key) = active_key else {
             return;
         };
-        if state
-            .windows
-            .get(&key)
-            .and_then(|record| record.state.as_ref())
-            == next_state.as_ref()
+        if let Some(record) = state.windows.get_mut(&key)
+            && record.state.as_ref() == next_state.as_ref()
         {
+            record.observed_at = observed_at;
             return;
         }
         let version = next_version(&mut state);
@@ -86,14 +92,16 @@ impl ChromeEligibilityPublisher {
             WindowRecord {
                 state: next_state,
                 version,
+                observed_at,
             },
         );
     }
 
-    pub(crate) fn clear_all(&self) {
+    pub fn clear_all(&self) {
         let Ok(mut state) = self.state.write() else {
             return;
         };
+        let observed_at = Instant::now();
         let active: Vec<_> = state
             .windows
             .iter()
@@ -104,16 +112,8 @@ impl ChromeEligibilityPublisher {
             if let Some(record) = state.windows.get_mut(&key) {
                 record.state = None;
                 record.version = version;
+                record.observed_at = observed_at;
             }
-        }
-    }
-
-    pub fn replace_filter(&self, filter: FilterConfig) {
-        match self.state.write() {
-            Ok(mut state) => state.filter = filter,
-            Err(_) => crate::trace::trace!(
-                "component=chrome phase=eligibility action=replace_filter result=poisoned"
-            ),
         }
     }
 }
@@ -136,6 +136,15 @@ impl ChromeEligibilityTracker {
         self.allows(PrivacyScope::ContentSnapshot, pid, window_id)
     }
 
+    pub(crate) fn replace_filter(&self, filter: FilterConfig) {
+        match self.state.write() {
+            Ok(mut state) => state.filter = filter,
+            Err(_) => crate::trace::trace!(
+                "component=chrome phase=eligibility action=replace_filter result=poisoned"
+            ),
+        }
+    }
+
     #[must_use]
     pub fn state_version(&self, pid: i64, window_id: i64) -> Option<u64> {
         let pid = i32::try_from(pid).ok()?;
@@ -149,11 +158,17 @@ impl ChromeEligibilityTracker {
     }
 
     #[must_use]
-    pub const fn poll_interval(&self) -> Duration {
-        CHROME_POLL_INTERVAL
+    pub fn observed_at(&self, pid: i64, window_id: i64) -> Option<Instant> {
+        let pid = i32::try_from(pid).ok()?;
+        self.state
+            .read()
+            .ok()?
+            .windows
+            .get(&(pid, window_id))
+            .map(|record| record.observed_at)
     }
 
-    fn allows(&self, scope: PrivacyScope, pid: i64, window_id: Option<i64>) -> bool {
+    pub(crate) fn allows(&self, scope: PrivacyScope, pid: i64, window_id: Option<i64>) -> bool {
         let (Ok(pid), Some(window_id)) = (i32::try_from(pid), window_id) else {
             return false;
         };
@@ -213,6 +228,7 @@ fn mark_disappeared_windows(
     state: &mut EligibilityState,
     pid: i32,
     active_key: Option<(i32, i64)>,
+    observed_at: Instant,
 ) {
     let disappeared: Vec<_> = state
         .windows
@@ -226,6 +242,7 @@ fn mark_disappeared_windows(
         if let Some(record) = state.windows.get_mut(&key) {
             record.state = None;
             record.version = version;
+            record.observed_at = observed_at;
         }
     }
 }
@@ -251,12 +268,15 @@ mod tests {
     #[test]
     fn unchanged_observation_preserves_version() {
         let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
-        publisher.observe(7, normal(11, "https://example.com"));
+        let first_observation = Instant::now();
+        publisher.observe_at(7, normal(11, "https://example.com"), first_observation);
         let version = tracker.state_version(7, 11).expect("version");
 
-        publisher.observe(7, normal(11, "https://example.com"));
+        let confirmation = first_observation + std::time::Duration::from_millis(1);
+        publisher.observe_at(7, normal(11, "https://example.com"), confirmation);
 
         assert_eq!(tracker.state_version(7, 11), Some(version));
+        assert_eq!(tracker.observed_at(7, 11), Some(confirmation));
     }
 
     #[test]
@@ -285,7 +305,7 @@ mod tests {
         publisher.observe(7, normal(11, "https://example.com"));
         let version = tracker.state_version(7, 11);
 
-        publisher.replace_filter(FilterConfig {
+        tracker.replace_filter(FilterConfig {
             text_content: ScopedFilterConfig {
                 exclude_websites: vec!["example.com".to_owned()],
                 ..ScopedFilterConfig::default()

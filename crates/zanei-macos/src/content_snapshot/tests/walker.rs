@@ -22,16 +22,20 @@ struct Metrics {
     value_reads: Arc<AtomicUsize>,
     visible_range_reads: Arc<AtomicUsize>,
     string_range_reads: Arc<AtomicUsize>,
+    children_count_reads: Arc<AtomicUsize>,
+    children_range_reads: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
-struct FakeNode {
+pub(super) struct FakeNode {
     attributes: NodeSafeAttributes,
     value: Option<String>,
     visible: Option<String>,
     children: Vec<Self>,
     fail_safe_read: bool,
     fail_value_read: bool,
+    numeric_value: bool,
+    illegal_leaf_range: bool,
     root_invalid: bool,
     call_micros: u64,
     elapsed_micros: Arc<AtomicU64>,
@@ -51,6 +55,8 @@ impl FakeNode {
             children: Vec::new(),
             fail_safe_read: false,
             fail_value_read: false,
+            numeric_value: false,
+            illegal_leaf_range: false,
             root_invalid: false,
             call_micros: 0,
             elapsed_micros: Arc::new(AtomicU64::new(0)),
@@ -70,9 +76,37 @@ impl FakeNode {
         self
     }
 
+    pub(super) fn chromium_window() -> Self {
+        let mut root = Self::new("AXWindow");
+        let mut checkbox = Self::new("AXCheckBox");
+        checkbox.attributes.title = Some("Checked option".to_owned());
+        checkbox.numeric_value = true;
+        checkbox.illegal_leaf_range = true;
+        let mut heading = Self::new("AXHeading");
+        heading.attributes.title = Some("Heading".to_owned());
+        heading.numeric_value = true;
+        heading.illegal_leaf_range = true;
+        root.children = vec![checkbox, heading];
+        let shared = root.clone();
+        root.with_shared(&shared)
+    }
+
     fn tick(&self) {
         self.elapsed_micros
             .fetch_add(self.call_micros, Ordering::Relaxed);
+    }
+}
+
+impl crate::content_snapshot::worker::SnapshotWindow for FakeNode {
+    fn frame(
+        &self,
+    ) -> Result<Option<crate::ffi::ax::AxFrame>, crate::content_snapshot::SnapshotAxError> {
+        Ok(self.attributes.frame)
+    }
+
+    fn window_number(&self) -> Result<Option<i64>, crate::content_snapshot::SnapshotAxError> {
+        // Chromium omits AXWindowNumber; the scanner must reconcile by bounds.
+        Ok(None)
     }
 }
 
@@ -95,6 +129,8 @@ impl SnapshotNode for FakeNode {
         self.metrics.value_reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_value_read {
             Err(SnapshotReadError::Contract("non-text AXValue"))
+        } else if self.numeric_value {
+            Ok(None)
         } else {
             Ok(self.value.clone())
         }
@@ -119,12 +155,28 @@ impl SnapshotNode for FakeNode {
         Ok(self.visible.clone())
     }
 
+    fn children_count(&self) -> Result<usize, SnapshotReadError> {
+        self.tick();
+        self.metrics
+            .children_count_reads
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(self.children.len())
+    }
+
     fn children_range(
         &self,
         index: usize,
         maximum_count: usize,
     ) -> Result<Vec<Self>, SnapshotReadError> {
         self.tick();
+        self.metrics
+            .children_range_reads
+            .fetch_add(1, Ordering::Relaxed);
+        if self.illegal_leaf_range && self.children.is_empty() {
+            return Err(SnapshotReadError::Ax(
+                crate::content_snapshot::SnapshotAxError::illegal_argument_for_test(7),
+            ));
+        }
         Ok(self
             .children
             .iter()
@@ -299,6 +351,22 @@ fn numeric_values_drop_only_the_affected_nodes() {
     assert!(output.complete);
     assert_eq!(output.degraded_nodes, 2);
     assert_eq!(output.text, "Visible text");
+}
+
+#[test]
+fn chromium_profile_counts_children_before_ranges_and_accepts_numeric_values() {
+    let root = FakeNode::chromium_window();
+    let metrics = root.metrics.clone();
+
+    let output = walk(root, generous_budget());
+
+    // Chromium returns -25201 for a ranged AXChildren read on a leaf. This
+    // assertion fails if count-first traversal is reverted and makes that call.
+    assert_eq!(metrics.children_count_reads.load(Ordering::Relaxed), 3);
+    assert_eq!(metrics.children_range_reads.load(Ordering::Relaxed), 1);
+    assert_eq!(output.text, "Checked option\nHeading");
+    assert_eq!(output.degraded_nodes, 0);
+    assert_eq!(output.ax_calls, 9);
 }
 
 #[test]

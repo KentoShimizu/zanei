@@ -35,7 +35,7 @@ When content capture is enabled, Zanei requests accessibility tree construction 
 - If Accessibility cannot confirm a known non-secure input field, `input.key.text` and pasted text remain null.
 - Value changes outside a 3-second authorization window opened by a confirmed keystroke or paste are not recorded as text. Rejected inputs do not open a window.
 - Chrome Incognito and website-filtered windows keep text-content bodies null. Window titles and interaction metadata can remain.
-- Chrome text-content bodies are confirmed one poll (about 1 second) after input. Text typed within about a second before switching that Chrome window to an excluded or Incognito tab is omitted.
+- Chrome text and snapshot bodies are written only after Zanei confirms, from an observation made after the input, that the window still shows an allowed site. Text typed or shown immediately before switching to an excluded or Incognito tab is omitted.
 - Unknown UI elements do not provide `element.value`.
 - `input.key.text` is null while an input method (IME) is active and when the input-source type is unknown; committed text can be captured only as an authorized `ui.value.data.text` difference.
 - Voice input does not itself open an authorization window because it has no recorded keystroke or paste trigger. If voice text is inserted while a 3-second window opened by a preceding recorded keystroke or paste for the same app and focused-element generation is still active, that text can be included in the authorized `ui.value.data.text` difference.

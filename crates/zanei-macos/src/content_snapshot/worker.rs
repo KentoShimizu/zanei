@@ -5,31 +5,32 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, SyncSender, TrySendError},
+        mpsc::{Receiver, SyncSender},
     },
     time::{Duration, Instant},
 };
 
 use zanei_collector::RawEvent;
-use zanei_core::schema::CaptureContext;
-use zanei_core::schema::{ContentSnapshotData, ContentSnapshotTrigger, EventData, Window};
+use zanei_core::{privacy::PrivacyScope, schema::ContentSnapshotTrigger};
 
 use crate::{
     content_snapshot::{
         SnapshotAxApplication, SnapshotAxError, SnapshotCutoff, SnapshotTriggerReceiver,
         SnapshotWalkOutput,
         budget::WalkBudget,
-        policy::SnapshotPolicy,
+        output::{emit, emit_released, trace_candidate, trace_output},
         scheduler::{ScheduledSnapshot, SnapshotScheduler},
-        state::{SaveBlock, SnapshotState, SnapshotWindowKey},
+        state::{SaveBlock, SnapshotState},
         walker::{InstantWalkClock, SnapshotWalkError, WalkClock, walk_snapshot},
     },
     ffi::window_list::window_id_for_frame,
     focus_context::FocusContext,
+    text_capture::TextQuarantine,
     workspace::WorkspaceEvent,
 };
 
 use super::{Control, SharedHealth, WORKER_POLL_INTERVAL};
+use crate::{CapturePolicy, chrome::ChromeObserver};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_worker(
@@ -38,17 +39,56 @@ pub(super) fn run_worker(
     controls: Receiver<Control>,
     stop: Arc<AtomicBool>,
     sender: SyncSender<RawEvent>,
-    mut policy: SnapshotPolicy,
+    capture_policy: CapturePolicy,
+    chrome_observer: ChromeObserver,
     health: SharedHealth,
     state: &mut SnapshotState,
     focus_context: FocusContext,
 ) {
+    run_worker_with_scanner(
+        trigger,
+        lifecycle,
+        controls,
+        stop,
+        sender,
+        capture_policy,
+        chrome_observer,
+        health,
+        state,
+        focus_context,
+        scan,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_worker_with_scanner<F>(
+    trigger: &SnapshotTriggerReceiver,
+    lifecycle: &Receiver<WorkspaceEvent>,
+    controls: Receiver<Control>,
+    stop: Arc<AtomicBool>,
+    sender: SyncSender<RawEvent>,
+    capture_policy: CapturePolicy,
+    chrome_observer: ChromeObserver,
+    health: SharedHealth,
+    state: &mut SnapshotState,
+    focus_context: FocusContext,
+    scan_window: F,
+) where
+    F: Fn(i32, i64, &AtomicBool) -> Result<Option<SnapshotWalkOutput>, ScanError>,
+{
     debug_assert_eq!(std::thread::current().name(), Some("zanei-content"));
     let mut scheduler = SnapshotScheduler::default();
+    let mut quarantine = TextQuarantine::new(chrome_observer);
     while !stop.load(Ordering::Acquire) {
-        if service_controls(&controls, &mut policy, &mut scheduler) {
+        if service_controls(&controls, &mut scheduler) {
             break;
         }
+        emit_released(
+            quarantine.release(Instant::now(), &capture_policy),
+            state,
+            &sender,
+            &health,
+        );
         service_lifecycle(lifecycle, &mut scheduler, state);
         let wait = scheduler
             .next_deadline()
@@ -69,12 +109,16 @@ pub(super) fn run_worker(
         while let Some(candidate) = scheduler.take_due(Instant::now()) {
             process_candidate(
                 candidate,
-                &policy,
                 state,
-                &sender,
-                &stop,
-                &health,
-                &focus_context,
+                CandidateContext {
+                    policy: &capture_policy,
+                    sender: &sender,
+                    stop: &stop,
+                    health: &health,
+                    focus_context: &focus_context,
+                    quarantine: &mut quarantine,
+                    scan_window: &scan_window,
+                },
             );
             if stop.load(Ordering::Acquire) {
                 break;
@@ -82,21 +126,14 @@ pub(super) fn run_worker(
         }
         update_degraded(&health, state, Instant::now());
     }
+    emit_released(quarantine.flush(), state, &sender, &health);
     scheduler.stop();
 }
 
-fn service_controls(
-    controls: &Receiver<Control>,
-    policy: &mut SnapshotPolicy,
-    scheduler: &mut SnapshotScheduler,
-) -> bool {
+fn service_controls(controls: &Receiver<Control>, scheduler: &mut SnapshotScheduler) -> bool {
     for control in controls.try_iter() {
         match control {
-            Control::ReplaceFilter {
-                filter,
-                acknowledge,
-            } => {
-                policy.replace_filter(*filter);
+            Control::ReplaceFilter { acknowledge } => {
                 scheduler.replace_filter();
                 let _ = acknowledge.send(());
             }
@@ -126,15 +163,32 @@ fn service_lifecycle(
     }
 }
 
-fn process_candidate(
+struct CandidateContext<'a, F> {
+    policy: &'a CapturePolicy,
+    sender: &'a SyncSender<RawEvent>,
+    stop: &'a AtomicBool,
+    health: &'a SharedHealth,
+    focus_context: &'a FocusContext,
+    quarantine: &'a mut TextQuarantine,
+    scan_window: &'a F,
+}
+
+fn process_candidate<F>(
     candidate: ScheduledSnapshot,
-    policy: &SnapshotPolicy,
     state: &mut SnapshotState,
-    sender: &SyncSender<RawEvent>,
-    stop: &AtomicBool,
-    health: &SharedHealth,
-    focus_context: &FocusContext,
-) {
+    context: CandidateContext<'_, F>,
+) where
+    F: Fn(i32, i64, &AtomicBool) -> Result<Option<SnapshotWalkOutput>, ScanError>,
+{
+    let CandidateContext {
+        policy,
+        sender,
+        stop,
+        health,
+        focus_context,
+        quarantine,
+        scan_window,
+    } = context;
     let now = Instant::now();
     let Some(key) = candidate.key() else {
         trace_candidate(&candidate, "window_id", 0, Duration::ZERO, 0, false, None);
@@ -171,12 +225,13 @@ fn process_candidate(
         );
         return;
     }
-    if !policy.app_allows(&candidate.target.app) {
+    let decision = policy.decision(
+        PrivacyScope::ContentSnapshot,
+        &candidate.target.app.raw_app(),
+        Some(key.window_id),
+    );
+    if !decision.is_allowed() {
         trace_candidate(&candidate, "app_scope", 0, Duration::ZERO, 0, false, None);
-        return;
-    }
-    if !policy.chrome_allows(&candidate.target.app, key.window_id) {
-        trace_candidate(&candidate, "chrome", 0, Duration::ZERO, 0, false, None);
         return;
     }
     if !policy.secure_input_allows() {
@@ -227,7 +282,7 @@ fn process_candidate(
         trace_candidate(&candidate, "pid", 0, Duration::ZERO, 0, false, None);
         return;
     };
-    let output = match scan(pid, key.window_id, stop) {
+    let output = match scan_window(pid, key.window_id, stop) {
         Ok(Some(output)) => output,
         Ok(None) => {
             trace_candidate(&candidate, "stale", 0, Duration::ZERO, 0, false, None);
@@ -265,7 +320,18 @@ fn process_candidate(
         trace_output(&candidate, gate, &output);
         return;
     }
-    emit(candidate, output, key, hash, policy, state, sender, health);
+    emit(
+        candidate,
+        output,
+        key,
+        hash,
+        decision.capture_context(),
+        decision.chrome_version(),
+        state,
+        sender,
+        health,
+        quarantine,
+    );
 }
 
 fn scan(
@@ -273,9 +339,55 @@ fn scan(
     expected_window_id: i64,
     stop: &AtomicBool,
 ) -> Result<Option<SnapshotWalkOutput>, ScanError> {
-    let clock = InstantWalkClock::start();
     let application = SnapshotAxApplication::new(pid)?;
-    debug_assert_eq!(application.pid(), pid);
+    scan_application(application, expected_window_id, stop, window_id_for_frame)
+}
+
+pub(super) trait SnapshotApplication {
+    type Window: SnapshotWindow;
+
+    fn pid(&self) -> i32;
+    fn focused_window(&self) -> Result<Option<Self::Window>, SnapshotAxError>;
+}
+
+pub(super) trait SnapshotWindow: crate::content_snapshot::walker::SnapshotNode {
+    fn frame(&self) -> Result<Option<crate::ffi::ax::AxFrame>, SnapshotAxError>;
+    fn window_number(&self) -> Result<Option<i64>, SnapshotAxError>;
+}
+
+impl SnapshotApplication for SnapshotAxApplication {
+    type Window = crate::content_snapshot::SnapshotAxElement;
+
+    fn pid(&self) -> i32 {
+        SnapshotAxApplication::pid(self)
+    }
+
+    fn focused_window(&self) -> Result<Option<Self::Window>, SnapshotAxError> {
+        SnapshotAxApplication::focused_window(self)
+    }
+}
+
+impl SnapshotWindow for crate::content_snapshot::SnapshotAxElement {
+    fn frame(&self) -> Result<Option<crate::ffi::ax::AxFrame>, SnapshotAxError> {
+        crate::content_snapshot::SnapshotAxElement::frame(self)
+    }
+
+    fn window_number(&self) -> Result<Option<i64>, SnapshotAxError> {
+        crate::content_snapshot::SnapshotAxElement::window_number(self)
+    }
+}
+
+pub(super) fn scan_application<A>(
+    application: A,
+    expected_window_id: i64,
+    stop: &AtomicBool,
+    resolve_bounds: impl Fn(i64, crate::ffi::ax::AxFrame) -> Option<i64>,
+) -> Result<Option<SnapshotWalkOutput>, ScanError>
+where
+    A: SnapshotApplication,
+{
+    let clock = InstantWalkClock::start();
+    let pid = application.pid();
     if let Some(output) = initial_time_cutoff(&clock, 1) {
         return Ok(Some(output));
     }
@@ -293,7 +405,7 @@ fn scan(
     }
     let window_id = window
         .window_number()?
-        .or_else(|| window_id_for_frame(i64::from(pid), frame));
+        .or_else(|| resolve_bounds(i64::from(pid), frame));
     if window_id != Some(expected_window_id) {
         return Ok(None);
     }
@@ -329,82 +441,8 @@ pub(super) fn test_live_scan(
     scan(pid, window_id, &AtomicBool::new(false)).map_err(|error| error.to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit(
-    candidate: ScheduledSnapshot,
-    output: SnapshotWalkOutput,
-    key: SnapshotWindowKey,
-    hash: u64,
-    policy: &SnapshotPolicy,
-    state: &mut SnapshotState,
-    sender: &SyncSender<RawEvent>,
-    health: &SharedHealth,
-) {
-    let bytes = output.text.len();
-    let capture_context = policy.capture_context(&candidate.target.app, key.window_id);
-    let event = build_raw_event(
-        &candidate,
-        key,
-        output.text,
-        output.complete,
-        capture_context,
-    );
-    let gate = match sender.try_send(event) {
-        Ok(()) => {
-            state.commit_save(key, hash, bytes, Instant::now());
-            "emit"
-        }
-        Err(TrySendError::Full(_)) => {
-            health.dropped.fetch_add(1, Ordering::Relaxed);
-            "output_full"
-        }
-        Err(TrySendError::Disconnected(_)) => {
-            health.dropped.fetch_add(1, Ordering::Relaxed);
-            "output_disconnected"
-        }
-    };
-    trace_candidate(
-        &candidate,
-        gate,
-        output.nodes,
-        output.elapsed,
-        bytes,
-        output.complete,
-        output.cutoff,
-    );
-}
-
-pub(super) fn build_raw_event(
-    candidate: &ScheduledSnapshot,
-    key: SnapshotWindowKey,
-    text: String,
-    complete: bool,
-    capture_context: CaptureContext,
-) -> RawEvent {
-    let chars =
-        u64::try_from(text.chars().count()).expect("the 32 KiB design limit always fits in u64");
-    RawEvent {
-        observed_at: None,
-        source: "macos.ax".to_owned(),
-        event_type: "content.snapshot".to_owned(),
-        app: candidate.target.app.raw_app(),
-        window: Some(Window {
-            title: candidate.target.window.title.clone(),
-            id: Some(key.window_id),
-        }),
-        element: None,
-        data: EventData::ContentSnapshot(ContentSnapshotData {
-            text: Some(text),
-            chars,
-            complete,
-            trigger: candidate.trigger,
-        }),
-        capture_context,
-    }
-}
-
 #[derive(Debug)]
-enum ScanError {
+pub(super) enum ScanError {
     Ax(SnapshotAxError),
     Walk(SnapshotWalkError),
 }
@@ -459,104 +497,6 @@ fn update_degraded(health: &SharedHealth, state: &mut SnapshotState, now: Instan
             "component=content_snapshot phase=health action=update result=poisoned"
         ),
     }
-}
-
-fn trace_output(candidate: &ScheduledSnapshot, gate: &str, output: &SnapshotWalkOutput) {
-    crate::trace::trace!(
-        "{}",
-        trace_summary(candidate, gate, TraceMetrics::from(output))
-    );
-}
-
-fn trace_candidate(
-    candidate: &ScheduledSnapshot,
-    gate: &str,
-    nodes: usize,
-    elapsed: Duration,
-    bytes: usize,
-    complete: bool,
-    cutoff: Option<SnapshotCutoff>,
-) {
-    crate::trace::trace!(
-        "{}",
-        trace_summary(
-            candidate,
-            gate,
-            TraceMetrics {
-                nodes,
-                degraded_nodes: 0,
-                elapsed,
-                bytes,
-                complete,
-                cutoff,
-            },
-        )
-    );
-}
-
-#[derive(Clone, Copy)]
-struct TraceMetrics {
-    nodes: usize,
-    degraded_nodes: usize,
-    elapsed: Duration,
-    bytes: usize,
-    complete: bool,
-    cutoff: Option<SnapshotCutoff>,
-}
-
-impl From<&SnapshotWalkOutput> for TraceMetrics {
-    fn from(output: &SnapshotWalkOutput) -> Self {
-        Self {
-            nodes: output.nodes,
-            degraded_nodes: output.degraded_nodes,
-            elapsed: output.elapsed,
-            bytes: output.text.len(),
-            complete: output.complete,
-            cutoff: output.cutoff,
-        }
-    }
-}
-
-fn trace_summary(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetrics) -> String {
-    let trigger = match candidate.trigger {
-        ContentSnapshotTrigger::Settle => "settle",
-        ContentSnapshotTrigger::Refresh => "refresh",
-        ContentSnapshotTrigger::FocusOut => "focus_out",
-    };
-    let window_id = candidate
-        .target
-        .window
-        .id
-        .map_or_else(|| "none".to_owned(), |window_id| window_id.to_string());
-    format!(
-        "component=content_snapshot trigger={} gate={} nodes={} degraded_nodes={} elapsed_ms={} bytes={} complete={} cutoff={} pid={} window_id={}",
-        trigger,
-        gate,
-        metrics.nodes,
-        metrics.degraded_nodes,
-        metrics.elapsed.as_millis(),
-        metrics.bytes,
-        metrics.complete,
-        metrics.cutoff.map_or("none", SnapshotCutoff::trace_name),
-        candidate.target.app.pid,
-        window_id
-    )
-}
-
-#[cfg(test)]
-pub(super) fn test_trace_summary(candidate: &ScheduledSnapshot) -> String {
-    trace_summary(
-        candidate,
-        "emit",
-        TraceMetrics {
-            nodes: 42,
-            degraded_nodes: 0,
-            elapsed: Duration::from_millis(17),
-            bytes: 512,
-            complete: true,
-            cutoff: None,
-        },
-    )
 }
 
 impl fmt::Display for ScanError {

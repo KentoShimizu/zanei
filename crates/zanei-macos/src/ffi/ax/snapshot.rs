@@ -11,6 +11,8 @@ use crate::ffi::geometry::{AxFrame, AxPoint, AxSize};
 
 const AX_ERROR_SUCCESS: i32 = 0;
 const AX_ERROR_CANNOT_COMPLETE: i32 = -25_204;
+#[cfg(test)]
+const AX_ERROR_ILLEGAL_ARGUMENT: i32 = -25_201;
 const AX_ERROR_INVALID_UI_ELEMENT: i32 = -25_202;
 const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
 const AX_ERROR_NO_VALUE: i32 = -25_212;
@@ -92,6 +94,15 @@ impl SnapshotAxError {
     #[cfg(test)]
     pub(crate) const fn invalid_ui_element_for_test(pid: i32) -> Self {
         ax_error("AXUIElement", AX_ERROR_INVALID_UI_ELEMENT, pid)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn illegal_argument_for_test(pid: i32) -> Self {
+        ax_error(
+            "AXUIElementCopyAttributeValues",
+            AX_ERROR_ILLEGAL_ARGUMENT,
+            pid,
+        )
     }
 }
 
@@ -205,6 +216,31 @@ impl SnapshotAxElement {
             children.push(Self::from_owned(self.pid, child)?);
         }
         Ok(children)
+    }
+
+    pub fn children_count(&self) -> Result<usize, SnapshotAxError> {
+        set_timeout(self.value.as_ptr(), self.pid)?;
+        let attribute = cf_string("AXChildren")
+            .ok_or_else(|| self.contract_error("CFStringCreateWithCString"))?;
+        let mut count = 0;
+        let status = unsafe {
+            AXUIElementGetAttributeValueCount(
+                self.value.as_ptr(),
+                attribute.as_ptr(),
+                &raw mut count,
+            )
+        };
+        match status {
+            AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(0),
+            AX_ERROR_SUCCESS => {
+                usize::try_from(count).map_err(|_| self.contract_error("AX children count"))
+            }
+            code => Err(ax_error(
+                "AXUIElementGetAttributeValueCount",
+                code,
+                self.pid,
+            )),
+        }
     }
 
     pub fn copy_multiple(
@@ -440,6 +476,11 @@ unsafe extern "C" {
         index: isize,
         maximum_values: isize,
         values: *mut CfRef,
+    ) -> i32;
+    fn AXUIElementGetAttributeValueCount(
+        element: CfRef,
+        attribute: CfRef,
+        count: *mut isize,
     ) -> i32;
     fn AXUIElementCopyMultipleAttributeValues(
         element: CfRef,

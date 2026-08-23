@@ -178,6 +178,8 @@ Timeline output never includes snapshot bodies. Each session reports how many sn
 
 `browser.navigate` (URL capture) currently supports Chrome only. Chromium exposes each window's mode (`normal` / `incognito`) via AppleScript. Incognito windows produce no URL events, and their text-content-derived bodies remain null without a configuration knob.
 
+Navigations are observed when the tab, window, title, or page load changes. An in-page navigation that changes neither the title nor focus may not produce `browser.navigate`.
+
 | Browser | URL capture (current) | Private windows |
 | --- | --- | --- |
 | **Google Chrome** | ✅ Supported | `mode` suppresses Incognito URL events and text-content bodies |

@@ -1,10 +1,5 @@
 //! Focused UI-element classification shared by the AX and EventTap collectors.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
-
 use zanei_core::schema::FieldKind;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,48 +36,6 @@ impl FocusedField {
     pub(crate) const fn field_kind(self) -> Option<FieldKind> {
         self.class.field_kind()
     }
-}
-
-#[derive(Clone)]
-pub struct FocusedFieldPublisher {
-    fields: Arc<RwLock<HashMap<i32, Option<FocusedField>>>>,
-}
-
-impl FocusedFieldPublisher {
-    pub(crate) fn update(&self, pid: i32, focused_field: Option<FocusedField>) {
-        if let Ok(mut fields) = self.fields.write() {
-            fields.insert(pid, focused_field);
-        }
-    }
-
-    pub(crate) fn remove(&self, pid: i32) {
-        if let Ok(mut fields) = self.fields.write() {
-            fields.remove(&pid);
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct FocusedFieldTracker {
-    fields: Arc<RwLock<HashMap<i32, Option<FocusedField>>>>,
-}
-
-impl FocusedFieldTracker {
-    pub(crate) fn focused_field(&self, pid: i64) -> Option<FocusedField> {
-        let pid = i32::try_from(pid).ok()?;
-        self.fields.read().ok()?.get(&pid).copied().flatten()
-    }
-}
-
-#[must_use]
-pub fn focused_field_channel() -> (FocusedFieldPublisher, FocusedFieldTracker) {
-    let fields = Arc::new(RwLock::new(HashMap::new()));
-    (
-        FocusedFieldPublisher {
-            fields: Arc::clone(&fields),
-        },
-        FocusedFieldTracker { fields },
-    )
 }
 
 #[must_use]
@@ -132,9 +85,7 @@ mod tests {
         sink::{Sink, StreamSink},
     };
 
-    use super::{
-        FieldClass, FocusedField, field_class, focused_field_channel, observed_field_class,
-    };
+    use super::{FieldClass, field_class, observed_field_class};
 
     #[test]
     fn classifies_known_text_roles_and_subroles() {
@@ -214,40 +165,6 @@ mod tests {
         assert_eq!(FieldClass::SecureText.field_kind(), None);
         assert_eq!(FieldClass::KnownSafeNonText.field_kind(), None);
         assert_eq!(FieldClass::Unknown.field_kind(), None);
-    }
-
-    #[test]
-    fn tracker_is_pid_scoped_and_preserves_generation_and_class() {
-        let (publisher, tracker) = focused_field_channel();
-        let search = FocusedField {
-            generation: 7,
-            class: FieldClass::KnownText(FieldKind::Search),
-        };
-        let safe_non_text = FocusedField {
-            generation: 11,
-            class: FieldClass::KnownSafeNonText,
-        };
-        publisher.update(41, Some(search));
-        publisher.update(42, Some(safe_non_text));
-
-        assert_eq!(tracker.focused_field(41), Some(search));
-        assert_eq!(tracker.focused_field(42), Some(safe_non_text));
-        assert_eq!(tracker.focused_field(43), None);
-        assert_eq!(search.field_kind(), Some(FieldKind::Search));
-
-        publisher.update(41, None);
-        assert_eq!(tracker.focused_field(41), None);
-        assert_eq!(tracker.focused_field(42), Some(safe_non_text));
-
-        publisher.remove(42);
-        assert_eq!(tracker.focused_field(42), None);
-        assert!(
-            !tracker
-                .fields
-                .read()
-                .expect("focused field lock should be available")
-                .contains_key(&42)
-        );
     }
 
     #[test]

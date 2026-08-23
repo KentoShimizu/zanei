@@ -5,6 +5,8 @@ pub mod app_directory;
 #[cfg(target_os = "macos")]
 pub mod ax;
 #[cfg(target_os = "macos")]
+pub mod capture_policy;
+#[cfg(target_os = "macos")]
 pub mod chrome;
 #[cfg(target_os = "macos")]
 pub mod content_snapshot;
@@ -31,11 +33,9 @@ mod trace;
 pub mod workspace;
 
 #[cfg(target_os = "macos")]
-pub use focused_field::{FocusedFieldPublisher, FocusedFieldTracker, focused_field_channel};
+pub use capture_policy::{CaptureDecision, CapturePolicy};
 #[cfg(target_os = "macos")]
 pub use secure_input::{SecureInputMonitor, SecureInputMonitorError, SecureInputProbe};
-#[cfg(target_os = "macos")]
-pub use text_capture::TextContentPolicy;
 #[cfg(target_os = "macos")]
 pub use text_capture::{
     InputAuthorizationPublisher, InputAuthorizations, input_authorization_channel,

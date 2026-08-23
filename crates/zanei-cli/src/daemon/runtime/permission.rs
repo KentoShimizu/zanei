@@ -1,7 +1,8 @@
 //! Permission worker completion and EventTap startup gating.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use zanei_collector::Permission;
 use zanei_macos::permission::{PermissionError, PermissionStatus};
 
 use super::{
@@ -63,4 +64,16 @@ pub(in crate::daemon) fn service_permission_request_worker(
         }
     }
     on_complete(start_now);
+}
+
+pub(in crate::daemon) fn queue_permission_expansion(
+    previous: &BTreeSet<Permission>,
+    current: &BTreeSet<Permission>,
+    pending: &mut Option<BTreeSet<Permission>>,
+) {
+    if !current.is_subset(previous) {
+        *pending = Some(current.clone());
+    } else if current != previous {
+        *pending = None;
+    }
 }

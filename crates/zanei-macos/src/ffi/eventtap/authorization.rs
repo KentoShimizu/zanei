@@ -6,14 +6,10 @@ use super::{
     CallbackContext, CfMutableRef, EVENT_TARGET_UNIX_PROCESS_ID_FIELD, NativeApp, NativeContext,
     NativeInputTarget,
 };
-use crate::{
-    focus_context::FocusContext, focused_field::FocusedFieldTracker,
-    text_capture::InputAuthorization, trace,
-};
+use crate::{focus_context::FocusContext, text_capture::InputAuthorization, trace};
 
 pub(super) fn input_target(
     event: CfMutableRef,
-    focused_fields: Option<&FocusedFieldTracker>,
     focus_context: &FocusContext,
 ) -> Option<NativeInputTarget> {
     let pid = i32::try_from(unsafe {
@@ -21,7 +17,6 @@ pub(super) fn input_target(
     })
     .ok()
     .filter(|pid| *pid > 0)?;
-    let focused_field = focused_fields.and_then(|fields| fields.focused_field(i64::from(pid)));
     let focus = focus_context
         .current()
         .filter(|focus| focus.app.pid == i64::from(pid))?;
@@ -34,8 +29,9 @@ pub(super) fn input_target(
             },
             window: focus.window,
         },
-        focused_field,
+        focused_field: focus.focused_field,
         focus_generation: focus.generation,
+        field_generation: focus.field_generation,
     })
 }
 

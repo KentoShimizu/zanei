@@ -8,8 +8,8 @@ use zanei_core::{
 };
 
 use crate::content_snapshot::{
-    SnapshotTriggerKind, scheduler::ScheduledSnapshot, state::SnapshotWindowKey,
-    worker::build_raw_event,
+    SnapshotTriggerKind, output::build_raw_event, scheduler::ScheduledSnapshot,
+    state::SnapshotWindowKey,
 };
 
 use super::support::trigger;
