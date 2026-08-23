@@ -81,6 +81,19 @@ impl SnapshotScheduler {
         if !self.active || trigger.window.id.is_none() {
             return;
         }
+        if trigger.kind == SnapshotTriggerKind::FocusOut {
+            if self.current.as_ref().is_some_and(|current| {
+                current.target.app.pid == trigger.app.pid
+                    && current.target.window.id == trigger.window.id
+            }) {
+                self.current = None;
+            }
+            self.focus_out.push_back(FocusOut {
+                due: trigger.observed_at,
+                target: trigger,
+            });
+            return;
+        }
         let same_window = self.current.as_ref().is_some_and(|current| {
             current.target.app.pid == trigger.app.pid
                 && current.target.window.id == trigger.window.id
@@ -90,14 +103,6 @@ impl SnapshotScheduler {
             return;
         }
 
-        if trigger.kind == SnapshotTriggerKind::Focus
-            && let Some(previous) = self.current.take()
-        {
-            self.focus_out.push_back(FocusOut {
-                target: previous.target,
-                due: trigger.observed_at,
-            });
-        }
         self.current = Some(Self::new_current(trigger));
     }
 

@@ -30,6 +30,7 @@ struct WindowRecord {
     state: Option<ChromeWindowState>,
     version: u64,
     observed_at: Instant,
+    applescript_window_id: Option<i64>,
 }
 
 struct EligibilityState {
@@ -52,6 +53,16 @@ impl ChromeEligibilityPublisher {
         &self,
         pid: i64,
         observation: ChromeEligibilityObservation,
+        observed_at: Instant,
+    ) {
+        self.observe_with_window_id_at(pid, observation, None, observed_at);
+    }
+
+    pub(crate) fn observe_with_window_id_at(
+        &self,
+        pid: i64,
+        observation: ChromeEligibilityObservation,
+        applescript_window_id: Option<i64>,
         observed_at: Instant,
     ) {
         let Ok(pid) = i32::try_from(pid) else {
@@ -92,8 +103,17 @@ impl ChromeEligibilityPublisher {
             && record.state.as_ref() == next_state.as_ref()
         {
             record.observed_at = observed_at;
+            if applescript_window_id.is_some() {
+                record.applescript_window_id = applescript_window_id;
+            }
             return;
         }
+        let remembered_window_id = applescript_window_id.or_else(|| {
+            state
+                .windows
+                .get(&key)
+                .and_then(|record| record.applescript_window_id)
+        });
         let version = next_version(&mut state);
         state.windows.insert(
             key,
@@ -101,28 +121,30 @@ impl ChromeEligibilityPublisher {
                 state: next_state,
                 version,
                 observed_at,
+                applescript_window_id: remembered_window_id,
             },
         );
     }
 
-    pub fn clear_all(&self) {
+    pub(crate) fn clear_all(&self) {
         let Ok(mut state) = self.state.write() else {
             return;
         };
         let observed_at = Instant::now();
-        let active: Vec<_> = state
-            .windows
-            .iter()
-            .filter_map(|(key, record)| record.state.as_ref().map(|_| *key))
-            .collect();
-        for key in active {
-            let version = next_version(&mut state);
-            if let Some(record) = state.windows.get_mut(&key) {
-                record.state = None;
-                record.version = version;
-                record.observed_at = observed_at;
-            }
+        let keys: Vec<_> = state.windows.keys().copied().collect();
+        for key in keys {
+            mark_record_unavailable(&mut state, key, observed_at);
         }
+    }
+
+    pub(crate) fn applescript_window_id(&self, pid: i64, window_id: i64) -> Option<i64> {
+        let pid = i32::try_from(pid).ok()?;
+        self.state
+            .read()
+            .ok()?
+            .windows
+            .get(&(pid, window_id))
+            .and_then(|record| record.applescript_window_id)
     }
 }
 
@@ -240,32 +262,48 @@ fn mark_unavailable(
 ) {
     if let Some(window_id) = window_id {
         let key = (pid, window_id);
-        let version = next_version(state);
-        state.windows.insert(
-            key,
-            WindowRecord {
-                state: None,
-                version,
-                observed_at,
-            },
-        );
+        if state.windows.contains_key(&key) {
+            mark_record_unavailable(state, key, observed_at);
+        } else {
+            let version = next_version(state);
+            state.windows.insert(
+                key,
+                WindowRecord {
+                    state: None,
+                    version,
+                    observed_at,
+                    applescript_window_id: None,
+                },
+            );
+        }
         return;
     }
-    let active: Vec<_> = state
+    let keys: Vec<_> = state
         .windows
-        .iter()
-        .filter_map(|(key, record)| (key.0 == pid && record.state.is_some()).then_some(*key))
+        .keys()
+        .filter(|key| key.0 == pid)
+        .copied()
         .collect();
-    for key in active {
-        let version = next_version(state);
-        let record = state
-            .windows
-            .get_mut(&key)
-            .expect("active Chrome window key remains present");
-        record.state = None;
-        record.version = version;
-        record.observed_at = observed_at;
+    for key in keys {
+        mark_record_unavailable(state, key, observed_at);
     }
+}
+
+fn mark_record_unavailable(state: &mut EligibilityState, key: (i32, i64), observed_at: Instant) {
+    let state_changed = state
+        .windows
+        .get(&key)
+        .is_some_and(|record| record.state.is_some());
+    let version = state_changed.then(|| next_version(state));
+    let record = state
+        .windows
+        .get_mut(&key)
+        .expect("Chrome window key remains present");
+    record.state = None;
+    if let Some(version) = version {
+        record.version = version;
+    }
+    record.observed_at = observed_at;
 }
 
 fn next_version(state: &mut EligibilityState) -> u64 {
@@ -298,6 +336,38 @@ mod tests {
 
         assert_eq!(tracker.state_version(7, 11), Some(version));
         assert_eq!(tracker.observed_at(7, 11), Some(confirmation));
+    }
+
+    #[test]
+    fn ownership_unavailable_reobservation_preserves_version() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        let initial = Instant::now();
+        publisher.observe_at(7, normal(11, "https://example.com"), initial);
+        let normal_version = tracker.state_version(7, 11).expect("normal version");
+        publisher.observe_at(
+            7,
+            ChromeEligibilityObservation::Unavailable {
+                window_id: Some(11),
+            },
+            initial + std::time::Duration::from_millis(1),
+        );
+        let repeated = initial + std::time::Duration::from_millis(2);
+        publisher.observe_at(
+            7,
+            ChromeEligibilityObservation::Unavailable {
+                window_id: Some(11),
+            },
+            repeated,
+        );
+        assert_eq!(tracker.observed_at(7, 11), Some(repeated));
+
+        publisher.observe_at(
+            7,
+            normal(11, "https://example.com"),
+            initial + std::time::Duration::from_millis(3),
+        );
+
+        assert_eq!(tracker.state_version(7, 11), Some(normal_version + 2));
     }
 
     #[test]

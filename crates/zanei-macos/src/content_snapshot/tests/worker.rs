@@ -20,7 +20,8 @@ use crate::{
         state::SnapshotState,
         tests::walker::FakeNode,
         worker::{
-            SnapshotApplication, run_worker_with_scanner, scan_application, service_controls,
+            SnapshotApplication, run_worker_with_scanner, scan_application,
+            seed_scheduler_from_focus, service_controls,
         },
     },
     focus_context::FocusContext,
@@ -160,6 +161,74 @@ fn filter_reload_rearms_focused_target_and_clears_pid_backoff() {
 }
 
 #[test]
+fn s26_worker_start_seeds_the_current_focus() {
+    let now = Instant::now();
+    let target = trigger(7, 11, SnapshotTriggerKind::Focus, now);
+    let focus_context = FocusContext::new();
+    focus_context.activate(target.app, Some(target.window));
+    let mut scheduler = SnapshotScheduler::default();
+
+    seed_scheduler_from_focus(&mut scheduler, &focus_context, now);
+
+    assert_eq!(scheduler.next_deadline(), Some(now + SETTLE_QUIET_INTERVAL));
+}
+
+#[test]
+fn s26_restarted_worker_processes_current_focus_without_a_new_trigger() {
+    let (_trigger_publisher, trigger_receiver) = snapshot_trigger_channel();
+    let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
+    let (_control, controls) = channel();
+    let (sender, _events) = sync_channel(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let focus_context = FocusContext::new();
+    let target = trigger(7, 11, SnapshotTriggerKind::Focus, Instant::now());
+    focus_context.activate(target.app, Some(target.window));
+    let filter = FilterConfig::default();
+    let (_chrome_publisher, chrome) = chrome_eligibility_channel(filter.clone());
+    let (secure_input, secure_responder) = secure_input_test_channel();
+    let policy = CapturePolicy::new(chrome, filter, Some(secure_input));
+    let scan_calls = Arc::new(AtomicUsize::new(0));
+    let observed_scan_calls = Arc::clone(&scan_calls);
+    let worker_stop = Arc::clone(&stop);
+    let worker = thread::Builder::new()
+        .name("zanei-content".to_owned())
+        .spawn(move || {
+            let mut state = SnapshotState::new(Instant::now());
+            run_worker_with_scanner(
+                &trigger_receiver,
+                &lifecycle_receiver,
+                controls,
+                worker_stop,
+                sender,
+                policy,
+                ChromeObserver::new(),
+                SharedHealth::default(),
+                &mut state,
+                focus_context,
+                move |_pid, _window_id, _stop| {
+                    observed_scan_calls.fetch_add(1, Ordering::Release);
+                    Ok(None)
+                },
+            );
+        })
+        .expect("spawn restarted content worker");
+    let secure_worker = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(1_500));
+        secure_responder.respond_next(false);
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while scan_calls.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    stop.store(true, Ordering::Release);
+    worker.join().expect("content worker");
+    secure_worker.join().expect("Secure Input responder");
+
+    assert_eq!(scan_calls.load(Ordering::Acquire), 1);
+}
+
+#[test]
 fn secure_input_enabled_after_walk_discards_the_snapshot() {
     let (trigger_publisher, trigger_receiver) = snapshot_trigger_channel();
     let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
@@ -223,5 +292,74 @@ fn secure_input_enabled_after_walk_discards_the_snapshot() {
     worker.join().expect("content worker");
 
     assert_eq!(scan_calls.load(Ordering::Relaxed), 1);
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn s27_filter_reload_during_walk_discards_the_snapshot() {
+    let (trigger_publisher, trigger_receiver) = snapshot_trigger_channel();
+    let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
+    let (_control, controls) = channel();
+    let (sender, events) = sync_channel(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let focus_context = FocusContext::new();
+    let target = trigger(
+        7,
+        11,
+        SnapshotTriggerKind::Focus,
+        Instant::now() - Duration::from_secs(3),
+    );
+    focus_context.activate(target.app.clone(), Some(target.window.clone()));
+    let filter = FilterConfig::default();
+    let (_chrome_publisher, chrome) = chrome_eligibility_channel(filter.clone());
+    let (secure_input, secure_responder) = secure_input_test_channel();
+    let policy = CapturePolicy::new(chrome, filter, Some(secure_input));
+    let reload_policy = policy.clone();
+    let worker_stop = Arc::clone(&stop);
+    let worker = thread::Builder::new()
+        .name("zanei-content".to_owned())
+        .spawn(move || {
+            let mut state = SnapshotState::new(Instant::now());
+            run_worker_with_scanner(
+                &trigger_receiver,
+                &lifecycle_receiver,
+                controls,
+                worker_stop,
+                sender,
+                policy,
+                ChromeObserver::new(),
+                SharedHealth::default(),
+                &mut state,
+                focus_context,
+                move |_pid, _window_id, _stop| {
+                    reload_policy.replace_filter(FilterConfig {
+                        exclude_apps: vec!["dev.example.App".to_owned()],
+                        ..FilterConfig::default()
+                    });
+                    Ok(Some(SnapshotWalkOutput {
+                        text: "must not escape".to_owned(),
+                        nodes: 1,
+                        ax_calls: 1,
+                        elapsed: Duration::from_millis(1),
+                        complete: true,
+                        cutoff: None,
+                        degraded_nodes: 0,
+                        frameless_nodes: 0,
+                    }))
+                },
+            );
+        })
+        .expect("spawn content worker");
+    let secure_worker = thread::spawn(move || {
+        secure_responder.respond_next(false);
+        secure_responder.respond_next(false);
+    });
+
+    assert!(trigger_publisher.publish(target));
+    secure_worker.join().expect("Secure Input responder");
+    thread::sleep(Duration::from_millis(20));
+    stop.store(true, Ordering::Release);
+    worker.join().expect("content worker");
+
     assert!(events.try_recv().is_err());
 }

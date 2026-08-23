@@ -25,7 +25,7 @@ use crate::{
 use super::support::trigger;
 
 #[test]
-fn quarantined_snapshot_reserves_interval_and_budget_without_double_commit() {
+fn snapshot_ts_quarantine_release_preserves_candidate_time_and_reservation() {
     let now = Instant::now();
     let mut target = trigger(7, 11, SnapshotTriggerKind::Focus, now);
     target.app.name = "Google Chrome".to_owned();
@@ -80,6 +80,7 @@ fn quarantined_snapshot_reserves_interval_and_budget_without_double_commit() {
         hash,
         decision.capture_context(),
         decision.chrome_version(),
+        time::OffsetDateTime::UNIX_EPOCH,
         now,
         &mut state,
         &sender,
@@ -113,7 +114,8 @@ fn quarantined_snapshot_reserves_interval_and_budget_without_double_commit() {
     let released = quarantine.release(now + std::time::Duration::from_millis(1), &policy);
     emit_released(released, &sender, &health, &mut state);
 
-    assert!(events.try_recv().is_ok(), "confirmed snapshot is delivered");
+    let event = events.try_recv().expect("confirmed snapshot is delivered");
+    assert_eq!(event.observed_at, Some(time::OffsetDateTime::UNIX_EPOCH));
     assert_eq!(
         state.daily_bytes(now),
         reserved_bytes,
@@ -177,6 +179,7 @@ fn dropped_snapshot_does_not_deduplicate_identical_settle_on_return() {
         hash,
         decision.capture_context(),
         decision.chrome_version(),
+        time::OffsetDateTime::UNIX_EPOCH,
         now,
         &mut state,
         &sender,

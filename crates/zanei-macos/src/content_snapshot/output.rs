@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use time::OffsetDateTime;
 use zanei_collector::RawEvent;
 use zanei_core::schema::{
     CaptureContext, ContentSnapshotData, ContentSnapshotTrigger, EventData, Window,
@@ -28,6 +29,7 @@ pub(super) fn emit(
     hash: u64,
     capture_context: CaptureContext,
     chrome_version: Option<u64>,
+    observed_at: OffsetDateTime,
     reserved_at: Instant,
     state: &mut SnapshotState,
     sender: &SyncSender<RawEvent>,
@@ -42,6 +44,7 @@ pub(super) fn emit(
         output.text,
         output.complete,
         capture_context,
+        observed_at,
     );
     if let Some(version) = chrome_version {
         quarantine.hold_snapshot(
@@ -111,11 +114,12 @@ pub(super) fn build_raw_event(
     text: String,
     complete: bool,
     capture_context: CaptureContext,
+    observed_at: OffsetDateTime,
 ) -> RawEvent {
     let chars =
         u64::try_from(text.chars().count()).expect("the 32 KiB design limit always fits in u64");
     RawEvent {
-        observed_at: None,
+        observed_at: Some(observed_at),
         source: "macos.ax".to_owned(),
         event_type: "content.snapshot".to_owned(),
         app: candidate.target.app.raw_app(),

@@ -1,8 +1,8 @@
 //! Single process-wide authority for the frontmost application and window.
 
 use std::sync::{
-    Arc, RwLock,
-    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, RwLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError, sync_channel},
 };
 use std::time::Duration;
@@ -40,11 +40,19 @@ struct FocusState {
     current: Option<FocusSnapshot>,
     generation: u64,
     field_generation: u64,
-    subscribers: Vec<SyncSender<FocusTransition>>,
+    subscribers: Vec<FocusSubscriber>,
+}
+
+struct FocusSubscriber {
+    sender: SyncSender<FocusTransition>,
+    missed: Arc<AtomicBool>,
 }
 
 pub struct FocusTransitionReceiver {
     receiver: Receiver<FocusTransition>,
+    missed: Arc<AtomicBool>,
+    state: Arc<RwLock<FocusState>>,
+    last_seen: Mutex<Option<FocusSnapshot>>,
 }
 
 impl FocusContext {
@@ -81,12 +89,22 @@ impl FocusContext {
     #[must_use]
     pub fn subscribe(&self) -> FocusTransitionReceiver {
         let (sender, receiver) = sync_channel(TRANSITION_CHANNEL_CAPACITY);
-        self.state
+        let missed = Arc::new(AtomicBool::new(false));
+        let mut state = self
+            .state
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .subscribers
-            .push(sender);
-        FocusTransitionReceiver { receiver }
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let last_seen = state.current.clone();
+        state.subscribers.push(FocusSubscriber {
+            sender,
+            missed: Arc::clone(&missed),
+        });
+        FocusTransitionReceiver {
+            receiver,
+            missed,
+            state: Arc::clone(&self.state),
+            last_seen: Mutex::new(last_seen),
+        }
     }
 
     #[must_use]
@@ -199,11 +217,11 @@ impl FocusContext {
             current,
             resynced: force,
         };
-        state
-            .subscribers
-            .retain(|subscriber| match subscriber.try_send(transition.clone()) {
+        state.subscribers.retain(|subscriber| {
+            match subscriber.sender.try_send(transition.clone()) {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
+                    subscriber.missed.store(true, Ordering::Release);
                     self.dropped.fetch_add(1, Ordering::Relaxed);
                     true
                 }
@@ -211,7 +229,8 @@ impl FocusContext {
                     self.dropped.fetch_add(1, Ordering::Relaxed);
                     false
                 }
-            });
+            }
+        });
         Some(transition)
     }
 }
@@ -236,11 +255,60 @@ impl FocusTransitionReceiver {
         &self,
         timeout: Duration,
     ) -> Result<FocusTransition, RecvTimeoutError> {
-        self.receiver.recv_timeout(timeout)
+        if let Some(transition) = self.recover_missed() {
+            return Ok(transition);
+        }
+        let transition = self.receiver.recv_timeout(timeout)?;
+        if let Some(recovered) = self.recover_missed() {
+            return Ok(recovered);
+        }
+        self.remember(&transition);
+        Ok(transition)
     }
 
     pub fn try_recv(&self) -> Result<FocusTransition, TryRecvError> {
-        self.receiver.try_recv()
+        if let Some(transition) = self.recover_missed() {
+            return Ok(transition);
+        }
+        let transition = self.receiver.try_recv()?;
+        if let Some(recovered) = self.recover_missed() {
+            return Ok(recovered);
+        }
+        self.remember(&transition);
+        Ok(transition)
+    }
+
+    fn recover_missed(&self) -> Option<FocusTransition> {
+        if !self.missed.load(Ordering::Acquire) {
+            return None;
+        }
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.missed.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        while self.receiver.try_recv().is_ok() {}
+        let current = state.current.clone();
+        let mut last_seen = self
+            .last_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let transition = FocusTransition {
+            previous: last_seen.clone(),
+            current: current.clone(),
+            resynced: true,
+        };
+        *last_seen = current;
+        Some(transition)
+    }
+
+    fn remember(&self, transition: &FocusTransition) {
+        *self
+            .last_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = transition.current.clone();
     }
 }
 
@@ -467,5 +535,27 @@ mod tests {
         let current = context.current().expect("focus snapshot");
         assert_eq!(current.focused_field.map(|field| field.generation), Some(9));
         assert_eq!(current.field_generation, 2);
+    }
+
+    #[test]
+    fn s28_full_subscriber_resyncs_from_current_focus() {
+        let context = FocusContext::new();
+        let transitions = context.subscribe();
+        context.activate(app(7), Some(window(11, "Initial")));
+        let first = transitions.try_recv().expect("initial transition");
+
+        for index in 0..TRANSITION_CHANNEL_CAPACITY {
+            context.observe_window(7, window(11, &format!("Queued {index}")));
+        }
+        context.observe_window(7, window(11, "Latest"));
+        let latest = context.current().expect("latest focus");
+
+        let recovered = transitions.try_recv().expect("resynchronized transition");
+
+        assert_eq!(recovered.previous, first.current);
+        assert_eq!(recovered.current, Some(latest));
+        assert!(recovered.resynced);
+        assert_eq!(context.dropped_transitions(), 1);
+        assert_eq!(transitions.try_recv(), Err(TryRecvError::Empty));
     }
 }

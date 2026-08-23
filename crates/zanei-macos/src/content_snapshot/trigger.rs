@@ -16,6 +16,7 @@ const SNAPSHOT_TRIGGER_CAPACITY: usize = 256;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotTriggerKind {
     Focus,
+    FocusOut,
     Title,
 }
 
@@ -23,6 +24,7 @@ impl SnapshotTriggerKind {
     const fn trace_name(self) -> &'static str {
         match self {
             Self::Focus => "focus",
+            Self::FocusOut => "focus_out",
             Self::Title => "title",
         }
     }

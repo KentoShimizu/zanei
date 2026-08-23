@@ -14,27 +14,39 @@ pub(super) fn publish_focus_transition(
     let (Some(publisher), Some(transition)) = (publisher, transition) else {
         return;
     };
-    let Some(current) = transition.current else {
-        return;
-    };
-    let Some(window) = current.window else {
-        return;
-    };
-    let title_only = !transition.resynced
-        && transition.previous.as_ref().is_some_and(|previous| {
-            previous.app.pid == current.app.pid
-                && previous.window.as_ref().and_then(|window| window.id) == window.id
+    let observed_at = Instant::now();
+    let same_window = matches!(
+        (&transition.previous, &transition.current),
+        (Some(previous), Some(current))
+            if previous.app.pid == current.app.pid
+                && previous.window.as_ref().and_then(|window| window.id)
+                    == current.window.as_ref().and_then(|window| window.id)
+    );
+    if !same_window
+        && let Some(previous) = transition.previous
+        && let Some(window) = previous.window
+    {
+        publisher.publish(SnapshotTrigger {
+            app: previous.app,
+            window,
+            kind: SnapshotTriggerKind::FocusOut,
+            observed_at,
         });
-    publisher.publish(SnapshotTrigger {
-        app: current.app,
-        window,
-        kind: if title_only {
-            SnapshotTriggerKind::Title
-        } else {
-            SnapshotTriggerKind::Focus
-        },
-        observed_at: Instant::now(),
-    });
+    }
+    if let Some(current) = transition.current
+        && let Some(window) = current.window
+    {
+        publisher.publish(SnapshotTrigger {
+            app: current.app,
+            window,
+            kind: if same_window && !transition.resynced {
+                SnapshotTriggerKind::Title
+            } else {
+                SnapshotTriggerKind::Focus
+            },
+            observed_at,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -112,5 +124,35 @@ mod tests {
             receiver.try_recv().expect("wake focus trigger").kind,
             SnapshotTriggerKind::Focus
         );
+    }
+
+    #[test]
+    fn s24_termination_projects_the_previous_focus_out() {
+        let context = FocusContext::new();
+        context.activate(app(7), Some(window(11, "Before exit")));
+        let (publisher, receiver) = snapshot_trigger_channel();
+
+        publish_focus_transition(Some(&publisher), context.terminate(7));
+
+        assert_eq!(
+            receiver.try_recv().expect("focus-out trigger").kind,
+            SnapshotTriggerKind::FocusOut
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn s25_windowless_current_still_projects_the_previous_focus_out() {
+        let context = FocusContext::new();
+        context.activate(app(7), Some(window(11, "Previous")));
+        let (publisher, receiver) = snapshot_trigger_channel();
+
+        publish_focus_transition(Some(&publisher), context.activate(app(8), None));
+
+        let focus_out = receiver.try_recv().expect("focus-out trigger");
+        assert_eq!(focus_out.kind, SnapshotTriggerKind::FocusOut);
+        assert_eq!(focus_out.app.pid, 7);
+        assert_eq!(focus_out.window.id, Some(11));
+        assert!(receiver.try_recv().is_err());
     }
 }

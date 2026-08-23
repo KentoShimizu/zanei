@@ -24,8 +24,13 @@ fn observe_once<A: ChromeApi>(
     metrics: &ChromeMetrics,
     eligibility: &ChromeEligibilityPublisher,
 ) -> ObservationOutcome {
+    let focus_context = FocusContext::new();
+    focus_context.activate(app.clone(), None);
+    let stop = AtomicBool::new(false);
     let context = ObservationContext {
         sender,
+        stop: &stop,
+        focus_context: &focus_context,
         metrics,
         eligibility,
     };
@@ -405,25 +410,6 @@ fn full_output_queue_is_counted_as_a_dropped_event() {
 }
 
 #[test]
-fn no_observation_happens_without_a_trigger_for_five_simulated_seconds() {
-    let started_at = Instant::now();
-    let mut api = FakeApi::new([]);
-    let (sender, _) = sync_channel(1);
-    let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
-    let mut state = worker_state(7);
-
-    assert!(service_on_demand(
-        started_at + Duration::from_secs(5),
-        &mut api,
-        &sender,
-        &mut state,
-        &ChromeMetrics::default(),
-        &eligibility,
-    ));
-    assert_eq!(api.query_count, 0);
-}
-
-#[test]
 fn on_demand_requests_within_debounce_coalesce_into_one_observation() {
     let started_at = Instant::now();
     let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
@@ -490,6 +476,8 @@ fn page_load_triggers_one_observation() {
     assert_eq!(api.query_count, 1);
 }
 
+#[path = "tests/divergences.rs"]
+mod divergences;
 #[path = "tests/focus_out.rs"]
 mod focus_out;
 fn tracker_with_initial_snapshot() -> NavigationTracker {
@@ -540,6 +528,7 @@ fn worker_state(window_id: i64) -> ChromeWorkerState {
         frontmost: Some(chrome_focus(window_id)),
         apps: HashMap::from([(42, chrome_app())]),
         on_demand: HashMap::new(),
+        last_focus_generation: None,
     }
 }
 

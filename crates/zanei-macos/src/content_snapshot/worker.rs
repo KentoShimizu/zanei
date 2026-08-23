@@ -31,6 +31,11 @@ use crate::{
 use super::{Control, SharedHealth, WORKER_POLL_INTERVAL};
 use crate::{CapturePolicy, chrome::ChromeObserver};
 
+mod scheduling;
+
+use scheduling::CandidateTime;
+pub(super) use scheduling::seed_scheduler_from_focus;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_worker(
     trigger: &SnapshotTriggerReceiver,
@@ -77,6 +82,7 @@ pub(super) fn run_worker_with_scanner<F>(
 {
     debug_assert_eq!(std::thread::current().name(), Some("zanei-content"));
     let mut scheduler = SnapshotScheduler::default();
+    seed_scheduler_from_focus(&mut scheduler, &focus_context, Instant::now());
     let mut quarantine = TextQuarantine::new(chrome_observer);
     while !stop.load(Ordering::Acquire) {
         if service_controls(&controls, &mut scheduler, state, Instant::now()) {
@@ -109,8 +115,10 @@ pub(super) fn run_worker_with_scanner<F>(
             scheduler.observe(observation);
         }
         while let Some(candidate) = scheduler.take_due(Instant::now()) {
+            let taken_at = CandidateTime::now();
             process_candidate(
                 candidate,
+                taken_at,
                 state,
                 CandidateContext {
                     policy: &capture_policy,
@@ -184,6 +192,7 @@ struct CandidateContext<'a, F> {
 
 fn process_candidate<F>(
     candidate: ScheduledSnapshot,
+    taken_at: CandidateTime,
     state: &mut SnapshotState,
     context: CandidateContext<'_, F>,
 ) where
@@ -198,7 +207,7 @@ fn process_candidate<F>(
         quarantine,
         scan_window,
     } = context;
-    let now = Instant::now();
+    let now = taken_at.monotonic;
     let Some(key) = candidate.key() else {
         trace_candidate(&candidate, "window_id", 0, Duration::ZERO, 0, false, None);
         return;
@@ -234,12 +243,12 @@ fn process_candidate<F>(
         );
         return;
     }
-    let decision = policy.decision(
+    let initial_decision = policy.decision(
         PrivacyScope::ContentSnapshot,
         &candidate.target.app.raw_app(),
         Some(key.window_id),
     );
-    if !decision.is_allowed() {
+    if !initial_decision.is_allowed() {
         trace_candidate(&candidate, "app_scope", 0, Duration::ZERO, 0, false, None);
         return;
     }
@@ -330,13 +339,23 @@ fn process_candidate<F>(
         trace_output(&candidate, "secure_input", &output);
         return;
     }
+    let final_decision = policy.decision(
+        PrivacyScope::ContentSnapshot,
+        &candidate.target.app.raw_app(),
+        Some(key.window_id),
+    );
+    if !final_decision.is_allowed() {
+        trace_output(&candidate, "app_scope", &output);
+        return;
+    }
     emit(
         candidate,
         output,
         key,
         hash,
-        decision.capture_context(),
-        decision.chrome_version(),
+        final_decision.capture_context(),
+        final_decision.chrome_version(),
+        taken_at.wall,
         save_at,
         state,
         sender,

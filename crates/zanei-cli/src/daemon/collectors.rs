@@ -211,7 +211,6 @@ impl CollectorSet {
             (true, false) => self.add_chrome_collector(),
             (false, true) => {
                 self.remove_chrome_collector();
-                self.chrome_eligibility.clear_all();
             }
             (true, true) | (false, false) => {}
         }

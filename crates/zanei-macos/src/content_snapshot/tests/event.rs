@@ -32,6 +32,7 @@ fn raw_event_matches_the_v2_content_snapshot_contract() {
         CaptureContext {
             website_host: Some("example.com".to_owned()),
         },
+        time::OffsetDateTime::UNIX_EPOCH,
     );
 
     assert_eq!(event.source, "macos.ax");
@@ -39,6 +40,7 @@ fn raw_event_matches_the_v2_content_snapshot_contract() {
     assert_eq!(event.app.pid, Some(7));
     assert_eq!(event.window.as_ref().and_then(|window| window.id), Some(11));
     assert!(event.element.is_none());
+    assert_eq!(event.observed_at, Some(time::OffsetDateTime::UNIX_EPOCH));
     assert_eq!(
         event.capture_context.website_host.as_deref(),
         Some("example.com")

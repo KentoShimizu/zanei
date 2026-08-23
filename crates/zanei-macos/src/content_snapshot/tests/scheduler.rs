@@ -85,6 +85,12 @@ fn focus_change_schedules_previous_window_and_frequency_predicates_are_exact() {
     let mut scheduler = SnapshotScheduler::default();
     scheduler.observe(trigger(7, 11, SnapshotTriggerKind::Focus, base));
     scheduler.observe(trigger(
+        7,
+        11,
+        SnapshotTriggerKind::FocusOut,
+        base + Duration::from_secs(5),
+    ));
+    scheduler.observe(trigger(
         8,
         12,
         SnapshotTriggerKind::Focus,

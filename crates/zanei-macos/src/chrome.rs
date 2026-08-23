@@ -40,8 +40,9 @@ use worker::{ChromeWorkerReceivers, run_worker};
 #[cfg(test)]
 use worker::{
     ChromeWorkerState, EVENT_SOURCE, EVENT_TYPE, NavigationTracker, ObservationContext,
-    ObservationOutcome, SnapshotError, handle_focus_transition, handle_observation_trigger,
-    observe_query_once, service_on_demand,
+    ObservationOutcome, SnapshotError, handle_focus_transition as handle_focus_transition_impl,
+    handle_observation_trigger as handle_observation_trigger_impl, observe_query_once,
+    service_on_demand as service_on_demand_impl,
 };
 pub struct ChromeCollector {
     focus_transitions: Option<FocusTransitionReceiver>,
@@ -85,7 +86,6 @@ impl ChromeCollector {
     }
 
     fn stop_worker(&mut self) {
-        self.eligibility.clear_all();
         let Some(runtime) = self.runtime.take() else {
             return;
         };
@@ -144,12 +144,14 @@ impl Collector for ChromeCollector {
                     Err(error) => {
                         metrics.degraded.fetch_add(1, Ordering::Relaxed);
                         let _ = startup_sender.send(Err(error.to_string()));
+                        eligibility.clear_all();
                         return (focus_transitions, observation_triggers);
                     }
                 };
                 let receivers = ChromeWorkerReceivers {
                     focus: &focus_transitions,
                     observations: &observation_triggers,
+                    focus_context: &focus_context,
                 };
                 run_worker(
                     &mut api,
@@ -281,8 +283,14 @@ impl ChromeQuery {
         }
     }
 
-    const fn is_targeted(self) -> bool {
-        matches!(self, Self::Window { .. })
+    const fn applescript_window_id(self) -> Option<i64> {
+        match self {
+            Self::Window {
+                applescript_window_id,
+                ..
+            } => Some(applescript_window_id),
+            Self::FrontWindow { .. } => None,
+        }
     }
 }
 
@@ -324,6 +332,83 @@ impl ChromeSnapshot {
             tab_title: value.tab_title,
         })
     }
+}
+
+#[cfg(test)]
+fn handle_focus_transition<A: ChromeApi>(
+    transition: FocusTransition,
+    observed_at: std::time::Instant,
+    api: &mut A,
+    sender: &SyncSender<RawEvent>,
+    state: &mut ChromeWorkerState,
+    metrics: &ChromeMetrics,
+    eligibility: &ChromeEligibilityPublisher,
+) -> bool {
+    let focus_context = FocusContext::new();
+    if let Some(current) = transition.current.as_ref() {
+        focus_context.activate(current.app.clone(), current.window.clone());
+    }
+    let stop = AtomicBool::new(false);
+    let context = ObservationContext {
+        sender,
+        stop: &stop,
+        focus_context: &focus_context,
+        metrics,
+        eligibility,
+    };
+    handle_focus_transition_impl(transition, observed_at, api, state, &context)
+}
+
+#[cfg(test)]
+fn handle_observation_trigger<A: ChromeApi>(
+    trigger: ObservationTrigger,
+    now: std::time::Instant,
+    api: &mut A,
+    sender: &SyncSender<RawEvent>,
+    state: &mut ChromeWorkerState,
+    metrics: &ChromeMetrics,
+    eligibility: &ChromeEligibilityPublisher,
+) -> bool {
+    let focus_context = test_focus_context(state.frontmost.as_ref());
+    let stop = AtomicBool::new(false);
+    let context = ObservationContext {
+        sender,
+        stop: &stop,
+        focus_context: &focus_context,
+        metrics,
+        eligibility,
+    };
+    handle_observation_trigger_impl(trigger, now, api, state, &context)
+}
+
+#[cfg(test)]
+fn service_on_demand<A: ChromeApi>(
+    now: std::time::Instant,
+    api: &mut A,
+    sender: &SyncSender<RawEvent>,
+    state: &mut ChromeWorkerState,
+    metrics: &ChromeMetrics,
+    eligibility: &ChromeEligibilityPublisher,
+) -> bool {
+    let focus_context = test_focus_context(state.frontmost.as_ref());
+    let stop = AtomicBool::new(false);
+    let context = ObservationContext {
+        sender,
+        stop: &stop,
+        focus_context: &focus_context,
+        metrics,
+        eligibility,
+    };
+    service_on_demand_impl(now, api, state, &context)
+}
+
+#[cfg(test)]
+fn test_focus_context(focus: Option<&crate::focus_context::FocusSnapshot>) -> FocusContext {
+    let context = FocusContext::new();
+    if let Some(focus) = focus {
+        context.activate(focus.app.clone(), focus.window.clone());
+    }
+    context
 }
 
 #[cfg(test)]

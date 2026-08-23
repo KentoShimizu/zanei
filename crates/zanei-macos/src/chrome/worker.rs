@@ -12,7 +12,7 @@ use std::{
 use zanei_collector::RawEvent;
 use zanei_core::{
     privacy::CHROME_BUNDLE_ID,
-    schema::{App, BrowserMode, BrowserNavigateData, BrowserTransition, EventData, Window},
+    schema::{App, BrowserMode, BrowserNavigateData, EventData, Window},
 };
 
 use super::{
@@ -20,9 +20,15 @@ use super::{
     ChromeObservation, ChromeQuery, ChromeSnapshot, ObservationTrigger,
 };
 use crate::{
-    focus_context::{FocusSnapshot, FocusTransition, FocusTransitionReceiver},
+    focus_context::{FocusContext, FocusSnapshot, FocusTransition, FocusTransitionReceiver},
     workspace::ApplicationInfo,
 };
+
+mod attribution;
+mod navigation;
+
+use attribution::FrontWindowAttribution;
+pub(super) use navigation::{Navigation, NavigationTracker};
 
 pub(super) const EVENT_SOURCE: &str = "macos.applescript";
 pub(super) const EVENT_TYPE: &str = "browser.navigate";
@@ -32,6 +38,7 @@ const ON_DEMAND_DEBOUNCE: Duration = Duration::from_millis(200);
 pub(super) struct ChromeWorkerReceivers<'a> {
     pub(super) focus: &'a FocusTransitionReceiver,
     pub(super) observations: &'a Receiver<ObservationTrigger>,
+    pub(super) focus_context: &'a FocusContext,
 }
 
 pub(super) fn run_worker<A: ChromeApi>(
@@ -44,96 +51,70 @@ pub(super) fn run_worker<A: ChromeApi>(
     initial_focus: Option<FocusTransition>,
 ) {
     let mut state = ChromeWorkerState::default();
-    if let Some(transition) = initial_focus
-        && !handle_focus_transition(
-            transition,
-            Instant::now(),
-            api,
-            sender,
-            &mut state,
-            metrics,
-            eligibility,
-        )
-    {
-        eligibility.clear_all();
-        return;
-    }
-
-    while !stop.load(Ordering::Acquire) {
-        let wait = state
-            .on_demand
-            .values()
-            .min()
-            .map_or(WORKER_WAKE_INTERVAL, |deadline| {
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(WORKER_WAKE_INTERVAL)
-            });
-        match receivers.focus.recv_timeout(wait) {
-            Ok(transition) => {
-                if !handle_focus_transition(
-                    transition,
-                    Instant::now(),
-                    api,
-                    sender,
-                    &mut state,
-                    metrics,
-                    eligibility,
-                ) {
-                    eligibility.clear_all();
-                    return;
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
+    let context = ObservationContext {
+        sender,
+        stop,
+        focus_context: receivers.focus_context,
+        metrics,
+        eligibility,
+    };
+    'worker: {
+        if let Some(transition) = initial_focus
+            && !handle_focus_transition(transition, Instant::now(), api, &mut state, &context)
+        {
+            break 'worker;
         }
-        loop {
-            match receivers.focus.try_recv() {
+
+        while !stop.load(Ordering::Acquire) {
+            let wait = state
+                .on_demand
+                .values()
+                .min()
+                .map_or(WORKER_WAKE_INTERVAL, |deadline| {
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(WORKER_WAKE_INTERVAL)
+                });
+            match receivers.focus.recv_timeout(wait) {
                 Ok(transition) => {
                     if !handle_focus_transition(
                         transition,
                         Instant::now(),
                         api,
-                        sender,
                         &mut state,
-                        metrics,
-                        eligibility,
+                        &context,
                     ) {
-                        eligibility.clear_all();
-                        return;
+                        break 'worker;
                     }
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    eligibility.clear_all();
-                    return;
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break 'worker,
+            }
+            loop {
+                match receivers.focus.try_recv() {
+                    Ok(transition) => {
+                        if !handle_focus_transition(
+                            transition,
+                            Instant::now(),
+                            api,
+                            &mut state,
+                            &context,
+                        ) {
+                            break 'worker;
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break 'worker,
                 }
             }
-        }
-        for trigger in receivers.observations.try_iter() {
-            if !handle_observation_trigger(
-                trigger,
-                Instant::now(),
-                api,
-                sender,
-                &mut state,
-                metrics,
-                eligibility,
-            ) {
-                eligibility.clear_all();
-                return;
+            for trigger in receivers.observations.try_iter() {
+                if !handle_observation_trigger(trigger, Instant::now(), api, &mut state, &context) {
+                    break 'worker;
+                }
             }
-        }
-        if !service_on_demand(
-            Instant::now(),
-            api,
-            sender,
-            &mut state,
-            metrics,
-            eligibility,
-        ) {
-            eligibility.clear_all();
-            return;
+            if !service_on_demand(Instant::now(), api, &mut state, &context) {
+                break 'worker;
+            }
         }
     }
     eligibility.clear_all();
@@ -143,10 +124,8 @@ pub(super) fn handle_observation_trigger<A: ChromeApi>(
     trigger: ObservationTrigger,
     now: Instant,
     api: &mut A,
-    sender: &SyncSender<RawEvent>,
     state: &mut ChromeWorkerState,
-    metrics: &ChromeMetrics,
-    eligibility: &ChromeEligibilityPublisher,
+    context: &ObservationContext<'_>,
 ) -> bool {
     match trigger {
         ObservationTrigger::OnDemand { pid, window_id } => {
@@ -158,19 +137,15 @@ pub(super) fn handle_observation_trigger<A: ChromeApi>(
                 .or_insert(now + ON_DEMAND_DEBOUNCE);
             true
         }
-        ObservationTrigger::PageLoaded { pid } => {
-            observe_frontmost(pid, now, api, sender, state, metrics, eligibility)
-        }
+        ObservationTrigger::PageLoaded { pid } => observe_frontmost(pid, now, api, state, context),
     }
 }
 
 pub(super) fn service_on_demand<A: ChromeApi>(
     now: Instant,
     api: &mut A,
-    sender: &SyncSender<RawEvent>,
     state: &mut ChromeWorkerState,
-    metrics: &ChromeMetrics,
-    eligibility: &ChromeEligibilityPublisher,
+    context: &ObservationContext<'_>,
 ) -> bool {
     let Some((&key, &deadline)) = state.on_demand.iter().min_by_key(|(_, deadline)| *deadline)
     else {
@@ -180,7 +155,7 @@ pub(super) fn service_on_demand<A: ChromeApi>(
         return true;
     }
     state.on_demand.remove(&key);
-    observe_confirmation(key, now, api, sender, state, metrics, eligibility)
+    observe_confirmation(key, now, api, state, context)
 }
 
 #[derive(Default)]
@@ -189,26 +164,38 @@ pub(super) struct ChromeWorkerState {
     pub(super) frontmost: Option<FocusSnapshot>,
     pub(super) apps: HashMap<i64, ApplicationInfo>,
     pub(super) on_demand: HashMap<(i64, i64), Instant>,
+    pub(super) last_focus_generation: Option<u64>,
 }
 
 pub(super) fn handle_focus_transition<A: ChromeApi>(
     transition: FocusTransition,
     observed_at: Instant,
     api: &mut A,
-    sender: &SyncSender<RawEvent>,
     state: &mut ChromeWorkerState,
-    metrics: &ChromeMetrics,
-    eligibility: &ChromeEligibilityPublisher,
+    context: &ObservationContext<'_>,
 ) -> bool {
+    if let Some(generation) = transition
+        .current
+        .as_ref()
+        .map(|current| current.generation)
+    {
+        if state
+            .last_focus_generation
+            .is_some_and(|seen| generation <= seen)
+        {
+            return true;
+        }
+        state.last_focus_generation = Some(generation);
+    }
     // A wake resync is the single ordering boundary for Chrome state: invalidate
     // stale eligibility, then immediately rebuild it from the re-read focus.
     if transition.resynced {
-        eligibility.clear_all();
+        context.eligibility.clear_all();
         state.navigation.clear();
     }
     let Some(current) = transition.current else {
         if let Some(previous) = transition.previous.filter(|focus| is_chrome(&focus.app)) {
-            terminate_chrome(previous.app.pid, state, eligibility);
+            terminate_chrome(previous.app.pid, state, context.eligibility);
         } else {
             leave_chrome_focus(state);
         }
@@ -221,7 +208,7 @@ pub(super) fn handle_focus_transition<A: ChromeApi>(
     let pid = current.app.pid;
     state.apps.insert(pid, current.app.clone());
     state.frontmost = Some(current);
-    observe_frontmost(pid, observed_at, api, sender, state, metrics, eligibility)
+    observe_frontmost(pid, observed_at, api, state, context)
 }
 
 fn leave_chrome_focus(state: &mut ChromeWorkerState) {
@@ -243,17 +230,15 @@ fn terminate_chrome(
     state
         .on_demand
         .retain(|(candidate_pid, _), _| *candidate_pid != pid);
-    state.navigation.terminate_pid(pid);
+    state.navigation.reset_page();
 }
 
 fn observe_frontmost<A: ChromeApi>(
     pid: i64,
     observed_at: Instant,
     api: &mut A,
-    sender: &SyncSender<RawEvent>,
     state: &mut ChromeWorkerState,
-    metrics: &ChromeMetrics,
-    eligibility: &ChromeEligibilityPublisher,
+    context: &ObservationContext<'_>,
 ) -> bool {
     let Some(focus) = state
         .frontmost
@@ -267,11 +252,6 @@ fn observe_frontmost<A: ChromeApi>(
         pid,
         window_id: focus.window.as_ref().and_then(|window| window.id),
     };
-    let context = ObservationContext {
-        sender,
-        metrics,
-        eligibility,
-    };
     match observe_query_once(
         api,
         &mut state.navigation,
@@ -279,11 +259,11 @@ fn observe_frontmost<A: ChromeApi>(
         query,
         true,
         observed_at,
-        &context,
+        context,
     ) {
         ObservationOutcome::Continue => true,
         ObservationOutcome::Inactive => {
-            terminate_chrome(pid, state, eligibility);
+            terminate_chrome(pid, state, context.eligibility);
             true
         }
         ObservationOutcome::Stop => false,
@@ -294,13 +274,11 @@ fn observe_confirmation<A: ChromeApi>(
     (pid, window_id): (i64, i64),
     observed_at: Instant,
     api: &mut A,
-    sender: &SyncSender<RawEvent>,
     state: &mut ChromeWorkerState,
-    metrics: &ChromeMetrics,
-    eligibility: &ChromeEligibilityPublisher,
+    context: &ObservationContext<'_>,
 ) -> bool {
-    let query = state
-        .navigation
+    let query = context
+        .eligibility
         .applescript_window_id(pid, window_id)
         .map_or(
             ChromeQuery::FrontWindow {
@@ -314,11 +292,6 @@ fn observe_confirmation<A: ChromeApi>(
             },
         );
     let app = state.apps.get(&pid);
-    let context = ObservationContext {
-        sender,
-        metrics,
-        eligibility,
-    };
     match observe_query_once(
         api,
         &mut state.navigation,
@@ -326,11 +299,11 @@ fn observe_confirmation<A: ChromeApi>(
         query,
         false,
         observed_at,
-        &context,
+        context,
     ) {
         ObservationOutcome::Continue => true,
         ObservationOutcome::Inactive => {
-            terminate_chrome(pid, state, eligibility);
+            terminate_chrome(pid, state, context.eligibility);
             true
         }
         ObservationOutcome::Stop => false,
@@ -349,6 +322,8 @@ pub(super) enum ObservationOutcome {
 
 pub(super) struct ObservationContext<'a> {
     pub(super) sender: &'a SyncSender<RawEvent>,
+    pub(super) stop: &'a AtomicBool,
+    pub(super) focus_context: &'a FocusContext,
     pub(super) metrics: &'a ChromeMetrics,
     pub(super) eligibility: &'a ChromeEligibilityPublisher,
 }
@@ -364,11 +339,28 @@ pub(super) fn observe_query_once<A: ChromeApi>(
 ) -> ObservationOutcome {
     let ObservationContext {
         sender,
+        stop,
+        focus_context,
         metrics,
         eligibility,
     } = context;
     let pid = query.pid();
-    match api.query(query) {
+    let attribution = FrontWindowAttribution::capture(query, focus_context);
+    let observation = api.query(query);
+    if stop.load(Ordering::Acquire) {
+        return ObservationOutcome::Stop;
+    }
+    if !attribution.allows(focus_context) {
+        eligibility.observe_at(
+            pid,
+            ChromeEligibilityObservation::Unavailable {
+                window_id: query.window_id(),
+            },
+            observed_at,
+        );
+        return ObservationOutcome::Continue;
+    }
+    match observation {
         Ok(ChromeObservation::Snapshot(snapshot)) => {
             if validate_snapshot(&snapshot).is_err() {
                 eligibility.observe_at(
@@ -379,15 +371,15 @@ pub(super) fn observe_query_once<A: ChromeApi>(
                 metrics.degraded.fetch_add(1, Ordering::Relaxed);
                 return ObservationOutcome::Stop;
             }
-            eligibility.observe_at(
+            eligibility.observe_with_window_id_at(
                 pid,
                 ChromeEligibilityObservation::Normal {
                     window_id: snapshot.window_id,
                     url: snapshot.url.clone(),
                 },
+                Some(snapshot.applescript_window_id),
                 observed_at,
             );
-            tracker.remember_window(pid, &snapshot);
             if !emit_navigation {
                 return ObservationOutcome::Continue;
             }
@@ -429,9 +421,10 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             }
         }
         Ok(ChromeObservation::Incognito { window_id }) => {
-            eligibility.observe_at(
+            eligibility.observe_with_window_id_at(
                 pid,
                 ChromeEligibilityObservation::Incognito { window_id },
+                query.applescript_window_id(),
                 observed_at,
             );
             if emit_navigation {
@@ -443,20 +436,12 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             eligibility.observe_at(
                 pid,
                 ChromeEligibilityObservation::Unavailable {
-                    window_id: if query.is_targeted() {
-                        query.window_id()
-                    } else {
-                        None
-                    },
+                    window_id: query.window_id(),
                 },
                 observed_at,
             );
-            if query.is_targeted() {
-                if let Some(window_id) = query.window_id() {
-                    tracker.forget_window(pid, window_id);
-                }
-            } else {
-                tracker.terminate_pid(pid);
+            if emit_navigation {
+                tracker.reset_page();
             }
             ObservationOutcome::Continue
         }
@@ -466,7 +451,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
                 ChromeEligibilityObservation::Unavailable { window_id: None },
                 observed_at,
             );
-            tracker.terminate_pid(pid);
+            tracker.reset_page();
             ObservationOutcome::Inactive
         }
         Err(_) => {
@@ -506,86 +491,6 @@ fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
         }),
         capture_context: zanei_core::schema::CaptureContext { website_host },
     }
-}
-
-#[derive(Default)]
-pub(super) struct NavigationTracker {
-    pub(super) previous: Option<ObservedPage>,
-    window_ids: HashMap<(i64, i64), i64>,
-}
-
-impl NavigationTracker {
-    pub(super) fn observe(
-        &mut self,
-        snapshot: ChromeSnapshot,
-    ) -> Result<Option<Navigation>, SnapshotError> {
-        validate_snapshot(&snapshot)?;
-        let current = ObservedPage {
-            window_key: snapshot.window_key.clone(),
-            tab_key: snapshot.tab_key.clone(),
-            url: snapshot.url.clone(),
-        };
-        let transition = match self.previous.as_ref() {
-            None => None,
-            Some(previous)
-                if previous.window_key != current.window_key
-                    || previous.tab_key != current.tab_key =>
-            {
-                Some(BrowserTransition::TabSwitch)
-            }
-            Some(previous) if previous.url != current.url => Some(BrowserTransition::Navigate),
-            Some(_) => {
-                self.previous = Some(current);
-                return Ok(None);
-            }
-        };
-        self.previous = Some(current);
-        Ok(Some(Navigation {
-            snapshot,
-            transition,
-        }))
-    }
-
-    fn remember_window(&mut self, pid: i64, snapshot: &ChromeSnapshot) {
-        if let Some(window_id) = snapshot.window_id {
-            self.window_ids
-                .insert((pid, window_id), snapshot.applescript_window_id);
-        }
-    }
-
-    fn applescript_window_id(&self, pid: i64, window_id: i64) -> Option<i64> {
-        self.window_ids.get(&(pid, window_id)).copied()
-    }
-
-    fn forget_window(&mut self, pid: i64, window_id: i64) {
-        self.window_ids.remove(&(pid, window_id));
-    }
-
-    fn terminate_pid(&mut self, pid: i64) {
-        self.window_ids
-            .retain(|(candidate_pid, _), _| *candidate_pid != pid);
-        self.reset_page();
-    }
-
-    fn reset_page(&mut self) {
-        self.previous = None;
-    }
-
-    fn clear(&mut self) {
-        self.previous = None;
-        self.window_ids.clear();
-    }
-}
-
-pub(super) struct ObservedPage {
-    window_key: String,
-    tab_key: String,
-    url: String,
-}
-
-pub(super) struct Navigation {
-    pub(super) transition: Option<BrowserTransition>,
-    snapshot: ChromeSnapshot,
 }
 
 mod validation;

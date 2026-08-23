@@ -1,0 +1,239 @@
+use super::*;
+
+#[test]
+fn no_observation_happens_without_a_trigger_for_five_simulated_seconds() {
+    let started_at = Instant::now();
+    let mut api = FakeApi::new([]);
+    let (sender, _) = sync_channel(1);
+    let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
+    let mut state = worker_state(7);
+
+    assert!(service_on_demand(
+        started_at + Duration::from_secs(5),
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+    assert_eq!(api.query_count, 0);
+}
+
+#[test]
+fn s21_front_window_result_is_unavailable_when_focus_generation_changes() {
+    let focus_context = FocusContext::new();
+    focus_context.activate(chrome_app(), Some(chrome_focus(7).window.expect("window")));
+    let initial = Instant::now();
+    let observed_at = initial + Duration::from_millis(1);
+    let (eligibility, tracker) = chrome_eligibility_channel(FilterConfig::default());
+    eligibility.observe_at(
+        42,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(7),
+            url: "https://allowed.example/before".to_owned(),
+        },
+        initial,
+    );
+    let mut api = FocusChangingApi {
+        focus_context: focus_context.clone(),
+    };
+    let (sender, _) = sync_channel(1);
+    let stop = AtomicBool::new(false);
+    let metrics = ChromeMetrics::default();
+    let context = ObservationContext {
+        sender: &sender,
+        stop: &stop,
+        focus_context: &focus_context,
+        metrics: &metrics,
+        eligibility: &eligibility,
+    };
+
+    let outcome = observe_query_once(
+        &mut api,
+        &mut NavigationTracker::default(),
+        Some(&chrome_app()),
+        ChromeQuery::FrontWindow {
+            pid: 42,
+            window_id: Some(7),
+        },
+        false,
+        observed_at,
+        &context,
+    );
+
+    assert!(matches!(outcome, ObservationOutcome::Continue));
+    assert_eq!(tracker.state_version(42, 7), None);
+    assert_eq!(tracker.observed_at(42, 7), Some(observed_at));
+    assert!(!tracker.allows_text(42, Some(7)));
+    assert_eq!(tracker.state_version(42, 8), None);
+}
+
+#[test]
+fn ownership_stop_discards_a_blocking_query_result() {
+    let stop = AtomicBool::new(false);
+    let focus_context = FocusContext::new();
+    let initial = Instant::now();
+    let observed_at = initial + Duration::from_millis(1);
+    let (eligibility, tracker) = chrome_eligibility_channel(FilterConfig::default());
+    eligibility.observe_at(
+        42,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(7),
+            url: "https://allowed.example/before".to_owned(),
+        },
+        initial,
+    );
+    let (sender, _) = sync_channel(1);
+    let metrics = ChromeMetrics::default();
+    let context = ObservationContext {
+        sender: &sender,
+        stop: &stop,
+        focus_context: &focus_context,
+        metrics: &metrics,
+        eligibility: &eligibility,
+    };
+    let mut api = StopDuringQuery { stop: &stop };
+
+    let outcome = observe_query_once(
+        &mut api,
+        &mut NavigationTracker::default(),
+        None,
+        ChromeQuery::Window {
+            pid: 42,
+            window_id: 7,
+            applescript_window_id: 101,
+        },
+        false,
+        observed_at,
+        &context,
+    );
+
+    assert!(matches!(outcome, ObservationOutcome::Stop));
+    assert_eq!(tracker.observed_at(42, 7), Some(initial));
+    assert_eq!(eligibility.applescript_window_id(42, 7), None);
+}
+
+#[test]
+fn ownership_as_id_survives_worker_state_restart() {
+    let now = Instant::now();
+    let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
+    eligibility.observe_with_window_id_at(
+        42,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(7),
+            url: "https://allowed.example".to_owned(),
+        },
+        Some(101),
+        now,
+    );
+    eligibility.clear_all();
+    let mut state = ChromeWorkerState::default();
+    let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
+    let (sender, _) = sync_channel(1);
+
+    assert!(handle_observation_trigger(
+        ObservationTrigger::OnDemand {
+            pid: 42,
+            window_id: 7,
+        },
+        now,
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+    assert!(service_on_demand(
+        now + Duration::from_millis(200),
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+
+    assert_eq!(
+        api.queries,
+        [ChromeQuery::Window {
+            pid: 42,
+            window_id: 7,
+            applescript_window_id: 101,
+        }]
+    );
+}
+
+#[test]
+fn s23_startup_generation_is_observed_once() {
+    let transition = FocusTransition {
+        previous: None,
+        current: Some(chrome_focus(7)),
+        resynced: false,
+    };
+    let mut api = FakeApi::new([
+        Ok(ChromeObservation::NoWindow),
+        Ok(ChromeObservation::NoWindow),
+    ]);
+    let (sender, _) = sync_channel(1);
+    let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
+    let mut state = ChromeWorkerState::default();
+
+    assert!(handle_focus_transition(
+        transition.clone(),
+        Instant::now(),
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+    assert!(handle_focus_transition(
+        transition,
+        Instant::now(),
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+
+    assert_eq!(api.query_count, 1);
+}
+
+struct FocusChangingApi {
+    focus_context: FocusContext,
+}
+
+impl ChromeApi for FocusChangingApi {
+    type Error = &'static str;
+
+    fn query(&mut self, _query: ChromeQuery) -> Result<ChromeObservation, Self::Error> {
+        self.focus_context
+            .activate(chrome_app(), Some(chrome_focus(8).window.expect("window")));
+        Ok(ChromeObservation::Snapshot(snapshot_for_window(
+            7,
+            202,
+            "tab-2",
+            "https://other.example",
+            "Other",
+        )))
+    }
+}
+
+struct StopDuringQuery<'a> {
+    stop: &'a AtomicBool,
+}
+
+impl ChromeApi for StopDuringQuery<'_> {
+    type Error = &'static str;
+
+    fn query(&mut self, _query: ChromeQuery) -> Result<ChromeObservation, Self::Error> {
+        self.stop.store(true, Ordering::Release);
+        Ok(ChromeObservation::Snapshot(snapshot_for_window(
+            7,
+            101,
+            "tab-1",
+            "https://allowed.example/after",
+            "After",
+        )))
+    }
+}

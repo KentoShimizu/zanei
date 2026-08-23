@@ -269,8 +269,13 @@ fn intra_app_focus_out_confirmation_targets_previous_window() {
 
 fn focus_transition(
     previous: Option<crate::focus_context::FocusSnapshot>,
-    current: Option<crate::focus_context::FocusSnapshot>,
+    mut current: Option<crate::focus_context::FocusSnapshot>,
 ) -> FocusTransition {
+    if let (Some(previous), Some(current)) = (&previous, &mut current)
+        && current.generation <= previous.generation
+    {
+        current.generation = previous.generation + 1;
+    }
     FocusTransition {
         previous,
         current,
