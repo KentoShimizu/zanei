@@ -42,6 +42,15 @@ impl PurgeFilter {
         }
     }
 
+    /// Reports whether this filter selects every event without another bound.
+    #[must_use]
+    pub fn is_universal(&self) -> bool {
+        self.types.iter().any(|event_type| event_type == "*")
+            && self.before.is_none()
+            && self.app.is_none()
+            && self.bundle_id.is_none()
+    }
+
     fn selection(&self) -> super::EventSelection {
         super::EventSelection {
             types: self.types.clone(),

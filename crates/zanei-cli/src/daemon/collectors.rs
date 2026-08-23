@@ -288,9 +288,11 @@ pub(crate) fn chrome_tracking_required(capture: &CaptureConfig, filter: &FilterC
         bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
         pid: None,
     };
-    let needs_chrome_privacy = capture.text_content && captures_ui_or_input
-        || capture.content_snapshot
-            && PrivacyFilter::new(filter.clone()).content_snapshot_app_is_allowed(&chrome);
+    let privacy = PrivacyFilter::new(filter.clone());
+    let needs_chrome_privacy = capture.text_content
+        && captures_ui_or_input
+        && privacy.text_content_app_is_allowed(&chrome)
+        || capture.content_snapshot && privacy.content_snapshot_app_is_allowed(&chrome);
     captures_browser || needs_chrome_privacy
 }
 

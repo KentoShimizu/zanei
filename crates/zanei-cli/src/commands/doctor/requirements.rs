@@ -2,8 +2,7 @@ use std::collections::BTreeSet;
 
 use zanei_collector::Permission;
 use zanei_core::config::{CaptureSource, Config};
-use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyFilter};
-use zanei_core::schema::App;
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 use zanei_core::store::{DaemonPermissions, PermissionState};
 
 const ACCESSIBILITY_PANE: &str =
@@ -30,16 +29,7 @@ pub(super) fn estimated_permissions(config: &Config) -> BTreeSet<Permission> {
     if capture_input || capture_ui {
         permissions.insert(Permission::InputMonitoring);
     }
-    let chrome = App {
-        name: "Google Chrome".to_owned(),
-        bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
-        pid: None,
-    };
-    let chrome_required = sources.contains(&CaptureSource::Browser)
-        || config.capture.text_content && (capture_ui || capture_input)
-        || config.capture.content_snapshot
-            && PrivacyFilter::new(config.filter.clone()).content_snapshot_app_is_allowed(&chrome);
-    if chrome_required {
+    if crate::daemon::chrome_tracking_required(&config.capture, &config.filter) {
         permissions.insert(Permission::Automation {
             bundle_id: CHROME_BUNDLE_ID.to_owned(),
         });
@@ -131,32 +121,41 @@ pub(super) fn assert_estimate_matches_collector_matrix() {
         for text_content in [false, true] {
             for content_snapshot in [false, true] {
                 for global_allows_chrome in [false, true] {
-                    for snapshot_scope_allows_chrome in [false, true] {
-                        let mut config = Config::default();
-                        config.capture.sources = sources
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(index, source)| {
-                                (source_mask & (1 << index) != 0).then_some(*source)
-                            })
-                            .collect();
-                        config.capture.text_content = text_content;
-                        config.capture.content_snapshot = content_snapshot;
-                        if !global_allows_chrome {
-                            config.filter.exclude_apps.push(CHROME_BUNDLE_ID.to_owned());
+                    for text_scope_allows_chrome in [false, true] {
+                        for snapshot_scope_allows_chrome in [false, true] {
+                            let mut config = Config::default();
+                            config.capture.sources = sources
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, source)| {
+                                    (source_mask & (1 << index) != 0).then_some(*source)
+                                })
+                                .collect();
+                            config.capture.text_content = text_content;
+                            config.capture.content_snapshot = content_snapshot;
+                            if !global_allows_chrome {
+                                config.filter.exclude_apps.push(CHROME_BUNDLE_ID.to_owned());
+                            }
+                            if !text_scope_allows_chrome {
+                                config
+                                    .filter
+                                    .text_content
+                                    .exclude_apps
+                                    .push(CHROME_BUNDLE_ID.to_owned());
+                            }
+                            if !snapshot_scope_allows_chrome {
+                                config
+                                    .filter
+                                    .content_snapshot
+                                    .exclude_apps
+                                    .push(CHROME_BUNDLE_ID.to_owned());
+                            }
+                            assert_eq!(
+                                estimated_permissions(&config),
+                                crate::daemon::required_permissions_for(&config),
+                                "permission estimate drifted for {config:?}"
+                            );
                         }
-                        if !snapshot_scope_allows_chrome {
-                            config
-                                .filter
-                                .content_snapshot
-                                .exclude_apps
-                                .push(CHROME_BUNDLE_ID.to_owned());
-                        }
-                        assert_eq!(
-                            estimated_permissions(&config),
-                            crate::daemon::required_permissions_for(&config),
-                            "permission estimate drifted for {config:?}"
-                        );
                     }
                 }
             }

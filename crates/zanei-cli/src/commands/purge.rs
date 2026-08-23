@@ -15,10 +15,6 @@ use crate::store_access::{self, KeyAccess, KeyPrompt};
 
 pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliError> {
     let filter = if args.all {
-        if !quiet && !confirmed()? {
-            println!("Purge cancelled");
-            return Ok(EXIT_SUCCESS);
-        }
         PurgeFilter::all()
     } else {
         let before = args
@@ -40,6 +36,10 @@ pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliErr
             bundle_id: args.bundle_id,
         }
     };
+    if filter.is_universal() && !quiet && !confirmed()? {
+        println!("Purge cancelled");
+        return Ok(EXIT_SUCCESS);
+    }
     // The live store and the set-aside plaintext stores are purged
     // independently: either may exist without the other (a set-aside store
     // outlives a crash before the encrypted store was created), and none of

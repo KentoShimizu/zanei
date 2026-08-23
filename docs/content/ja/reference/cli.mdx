@@ -439,6 +439,7 @@ zanei export --since 24h --types app.*,window.*,ui.*,input.*,browser.*,clipboard
 ```bash
 zanei purge --before 24h   # 24 時間より古いイベントを削除
 zanei purge --all          # 全削除（確認プロンプトあり。--quiet で抑制）
+zanei purge --types '*'    # これも全削除（--all と同じ確認）
 zanei purge --types content.* --before 24h
 zanei purge --types content.* --app Slack
 zanei purge --types content.* --bundle-id com.tinyspeck.slackmacgap
@@ -447,11 +448,11 @@ zanei purge --types content.* --bundle-id com.tinyspeck.slackmacgap
 | フラグ | 説明 |
 | --- | --- |
 | `--before <TIME>` | これより古いイベントを削除 |
-| `--types <TYPE,...>` | 一致する event type だけ削除。wildcard 可 |
+| `--types <TYPE,...>` | 一致する event type だけ削除。wildcard 可。scope のない `'*'` は `--all` と同じ確認あり |
 | `--app <NAME>` / `--bundle-id <ID>` | 一致する app の event だけ削除。相互排他 |
 | `--all` | 全削除（確認プロンプトあり） |
 
-`--types` は `--before` と app selector 1 つを組み合わせられます。後から app を除外したとき、その app の snapshot だけを削除できます。この削除は不可逆で dry-run はありません。command は適用 scope と削除件数を報告します。store が存在しない場合、`purge` は `Purged 0 events` を表示し、store を作成しません。暗号化への upgrade 時に退避した平文 store も対象で、scoped option は一致 row を削除し、`--all` は file ごと削除します。
+`--types` は `--before` と app selector 1 つを組み合わせられます。後から app を除外したとき、その app の snapshot だけを削除できます。scope のない `--types '*'` は全件選択なので、`--quiet` を指定しない限り `--all` と同じ確認が必要です。`content.*` のような狭い type pattern では確認しません。この削除は不可逆で dry-run はありません。command は適用 scope と削除件数を報告します。store が存在しない場合、`purge` は `Purged 0 events` を表示し、store を作成しません。暗号化への upgrade 時に退避した平文 store も対象で、scoped option は一致 row を削除し、`--all` は file ごと削除します。
 
 ## `apps`
 

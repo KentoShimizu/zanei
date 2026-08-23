@@ -160,7 +160,10 @@ fn set(
 ) -> Result<u8, CliError> {
     let config = Config::load(&paths.config)?;
     let result = apply_scalar_edit(&config, dotted_key, value)?;
-    if dotted_key == "capture.content_snapshot" && result.config.capture.content_snapshot && !quiet
+    if dotted_key == "capture.content_snapshot"
+        && result.changed
+        && result.config.capture.content_snapshot
+        && !quiet
     {
         let candidates = apps::collect(paths, app_directory)?.apps;
         let summary = ScopeSummary::for_scope(&config, FilterScope::ContentSnapshot, &candidates);

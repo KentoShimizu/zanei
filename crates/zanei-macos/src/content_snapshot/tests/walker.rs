@@ -29,6 +29,7 @@ struct Metrics {
 #[derive(Clone)]
 pub(super) struct FakeNode {
     attributes: NodeSafeAttributes,
+    window_number: Option<i64>,
     value: Option<String>,
     visible: Option<String>,
     children: Vec<Self>,
@@ -50,6 +51,7 @@ impl FakeNode {
                 frame: Some(frame(0.0, 0.0, 100.0, 100.0)),
                 ..NodeSafeAttributes::default()
             },
+            window_number: None,
             value: None,
             visible: None,
             children: Vec::new(),
@@ -91,6 +93,16 @@ impl FakeNode {
         root.with_shared(&shared)
     }
 
+    pub(super) fn numbered_window(window_number: i64, text: &str) -> Self {
+        let mut root = Self::new("AXWindow");
+        root.window_number = Some(window_number);
+        let mut child = Self::new("AXStaticText");
+        child.value = Some(text.to_owned());
+        root.children.push(child);
+        let shared = root.clone();
+        root.with_shared(&shared)
+    }
+
     fn tick(&self) {
         self.elapsed_micros
             .fetch_add(self.call_micros, Ordering::Relaxed);
@@ -105,8 +117,7 @@ impl crate::content_snapshot::worker::SnapshotWindow for FakeNode {
     }
 
     fn window_number(&self) -> Result<Option<i64>, crate::content_snapshot::SnapshotAxError> {
-        // Chromium omits AXWindowNumber; the scanner must reconcile by bounds.
-        Ok(None)
+        Ok(self.window_number)
     }
 }
 

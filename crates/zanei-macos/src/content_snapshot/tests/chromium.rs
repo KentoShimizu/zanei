@@ -46,6 +46,10 @@ impl SnapshotApplication for ChromiumApplication {
         // window comes from the activation-time focused-window read.
         Ok(Some(FakeNode::chromium_window()))
     }
+
+    fn windows(&self) -> Result<Vec<Self::Window>, crate::content_snapshot::SnapshotAxError> {
+        Ok(vec![FakeNode::chromium_window()])
+    }
 }
 
 fn chrome_app() -> ApplicationInfo {

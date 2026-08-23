@@ -135,6 +135,10 @@ impl SnapshotAxApplication {
     pub fn focused_window(&self) -> Result<Option<SnapshotAxElement>, SnapshotAxError> {
         self.element.copy_element("AXFocusedWindow")
     }
+
+    pub fn windows(&self) -> Result<Vec<SnapshotAxElement>, SnapshotAxError> {
+        self.element.copy_elements("AXWindows")
+    }
 }
 
 impl SnapshotAxElement {
@@ -348,6 +352,24 @@ impl SnapshotAxElement {
             return Err(self.contract_error("AX element attribute type"));
         }
         Self::from_owned(self.pid, value).map(Some)
+    }
+
+    fn copy_elements(&self, attribute: &'static str) -> Result<Vec<Self>, SnapshotAxError> {
+        let Some(values) = self.copy_attribute(attribute)? else {
+            return Ok(Vec::new());
+        };
+        let count = array_count(values.as_ptr(), self.pid)?;
+        let mut elements = Vec::with_capacity(count);
+        for index in 0..count {
+            let value = array_value(values.as_ptr(), index, self.pid)?;
+            if unsafe { CFGetTypeID(value) } != unsafe { AXUIElementGetTypeID() } {
+                return Err(self.contract_error("AX elements attribute type"));
+            }
+            let value = unsafe { OwnedCf::retain(value) }
+                .ok_or_else(|| self.contract_error("CFRetain AX element"))?;
+            elements.push(Self::from_owned(self.pid, value)?);
+        }
+        Ok(elements)
     }
 
     fn copy_attribute(&self, attribute: &'static str) -> Result<Option<OwnedCf>, SnapshotAxError> {

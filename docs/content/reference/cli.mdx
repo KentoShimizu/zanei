@@ -442,6 +442,7 @@ Deletes stored events manually, independent of retention-based auto-purge. **Des
 ```bash
 zanei purge --before 24h   # delete events older than 24 hours
 zanei purge --all          # delete everything (confirmation prompt; suppress with --quiet)
+zanei purge --types '*'    # also delete everything (same confirmation as --all)
 zanei purge --types content.* --before 24h
 zanei purge --types content.* --app Slack
 zanei purge --types content.* --bundle-id com.tinyspeck.slackmacgap
@@ -450,11 +451,11 @@ zanei purge --types content.* --bundle-id com.tinyspeck.slackmacgap
 | Flag | Description |
 | --- | --- |
 | `--before <TIME>` | Delete events older than this |
-| `--types <TYPE,...>` | Delete only matching event types; wildcards allowed |
+| `--types <TYPE,...>` | Delete only matching event types; wildcards allowed. Unscoped `'*'` asks for the same confirmation as `--all` |
 | `--app <NAME>` / `--bundle-id <ID>` | Delete only events matching the app; mutually exclusive |
 | `--all` | Delete everything (asks for confirmation) |
 
-`--types` can be combined with `--before` and one app selector, for example to remove snapshots from an app after excluding it. This deletion is irreversible and has no dry-run mode; the command reports the applied scope and deleted count. When the store does not exist, `purge` prints `Purged 0 events` and does not create one. Set-aside plaintext stores from the encryption upgrade are purged too: scoped options delete matching rows, while `--all` deletes the files.
+`--types` can be combined with `--before` and one app selector, for example to remove snapshots from an app after excluding it. An unscoped `--types '*'` is a universal selection and requires the same confirmation as `--all` unless `--quiet` is set; narrower type patterns such as `content.*` do not prompt. This deletion is irreversible and has no dry-run mode; the command reports the applied scope and deleted count. When the store does not exist, `purge` prints `Purged 0 events` and does not create one. Set-aside plaintext stores from the encryption upgrade are purged too: scoped options delete matching rows, while `--all` deletes the files.
 
 ## `apps`
 

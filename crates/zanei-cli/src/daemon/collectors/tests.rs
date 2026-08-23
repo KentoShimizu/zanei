@@ -308,6 +308,20 @@ fn text_content_chrome_automation_permission_matrix() {
 
         assert_eq!(CollectorSet::new(&config).required_permissions(), expected);
     }
+
+    config.capture.sources = vec![CaptureSource::Ui];
+    config
+        .filter
+        .text_content
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    assert!(!chrome_tracking_required(&config.capture, &config.filter));
+    let excluded = CollectorSet::new(&config);
+    assert!(excluded.chrome.is_none());
+    assert_eq!(
+        excluded.required_permissions(),
+        BTreeSet::from([Permission::Accessibility, Permission::InputMonitoring])
+    );
 }
 
 #[test]
@@ -374,6 +388,27 @@ fn filter_reload_reconciles_chrome_collector_topology_without_applescript() {
         collectors.chrome.is_none(),
         "reload stops and drops the collector"
     );
+}
+
+#[test]
+fn text_scope_reload_starts_chrome_tracking_when_chrome_becomes_allowed() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Ui];
+    config.capture.text_content = true;
+    config
+        .filter
+        .text_content
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    let mut collectors = CollectorSet::new(&config);
+    assert!(!chrome_tracking_required(&config.capture, &config.filter));
+    assert!(collectors.chrome.is_none());
+
+    let mut admitted = config.filter.clone();
+    admitted.text_content.exclude_apps.clear();
+    assert!(chrome_tracking_required(&config.capture, &admitted));
+    collectors.replace_filter(admitted);
+    assert!(collectors.chrome.is_some());
 }
 
 mod supervisor_tests;

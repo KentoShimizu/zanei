@@ -96,6 +96,12 @@ impl PrivacyFilter {
             )
     }
 
+    /// Reports whether global and text-content app rules can include `app`.
+    #[must_use]
+    pub fn text_content_app_is_allowed(&self, app: &App) -> bool {
+        app_is_allowed_for(PrivacyScope::TextContent, app, &self.config)
+    }
+
     /// Reports whether global and snapshot-specific app rules can include `app`.
     #[must_use]
     pub fn content_snapshot_app_is_allowed(&self, app: &App) -> bool {
