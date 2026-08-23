@@ -117,7 +117,6 @@ pub(super) fn run_worker<A: ChromeApi>(
             }
         }
     }
-    eligibility.clear_all();
 }
 
 pub(super) fn handle_observation_trigger<A: ChromeApi>(

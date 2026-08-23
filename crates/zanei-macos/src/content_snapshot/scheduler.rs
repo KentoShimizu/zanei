@@ -10,7 +10,7 @@ use zanei_core::schema::ContentSnapshotTrigger;
 use super::{
     budget::GLOBAL_SAVE_INTERVAL,
     state::SnapshotWindowKey,
-    trigger::{SnapshotTrigger, SnapshotTriggerKind},
+    trigger::{SnapshotTrigger, SnapshotTriggerKind, SnapshotTriggerMessage},
 };
 
 // Design limit: settle after two seconds without a focus/title change.
@@ -77,6 +77,16 @@ impl Default for SnapshotScheduler {
 }
 
 impl SnapshotScheduler {
+    pub(crate) fn observe_message(&mut self, message: SnapshotTriggerMessage) {
+        match message {
+            SnapshotTriggerMessage::Trigger(trigger) => self.observe(trigger),
+            SnapshotTriggerMessage::FocusTransition {
+                transition,
+                observed_at,
+            } => self.observe_focus_transition(transition, observed_at),
+        }
+    }
+
     pub(crate) fn observe(&mut self, trigger: SnapshotTrigger) {
         if !self.active || trigger.window.id.is_none() {
             return;
@@ -212,6 +222,45 @@ impl SnapshotScheduler {
             settle_due: Some(observed_at + SETTLE_QUIET_INTERVAL),
             refresh_due: observed_at + REFRESH_INTERVALS[0],
             refresh_index: 0,
+        }
+    }
+
+    fn observe_focus_transition(
+        &mut self,
+        transition: crate::focus_context::FocusTransition,
+        observed_at: Instant,
+    ) {
+        let same_window = matches!(
+            (&transition.previous, &transition.current),
+            (Some(previous), Some(current))
+                if previous.app.pid == current.app.pid
+                    && previous.window.as_ref().and_then(|window| window.id)
+                        == current.window.as_ref().and_then(|window| window.id)
+        );
+        if !same_window
+            && let Some(previous) = transition.previous
+            && let Some(window) = previous.window
+        {
+            self.observe(SnapshotTrigger {
+                app: previous.app,
+                window,
+                kind: SnapshotTriggerKind::FocusOut,
+                observed_at,
+            });
+        }
+        if let Some(current) = transition.current
+            && let Some(window) = current.window
+        {
+            self.observe(SnapshotTrigger {
+                app: current.app,
+                window,
+                kind: if same_window && !transition.resynced {
+                    SnapshotTriggerKind::Title
+                } else {
+                    SnapshotTriggerKind::Focus
+                },
+                observed_at,
+            });
         }
     }
 

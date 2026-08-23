@@ -112,7 +112,7 @@ pub(super) fn run_worker_with_scanner<F>(
         service_lifecycle(lifecycle, &mut scheduler, state);
         if let Some(observation) = observation {
             health.processed_triggers.fetch_add(1, Ordering::Relaxed);
-            scheduler.observe(observation);
+            scheduler.observe_message(observation);
         }
         while let Some(candidate) = scheduler.take_due(Instant::now()) {
             let taken_at = CandidateTime::now();
@@ -324,17 +324,6 @@ fn process_candidate<F>(
         trace_output(&candidate, "empty", &output);
         return;
     }
-    let hash = SnapshotState::text_hash(&output.text);
-    let save_at = Instant::now();
-    if let Err(block) = state.evaluate_save(key, hash, output.text.len(), save_at) {
-        let gate = match block {
-            SaveBlock::Duplicate => "duplicate",
-            SaveBlock::GlobalInterval => "global_interval",
-            SaveBlock::DailyBudget => "daily_budget",
-        };
-        trace_output(&candidate, gate, &output);
-        return;
-    }
     if !policy.secure_input_allows() {
         trace_output(&candidate, "secure_input", &output);
         return;
@@ -346,6 +335,17 @@ fn process_candidate<F>(
     );
     if !final_decision.is_allowed() {
         trace_output(&candidate, "app_scope", &output);
+        return;
+    }
+    let hash = SnapshotState::text_hash(&output.text);
+    let save_at = Instant::now();
+    if let Err(block) = state.evaluate_save(key, hash, output.text.len(), save_at) {
+        let gate = match block {
+            SaveBlock::Duplicate => "duplicate",
+            SaveBlock::GlobalInterval => "global_interval",
+            SaveBlock::DailyBudget => "daily_budget",
+        };
+        trace_output(&candidate, gate, &output);
         return;
     }
     emit(

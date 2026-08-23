@@ -420,10 +420,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             let key_result = emit_or_quarantine(
                 sender,
                 key_event,
-                input_text_allowed
-                    .then(|| input_decision.chrome_version())
-                    .flatten(),
-                observed_at,
+                Some(&input_decision),
                 quarantine,
                 dropped_events,
             );
@@ -461,9 +458,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                         wall: observed_at,
                     },
                     capture_text_content && window_text_allowed,
-                    window_text_allowed
-                        .then(|| window_decision.chrome_version())
-                        .flatten(),
+                    window_decision,
                 );
             }
             if is_paste_shortcut(&observation) {
@@ -480,10 +475,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                         capture_policy,
                         observed_at,
                     ),
-                    input_text_allowed
-                        .then(|| input_decision.chrome_version())
-                        .flatten(),
-                    observed_at,
+                    Some(&input_decision),
                     quarantine,
                     dropped_events,
                 )

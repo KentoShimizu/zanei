@@ -15,9 +15,10 @@ use crate::{
     chrome::{ChromeObserver, chrome_eligibility_channel},
     content_snapshot::{
         Control, SharedHealth, SnapshotAxError, SnapshotTriggerKind, SnapshotWalkOutput,
+        budget::{DAILY_TEXT_BUDGET_BYTES, GLOBAL_SAVE_INTERVAL},
         scheduler::{SETTLE_QUIET_INTERVAL, SnapshotScheduler},
         snapshot_trigger_channel,
-        state::SnapshotState,
+        state::{SnapshotState, SnapshotWindowKey},
         tests::walker::FakeNode,
         worker::{
             SnapshotApplication, run_worker_with_scanner, scan_application,
@@ -362,4 +363,86 @@ fn s27_filter_reload_during_walk_discards_the_snapshot() {
     worker.join().expect("content worker");
 
     assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn v2_4_post_walk_deny_does_not_exhaust_daily_budget() {
+    let (trigger_publisher, trigger_receiver) = snapshot_trigger_channel();
+    let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
+    let (_control, controls) = channel();
+    let (sender, _events) = sync_channel(1);
+    let (state_result, state_results) = sync_channel(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let focus_context = FocusContext::new();
+    let target = trigger(
+        7,
+        11,
+        SnapshotTriggerKind::Focus,
+        Instant::now() - Duration::from_secs(3),
+    );
+    focus_context.activate(target.app.clone(), Some(target.window.clone()));
+    let filter = FilterConfig::default();
+    let (_chrome_publisher, chrome) = chrome_eligibility_channel(filter.clone());
+    let (secure_input, secure_responder) = secure_input_test_channel();
+    let policy = CapturePolicy::new(chrome, filter, Some(secure_input));
+    let reload_policy = policy.clone();
+    let worker_stop = Arc::clone(&stop);
+    let worker = thread::Builder::new()
+        .name("zanei-content".to_owned())
+        .spawn(move || {
+            let started_at = Instant::now() - GLOBAL_SAVE_INTERVAL;
+            let mut state = SnapshotState::new(started_at);
+            state.reserve(
+                SnapshotWindowKey {
+                    pid: 8,
+                    window_id: 12,
+                },
+                usize::try_from(DAILY_TEXT_BUDGET_BYTES - 1).expect("daily budget fits usize"),
+                started_at,
+            );
+            run_worker_with_scanner(
+                &trigger_receiver,
+                &lifecycle_receiver,
+                controls,
+                worker_stop,
+                sender,
+                policy,
+                ChromeObserver::new(),
+                SharedHealth::default(),
+                &mut state,
+                focus_context,
+                move |_pid, _window_id, _stop| {
+                    reload_policy.replace_filter(FilterConfig {
+                        exclude_apps: vec!["dev.example.App".to_owned()],
+                        ..FilterConfig::default()
+                    });
+                    Ok(Some(SnapshotWalkOutput {
+                        text: "xx".to_owned(),
+                        nodes: 1,
+                        ax_calls: 1,
+                        elapsed: Duration::from_millis(1),
+                        complete: true,
+                        cutoff: None,
+                        degraded_nodes: 0,
+                        frameless_nodes: 0,
+                    }))
+                },
+            );
+            let now = Instant::now();
+            state_result
+                .send(state.daily_budget_allows(now))
+                .expect("state result receiver");
+        })
+        .expect("spawn content worker");
+    let secure_worker = thread::spawn(move || {
+        secure_responder.respond_next(false);
+        secure_responder.respond_next(false);
+    });
+
+    assert!(trigger_publisher.publish(target));
+    secure_worker.join().expect("Secure Input responder");
+    stop.store(true, Ordering::Release);
+    worker.join().expect("content worker");
+
+    assert!(state_results.recv().expect("state result"));
 }

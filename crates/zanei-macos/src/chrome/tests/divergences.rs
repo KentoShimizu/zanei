@@ -1,4 +1,5 @@
 use super::*;
+use zanei_collector::Collector;
 
 #[test]
 fn no_observation_happens_without_a_trigger_for_five_simulated_seconds() {
@@ -160,6 +161,37 @@ fn ownership_as_id_survives_worker_state_restart() {
             applescript_window_id: 101,
         }]
     );
+}
+
+#[test]
+fn v2_5_worker_panic_clears_state_and_preserves_receivers_for_restart() {
+    let now = Instant::now();
+    let focus_context = FocusContext::new();
+    let observer = ChromeObserver::new();
+    let (eligibility, tracker) = chrome_eligibility_channel(FilterConfig::default());
+    eligibility.observe_at(
+        42,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(7),
+            url: "https://allowed.example".to_owned(),
+        },
+        now,
+    );
+    let mut collector = ChromeCollector::new(eligibility, focus_context, observer);
+    let (output, _events) = sync_channel(1);
+    collector.panic_next_worker_for_test();
+
+    collector
+        .start(output.clone())
+        .expect("start injected panic worker");
+    collector.stop();
+
+    assert_eq!(tracker.state_version(42, 7), None);
+    collector.panic_next_worker_for_test();
+    collector
+        .start(output)
+        .expect("restart with recovered receivers");
+    collector.stop();
 }
 
 #[test]

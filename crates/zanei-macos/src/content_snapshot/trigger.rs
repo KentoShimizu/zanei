@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{ax::NativeWindow, workspace::ApplicationInfo};
+use crate::{ax::NativeWindow, focus_context::FocusTransition, workspace::ApplicationInfo};
 
 const SNAPSHOT_TRIGGER_CAPACITY: usize = 256;
 
@@ -38,14 +38,22 @@ pub struct SnapshotTrigger {
     pub observed_at: Instant,
 }
 
+pub(crate) enum SnapshotTriggerMessage {
+    Trigger(SnapshotTrigger),
+    FocusTransition {
+        transition: FocusTransition,
+        observed_at: Instant,
+    },
+}
+
 #[derive(Clone)]
 pub struct SnapshotTriggerPublisher {
-    sender: SyncSender<SnapshotTrigger>,
+    sender: SyncSender<SnapshotTriggerMessage>,
     dropped: Arc<AtomicU64>,
 }
 
 pub struct SnapshotTriggerReceiver {
-    receiver: Receiver<SnapshotTrigger>,
+    receiver: Receiver<SnapshotTriggerMessage>,
 }
 
 #[must_use]
@@ -53,7 +61,7 @@ pub fn snapshot_trigger_channel() -> (SnapshotTriggerPublisher, SnapshotTriggerR
     snapshot_trigger_channel_with_capacity(SNAPSHOT_TRIGGER_CAPACITY)
 }
 
-fn snapshot_trigger_channel_with_capacity(
+pub(crate) fn snapshot_trigger_channel_with_capacity(
     capacity: usize,
 ) -> (SnapshotTriggerPublisher, SnapshotTriggerReceiver) {
     let (sender, receiver) = sync_channel(capacity);
@@ -68,14 +76,25 @@ fn snapshot_trigger_channel_with_capacity(
 
 impl SnapshotTriggerPublisher {
     pub fn publish(&self, trigger: SnapshotTrigger) -> bool {
-        match self.sender.try_send(trigger) {
+        self.publish_message(SnapshotTriggerMessage::Trigger(trigger))
+    }
+
+    pub(crate) fn publish_focus_transition(&self, transition: FocusTransition) -> bool {
+        self.publish_message(SnapshotTriggerMessage::FocusTransition {
+            transition,
+            observed_at: Instant::now(),
+        })
+    }
+
+    fn publish_message(&self, message: SnapshotTriggerMessage) -> bool {
+        match self.sender.try_send(message) {
             Ok(()) => true,
-            Err(TrySendError::Full(trigger)) => {
-                self.trace_drop(&trigger, "queue_full");
+            Err(TrySendError::Full(message)) => {
+                self.trace_drop(&message, "queue_full");
                 false
             }
-            Err(TrySendError::Disconnected(trigger)) => {
-                self.trace_drop(&trigger, "queue_disconnected");
+            Err(TrySendError::Disconnected(message)) => {
+                self.trace_drop(&message, "queue_disconnected");
                 false
             }
         }
@@ -85,24 +104,45 @@ impl SnapshotTriggerPublisher {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    fn trace_drop(&self, trigger: &SnapshotTrigger, reason: &'static str) {
+    fn trace_drop(&self, message: &SnapshotTriggerMessage, reason: &'static str) {
         self.dropped.fetch_add(1, Ordering::Relaxed);
+        let (kind, pid, window_id) = match message {
+            SnapshotTriggerMessage::Trigger(trigger) => (
+                trigger.kind.trace_name(),
+                trigger.app.pid,
+                trigger.window.id.unwrap_or_default(),
+            ),
+            SnapshotTriggerMessage::FocusTransition { transition, .. } => {
+                let focus = transition.current.as_ref().or(transition.previous.as_ref());
+                (
+                    "focus_transition",
+                    focus.map_or(0, |focus| focus.app.pid),
+                    focus
+                        .and_then(|focus| focus.window.as_ref())
+                        .and_then(|window| window.id)
+                        .unwrap_or_default(),
+                )
+            }
+        };
         crate::trace::trace!(
             "component=content_snapshot phase=trigger action=drop kind={} pid={} window_id={} reason={}",
-            trigger.kind.trace_name(),
-            trigger.app.pid,
-            trigger.window.id.unwrap_or_default(),
+            kind,
+            pid,
+            window_id,
             reason
         );
     }
 }
 
 impl SnapshotTriggerReceiver {
-    pub fn try_recv(&self) -> Result<SnapshotTrigger, TryRecvError> {
+    pub(crate) fn try_recv(&self) -> Result<SnapshotTriggerMessage, TryRecvError> {
         self.receiver.try_recv()
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<SnapshotTrigger, RecvTimeoutError> {
+    pub(crate) fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<SnapshotTriggerMessage, RecvTimeoutError> {
         self.receiver.recv_timeout(timeout)
     }
 }

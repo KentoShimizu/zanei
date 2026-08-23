@@ -25,7 +25,7 @@ use super::{
 use crate::{
     CapturePolicy,
     chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
-    content_snapshot::{SnapshotTriggerKind, snapshot_trigger_channel},
+    content_snapshot::{SnapshotTriggerMessage, snapshot_trigger_channel},
     ffi::ax::{ManualAccessibilityPolicy, NativeElement, NativeWindow},
     focus_context::FocusContext,
     focused_field::{FieldClass, FocusedField},
@@ -495,13 +495,13 @@ fn did_wake_resyncs_focus_and_publishes_a_focus_trigger() {
         current_degraded_observers,
     );
 
-    assert_eq!(
-        trigger_receiver
-            .try_recv()
-            .expect("wake resync trigger")
-            .kind,
-        SnapshotTriggerKind::Focus
-    );
+    let SnapshotTriggerMessage::FocusTransition { transition, .. } =
+        trigger_receiver.try_recv().expect("wake resync transition")
+    else {
+        panic!("FocusTransition message");
+    };
+    assert!(transition.resynced);
+    assert!(transition.current.is_some());
     assert_eq!(focus_context.generation(), 2);
 }
 

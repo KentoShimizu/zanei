@@ -9,7 +9,10 @@ use std::{
 use zanei_collector::RawEvent;
 use zanei_core::{
     config::FilterConfig,
-    schema::{App, ClickButton, EmptyData, EventData, FieldKind},
+    privacy::{CHROME_BUNDLE_ID, PrivacyScope},
+    schema::{
+        App, ClickButton, EmptyData, EventData, FieldKind, InputKeyData, InputKeyKind, Window,
+    },
 };
 
 use super::{
@@ -18,7 +21,7 @@ use super::{
     logic::{
         KeyModifiers, KeyObservation, PasteboardContent, PasteboardKind, clipboard_paste, key_data,
     },
-    output::{EmitResult, emit, resolve_input_authorization, try_send_counted},
+    output::{EmitResult, emit, emit_or_quarantine, resolve_input_authorization, try_send_counted},
     state::{Driver, EventTapApi, MonotonicTime},
     worker::{early_text_read_allowed, handle_native_event},
 };
@@ -31,7 +34,7 @@ use crate::{
     },
     focus_context::FocusContext,
     focused_field::{FieldClass, FocusedField},
-    text_capture::{InputAuthorization, input_authorization_channel},
+    text_capture::{InputAuthorization, TextQuarantine, input_authorization_channel},
     workspace::{ApplicationActivationPolicy, ApplicationInfo},
 };
 
@@ -300,6 +303,59 @@ fn missing_window_is_filtered_without_incrementing_drop_counter() {
     let dropped = AtomicU64::new(0);
     assert_eq!(emit(&sender, None, &dropped), EmitResult::Filtered);
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn eventtap_chrome_body_without_version_is_suppressed() {
+    let policy = capture_policy();
+    let app = App {
+        name: "Google Chrome".to_owned(),
+        bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
+        pid: Some(501),
+    };
+    let decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    assert!(!decision.is_allowed());
+    assert_eq!(decision.chrome_version(), None);
+    let event = RawEvent {
+        observed_at: Some(time::OffsetDateTime::UNIX_EPOCH),
+        source: "macos.eventtap".to_owned(),
+        event_type: "input.key".to_owned(),
+        app,
+        window: Some(Window {
+            title: Some("Window".to_owned()),
+            id: Some(11),
+        }),
+        element: None,
+        data: EventData::InputKey(InputKeyData {
+            kind: InputKeyKind::Text,
+            modifiers: Vec::new(),
+            combo: None,
+            text: Some("private".to_owned()),
+            field_kind: Some(FieldKind::Text),
+            count: 1,
+        }),
+        capture_context: Default::default(),
+    };
+    let (sender, receiver) = sync_channel(1);
+    let dropped = AtomicU64::new(0);
+    let mut quarantine = TextQuarantine::new(ChromeObserver::new());
+
+    assert_eq!(
+        emit_or_quarantine(
+            &sender,
+            Some(event),
+            Some(&decision),
+            &mut quarantine,
+            &dropped,
+        ),
+        EmitResult::Sent
+    );
+
+    let event = receiver.try_recv().expect("suppressed metadata event");
+    let EventData::InputKey(data) = event.data else {
+        panic!("input.key");
+    };
+    assert_eq!(data.text, None);
 }
 
 #[test]

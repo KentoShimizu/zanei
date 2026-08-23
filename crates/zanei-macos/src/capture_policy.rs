@@ -113,31 +113,29 @@ impl CapturePolicy {
         window_id: Option<i64>,
     ) -> CaptureDecision {
         let is_chrome = app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID);
-        let capture_context = if is_chrome {
-            app.pid
-                .map(|pid| self.chrome.capture_context(pid, window_id))
-                .unwrap_or_default()
+        let (chrome_allowed, capture_context, chrome_version) = if is_chrome {
+            app.pid.map_or_else(
+                || (false, CaptureContext::default(), None),
+                |pid| {
+                    let decision = self.chrome.decision(scope, pid, window_id);
+                    (
+                        decision.is_allowed(),
+                        decision.capture_context(),
+                        decision.version(),
+                    )
+                },
+            )
         } else {
-            CaptureContext::default()
+            (true, CaptureContext::default(), None)
         };
         let app_allowed = self
             .filter
             .read()
             .is_ok_and(|filter| app_is_allowed_for(scope, app, &filter));
-        let chrome_allowed = !is_chrome
-            || app
-                .pid
-                .is_some_and(|pid| self.chrome.allows(scope, pid, window_id));
         CaptureDecision {
             allowed: app_allowed && chrome_allowed,
             capture_context,
-            chrome_version: is_chrome
-                .then(|| {
-                    app.pid
-                        .zip(window_id)
-                        .and_then(|(pid, window_id)| self.chrome.state_version(pid, window_id))
-                })
-                .flatten(),
+            chrome_version,
         }
     }
 

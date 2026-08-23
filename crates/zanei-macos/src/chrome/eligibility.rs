@@ -39,6 +39,27 @@ struct EligibilityState {
     next_version: u64,
 }
 
+#[derive(Default)]
+pub(crate) struct ChromeEligibilityDecision {
+    allowed: bool,
+    capture_context: CaptureContext,
+    version: Option<u64>,
+}
+
+impl ChromeEligibilityDecision {
+    pub(crate) const fn is_allowed(&self) -> bool {
+        self.allowed
+    }
+
+    pub(crate) fn capture_context(&self) -> CaptureContext {
+        self.capture_context.clone()
+    }
+
+    pub(crate) const fn version(&self) -> Option<u64> {
+        self.version
+    }
+}
+
 #[derive(Clone)]
 pub struct ChromeEligibilityPublisher {
     state: Arc<RwLock<EligibilityState>>,
@@ -155,15 +176,18 @@ pub struct ChromeEligibilityTracker {
 
 impl ChromeEligibilityTracker {
     pub fn allows_url_events(&self, pid: i64, window_id: Option<i64>) -> bool {
-        self.allows(PrivacyScope::AllEvents, pid, window_id)
+        self.decision(PrivacyScope::AllEvents, pid, window_id)
+            .is_allowed()
     }
 
     pub fn allows_text(&self, pid: i64, window_id: Option<i64>) -> bool {
-        self.allows(PrivacyScope::TextContent, pid, window_id)
+        self.decision(PrivacyScope::TextContent, pid, window_id)
+            .is_allowed()
     }
 
     pub fn allows_snapshot(&self, pid: i64, window_id: Option<i64>) -> bool {
-        self.allows(PrivacyScope::ContentSnapshot, pid, window_id)
+        self.decision(PrivacyScope::ContentSnapshot, pid, window_id)
+            .is_allowed()
     }
 
     pub(crate) fn replace_filter(&self, filter: FilterConfig) {
@@ -176,6 +200,7 @@ impl ChromeEligibilityTracker {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn state_version(&self, pid: i64, window_id: i64) -> Option<u64> {
         let pid = i32::try_from(pid).ok()?;
         self.state.read().ok().and_then(|state| {
@@ -198,42 +223,44 @@ impl ChromeEligibilityTracker {
             .map(|record| record.observed_at)
     }
 
-    pub(crate) fn allows(&self, scope: PrivacyScope, pid: i64, window_id: Option<i64>) -> bool {
+    pub(crate) fn decision(
+        &self,
+        scope: PrivacyScope,
+        pid: i64,
+        window_id: Option<i64>,
+    ) -> ChromeEligibilityDecision {
         let (Ok(pid), Some(window_id)) = (i32::try_from(pid), window_id) else {
-            return false;
+            return ChromeEligibilityDecision::default();
         };
-        self.state.read().is_ok_and(|state| {
-            let Some(ChromeWindowState::Normal { host }) = state
-                .windows
-                .get(&(pid, window_id))
-                .and_then(|record| record.state.as_ref())
-            else {
-                return false;
-            };
-            host_is_allowed_for(scope, host.as_deref(), &state.filter)
-        })
-    }
-
-    pub(crate) fn capture_context(&self, pid: i64, window_id: Option<i64>) -> CaptureContext {
-        let (Ok(pid), Some(window_id)) = (i32::try_from(pid), window_id) else {
-            return CaptureContext::default();
+        let Ok(state) = self.state.read() else {
+            return ChromeEligibilityDecision::default();
         };
-        self.state
-            .read()
-            .ok()
-            .and_then(|state| {
-                state
-                    .windows
-                    .get(&(pid, window_id))
-                    .and_then(|record| record.state.as_ref())
-                    .map(|window| CaptureContext {
-                        website_host: match window {
-                            ChromeWindowState::Normal { host } => host.clone(),
-                            ChromeWindowState::Incognito => None,
-                        },
-                    })
+        let Some(record) = state.windows.get(&(pid, window_id)) else {
+            return ChromeEligibilityDecision::default();
+        };
+        let capture_context = record
+            .state
+            .as_ref()
+            .map(|window| CaptureContext {
+                website_host: match window {
+                    ChromeWindowState::Normal { host } => host.clone(),
+                    ChromeWindowState::Incognito => None,
+                },
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let allowed = match record.state.as_ref() {
+            Some(ChromeWindowState::Normal { host }) => {
+                host_is_allowed_for(scope, host.as_deref(), &state.filter)
+            }
+            Some(ChromeWindowState::Incognito) | None => false,
+        };
+        let version = record.state.as_ref().map(|_| record.version);
+        debug_assert!(!allowed || version.is_some());
+        ChromeEligibilityDecision {
+            allowed,
+            capture_context,
+            version,
+        }
     }
 }
 
@@ -449,5 +476,20 @@ mod tests {
 
         publisher.observe(7, normal(11, "about:blank"));
         assert!(!tracker.allows_text(7, Some(11)));
+    }
+
+    #[test]
+    fn decision_returns_allow_context_and_version_from_one_record() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        publisher.observe(7, normal(11, "https://example.com/path"));
+
+        let decision = tracker.decision(PrivacyScope::TextContent, 7, Some(11));
+
+        assert!(decision.is_allowed());
+        assert_eq!(
+            decision.capture_context().website_host.as_deref(),
+            Some("example.com")
+        );
+        assert!(decision.version().is_some());
     }
 }

@@ -1,11 +1,6 @@
 //! FocusContext transition to content-snapshot trigger projection.
 
-use std::time::Instant;
-
-use crate::{
-    content_snapshot::{SnapshotTrigger, SnapshotTriggerKind, SnapshotTriggerPublisher},
-    focus_context::FocusTransition,
-};
+use crate::{content_snapshot::SnapshotTriggerPublisher, focus_context::FocusTransition};
 
 pub(super) fn publish_focus_transition(
     publisher: Option<&SnapshotTriggerPublisher>,
@@ -14,45 +9,20 @@ pub(super) fn publish_focus_transition(
     let (Some(publisher), Some(transition)) = (publisher, transition) else {
         return;
     };
-    let observed_at = Instant::now();
-    let same_window = matches!(
-        (&transition.previous, &transition.current),
-        (Some(previous), Some(current))
-            if previous.app.pid == current.app.pid
-                && previous.window.as_ref().and_then(|window| window.id)
-                    == current.window.as_ref().and_then(|window| window.id)
-    );
-    if !same_window
-        && let Some(previous) = transition.previous
-        && let Some(window) = previous.window
-    {
-        publisher.publish(SnapshotTrigger {
-            app: previous.app,
-            window,
-            kind: SnapshotTriggerKind::FocusOut,
-            observed_at,
-        });
-    }
-    if let Some(current) = transition.current
-        && let Some(window) = current.window
-    {
-        publisher.publish(SnapshotTrigger {
-            app: current.app,
-            window,
-            kind: if same_window && !transition.resynced {
-                SnapshotTriggerKind::Title
-            } else {
-                SnapshotTriggerKind::Focus
-            },
-            observed_at,
-        });
-    }
+    publisher.publish_focus_transition(transition);
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use zanei_core::schema::ContentSnapshotTrigger;
+
     use crate::{
-        content_snapshot::{SnapshotTriggerKind, snapshot_trigger_channel},
+        content_snapshot::{
+            SnapshotScheduler, SnapshotTriggerMessage, SnapshotTriggerReceiver,
+            snapshot_trigger_channel, snapshot_trigger_channel_with_capacity,
+        },
         ffi::ax::NativeWindow,
         focus_context::FocusContext,
         workspace::{ApplicationActivationPolicy, ApplicationInfo},
@@ -76,6 +46,12 @@ mod tests {
         }
     }
 
+    fn projected(receiver: &SnapshotTriggerReceiver) -> SnapshotScheduler {
+        let mut scheduler = SnapshotScheduler::default();
+        scheduler.observe_message(receiver.try_recv().expect("focus transition"));
+        scheduler
+    }
+
     #[test]
     fn activation_projects_a_focus_trigger() {
         let context = FocusContext::new();
@@ -86,9 +62,13 @@ mod tests {
             context.activate(app(7), Some(window(11, "First"))),
         );
 
+        let mut scheduler = projected(&receiver);
         assert_eq!(
-            receiver.try_recv().expect("focus trigger").kind,
-            SnapshotTriggerKind::Focus
+            scheduler
+                .take_due(Instant::now() + Duration::from_secs(3))
+                .expect("settle")
+                .trigger,
+            ContentSnapshotTrigger::Settle
         );
     }
 
@@ -103,9 +83,13 @@ mod tests {
             context.observe_window(7, window(11, "Renamed")),
         );
 
+        let mut scheduler = projected(&receiver);
         assert_eq!(
-            receiver.try_recv().expect("title trigger").kind,
-            SnapshotTriggerKind::Title
+            scheduler
+                .take_due(Instant::now() + Duration::from_secs(3))
+                .expect("settle")
+                .trigger,
+            ContentSnapshotTrigger::Settle
         );
     }
 
@@ -120,10 +104,40 @@ mod tests {
             Some(context.resync(app(7), Some(window(11, "After wake")))),
         );
 
+        let mut scheduler = projected(&receiver);
         assert_eq!(
-            receiver.try_recv().expect("wake focus trigger").kind,
-            SnapshotTriggerKind::Focus
+            scheduler
+                .take_due(Instant::now() + Duration::from_secs(3))
+                .expect("settle")
+                .trigger,
+            ContentSnapshotTrigger::Settle
         );
+    }
+
+    #[test]
+    fn v2_3_focus_change_is_one_queue_message() {
+        let context = FocusContext::new();
+        context.activate(app(7), Some(window(11, "Previous")));
+        let (publisher, receiver) = snapshot_trigger_channel_with_capacity(1);
+
+        publish_focus_transition(
+            Some(&publisher),
+            context.activate(app(8), Some(window(12, "Current"))),
+        );
+
+        assert_eq!(publisher.dropped(), 0);
+        let mut scheduler = projected(&receiver);
+        assert!(receiver.try_recv().is_err());
+        let focus_out = scheduler
+            .take_due(Instant::now())
+            .expect("previous focus-out");
+        assert_eq!(focus_out.trigger, ContentSnapshotTrigger::FocusOut);
+        assert_eq!(focus_out.target.app.pid, 7);
+        let current = scheduler
+            .take_due(Instant::now() + Duration::from_secs(3))
+            .expect("current settle");
+        assert_eq!(current.trigger, ContentSnapshotTrigger::Settle);
+        assert_eq!(current.target.app.pid, 8);
     }
 
     #[test]
@@ -134,10 +148,13 @@ mod tests {
 
         publish_focus_transition(Some(&publisher), context.terminate(7));
 
-        assert_eq!(
-            receiver.try_recv().expect("focus-out trigger").kind,
-            SnapshotTriggerKind::FocusOut
-        );
+        let SnapshotTriggerMessage::FocusTransition { transition, .. } =
+            receiver.try_recv().expect("focus transition")
+        else {
+            panic!("FocusTransition message");
+        };
+        assert_eq!(transition.previous.map(|focus| focus.app.pid), Some(7));
+        assert!(transition.current.is_none());
         assert!(receiver.try_recv().is_err());
     }
 
@@ -149,10 +166,19 @@ mod tests {
 
         publish_focus_transition(Some(&publisher), context.activate(app(8), None));
 
-        let focus_out = receiver.try_recv().expect("focus-out trigger");
-        assert_eq!(focus_out.kind, SnapshotTriggerKind::FocusOut);
-        assert_eq!(focus_out.app.pid, 7);
-        assert_eq!(focus_out.window.id, Some(11));
+        let SnapshotTriggerMessage::FocusTransition { transition, .. } =
+            receiver.try_recv().expect("focus transition")
+        else {
+            panic!("FocusTransition message");
+        };
+        let previous = transition.previous.expect("previous focus");
+        assert_eq!(previous.app.pid, 7);
+        assert_eq!(previous.window.and_then(|window| window.id), Some(11));
+        assert!(
+            transition
+                .current
+                .is_some_and(|current| current.window.is_none())
+        );
         assert!(receiver.try_recv().is_err());
     }
 }

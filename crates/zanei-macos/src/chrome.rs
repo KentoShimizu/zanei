@@ -13,7 +13,7 @@ pub use observer::ChromeObserver;
 use std::{
     fmt::Display,
     sync::{
-        Arc,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
@@ -45,13 +45,19 @@ use worker::{
     service_on_demand as service_on_demand_impl,
 };
 pub struct ChromeCollector {
-    focus_transitions: Option<FocusTransitionReceiver>,
-    observation_triggers: Option<Receiver<ObservationTrigger>>,
+    channels: Arc<Mutex<ChromeWorkerChannels>>,
     eligibility: ChromeEligibilityPublisher,
     focus_context: FocusContext,
     runtime: Option<ChromeRuntime>,
     permissions: [Permission; 1],
     metrics: ChromeMetrics,
+    #[cfg(test)]
+    panic_next_worker: Arc<AtomicBool>,
+}
+
+struct ChromeWorkerChannels {
+    focus_transitions: FocusTransitionReceiver,
+    observation_triggers: Receiver<ObservationTrigger>,
 }
 impl ChromeCollector {
     #[must_use]
@@ -63,8 +69,10 @@ impl ChromeCollector {
         let focus_transitions = focus_context.subscribe();
         let observation_triggers = observer.subscribe();
         Self {
-            focus_transitions: Some(focus_transitions),
-            observation_triggers: Some(observation_triggers),
+            channels: Arc::new(Mutex::new(ChromeWorkerChannels {
+                focus_transitions,
+                observation_triggers,
+            })),
             eligibility,
             focus_context,
             runtime: None,
@@ -72,6 +80,8 @@ impl ChromeCollector {
                 bundle_id: CHROME_BUNDLE_ID.to_owned(),
             }],
             metrics: ChromeMetrics::default(),
+            #[cfg(test)]
+            panic_next_worker: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -90,10 +100,12 @@ impl ChromeCollector {
             return;
         };
         runtime.stop.store(true, Ordering::Release);
-        if let Ok((focus_transitions, observation_triggers)) = runtime.handle.join() {
-            self.focus_transitions = Some(focus_transitions);
-            self.observation_triggers = Some(observation_triggers);
-        }
+        let _ = runtime.handle.join();
+    }
+
+    #[cfg(test)]
+    fn panic_next_worker_for_test(&self) {
+        self.panic_next_worker.store(true, Ordering::Release);
     }
 }
 
@@ -112,30 +124,26 @@ impl Collector for ChromeCollector {
                 collector: COLLECTOR_NAME.to_owned(),
             });
         }
-        let focus_transitions =
-            self.focus_transitions
-                .take()
-                .ok_or_else(|| CollectorError::Start {
-                    collector: COLLECTOR_NAME.to_owned(),
-                    message: "focus transition receiver is unavailable".to_owned(),
-                })?;
-        let observation_triggers =
-            self.observation_triggers
-                .take()
-                .ok_or_else(|| CollectorError::Start {
-                    collector: COLLECTOR_NAME.to_owned(),
-                    message: "Chrome observation trigger receiver is unavailable".to_owned(),
-                })?;
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let metrics = self.metrics.clone();
         let eligibility = self.eligibility.clone();
         let focus_context = self.focus_context.clone();
         let initial_focus = focus_context.current();
+        let channels = Arc::clone(&self.channels);
         let (startup_sender, startup_receiver) = sync_channel(1);
+        #[cfg(test)]
+        let panic_next_worker = Arc::clone(&self.panic_next_worker);
         let handle = thread::Builder::new()
             .name("zanei-chrome".to_owned())
             .spawn(move || {
+                let channels = lock_worker_channels(&channels);
+                let _clear_eligibility = EligibilityClearGuard::new(&eligibility);
+                #[cfg(test)]
+                if panic_next_worker.swap(false, Ordering::AcqRel) {
+                    let _ = startup_sender.send(Ok(()));
+                    panic!("injected Chrome worker panic");
+                }
                 let mut api = match AppleScriptClient::new() {
                     Ok(client) => {
                         let _ = startup_sender.send(Ok(()));
@@ -144,13 +152,12 @@ impl Collector for ChromeCollector {
                     Err(error) => {
                         metrics.degraded.fetch_add(1, Ordering::Relaxed);
                         let _ = startup_sender.send(Err(error.to_string()));
-                        eligibility.clear_all();
-                        return (focus_transitions, observation_triggers);
+                        return;
                     }
                 };
                 let receivers = ChromeWorkerReceivers {
-                    focus: &focus_transitions,
-                    observations: &observation_triggers,
+                    focus: &channels.focus_transitions,
+                    observations: &channels.observation_triggers,
                     focus_context: &focus_context,
                 };
                 run_worker(
@@ -166,7 +173,6 @@ impl Collector for ChromeCollector {
                         resynced: false,
                     }),
                 );
-                (focus_transitions, observation_triggers)
             })
             .map_err(|error| CollectorError::Start {
                 collector: COLLECTOR_NAME.to_owned(),
@@ -179,20 +185,14 @@ impl Collector for ChromeCollector {
                 Ok(())
             }
             Ok(Err(message)) => {
-                if let Ok((focus, triggers)) = handle.join() {
-                    self.focus_transitions = Some(focus);
-                    self.observation_triggers = Some(triggers);
-                }
+                let _ = handle.join();
                 Err(CollectorError::Start {
                     collector: COLLECTOR_NAME.to_owned(),
                     message,
                 })
             }
             Err(error) => {
-                if let Ok((focus, triggers)) = handle.join() {
-                    self.focus_transitions = Some(focus);
-                    self.observation_triggers = Some(triggers);
-                }
+                let _ = handle.join();
                 Err(CollectorError::Start {
                     collector: COLLECTOR_NAME.to_owned(),
                     message: error.to_string(),
@@ -214,7 +214,31 @@ impl Drop for ChromeCollector {
 
 struct ChromeRuntime {
     stop: Arc<AtomicBool>,
-    handle: JoinHandle<(FocusTransitionReceiver, Receiver<ObservationTrigger>)>,
+    handle: JoinHandle<()>,
+}
+
+struct EligibilityClearGuard<'a> {
+    eligibility: &'a ChromeEligibilityPublisher,
+}
+
+impl<'a> EligibilityClearGuard<'a> {
+    const fn new(eligibility: &'a ChromeEligibilityPublisher) -> Self {
+        Self { eligibility }
+    }
+}
+
+impl Drop for EligibilityClearGuard<'_> {
+    fn drop(&mut self) {
+        self.eligibility.clear_all();
+    }
+}
+
+fn lock_worker_channels(
+    channels: &Mutex<ChromeWorkerChannels>,
+) -> MutexGuard<'_, ChromeWorkerChannels> {
+    channels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Clone, Default)]

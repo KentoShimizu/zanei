@@ -10,6 +10,7 @@ use std::{
 
 use time::OffsetDateTime;
 use zanei_collector::RawEvent;
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 use zanei_core::schema::{
     CaptureContext, ContentSnapshotData, ContentSnapshotTrigger, EventData, Window,
 };
@@ -38,6 +39,12 @@ pub(super) fn emit(
 ) {
     let bytes = output.text.len();
     let metrics = TraceMetrics::from(&output);
+    if candidate.target.app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID)
+        && chrome_version.is_none()
+    {
+        trace_metrics(&candidate, "chrome_version", metrics);
+        return;
+    }
     let event = build_raw_event(
         &candidate,
         key,

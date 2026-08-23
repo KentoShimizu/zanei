@@ -3,6 +3,7 @@
 mod authorization;
 mod focused_target;
 mod quarantine;
+mod routing;
 mod value;
 
 #[cfg(test)]
@@ -13,6 +14,7 @@ pub use authorization::{
 };
 pub(crate) use focused_target::FocusedTarget;
 pub(crate) use quarantine::{ChromeWindowKey, ReleasedEvent, TextQuarantine};
+pub(crate) use routing::{TextBodyRoute, route_text_body};
 pub(crate) use value::{FocusChangeCapture, ValueCapture, ValueEmission, ValueObservation};
 #[cfg(test)]
 pub(crate) use value::{VALUE_DEBOUNCE, VALUE_MAX_HOLD};

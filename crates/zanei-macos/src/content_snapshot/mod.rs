@@ -33,6 +33,12 @@ pub use crate::ffi::ax::{
     SnapshotAttributeValue, SnapshotAxApplication, SnapshotAxElement, SnapshotAxError,
 };
 pub use role::{SnapshotNodeClass, classify_role};
+#[cfg(test)]
+pub(crate) use scheduler::SnapshotScheduler;
+#[cfg(test)]
+pub(crate) use trigger::SnapshotTriggerMessage;
+#[cfg(test)]
+pub(crate) use trigger::snapshot_trigger_channel_with_capacity;
 pub use trigger::{
     SnapshotTrigger, SnapshotTriggerKind, SnapshotTriggerPublisher, SnapshotTriggerReceiver,
     snapshot_trigger_channel,

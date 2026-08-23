@@ -11,7 +11,7 @@ use zanei_core::privacy::PrivacyScope;
 use crate::{
     capture_policy::CapturePolicy,
     chrome::ChromeObserver,
-    text_capture::{ChromeWindowKey, TextQuarantine},
+    text_capture::{TextBodyRoute, TextQuarantine, route_text_body},
 };
 
 pub(super) struct AxOutput<'a> {
@@ -49,21 +49,15 @@ impl<'a> AxOutput<'a> {
             &event.app,
             event.window.as_ref().and_then(|window| window.id),
         );
-        let key = event
-            .app
-            .pid
-            .zip(event.window.as_ref().and_then(|window| window.id))
-            .map(|(pid, window_id)| ChromeWindowKey { pid, window_id });
-        if event.event_type == "ui.value"
-            && event_has_body(&event)
-            && decision.is_allowed()
-            && let (Some(version), Some(key), Some(observed_at)) =
-                (decision.chrome_version(), key, event.observed_at)
-        {
-            self.quarantine.hold_text(event, key, version, observed_at);
-            return;
+        match route_text_body(event, Some(&decision)) {
+            TextBodyRoute::Send(event) => self.send_now(event),
+            TextBodyRoute::Quarantine {
+                event,
+                key,
+                version,
+                observed_at,
+            } => self.quarantine.hold_text(event, key, version, observed_at),
         }
-        self.send_now(event);
     }
 
     pub(super) fn release_due(&mut self) {
@@ -101,14 +95,64 @@ impl<'a> AxOutput<'a> {
     }
 }
 
-fn event_has_body(event: &RawEvent) -> bool {
-    let zanei_core::schema::EventData::UiValue(data) = &event.data else {
-        return false;
+#[cfg(test)]
+mod tests {
+    use std::sync::{atomic::AtomicU64, mpsc::sync_channel};
+
+    use time::OffsetDateTime;
+    use zanei_core::{
+        config::FilterConfig,
+        schema::{App, Element, EventData, FieldKind, UiValueData, Window},
     };
-    data.text.is_some()
-        || event
-            .element
-            .as_ref()
-            .and_then(|element| element.value.as_ref())
-            .is_some()
+
+    use super::*;
+    use crate::chrome::chrome_eligibility_channel;
+
+    #[test]
+    fn v2_2_final_deny_suppresses_built_ax_body() {
+        let filter = FilterConfig::default();
+        let (_, tracker) = chrome_eligibility_channel(filter.clone());
+        let policy = CapturePolicy::new(tracker, filter, None);
+        let (sender, receiver) = sync_channel(1);
+        let dropped = AtomicU64::new(0);
+        let mut output = AxOutput::new(&sender, &dropped, policy.clone(), ChromeObserver::new());
+        let event = RawEvent {
+            observed_at: Some(OffsetDateTime::UNIX_EPOCH),
+            source: "macos.ax".to_owned(),
+            event_type: "ui.value".to_owned(),
+            app: App {
+                name: "Example".to_owned(),
+                bundle_id: Some("dev.example.App".to_owned()),
+                pid: Some(7),
+            },
+            window: Some(Window {
+                title: Some("Window".to_owned()),
+                id: Some(11),
+            }),
+            element: Some(Element {
+                role: Some("AXTextArea".to_owned()),
+                title: None,
+                value: Some("private element value".to_owned()),
+            }),
+            data: EventData::UiValue(UiValueData {
+                field_kind: Some(FieldKind::Text),
+                value_len: Some(12),
+                text: Some("private text".to_owned()),
+            }),
+            capture_context: Default::default(),
+        };
+        policy.replace_filter(FilterConfig {
+            exclude_apps: vec!["dev.example.App".to_owned()],
+            ..FilterConfig::default()
+        });
+
+        output.send(event);
+
+        let event = receiver.try_recv().expect("metadata event is retained");
+        let EventData::UiValue(data) = event.data else {
+            panic!("ui.value");
+        };
+        assert_eq!(data.text, None);
+        assert_eq!(event.element.and_then(|element| element.value), None);
+    }
 }

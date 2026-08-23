@@ -14,9 +14,11 @@ use zanei_core::{
 
 use crate::trace;
 use crate::{
-    capture_policy::CapturePolicy,
+    capture_policy::{CaptureDecision, CapturePolicy},
     ffi::eventtap::NativeContext,
-    text_capture::{ChromeWindowKey, InputAuthorization, ReleasedEvent, TextQuarantine},
+    text_capture::{
+        InputAuthorization, ReleasedEvent, TextBodyRoute, TextQuarantine, route_text_body,
+    },
 };
 
 use super::clipboard::ClipboardOutput;
@@ -98,15 +100,10 @@ pub(super) fn emit_clipboard(
     let Some(output) = output else {
         return EmitResult::Filtered;
     };
-    let observed_at = output
-        .event
-        .observed_at
-        .unwrap_or_else(OffsetDateTime::now_utc);
     emit_or_quarantine(
         sender,
         Some(output.event),
-        output.chrome_version,
-        observed_at,
+        output.decision.as_ref(),
         quarantine,
         dropped_events,
     )
@@ -115,26 +112,25 @@ pub(super) fn emit_clipboard(
 pub(super) fn emit_or_quarantine(
     sender: &SyncSender<RawEvent>,
     event: Option<RawEvent>,
-    chrome_version: Option<u64>,
-    observed_at: OffsetDateTime,
+    decision: Option<&CaptureDecision>,
     quarantine: &mut TextQuarantine,
     dropped_events: &AtomicU64,
 ) -> EmitResult {
     let Some(event) = event else {
         return EmitResult::Filtered;
     };
-    let key = event
-        .app
-        .pid
-        .zip(event.window.as_ref().and_then(|window| window.id))
-        .map(|(pid, window_id)| ChromeWindowKey { pid, window_id });
-    if let (Some(version), Some(key)) = (chrome_version, key)
-        && has_text_body(&event)
-    {
-        quarantine.hold_text(event, key, version, observed_at);
-        return EmitResult::Sent;
+    match route_text_body(event, decision) {
+        TextBodyRoute::Send(event) => try_send_counted(sender, event, dropped_events),
+        TextBodyRoute::Quarantine {
+            event,
+            key,
+            version,
+            observed_at,
+        } => {
+            quarantine.hold_text(event, key, version, observed_at);
+            EmitResult::Sent
+        }
     }
-    try_send_counted(sender, event, dropped_events)
 }
 
 pub(super) fn emit_released(
@@ -146,32 +142,6 @@ pub(super) fn emit_released(
         let (event, _) = event.into_parts();
         try_send_counted(sender, event, dropped_events).continues()
     })
-}
-
-fn has_text_body(event: &RawEvent) -> bool {
-    match &event.data {
-        EventData::InputKey(data) => data.text.is_some(),
-        EventData::ClipboardCopy(data) => data.text.is_some() || data.size_bytes.is_some(),
-        EventData::ClipboardPaste(data) => data.text.is_some() || data.size_bytes.is_some(),
-        EventData::UiValue(data) => {
-            data.text.is_some()
-                || event
-                    .element
-                    .as_ref()
-                    .and_then(|element| element.value.as_ref())
-                    .is_some()
-        }
-        EventData::AppActivate(_)
-        | EventData::AppLaunch(_)
-        | EventData::AppTerminate(_)
-        | EventData::WindowFocus(_)
-        | EventData::WindowTitle(_)
-        | EventData::UiFocus(_)
-        | EventData::UiClick(_)
-        | EventData::InputScroll(_)
-        | EventData::BrowserNavigate(_)
-        | EventData::ContentSnapshot(_) => false,
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
