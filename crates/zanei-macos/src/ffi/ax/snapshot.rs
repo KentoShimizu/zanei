@@ -2,8 +2,12 @@
 
 use std::{ffi::c_void, fmt, ptr};
 
-use super::cf::{CfRef, OwnedCf, cf_string, i64_value, string_value};
+use super::{
+    cf::{CfRef, OwnedCf, cf_string, i64_value, string_value},
+    types::{AxTextRange, DecodedAxError, decode_error, decode_point, decode_range, decode_size},
+};
 use crate::content_snapshot::budget::AX_CALL_TIMEOUT;
+use crate::ffi::geometry::{AxFrame, AxPoint, AxSize};
 
 const AX_ERROR_SUCCESS: i32 = 0;
 const AX_ERROR_CANNOT_COMPLETE: i32 = -25_204;
@@ -11,37 +15,7 @@ const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
 const AX_ERROR_NO_VALUE: i32 = -25_212;
 const WRAPPER_CONTRACT_ERROR: i32 = -1;
 
-const AX_VALUE_TYPE_POINT: u32 = 1;
-const AX_VALUE_TYPE_SIZE: u32 = 2;
 const AX_VALUE_TYPE_RANGE: u32 = 4;
-const AX_VALUE_TYPE_ERROR: u32 = 5;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AxPoint {
-    pub x: f64,
-    pub y: f64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AxSize {
-    pub width: f64,
-    pub height: f64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AxFrame {
-    pub origin: AxPoint,
-    pub size: AxSize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AxTextRange {
-    pub location: isize,
-    pub length: isize,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SnapshotAttribute {
@@ -400,21 +374,21 @@ fn decode_attribute(
     if unsafe { CFGetTypeID(value) } == unsafe { CFNullGetTypeID() } {
         return Ok(None);
     }
-    if unsafe { CFGetTypeID(value) } == unsafe { AXValueGetTypeID() }
-        && unsafe { AXValueGetType(value) } == AX_VALUE_TYPE_ERROR
-    {
-        let mut code = WRAPPER_CONTRACT_ERROR;
-        if unsafe { AXValueGetValue(value, AX_VALUE_TYPE_ERROR, (&raw mut code).cast()) } == 0 {
+    match decode_error(value) {
+        DecodedAxError::Invalid => {
             return Err(ax_error(
                 "AXValueGetValue error",
                 WRAPPER_CONTRACT_ERROR,
                 pid,
             ));
         }
-        return match code {
-            AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(None),
-            code => Err(ax_error(attribute.name(), code, pid)),
-        };
+        DecodedAxError::Code(code) => {
+            return match code {
+                AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(None),
+                code => Err(ax_error(attribute.name(), code, pid)),
+            };
+        }
+        DecodedAxError::NotError => {}
     }
     match attribute {
         SnapshotAttribute::Position => decode_point(value)
@@ -434,45 +408,6 @@ fn decode_attribute(
             .map(Some)
             .ok_or_else(|| ax_error(attribute.name(), WRAPPER_CONTRACT_ERROR, pid)),
     }
-}
-
-fn decode_point(value: CfRef) -> Option<AxPoint> {
-    if unsafe { CFGetTypeID(value) } != unsafe { AXValueGetTypeID() }
-        || unsafe { AXValueGetType(value) } != AX_VALUE_TYPE_POINT
-    {
-        return None;
-    }
-    let mut point = AxPoint { x: 0.0, y: 0.0 };
-    (unsafe { AXValueGetValue(value, AX_VALUE_TYPE_POINT, (&raw mut point).cast()) } != 0)
-        .then_some(point)
-}
-
-fn decode_size(value: CfRef) -> Option<AxSize> {
-    if unsafe { CFGetTypeID(value) } != unsafe { AXValueGetTypeID() }
-        || unsafe { AXValueGetType(value) } != AX_VALUE_TYPE_SIZE
-    {
-        return None;
-    }
-    let mut size = AxSize {
-        width: 0.0,
-        height: 0.0,
-    };
-    (unsafe { AXValueGetValue(value, AX_VALUE_TYPE_SIZE, (&raw mut size).cast()) } != 0)
-        .then_some(size)
-}
-
-fn decode_range(value: CfRef) -> Option<AxTextRange> {
-    if unsafe { CFGetTypeID(value) } != unsafe { AXValueGetTypeID() }
-        || unsafe { AXValueGetType(value) } != AX_VALUE_TYPE_RANGE
-    {
-        return None;
-    }
-    let mut range = AxTextRange {
-        location: 0,
-        length: 0,
-    };
-    (unsafe { AXValueGetValue(value, AX_VALUE_TYPE_RANGE, (&raw mut range).cast()) } != 0)
-        .then_some(range)
 }
 
 const fn ax_error(operation: &'static str, code: i32, pid: i32) -> SnapshotAxError {
@@ -509,9 +444,6 @@ unsafe extern "C" {
         value: *mut CfRef,
     ) -> i32;
     fn AXValueCreate(value_type: u32, value: *const c_void) -> CfRef;
-    fn AXValueGetTypeID() -> usize;
-    fn AXValueGetType(value: CfRef) -> u32;
-    fn AXValueGetValue(value: CfRef, value_type: u32, output: *mut c_void) -> u8;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]

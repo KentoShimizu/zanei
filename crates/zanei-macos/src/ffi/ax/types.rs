@@ -1,8 +1,29 @@
-//! Native AX observation and error shapes.
+//! Shared AX value, observation, and error shapes.
 
-use std::fmt;
+use std::{ffi::c_void, fmt};
+
+use super::cf::CfRef;
+use crate::ffi::geometry::{AxPoint, AxSize};
 
 pub(super) const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
+
+const AX_VALUE_TYPE_POINT: u32 = 1;
+const AX_VALUE_TYPE_SIZE: u32 = 2;
+const AX_VALUE_TYPE_RANGE: u32 = 4;
+const AX_VALUE_TYPE_ERROR: u32 = 5;
+
+pub(super) enum DecodedAxError {
+    NotError,
+    Code(i32),
+    Invalid,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AxTextRange {
+    pub location: isize,
+    pub length: isize,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeWindow {
@@ -78,4 +99,66 @@ impl NativeAxError {
     pub(super) const fn is_attribute_unsupported(&self) -> bool {
         self.code == AX_ERROR_ATTRIBUTE_UNSUPPORTED
     }
+}
+
+pub(super) fn decode_point(value: CfRef) -> Option<AxPoint> {
+    if ax_value_type(value) != Some(AX_VALUE_TYPE_POINT) {
+        return None;
+    }
+    let mut point = AxPoint { x: 0.0, y: 0.0 };
+    (unsafe { AXValueGetValue(value, AX_VALUE_TYPE_POINT, (&raw mut point).cast()) } != 0)
+        .then_some(point)
+}
+
+pub(super) fn decode_size(value: CfRef) -> Option<AxSize> {
+    if ax_value_type(value) != Some(AX_VALUE_TYPE_SIZE) {
+        return None;
+    }
+    let mut size = AxSize {
+        width: 0.0,
+        height: 0.0,
+    };
+    (unsafe { AXValueGetValue(value, AX_VALUE_TYPE_SIZE, (&raw mut size).cast()) } != 0)
+        .then_some(size)
+}
+
+pub(super) fn decode_range(value: CfRef) -> Option<AxTextRange> {
+    if ax_value_type(value) != Some(AX_VALUE_TYPE_RANGE) {
+        return None;
+    }
+    let mut range = AxTextRange {
+        location: 0,
+        length: 0,
+    };
+    (unsafe { AXValueGetValue(value, AX_VALUE_TYPE_RANGE, (&raw mut range).cast()) } != 0)
+        .then_some(range)
+}
+
+pub(super) fn decode_error(value: CfRef) -> DecodedAxError {
+    if ax_value_type(value) != Some(AX_VALUE_TYPE_ERROR) {
+        return DecodedAxError::NotError;
+    }
+    let mut code = -1;
+    if unsafe { AXValueGetValue(value, AX_VALUE_TYPE_ERROR, (&raw mut code).cast()) } == 0 {
+        DecodedAxError::Invalid
+    } else {
+        DecodedAxError::Code(code)
+    }
+}
+
+fn ax_value_type(value: CfRef) -> Option<u32> {
+    (!value.is_null() && unsafe { CFGetTypeID(value) } == unsafe { AXValueGetTypeID() })
+        .then(|| unsafe { AXValueGetType(value) })
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXValueGetTypeID() -> usize;
+    fn AXValueGetType(value: CfRef) -> u32;
+    fn AXValueGetValue(value: CfRef, value_type: u32, output: *mut c_void) -> u8;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFGetTypeID(value: CfRef) -> usize;
 }

@@ -9,13 +9,14 @@ mod snapshot;
 mod types;
 mod value_context;
 
+pub use crate::ffi::geometry::{AxFrame, AxPoint, AxSize};
 pub(crate) use accessibility::ManualAccessibilityPolicy;
 pub(crate) use runtime::NativeAx;
 pub use snapshot::{
-    AxFrame, AxPoint, AxSize, AxTextRange, SnapshotAttribute, SnapshotAttributeResult,
-    SnapshotAttributeValue, SnapshotAxApplication, SnapshotAxElement, SnapshotAxError,
+    SnapshotAttribute, SnapshotAttributeResult, SnapshotAttributeValue, SnapshotAxApplication,
+    SnapshotAxElement, SnapshotAxError,
 };
-pub use types::NativeWindow;
+pub use types::{AxTextRange, NativeWindow};
 pub(crate) use types::{NativeAxError, NativeAxEvent, NativeElement, NativeHitTest};
 
 use std::{

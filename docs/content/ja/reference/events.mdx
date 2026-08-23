@@ -41,6 +41,8 @@ Zanei が記録するすべてのイベントは、ソースによらず OS 非�
 | `truncated` | normalize が上限超過の text・URL・title field を 1 つ以上除去した場合は `true` |
 | `redaction` | 適用された変換の有無と内訳。設定可能な privacy rule（`email` / `credit_card` / `token`）と常時適用の安全 rule `size_limit` を含みます。secure field は捕捉前に除外されるため痕跡は残りません |
 
+Chromium・Electron app など Accessibility の window number を公開しない app は、on-screen bounds により window ID と照合されます。
+
 このエンベロープは機械可読な JSON Schema としても公開されています：[`/schema/event.schema.json`](/schema/event.schema.json)。全露出面が共有する単一契約であり、Rust コアの型はこのファイルとの一致をテストで担保されます。
 
 ## field の byte 上限

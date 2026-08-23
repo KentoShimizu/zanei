@@ -24,6 +24,7 @@ use crate::{
         state::{SaveBlock, SnapshotState, SnapshotWindowKey},
         walker::{InstantWalkClock, SnapshotWalkError, WalkClock, walk_snapshot},
     },
+    ffi::window_list::window_id_for_frame,
     workspace::WorkspaceEvent,
 };
 
@@ -254,15 +255,18 @@ fn scan(
     if let Some(output) = initial_time_cutoff(&clock, 2) {
         return Ok(Some(output));
     }
-    if window.window_number()? != Some(expected_window_id) {
+    let Some(frame) = window.frame()? else {
         return Ok(None);
-    }
+    };
     if let Some(output) = initial_time_cutoff(&clock, 3) {
         return Ok(Some(output));
     }
-    let frame = window
-        .frame()?
-        .ok_or(ScanError::MissingWindowFrame { pid })?;
+    let window_id = window
+        .window_number()?
+        .or_else(|| window_id_for_frame(i64::from(pid), frame));
+    if window_id != Some(expected_window_id) {
+        return Ok(None);
+    }
     if let Some(output) = initial_time_cutoff(&clock, 4) {
         return Ok(Some(output));
     }
@@ -371,7 +375,6 @@ pub(super) fn build_raw_event(
 enum ScanError {
     Ax(SnapshotAxError),
     Walk(SnapshotWalkError),
-    MissingWindowFrame { pid: i32 },
 }
 
 impl From<SnapshotAxError> for ScanError {
@@ -392,7 +395,7 @@ fn record_scan_failure(
     state.record_failure(pid, now, scan_timed_out(error));
     let (nodes, elapsed) = match error {
         ScanError::Walk(error) => (error.nodes, error.elapsed),
-        ScanError::Ax(_) | ScanError::MissingWindowFrame { .. } => (0, Duration::ZERO),
+        ScanError::Ax(_) => (0, Duration::ZERO),
     };
     trace_candidate(candidate, "ax_failure", nodes, elapsed, 0, false, None);
 }
@@ -404,7 +407,6 @@ fn scan_timed_out(error: &ScanError) -> bool {
             crate::content_snapshot::walker::SnapshotReadError::Ax(error) => error.is_timeout(),
             crate::content_snapshot::walker::SnapshotReadError::Contract(_) => false,
         },
-        ScanError::MissingWindowFrame { .. } => false,
     }
 }
 
@@ -505,12 +507,6 @@ impl fmt::Display for ScanError {
         match self {
             Self::Ax(error) => error.fmt(formatter),
             Self::Walk(error) => error.fmt(formatter),
-            Self::MissingWindowFrame { pid } => {
-                write!(
-                    formatter,
-                    "focused window frame is unavailable for pid {pid}"
-                )
-            }
         }
     }
 }
@@ -520,7 +516,6 @@ impl std::error::Error for ScanError {
         match self {
             Self::Ax(error) => Some(error),
             Self::Walk(error) => Some(error),
-            Self::MissingWindowFrame { .. } => None,
         }
     }
 }
