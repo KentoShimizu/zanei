@@ -35,7 +35,6 @@ pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliErr
     let live_store_exists = store_path
         .try_exists()
         .map_err(|source| CliError::io(store_path, source))?;
-    let retired = retired_plaintext_stores(store_path)?;
     let mut deleted = 0;
     if live_store_exists {
         let mut writer =
@@ -45,7 +44,11 @@ pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliErr
             None => writer.purge_all()?,
         };
     }
-    for retired in retired {
+    // Listed after the live purge: the recorder's first start after the
+    // upgrade may set the live store aside at any moment, and a set-aside that
+    // coincides with the purge waits for the purge's connection, so listing
+    // afterwards sees every file the purge has not already emptied.
+    for retired in retired_plaintext_stores(store_path)? {
         match cutoff.as_deref() {
             Some(cutoff) => deleted += StoreWriter::open(&retired.path)?.purge_before(cutoff)?,
             None => {

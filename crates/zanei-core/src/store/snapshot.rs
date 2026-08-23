@@ -13,8 +13,8 @@ use rusqlite::{Connection, OpenFlags, params, params_from_iter};
 use time::OffsetDateTime;
 
 use super::{
-    QueryFilter, STORE_TABLES, StoreError, StoreFormat, StoreKey, StoreReader, file_uri, reader,
-    retired_plaintext_stores,
+    QueryFilter, SQLCIPHER_COMPATIBILITY, STORE_TABLES, StoreError, StoreFormat, StoreKey,
+    StoreReader, file_uri, reader, retired_plaintext_stores,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,12 +64,11 @@ pub fn export_plain_sqlite(
     // and the number of set-aside stores is not bounded.
     let source_uri = file_uri(store, "mode=ro")?;
     match key {
-        Some(key) => snapshot.execute(
-            "ATTACH DATABASE ?1 AS src KEY ?2",
-            params![source_uri, key.sqlcipher_literal().as_str()],
-        )?,
-        None => snapshot.execute("ATTACH DATABASE ?1 AS src", [source_uri])?,
-    };
+        Some(key) => attach_encrypted_source(&snapshot, store, key)?,
+        None => {
+            snapshot.execute("ATTACH DATABASE ?1 AS src", [source_uri])?;
+        }
+    }
     // The snapshot's tables were just created at the current schema version,
     // which is what `meta` already says; a source's older version is not copied.
     let main_copy = copy_events(&snapshot, "src", &conditions);
@@ -90,6 +89,31 @@ pub fn export_plain_sqlite(
         events += copied?;
     }
     Ok(SnapshotReport { events })
+}
+
+/// Attaches the encrypted store at `store` as `src`, read-only, with the same
+/// file-format pin `apply_key` gives a direct connection. `ATTACH … KEY` reads
+/// the first page at once, so the pin has to be in force before it; SQLCipher
+/// only offers that as a process-wide default, which this sets to the pinned
+/// generation (also the library's own default) right before attaching.
+pub(super) fn attach_encrypted_source(
+    snapshot: &Connection,
+    store: &Path,
+    key: &StoreKey,
+) -> Result<(), StoreError> {
+    snapshot.pragma_update(
+        None,
+        "cipher_default_compatibility",
+        SQLCIPHER_COMPATIBILITY,
+    )?;
+    snapshot.execute(
+        "ATTACH DATABASE ?1 AS src KEY ?2",
+        params![
+            file_uri(store, "mode=ro")?,
+            key.sqlcipher_literal().as_str()
+        ],
+    )?;
+    Ok(())
 }
 
 struct RangeConditions {
@@ -116,13 +140,17 @@ impl RangeConditions {
     }
 }
 
+/// Copies one source's events in range. Sources are copied live store first,
+/// then set-aside stores oldest first, and an id that is already in the
+/// snapshot keeps its first copy: sources can overlap, for example after a
+/// backup of the previous store was restored and set aside a second time.
 fn copy_events(
     snapshot: &Connection,
     alias: &str,
     conditions: &RangeConditions,
 ) -> Result<u64, StoreError> {
     let sql = format!(
-        "INSERT INTO events(id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
+        "INSERT OR IGNORE INTO events(id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
          window_title, window_id, element_json, data_json, redaction_json) \
          SELECT id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
          window_title, window_id, element_json, data_json, redaction_json \

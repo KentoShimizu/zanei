@@ -1061,6 +1061,92 @@ fn format_probe_distinguishes_missing_plaintext_and_encrypted() {
 }
 
 #[test]
+fn plaintext_snapshot_keeps_one_copy_of_an_event_present_in_two_sources() {
+    let database = TestDatabase::new("snapshot-duplicate");
+    let snapshot = TestDatabase::new("snapshot-duplicate-output");
+    let event = app_launch(
+        "evt_01K00000000000000000000701",
+        "2026-08-16T09:00:00.000Z",
+        "Safari",
+        "com.apple.Safari",
+    );
+    // The same event in a plaintext store that was set aside and in the
+    // encrypted store that replaced it, as after restoring a backup.
+    StoreWriter::open(database.path())
+        .and_then(|mut writer| writer.append(&event))
+        .expect("plaintext store");
+    set_aside_plaintext(database.path(), timestamp("2026-08-16T10:00:00Z"))
+        .expect("set aside")
+        .expect("a plaintext store was set aside");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key))
+        .and_then(|mut writer| writer.append(&event))
+        .expect("encrypted store");
+
+    let report = export_plain_sqlite(
+        database.path(),
+        Some(&key),
+        &QueryFilter::default(),
+        TEST_RETENTION_HOURS,
+        snapshot.path(),
+    )
+    .expect("export with an event present twice");
+
+    assert_eq!(report.events, 1);
+    let copied = StoreReader::open(snapshot.path())
+        .and_then(|reader| reader.query(&QueryFilter::default(), TEST_RETENTION_HOURS))
+        .expect("snapshot events");
+    assert_eq!(copied, vec![event]);
+}
+
+#[test]
+fn attached_encrypted_source_uses_the_pinned_file_format() {
+    let database = TestDatabase::new("attach-compatibility");
+    let key = StoreKey::generate().expect("generate key");
+    StoreWriter::open_with_key(database.path(), Some(&key))
+        .and_then(|mut writer| {
+            writer.append(&app_launch(
+                "evt_01K00000000000000000000801",
+                "2026-08-16T09:00:00.000Z",
+                "Safari",
+                "com.apple.Safari",
+            ))
+        })
+        .expect("encrypted store");
+    let probe = rusqlite::Connection::open_in_memory().expect("scratch connection");
+
+    super::snapshot::attach_encrypted_source(&probe, database.path(), &key)
+        .expect("attach the way the snapshot does");
+
+    // `ATTACH … KEY` reads the first page at once, so only settings in force
+    // before it count; a wrong generation makes the attach itself fail with
+    // "file is not a database" (checked by hand against generation 3).
+    let mut statement = probe
+        .prepare("PRAGMA src.cipher_settings")
+        .expect("settings of the attached source");
+    let settings: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query settings")
+        .collect::<Result<_, _>>()
+        .expect("settings rows");
+    for expected in [
+        "PRAGMA kdf_iter = 256000;",
+        "PRAGMA cipher_page_size = 4096;",
+        "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;",
+        "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;",
+    ] {
+        assert!(settings.iter().any(|s| s == expected), "{settings:?}");
+    }
+    assert_eq!(
+        probe
+            .query_row("SELECT count(*) FROM src.events", [], |row| row
+                .get::<_, i64>(0))
+            .expect("read"),
+        1
+    );
+}
+
+#[test]
 fn plaintext_snapshot_handles_non_ascii_paths() {
     let database = TestDatabase::new("スナップショット-source");
     let snapshot = TestDatabase::new("スナップショット-output");
