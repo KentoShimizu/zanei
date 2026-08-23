@@ -24,7 +24,7 @@ use crate::{
     daemon::{
         permission_worker::PermissionRequestWorker,
         runtime::{configure_eventtap_start_gate, service_permission_request_worker},
-        supervisor::EventTapStartGate,
+        supervisor::{CollectorKind, EventTapStartGate, START_ORDER, STOP_ORDER},
     },
     permissions::PermissionRequestOutcome,
 };
@@ -79,6 +79,77 @@ fn secure_input_monitor_is_created_only_for_an_enabled_consumer() {
     config.capture.text_content = false;
     config.capture.content_snapshot = true;
     assert!(CollectorSet::new(&config)._secure_input_monitor.is_some());
+}
+
+#[test]
+fn content_snapshot_collector_and_internal_dependencies_exist_only_when_opted_in() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources.clear();
+    let disabled = CollectorSet::new(&config);
+    assert!(disabled.content_snapshot.is_none());
+    assert!(disabled.ax.is_none());
+    assert!(disabled.workspace.is_none());
+
+    config.capture.content_snapshot = true;
+    let enabled = CollectorSet::new(&config);
+    assert!(enabled.content_snapshot.is_some());
+    assert!(enabled.ax.is_some(), "AX produces snapshot triggers");
+    assert!(
+        enabled.workspace.is_some(),
+        "workspace cleans process state"
+    );
+    assert!(
+        !enabled
+            .content_snapshot
+            .as_ref()
+            .expect("content collector")
+            .collector
+            .is_running(),
+        "construction alone does not start zanei-content"
+    );
+}
+
+#[test]
+fn content_snapshot_health_uses_the_stable_component_name() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.content_snapshot = true;
+    let mut collectors = CollectorSet::new(&config);
+    collectors.start_errors.insert(
+        "content_snapshot".to_owned(),
+        "simulated content worker failure".to_owned(),
+    );
+
+    let health = collectors.health();
+    assert_eq!(
+        health.degraded.get("content_snapshot").map(String::as_str),
+        Some("simulated content worker failure")
+    );
+}
+
+#[test]
+fn content_worker_lifecycle_order_keeps_trigger_production_outside_its_lifetime() {
+    assert_eq!(
+        START_ORDER,
+        [
+            CollectorKind::ContentSnapshot,
+            CollectorKind::Ax,
+            CollectorKind::Chrome,
+            CollectorKind::Workspace,
+            CollectorKind::EventTap,
+        ]
+    );
+    let ax_stop = STOP_ORDER
+        .iter()
+        .position(|collector| *collector == CollectorKind::Ax)
+        .expect("AX stop position");
+    let content_stop = STOP_ORDER
+        .iter()
+        .position(|collector| *collector == CollectorKind::ContentSnapshot)
+        .expect("content stop position");
+    assert!(
+        ax_stop < content_stop,
+        "AX producer stops before content discard"
+    );
 }
 
 #[test]

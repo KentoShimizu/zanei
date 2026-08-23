@@ -54,6 +54,8 @@ The order is fixed:
 
 Website rules work only for Chrome because it is the only supported browser that exposes both URL and private-window mode. Other browsers are controlled only by app rules.
 
+One startup-time exception: whether the recorder talks to Chrome at all (and therefore whether Automation is required) is decided when recording starts. If Chrome was excluded from the content-snapshot scope at that moment and you include it later, content snapshots for Chrome start after `zanei stop && zanei start`; every other scope change applies within a few seconds.
+
 ## Choosing apps
 
 ```bash

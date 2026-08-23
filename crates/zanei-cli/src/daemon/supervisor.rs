@@ -24,14 +24,56 @@ const RESTART_DELAYS: [Duration; 5] = [
 ];
 const RESTART_STABLE_AFTER: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CollectorKind {
+    ContentSnapshot,
+    Ax,
+    Chrome,
+    Workspace,
+    EventTap,
+}
+
+pub(super) const START_ORDER: [CollectorKind; 5] = [
+    CollectorKind::ContentSnapshot,
+    CollectorKind::Ax,
+    CollectorKind::Chrome,
+    CollectorKind::Workspace,
+    CollectorKind::EventTap,
+];
+
+pub(super) const STOP_ORDER: [CollectorKind; 5] = [
+    CollectorKind::Workspace,
+    CollectorKind::Chrome,
+    CollectorKind::Ax,
+    CollectorKind::ContentSnapshot,
+    CollectorKind::EventTap,
+];
+
 impl CollectorSet {
     pub(crate) fn start(&mut self, sender: &SyncSender<RawEvent>) {
         let now = Instant::now();
-        // AX Secure Input probes are served by the EventTap worker.
-        self.start_eventtap(sender, now);
-        start_collector(&mut self.ax, sender, &mut self.start_errors, now);
-        start_collector(&mut self.chrome, sender, &mut self.start_errors, now);
-        start_collector(&mut self.workspace, sender, &mut self.start_errors, now);
+        // The Secure Input owner starts during CollectorSet construction. Start the
+        // trigger consumer before AX and the lifecycle consumers before workspace.
+        for collector in START_ORDER {
+            match collector {
+                CollectorKind::ContentSnapshot => start_collector(
+                    &mut self.content_snapshot,
+                    sender,
+                    &mut self.start_errors,
+                    now,
+                ),
+                CollectorKind::Ax => {
+                    start_collector(&mut self.ax, sender, &mut self.start_errors, now);
+                }
+                CollectorKind::Chrome => {
+                    start_collector(&mut self.chrome, sender, &mut self.start_errors, now);
+                }
+                CollectorKind::Workspace => {
+                    start_collector(&mut self.workspace, sender, &mut self.start_errors, now);
+                }
+                CollectorKind::EventTap => self.start_eventtap(sender, now),
+            }
+        }
     }
 
     pub(crate) fn start_eventtap(&mut self, sender: &SyncSender<RawEvent>, now: Instant) {
@@ -45,19 +87,27 @@ impl CollectorSet {
     }
 
     pub(crate) fn stop(&mut self) {
-        stop_collector(&mut self.workspace, StopMode::Drain);
-        stop_collector(&mut self.chrome, StopMode::Drain);
-        stop_collector(&mut self.ax, StopMode::Drain);
-        stop_collector(&mut self.eventtap, StopMode::Drain);
+        self.stop_in_order(StopMode::Drain);
         self.start_errors.clear();
     }
 
     pub(crate) fn suspend(&mut self) {
-        stop_collector(&mut self.workspace, StopMode::Discard);
-        stop_collector(&mut self.chrome, StopMode::Discard);
-        stop_collector(&mut self.ax, StopMode::Discard);
-        stop_collector(&mut self.eventtap, StopMode::Discard);
+        self.stop_in_order(StopMode::Discard);
         self.start_errors.clear();
+    }
+
+    fn stop_in_order(&mut self, mode: StopMode) {
+        for collector in STOP_ORDER {
+            match collector {
+                CollectorKind::ContentSnapshot => {
+                    stop_collector(&mut self.content_snapshot, StopMode::Discard);
+                }
+                CollectorKind::Ax => stop_collector(&mut self.ax, mode),
+                CollectorKind::Chrome => stop_collector(&mut self.chrome, mode),
+                CollectorKind::Workspace => stop_collector(&mut self.workspace, mode),
+                CollectorKind::EventTap => stop_collector(&mut self.eventtap, mode),
+            }
+        }
     }
 
     pub(crate) fn supervise(
@@ -66,17 +116,15 @@ impl CollectorSet {
         permissions: Option<&DaemonPermissions>,
         now: Instant,
     ) -> Result<(), DaemonError> {
-        // Preserve startup ordering because AX Secure Input probes are served
-        // by EventTap and browser/AX collectors consume workspace lifecycle.
-        if self.eventtap_start_gate.allows_start() {
-            supervise_collector(
-                &mut self.eventtap,
-                sender,
-                permissions,
-                &mut self.start_errors,
-                now,
-            )?;
-        }
+        // Preserve startup ordering: content consumes AX triggers, and AX/Chrome/content
+        // consume workspace lifecycle notifications.
+        supervise_collector(
+            &mut self.content_snapshot,
+            sender,
+            permissions,
+            &mut self.start_errors,
+            now,
+        )?;
         supervise_collector(
             &mut self.ax,
             sender,
@@ -97,7 +145,17 @@ impl CollectorSet {
             permissions,
             &mut self.start_errors,
             now,
-        )
+        )?;
+        if self.eventtap_start_gate.allows_start() {
+            supervise_collector(
+                &mut self.eventtap,
+                sender,
+                permissions,
+                &mut self.start_errors,
+                now,
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn health(&self) -> CollectorHealth {
@@ -155,6 +213,22 @@ impl CollectorSet {
                     "secure_input".to_owned(),
                     "macOS Secure Input is active; input.key delivery is suspended".to_owned(),
                 );
+            }
+        }
+        if let Some(content) = self.content_snapshot.as_ref() {
+            health.dropped = health
+                .dropped
+                .saturating_add(content.collector.dropped_events())
+                .saturating_add(content.relay_dropped);
+            add_failure_count(
+                &mut health.collector_failures,
+                "content_snapshot",
+                content.collector.collector_failures(),
+            );
+            if let Some(reason) = content.collector.degraded_reason() {
+                health
+                    .degraded
+                    .insert("content_snapshot".to_owned(), reason);
             }
         }
         if let Some(chrome) = self.chrome.as_ref() {

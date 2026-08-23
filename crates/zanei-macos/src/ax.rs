@@ -112,7 +112,11 @@ impl AxCollector {
 
     #[must_use]
     pub fn dropped_events(&self) -> u64 {
-        self.dropped_events.load(Ordering::Relaxed)
+        self.dropped_events.load(Ordering::Relaxed).saturating_add(
+            self.snapshot_trigger_publisher
+                .as_ref()
+                .map_or(0, SnapshotTriggerPublisher::dropped),
+        )
     }
 
     #[must_use]

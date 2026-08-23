@@ -13,7 +13,7 @@ use zanei_macos::{
     SecureInputMonitor, TextContentPolicy,
     ax::{AxCollector, AxCollectorOptions, click_channel},
     chrome::{ChromeCollector, ChromeEligibilityPublisher, chrome_eligibility_channel},
-    content_snapshot::{SnapshotTriggerReceiver, snapshot_trigger_channel},
+    content_snapshot::{ContentSnapshotCollector, snapshot_trigger_channel},
     eventtap::{EventTapCollector, EventTapMode, InputSourceObserver},
     focused_field_channel, input_authorization_channel,
     workspace::{WorkspaceCollector, WorkspaceEvent, WorkspaceObserver, notification_channel},
@@ -31,12 +31,12 @@ use super::supervisor::{
 pub(crate) struct CollectorSet {
     pub(super) workspace: Option<Managed<WorkspaceCollector>>,
     pub(super) ax: Option<Managed<AxCollector>>,
+    pub(super) content_snapshot: Option<Managed<ContentSnapshotCollector>>,
     pub(super) eventtap: Option<Managed<EventTapCollector>>,
     pub(super) chrome: Option<Managed<ChromeCollector>>,
     chrome_eligibility: ChromeEligibilityPublisher,
     text_policy: TextContentPolicy,
     _secure_input_monitor: Option<SecureInputMonitor>,
-    _snapshot_trigger_receiver: Option<SnapshotTriggerReceiver>,
     pub(super) start_errors: BTreeMap<String, String>,
     pub(super) eventtap_start_gate: super::supervisor::EventTapStartGate,
 }
@@ -61,22 +61,17 @@ impl CollectorSet {
                     .content_snapshot_app_is_allowed(&chrome);
         let (chrome_eligibility, chrome_tracker) =
             chrome_eligibility_channel(config.filter.clone());
-        let text_policy = TextContentPolicy::new(chrome_tracker, config.filter.clone());
+        let text_policy = TextContentPolicy::new(chrome_tracker.clone(), config.filter.clone());
 
         let mut subscribers = Vec::new();
         let ax_lifecycle = capture_ax.then(|| subscriber(&mut subscribers));
+        let content_lifecycle = capture_content.then(|| subscriber(&mut subscribers));
         let chrome_lifecycle =
             (capture_browser || needs_chrome_privacy).then(|| subscriber(&mut subscribers));
         let workspace = (capture_app || capture_ax || capture_browser || needs_chrome_privacy)
             .then(|| Managed::new(WorkspaceCollector::new(subscribers)));
 
         let (click_sender, click_receiver) = click_channel();
-        let (snapshot_trigger_publisher, snapshot_trigger_receiver) = if capture_content {
-            let (publisher, receiver) = snapshot_trigger_channel();
-            (Some(publisher), Some(receiver))
-        } else {
-            (None, None)
-        };
         let focused_field = (capture_ax && capture_input).then(focused_field_channel);
         let (authorization_publisher, authorizations) = input_authorization_channel();
         let authorization_publisher = (capture_ax && capture_input && config.capture.text_content)
@@ -93,6 +88,29 @@ impl CollectorSet {
             }
         } else {
             (None, None)
+        };
+        let (snapshot_trigger_publisher, snapshot_trigger_receiver) =
+            if capture_content && secure_input_probe.is_some() {
+                let (publisher, receiver) = snapshot_trigger_channel();
+                (Some(publisher), Some(receiver))
+            } else {
+                (None, None)
+            };
+        let content_snapshot = match (
+            snapshot_trigger_receiver,
+            content_lifecycle,
+            secure_input_probe.clone(),
+        ) {
+            (Some(trigger), Some(lifecycle), Some(secure_input)) => {
+                Some(Managed::new(ContentSnapshotCollector::new(
+                    trigger,
+                    lifecycle,
+                    secure_input,
+                    chrome_tracker,
+                    config.filter.clone(),
+                )))
+            }
+            _ => None,
         };
         let ax = ax_lifecycle.map(|lifecycle| {
             Managed::new(AxCollector::new(
@@ -140,12 +158,12 @@ impl CollectorSet {
         Self {
             workspace,
             ax,
+            content_snapshot,
             eventtap,
             chrome,
             chrome_eligibility,
             text_policy,
             _secure_input_monitor: secure_input_monitor,
-            _snapshot_trigger_receiver: snapshot_trigger_receiver,
             start_errors,
             eventtap_start_gate: super::supervisor::EventTapStartGate::open(),
         }
@@ -155,19 +173,31 @@ impl CollectorSet {
         self.eventtap.is_some()
     }
 
-    pub(crate) fn replace_filter(&self, filter: FilterConfig) {
+    pub(crate) fn replace_filter(&mut self, filter: FilterConfig) {
+        self.chrome_eligibility.replace_filter(filter.clone());
         if let Some(ax) = &self.ax {
             ax.collector.replace_filter(filter.clone());
         } else {
             self.text_policy.replace_filter(filter.clone());
         }
-        self.chrome_eligibility.replace_filter(filter);
+        if let Some(content) = self.content_snapshot.as_mut() {
+            match content.collector.replace_filter(filter) {
+                Ok(()) => {
+                    self.start_errors.remove("content_snapshot");
+                }
+                Err(error) => {
+                    self.start_errors
+                        .insert("content_snapshot".to_owned(), error.to_string());
+                }
+            }
+        }
     }
 
     pub(crate) fn required_permissions(&self) -> BTreeSet<Permission> {
         let mut permissions = BTreeSet::new();
         extend_permissions(&mut permissions, self.workspace.as_ref());
         extend_permissions(&mut permissions, self.ax.as_ref());
+        extend_permissions(&mut permissions, self.content_snapshot.as_ref());
         extend_permissions(&mut permissions, self.eventtap.as_ref());
         extend_permissions(&mut permissions, self.chrome.as_ref());
         permissions

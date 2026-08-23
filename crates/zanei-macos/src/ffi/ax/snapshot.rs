@@ -3,9 +3,10 @@
 use std::{ffi::c_void, fmt, ptr};
 
 use super::cf::{CfRef, OwnedCf, cf_string, i64_value, string_value};
+use crate::content_snapshot::budget::AX_CALL_TIMEOUT;
 
-const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 0.1;
 const AX_ERROR_SUCCESS: i32 = 0;
+const AX_ERROR_CANNOT_COMPLETE: i32 = -25_204;
 const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
 const AX_ERROR_NO_VALUE: i32 = -25_212;
 const WRAPPER_CONTRACT_ERROR: i32 = -1;
@@ -103,6 +104,10 @@ impl SnapshotAxError {
 
     pub const fn pid(&self) -> i32 {
         self.pid
+    }
+
+    pub const fn is_timeout(&self) -> bool {
+        self.code == AX_ERROR_CANNOT_COMPLETE
     }
 }
 
@@ -348,7 +353,7 @@ impl SnapshotAxElement {
 }
 
 fn set_timeout(element: CfRef, pid: i32) -> Result<(), SnapshotAxError> {
-    let status = unsafe { AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECONDS) };
+    let status = unsafe { AXUIElementSetMessagingTimeout(element, AX_CALL_TIMEOUT.as_secs_f32()) };
     if status == AX_ERROR_SUCCESS {
         Ok(())
     } else {
@@ -539,6 +544,8 @@ mod tests {
             error.to_string(),
             "operation failed with AXError -25206 for pid 42"
         );
+        assert!(!error.is_timeout());
+        assert!(ax_error("operation", AX_ERROR_CANNOT_COMPLETE, 42).is_timeout());
     }
 
     #[test]
