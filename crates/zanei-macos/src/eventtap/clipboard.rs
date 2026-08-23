@@ -127,13 +127,12 @@ fn copy_text_allowed(
     text_policy: &TextContentPolicy,
 ) -> bool {
     let window_id = intent.context.window.as_ref().and_then(|window| window.id);
-    !secure_input
-        && intent.text_allowed
-        && text_policy.allows_window(
-            intent.context.app.bundle_id.as_deref(),
-            intent.context.app.pid,
-            window_id,
-        )
+    let app = zanei_core::schema::App {
+        name: intent.context.app.name.clone(),
+        bundle_id: intent.context.app.bundle_id.clone(),
+        pid: Some(intent.context.app.pid),
+    };
+    !secure_input && intent.text_allowed && text_policy.decision(&app, window_id).is_allowed()
 }
 
 #[cfg(test)]
@@ -172,7 +171,8 @@ mod tests {
     #[test]
     fn pasteboard_change_without_copy_intent_has_unknown_origin_and_no_body() {
         let mut tracker = ClipboardTracker::new(1);
-        let (_, chrome) = chrome_eligibility_channel(FilterConfig::default());
+        let filter = FilterConfig::default();
+        let (_, chrome) = chrome_eligibility_channel(filter.clone());
         let event = tracker
             .copy_event(
                 2,
@@ -180,7 +180,7 @@ mod tests {
                 Instant::now(),
                 text_content,
                 false,
-                &TextContentPolicy::new(chrome),
+                &TextContentPolicy::new(chrome, filter),
             )
             .expect("unknown copy event remains");
 
@@ -225,20 +225,27 @@ mod tests {
 
     #[test]
     fn non_chrome_policy_is_available_to_copy_path() {
-        let (_, chrome) = chrome_eligibility_channel(FilterConfig::default());
-        let policy = TextContentPolicy::new(chrome);
-        let app = context(7);
-        assert!(policy.allows_window(
-            app.app.bundle_id.as_deref(),
-            app.app.pid,
-            app.window.and_then(|window| window.id),
-        ));
+        let filter = FilterConfig::default();
+        let (_, chrome) = chrome_eligibility_channel(filter.clone());
+        let policy = TextContentPolicy::new(chrome, filter);
+        let context = context(7);
+        let app = zanei_core::schema::App {
+            name: context.app.name,
+            bundle_id: context.app.bundle_id,
+            pid: Some(context.app.pid),
+        };
+        assert!(
+            policy
+                .decision(&app, context.window.and_then(|window| window.id))
+                .is_allowed()
+        );
     }
 
     #[test]
     fn secure_input_suppresses_matched_copy_body() {
-        let (_, chrome) = chrome_eligibility_channel(FilterConfig::default());
-        let policy = TextContentPolicy::new(chrome);
+        let filter = FilterConfig::default();
+        let (_, chrome) = chrome_eligibility_channel(filter.clone());
+        let policy = TextContentPolicy::new(chrome, filter);
         let now = Instant::now();
         let app = context(7);
         let mut tracker = ClipboardTracker::new(1);
@@ -257,9 +264,20 @@ mod tests {
 
     #[test]
     fn missing_ax_tracking_suppresses_paste_body() {
-        let (_, chrome) = chrome_eligibility_channel(FilterConfig::default());
-        let policy = TextContentPolicy::new(chrome);
-        let text_allowed = policy.allows_input(Some("dev.example.App"), 7, Some(11), None);
+        let filter = FilterConfig::default();
+        let (_, chrome) = chrome_eligibility_channel(filter.clone());
+        let policy = TextContentPolicy::new(chrome, filter);
+        let text_allowed = policy
+            .input_decision(
+                &zanei_core::schema::App {
+                    name: "Example".to_owned(),
+                    bundle_id: Some("dev.example.App".to_owned()),
+                    pid: Some(7),
+                },
+                Some(11),
+                None,
+            )
+            .is_allowed();
 
         let data = paste_data(text_content, text_allowed, None);
 

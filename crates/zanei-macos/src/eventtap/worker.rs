@@ -26,11 +26,12 @@ use super::{
 use crate::{
     ax::ClickObservation,
     ffi::eventtap::{
-        self as native, EventTap, NativeContext, NativeEvent, Pasteboard, WakeObserver,
+        self as native, EventTap, EventTapConfig, NativeContext, NativeEvent, Pasteboard,
+        WakeObserver,
     },
     focused_field::FocusedFieldTracker,
     input_source::ImeState,
-    secure_input::SecureInputResponder,
+    secure_input::SecureInputProbe,
     text_capture::{InputAuthorizationPublisher, TextContentPolicy},
     trace,
 };
@@ -47,6 +48,7 @@ struct NativeApi {
     focused_fields: Option<FocusedFieldTracker>,
     input_authorizations: Option<InputAuthorizationPublisher>,
     ime_state: ImeState,
+    secure_input_probe: Option<SecureInputProbe>,
 }
 
 impl NativeApi {
@@ -58,6 +60,7 @@ impl NativeApi {
         focused_fields: Option<FocusedFieldTracker>,
         input_authorizations: Option<InputAuthorizationPublisher>,
         ime_state: ImeState,
+        secure_input_probe: Option<SecureInputProbe>,
     ) -> Self {
         Self {
             tap: None,
@@ -67,6 +70,7 @@ impl NativeApi {
             focused_fields,
             input_authorizations,
             ime_state,
+            secure_input_probe,
         }
     }
 
@@ -78,8 +82,10 @@ impl NativeApi {
         }
     }
 
-    fn try_next_event(&self) -> Option<NativeEvent> {
-        self.tap.as_ref().and_then(EventTap::try_next_event)
+    fn try_next_event(&self, text_policy: &TextContentPolicy) -> Option<NativeEvent> {
+        self.tap.as_ref().and_then(|tap| {
+            tap.try_next_event(|target| early_text_read_allowed(target, text_policy))
+        })
     }
 }
 
@@ -96,21 +102,26 @@ impl EventTapApi for NativeApi {
 
     fn recreate(&mut self) -> bool {
         self.tap = None;
-        self.tap = EventTap::create(
-            EVENT_QUEUE_CAPACITY,
-            self.mode,
-            Arc::clone(&self.dropped_events),
-            Arc::clone(&self.degraded_operations),
-            self.focused_fields.clone(),
-            self.input_authorizations.clone(),
-            self.ime_state.clone(),
-        )
+        self.tap = EventTap::create(EventTapConfig {
+            queue_capacity: EVENT_QUEUE_CAPACITY,
+            mode: self.mode,
+            dropped_events: Arc::clone(&self.dropped_events),
+            degraded_operations: Arc::clone(&self.degraded_operations),
+            focused_fields: self.focused_fields.clone(),
+            input_authorizations: self.input_authorizations.clone(),
+            ime_state: self.ime_state.clone(),
+            secure_input_probe: self.secure_input_probe.clone(),
+        })
         .ok();
         self.tap.is_some()
     }
 
     fn secure_input_enabled(&self) -> bool {
-        self.mode.captures_input() && native::secure_input_enabled()
+        self.mode.captures_text_content()
+            && self
+                .secure_input_probe
+                .as_ref()
+                .is_none_or(|probe| probe.enabled().unwrap_or(true))
     }
 }
 
@@ -126,7 +137,7 @@ pub(super) fn run(
     current_degraded: Arc<AtomicBool>,
     secure_input_enabled: Arc<AtomicBool>,
     input_authorizations: Option<InputAuthorizationPublisher>,
-    secure_input_responder: Option<&SecureInputResponder>,
+    secure_input_probe: Option<SecureInputProbe>,
     ime_state: ImeState,
     text_policy: TextContentPolicy,
     ready_sender: SyncSender<()>,
@@ -141,11 +152,12 @@ pub(super) fn run(
             focused_fields.clone(),
             input_authorizations,
             ime_state.clone(),
+            secure_input_probe,
         ),
         elapsed(started_at),
     );
     driver.watchdog(elapsed(started_at));
-    refresh_secure_input(&mut driver, secure_input_responder, &secure_input_enabled);
+    refresh_secure_input(&mut driver, &secure_input_enabled);
     let mut observed_degraded_entries = 0;
     record_degraded_entries(
         &driver,
@@ -166,8 +178,7 @@ pub(super) fn run(
     let _ = ready_sender.try_send(());
 
     while stop_receiver.try_recv().is_err() {
-        let secure_input_before =
-            refresh_secure_input(&mut driver, secure_input_responder, &secure_input_enabled);
+        let secure_input_before = refresh_secure_input(&mut driver, &secure_input_enabled);
         if let Some(clipboard) = clipboard.as_mut() {
             let change_before_events = pasteboard.change_count();
             if clipboard.has_changed(change_before_events) {
@@ -186,11 +197,10 @@ pub(super) fn run(
             }
         }
         driver.api_mut().run_once();
-        let secure_input_now =
-            refresh_secure_input(&mut driver, secure_input_responder, &secure_input_enabled);
+        let secure_input_now = refresh_secure_input(&mut driver, &secure_input_enabled);
         let now = elapsed(started_at);
         let mut events = Vec::new();
-        while let Some(event) = driver.api_mut().try_next_event() {
+        while let Some(event) = driver.api_mut().try_next_event(&text_policy) {
             events.push(event);
         }
         let pasteboard_change_count = clipboard.as_ref().map(|_| pasteboard.change_count());
@@ -263,6 +273,27 @@ pub(super) fn run(
     }
 }
 
+fn early_text_read_allowed(
+    target: Option<crate::ffi::eventtap::NativeInputTarget>,
+    text_policy: &TextContentPolicy,
+) -> bool {
+    let (Some(target), Some(context)) = (target, native::current_context()) else {
+        return false;
+    };
+    if i64::from(target.pid) != context.app.pid {
+        return false;
+    }
+    let app = zanei_core::schema::App {
+        name: context.app.name,
+        bundle_id: context.app.bundle_id,
+        pid: Some(context.app.pid),
+    };
+    let window_id = context.window.and_then(|window| window.id);
+    text_policy
+        .input_decision(&app, window_id, target.focused_field)
+        .is_allowed()
+}
+
 fn publish_current_health<A: EventTapApi>(
     driver: &Driver<A>,
     wake_recovery_degraded: bool,
@@ -323,18 +354,16 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             let focused_field = target.and_then(|target| target.focused_field);
             let field_kind = focused_field.and_then(|field| field.field_kind());
             let window_id = context.window.as_ref().and_then(|window| window.id);
-            let window_text_allowed = text_policy.allows_window(
-                context.app.bundle_id.as_deref(),
-                context.app.pid,
-                window_id,
-            );
+            let app = zanei_core::schema::App {
+                name: context.app.name.clone(),
+                bundle_id: context.app.bundle_id.clone(),
+                pid: Some(context.app.pid),
+            };
+            let window_text_allowed = text_policy.decision(&app, window_id).is_allowed();
             let input_text_allowed = capture_text_content
-                && text_policy.allows_input(
-                    context.app.bundle_id.as_deref(),
-                    context.app.pid,
-                    window_id,
-                    focused_field,
-                );
+                && text_policy
+                    .input_decision(&app, window_id, focused_field)
+                    .is_allowed();
             let key_event = raw_event(
                 "input.key",
                 context,

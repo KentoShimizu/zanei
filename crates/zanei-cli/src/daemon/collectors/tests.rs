@@ -59,6 +59,29 @@ fn content_snapshot_gate_is_independent_from_capture_sources() {
 }
 
 #[test]
+fn secure_input_monitor_is_created_only_for_an_enabled_consumer() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources.clear();
+    config.capture.text_content = false;
+    config.capture.content_snapshot = false;
+    assert!(CollectorSet::new(&config)._secure_input_monitor.is_none());
+
+    config.capture.text_content = true;
+    assert!(
+        CollectorSet::new(&config)._secure_input_monitor.is_none(),
+        "text opt-in without the input source has no Secure Input consumer"
+    );
+
+    config.capture.sources = vec![CaptureSource::Input];
+    assert!(CollectorSet::new(&config)._secure_input_monitor.is_some());
+
+    config.capture.sources.clear();
+    config.capture.text_content = false;
+    config.capture.content_snapshot = true;
+    assert!(CollectorSet::new(&config)._secure_input_monitor.is_some());
+}
+
+#[test]
 fn source_gate_drops_every_family_when_capture_is_disabled() {
     let gate = SourceGate::new(&[], false);
 

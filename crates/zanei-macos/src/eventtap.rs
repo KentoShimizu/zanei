@@ -26,7 +26,7 @@ use crate::{
     ax::ClickObservation,
     focused_field::FocusedFieldTracker,
     input_source::ImeState,
-    secure_input::SecureInputResponder,
+    secure_input::SecureInputProbe,
     text_capture::{InputAuthorizationPublisher, TextContentPolicy},
 };
 
@@ -37,7 +37,7 @@ pub struct EventTapCollector {
     click_sender: Option<SyncSender<ClickObservation>>,
     focused_fields: Option<FocusedFieldTracker>,
     input_authorizations: Option<InputAuthorizationPublisher>,
-    secure_input_responder: Option<SecureInputResponder>,
+    secure_input_probe: Option<SecureInputProbe>,
     text_policy: TextContentPolicy,
     ime_state: ImeState,
     input_source_prepared: bool,
@@ -56,7 +56,7 @@ impl EventTapCollector {
         click_sender: Option<SyncSender<ClickObservation>>,
         focused_fields: Option<FocusedFieldTracker>,
         input_authorizations: Option<InputAuthorizationPublisher>,
-        secure_input_responder: Option<SecureInputResponder>,
+        secure_input_probe: Option<SecureInputProbe>,
         text_policy: TextContentPolicy,
     ) -> Self {
         assert_eq!(
@@ -69,7 +69,7 @@ impl EventTapCollector {
             click_sender,
             focused_fields,
             input_authorizations,
-            secure_input_responder,
+            secure_input_probe,
             text_policy,
             ime_state: ImeState::new(),
             input_source_prepared: !mode.captures_text_content(),
@@ -151,7 +151,7 @@ impl Collector for EventTapCollector {
         let current_degraded = Arc::clone(&self.current_degraded);
         let secure_input_enabled = Arc::clone(&self.secure_input_enabled);
         let input_authorizations = self.input_authorizations.clone();
-        let secure_input_responder = self.secure_input_responder.take();
+        let secure_input_probe = self.secure_input_probe.clone();
         let ime_state = self.ime_state.clone();
         let text_policy = self.text_policy.clone();
         let (stop_sender, stop_receiver) = sync_channel(1);
@@ -170,21 +170,20 @@ impl Collector for EventTapCollector {
                     current_degraded,
                     secure_input_enabled,
                     input_authorizations,
-                    secure_input_responder.as_ref(),
+                    secure_input_probe,
                     ime_state,
                     text_policy,
                     ready_sender,
                 );
-                (focused_fields, secure_input_responder)
+                focused_fields
             })
             .map_err(|error| CollectorError::Start {
                 collector: self.name().to_owned(),
                 message: error.to_string(),
             })?;
         if ready_receiver.recv().is_err() {
-            if let Ok((focused_fields, secure_input_responder)) = handle.join() {
+            if let Ok(focused_fields) = handle.join() {
                 self.focused_fields = focused_fields;
-                self.secure_input_responder = secure_input_responder;
             }
             return Err(CollectorError::Start {
                 collector: self.name().to_owned(),
@@ -201,9 +200,8 @@ impl Collector for EventTapCollector {
             let _ = sender.try_send(());
         }
         if let Some(worker) = self.worker.take() {
-            if let Ok((focused_fields, secure_input_responder)) = worker.handle.join() {
+            if let Ok(focused_fields) = worker.handle.join() {
                 self.focused_fields = focused_fields;
-                self.secure_input_responder = secure_input_responder;
             }
         }
         self.current_degraded.store(false, Ordering::Relaxed);
@@ -212,7 +210,7 @@ impl Collector for EventTapCollector {
 }
 
 struct Worker {
-    handle: JoinHandle<(Option<FocusedFieldTracker>, Option<SecureInputResponder>)>,
+    handle: JoinHandle<Option<FocusedFieldTracker>>,
 }
 
 impl Drop for EventTapCollector {

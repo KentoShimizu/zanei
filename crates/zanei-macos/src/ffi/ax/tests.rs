@@ -13,7 +13,7 @@ use super::{
         VALUE_CHANGE_READ_SURFACE, ValueFieldSnapshot, focused_element_is_excluded, gated_value,
         value_length,
     },
-    secure_input_active,
+    runtime::secure_input_active,
     value_context::{
         DeferredResolution, DeferredValueContext, FocusedValueContext, after_target_preparation,
         classified_field_snapshot,
@@ -21,7 +21,7 @@ use super::{
 };
 use crate::{
     focused_field::FieldClass,
-    secure_input::secure_input_channel,
+    secure_input::secure_input_test_channel,
     text_capture::{
         FocusedTarget, VALUE_DEBOUNCE, ValueCapture, ValueObservation, input_authorization_channel,
     },
@@ -98,13 +98,13 @@ fn character_count_is_available_without_captured_content() {
 
 #[test]
 fn secure_input_or_probe_failure_is_fail_closed() {
-    let (probe, responder) = secure_input_channel();
+    let (probe, responder) = secure_input_test_channel();
     let degraded = AtomicU64::new(0);
     let response = thread::spawn(move || responder.respond_next(true));
     assert!(secure_input_active(true, Some(&probe), &degraded, "test"));
     response.join().expect("Secure Input response thread");
 
-    let (probe, responder) = secure_input_channel();
+    let (probe, responder) = secure_input_test_channel();
     drop(responder);
     assert!(secure_input_active(true, Some(&probe), &degraded, "test"));
     assert_eq!(degraded.load(Ordering::Relaxed), 1);
@@ -120,7 +120,7 @@ fn actual_secure_text_field_is_excluded_from_focus_snapshot() {
 
 #[test]
 fn secure_input_disabled_allows_authorized_text_capture() {
-    let (probe, responder) = secure_input_channel();
+    let (probe, responder) = secure_input_test_channel();
     let degraded = AtomicU64::new(0);
     let response = thread::spawn(move || responder.respond_next(false));
 

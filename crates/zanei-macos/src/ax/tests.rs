@@ -20,18 +20,23 @@ use super::{
 };
 use crate::{
     chrome::chrome_eligibility_channel,
-    ffi::ax::{NativeElement, NativeWindow},
+    ffi::ax::{ManualAccessibilityPolicy, NativeElement, NativeWindow},
     focused_field::{FieldClass, FocusedField, focused_field_channel},
     text_capture::{TextContentPolicy, input_authorization_channel},
 };
 
-fn text_policy() -> TextContentPolicy {
-    let (_, tracker) = chrome_eligibility_channel(FilterConfig::default());
-    TextContentPolicy::new(tracker)
+pub(super) fn text_policy() -> TextContentPolicy {
+    let filter = FilterConfig::default();
+    let (_, tracker) = chrome_eligibility_channel(filter.clone());
+    TextContentPolicy::new(tracker, filter)
 }
 
 fn builder() -> AxEventBuilder {
     AxEventBuilder::new(text_policy())
+}
+
+fn manual_accessibility_policy() -> ManualAccessibilityPolicy {
+    ManualAccessibilityPolicy::new(true, false, FilterConfig::default())
 }
 
 fn app() -> ApplicationInfo {
@@ -127,8 +132,9 @@ fn ui_events_derive_field_kind_from_the_ax_snapshot() {
 
 #[test]
 fn chrome_ui_value_text_follows_window_eligibility() {
-    let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
-    let mut builder = AxEventBuilder::new(TextContentPolicy::new(tracker));
+    let filter = FilterConfig::default();
+    let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
+    let mut builder = AxEventBuilder::new(TextContentPolicy::new(tracker, filter));
     builder.add_app(ApplicationInfo {
         name: "Google Chrome".to_owned(),
         bundle_id: Some("com.google.Chrome".to_owned()),
@@ -208,7 +214,12 @@ impl AxApi for FakeAxApi {
         self.running_applications.clone()
     }
 
-    fn attach(&mut self, pid: i32) -> Result<Vec<NativeAxEvent>, Self::AttachError> {
+    fn attach(
+        &mut self,
+        pid: i32,
+        _app: zanei_core::schema::App,
+        _manual_accessibility: bool,
+    ) -> Result<Vec<NativeAxEvent>, Self::AttachError> {
         self.attached_pids.push(pid);
         self.attach_results
             .pop_front()
@@ -265,6 +276,8 @@ fn run_fake_ax_loop(
         &click_receiver,
         None,
         text_policy(),
+        manual_accessibility_policy(),
+        None,
         &AtomicU64::new(0),
         degraded_operations,
         current_degraded_observers,
@@ -341,6 +354,7 @@ fn prohibited_application_is_skipped_before_pid_and_failure_accounting() {
         &mut builder,
         app_with_policy(i64::MAX, ApplicationActivationPolicy::Prohibited),
         None,
+        &manual_accessibility_policy(),
         &degraded_operations,
         &mut observer_health,
     );
@@ -372,6 +386,7 @@ fn attach_publishes_the_initial_focused_field() {
         &mut builder,
         app(),
         Some(&publisher),
+        &manual_accessibility_policy(),
         &AtomicU64::new(0),
         &mut observer_health,
     );

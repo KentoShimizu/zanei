@@ -43,6 +43,10 @@ impl AxEventBuilder {
             .retain(|(window_pid, _), _| *window_pid != pid);
     }
 
+    pub(super) fn app(&self, pid: i32) -> Option<ApplicationInfo> {
+        self.apps.get(&pid).cloned()
+    }
+
     pub(super) fn event(&mut self, event: NativeAxEvent) -> Option<RawEvent> {
         match event {
             NativeAxEvent::WindowFocused { pid, window } => {
@@ -110,7 +114,8 @@ impl AxEventBuilder {
                 let window_id = window.as_ref().and_then(|window| window.id);
                 if !self
                     .text_policy
-                    .allows_window(app.bundle_id.as_deref(), app.pid, window_id)
+                    .decision(&app.raw_app(), window_id)
+                    .is_allowed()
                 {
                     text = None;
                 }
@@ -173,9 +178,10 @@ impl AxEventBuilder {
             );
             return None;
         };
-        let capture_context =
-            self.text_policy
-                .capture_context(app.bundle_id.as_deref(), app.pid, window.id);
+        let capture_context = self
+            .text_policy
+            .decision(&app.raw_app(), window.id)
+            .capture_context();
         let event = RawEvent {
             source: "macos.ax".to_owned(),
             event_type: event_type.to_owned(),

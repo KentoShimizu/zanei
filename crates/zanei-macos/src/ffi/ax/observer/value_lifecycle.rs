@@ -21,6 +21,10 @@ impl AppObserver {
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
+        let capture_text_content = self
+            .focused_target
+            .current()
+            .is_some_and(|target| self.text_content_allowed(target.context.window.as_ref()));
         let (class_changed, value_event) = {
             let Some(target) = self.focused_target.current_mut() else {
                 crate::trace::trace!(
@@ -39,11 +43,8 @@ impl AppObserver {
             }
             let context = &mut target.context;
             let previous_class = context.field_class;
-            let snapshot = value_snapshot(
-                target.element.as_ptr(),
-                self.capture_text_content,
-                secure_input,
-            );
+            let snapshot =
+                value_snapshot(target.element.as_ptr(), capture_text_content, secure_input);
             crate::trace::trace!(
                 "component=ax phase=value action=observe pid={} target_generation={} field_class={} value_len={} degraded={}",
                 self.context.pid,
@@ -221,6 +222,10 @@ impl AppObserver {
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> FocusChangeResolution {
+        let capture_text_content = self
+            .focused_target
+            .current()
+            .is_some_and(|target| self.text_content_allowed(target.context.window.as_ref()));
         let Some(target) = self.focused_target.current_mut() else {
             return FocusChangeResolution::Immediate(None);
         };
@@ -228,11 +233,7 @@ impl AppObserver {
             return FocusChangeResolution::Immediate(None);
         }
         let context = &mut target.context;
-        let snapshot = value_snapshot(
-            target.element.as_ptr(),
-            self.capture_text_content,
-            secure_input,
-        );
+        let snapshot = value_snapshot(target.element.as_ptr(), capture_text_content, secure_input);
         if snapshot.degraded {
             self.degraded.fetch_add(1, Ordering::Relaxed);
             return match context

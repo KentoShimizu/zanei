@@ -12,8 +12,9 @@ use std::{
 
 use crate::{
     focused_field::{FieldClass, field_class},
-    text_capture::{FocusedTarget, InputAuthorizations},
+    text_capture::{FocusedTarget, InputAuthorizations, TextContentPolicy},
 };
+use zanei_core::schema::App;
 
 use super::{
     NativeAxError, NativeAxEvent, ObserverContext, TargetKind,
@@ -38,6 +39,9 @@ pub(super) struct AppObserver {
     stale_targets: Vec<RegisteredTarget>,
     degraded: Arc<AtomicU64>,
     capture_text_content: bool,
+    app: App,
+    text_policy: TextContentPolicy,
+    manual_accessibility: bool,
 }
 
 struct RegisteredTarget {
@@ -74,6 +78,9 @@ impl AppObserver {
         context: Box<ObserverContext>,
         degraded: Arc<AtomicU64>,
         capture_text_content: bool,
+        app: App,
+        text_policy: TextContentPolicy,
+        manual_accessibility: bool,
     ) -> Self {
         Self {
             application,
@@ -86,6 +93,9 @@ impl AppObserver {
             stale_targets: Vec::new(),
             degraded,
             capture_text_content,
+            app,
+            text_policy,
+            manual_accessibility,
         }
     }
 
@@ -93,9 +103,23 @@ impl AppObserver {
         set_manual_accessibility(
             self.application.as_ptr(),
             self.context.pid,
-            self.capture_text_content,
+            self.manual_accessibility,
             enabled,
         );
+    }
+
+    pub(super) fn update_attach(&mut self, app: App, manual_accessibility: bool) {
+        self.app = app;
+        if self.manual_accessibility == manual_accessibility {
+            return;
+        }
+        if self.manual_accessibility {
+            self.set_manual_accessibility(false);
+        }
+        self.manual_accessibility = manual_accessibility;
+        if self.manual_accessibility {
+            self.set_manual_accessibility(true);
+        }
     }
 
     pub(super) fn is_current_target(&self, kind: TargetKind, element: CfRef) -> bool {
@@ -141,7 +165,11 @@ impl AppObserver {
         let snapshot = target
             .as_ref()
             .map(|element| {
-                focused_element_snapshot(element.as_ptr(), self.capture_text_content, secure_input)
+                focused_element_snapshot(
+                    element.as_ptr(),
+                    |window| self.text_content_allowed(window),
+                    secure_input,
+                )
             })
             .transpose()?
             .flatten();
@@ -256,12 +284,13 @@ impl AppObserver {
                         "skipped"
                     }
                 );
+                let capture_text_content = self.text_content_allowed(snapshot.window.as_ref());
                 Ok(Some(RegisteredFocusedTarget {
                     element,
                     context: FocusedValueContext::new(
                         snapshot.window,
                         snapshot.element,
-                        self.capture_text_content,
+                        capture_text_content,
                         snapshot.text_baseline,
                         generation,
                         snapshot.field_class,
@@ -407,6 +436,14 @@ impl AppObserver {
 
     fn record_degraded(&self) {
         self.degraded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn text_content_allowed(&self, window: Option<&super::NativeWindow>) -> bool {
+        self.capture_text_content
+            && self
+                .text_policy
+                .decision(&self.app, window.and_then(|window| window.id))
+                .is_allowed()
     }
 }
 

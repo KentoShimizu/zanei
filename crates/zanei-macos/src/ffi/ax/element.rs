@@ -48,7 +48,7 @@ pub(super) struct ValueFieldSnapshot {
 
 pub(super) fn element_snapshot(
     element: CfRef,
-    capture_text_content: bool,
+    capture_text_content: impl FnOnce(Option<&NativeWindow>) -> bool,
 ) -> Result<Option<(Option<NativeWindow>, NativeElement)>, NativeAxError> {
     let subrole = copy_string(element, "AXSubrole")?;
     let role = copy_string(element, "AXRole")?;
@@ -60,6 +60,7 @@ pub(super) fn element_snapshot(
         .map(|window| window_snapshot(window.as_ptr()))
         .transpose()?
         .flatten();
+    let capture_text_content = capture_text_content(window.as_ref());
     let value = gated_value(capture_text_content, field_class, role.as_deref(), || {
         copy_string(element, "AXValue")
     })?;
@@ -85,7 +86,7 @@ pub(super) fn element_snapshot(
 
 pub(super) fn focused_element_snapshot(
     element: CfRef,
-    capture_text_content: bool,
+    capture_text_content: impl FnOnce(Option<&NativeWindow>) -> bool,
     secure_input: bool,
 ) -> Result<Option<FocusedElementSnapshot>, NativeAxError> {
     let subrole = copy_string(element, "AXSubrole")?;
@@ -99,6 +100,7 @@ pub(super) fn focused_element_snapshot(
         .map(|window| window_snapshot(window.as_ptr()))
         .transpose()?
         .flatten();
+    let capture_text_content = capture_text_content(window.as_ref());
     let (value, text_baseline) = match field_class {
         FieldClass::KnownText(_) => {
             let baseline = capture_text_content

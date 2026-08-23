@@ -8,19 +8,14 @@ use std::{
 use zanei_core::schema::ClickButton;
 
 use super::state::{DisableReason, Driver, EventTapApi, MonotonicTime};
-use crate::{ffi::eventtap::NativeDisableReason, secure_input::SecureInputResponder};
+use crate::ffi::eventtap::NativeDisableReason;
 
 pub(super) fn refresh_secure_input<A: EventTapApi>(
     driver: &mut Driver<A>,
-    responder: Option<&SecureInputResponder>,
     published: &std::sync::atomic::AtomicBool,
 ) -> bool {
-    let replies = responder.map(SecureInputResponder::take_pending);
     let enabled = driver.api_mut().secure_input_enabled();
     published.store(enabled, Ordering::Relaxed);
-    if let Some(replies) = replies {
-        SecureInputResponder::respond(replies, enabled);
-    }
     enabled
 }
 

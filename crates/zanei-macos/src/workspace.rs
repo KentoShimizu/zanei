@@ -42,7 +42,7 @@ pub struct ApplicationInfo {
 }
 
 impl ApplicationInfo {
-    fn raw_app(&self) -> App {
+    pub(crate) fn raw_app(&self) -> App {
         App {
             name: self.name.clone(),
             bundle_id: self.bundle_id.clone(),

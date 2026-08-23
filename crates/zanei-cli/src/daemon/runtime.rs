@@ -40,6 +40,13 @@ use crate::commands::RETIRED_STORE_DEGRADED_COMPONENT;
 use crate::permissions::{PermissionRequestOutcome, probe_permissions};
 use crate::store_access::{self, KeyAccess, KeyPrompt};
 
+mod config_reload;
+mod heartbeat;
+mod permission;
+
+use heartbeat::initial_heartbeat;
+pub(super) use permission::{configure_eventtap_start_gate, service_permission_request_worker};
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const PAUSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETENTION_PURGE_INTERVAL: time::Duration = time::Duration::minutes(10);
@@ -404,68 +411,6 @@ impl ActiveDaemon<'_> {
         Ok(())
     }
 
-    fn request_retention_reload(
-        &mut self,
-        requested_retention_hours: u64,
-        now: OffsetDateTime,
-    ) -> Result<bool, DaemonError> {
-        if requested_retention_hours == self.active_retention_hours {
-            self.pending_retention_hours = None;
-            self.degraded.remove("retention");
-            return Ok(false);
-        }
-        self.pending_retention_hours = Some(requested_retention_hours);
-        self.retry_pending_retention(now)
-    }
-
-    fn retry_pending_retention(&mut self, now: OffsetDateTime) -> Result<bool, DaemonError> {
-        let Some(retention_hours) = self.pending_retention_hours else {
-            return Ok(false);
-        };
-        let purge_result = apply_retention(
-            &mut *lock_writer(self.writer)?,
-            self.store_path,
-            now,
-            retention_hours,
-            self.degraded,
-        );
-        match purge_result {
-            Ok(_) => {
-                self.active_retention_hours = retention_hours;
-                self.pending_retention_hours = None;
-                self.degraded.remove("retention");
-                self.publish_heartbeat()?;
-                Ok(true)
-            }
-            Err(error) => {
-                self.degraded
-                    .insert("retention".to_owned(), error.to_string());
-                Ok(false)
-            }
-        }
-    }
-
-    fn purge_active_retention(&mut self, now: OffsetDateTime) -> Result<(), DaemonError> {
-        let purge_result = apply_retention(
-            &mut *lock_writer(self.writer)?,
-            self.store_path,
-            now,
-            self.active_retention_hours,
-            self.degraded,
-        );
-        match purge_result {
-            Ok(_) if self.pending_retention_hours.is_none() => {
-                self.degraded.remove("retention");
-            }
-            Ok(_) => {}
-            Err(error) => {
-                self.degraded
-                    .insert("retention".to_owned(), error.to_string());
-            }
-        }
-        Ok(())
-    }
-
     fn sync_store_intake(&mut self) -> Result<(), DaemonError> {
         let accepts_intake = self.pipeline.store_health()?.accepts_intake();
         match (accepts_intake, self.intake_suspended) {
@@ -511,28 +456,6 @@ impl ActiveDaemon<'_> {
         Ok(())
     }
 
-    fn publish_heartbeat(&mut self) -> Result<(), DaemonError> {
-        let permissions = self.refresh_permissions();
-        self.publish_heartbeat_with_permissions(permissions)
-    }
-
-    fn refresh_permissions(&mut self) -> Option<DaemonPermissions> {
-        if self.permission_request_worker.is_some() {
-            return None;
-        }
-        match probe_permissions(&self.collectors.required_permissions()) {
-            Ok(permissions) => {
-                self.degraded.remove("permissions");
-                self.last_permissions = Some(permissions.clone());
-            }
-            Err(error) => {
-                self.degraded
-                    .insert("permissions".to_owned(), error.to_string());
-            }
-        }
-        self.last_permissions.clone()
-    }
-
     fn poll_permission_request(&mut self) {
         let start_now = !*self.paused && !self.intake_suspended;
         service_permission_request_worker(
@@ -548,103 +471,6 @@ impl ActiveDaemon<'_> {
             },
         );
     }
-
-    fn publish_heartbeat_with_permissions(
-        &mut self,
-        permissions: Option<DaemonPermissions>,
-    ) -> Result<(), DaemonError> {
-        match self.reader.status() {
-            Ok(status) => {
-                self.last_status = status;
-                self.degraded.remove("store_read");
-            }
-            Err(error) => {
-                self.degraded
-                    .insert("store_read".to_owned(), error.to_string());
-            }
-        }
-        let collector_health = self.collectors.health();
-        let mut degraded = self.degraded.clone();
-        degraded.extend(self.pipeline.degraded()?);
-        degraded.extend(collector_health.degraded);
-        self.pipeline.heartbeat(DaemonState {
-            pid: Some(i64::from(self.owner.pid)),
-            started_at: Some(self.owner.started_at.clone()),
-            instance_id: Some(self.owner.instance_id.clone()),
-            mode: Some(self.owner.mode),
-            heartbeat_at: Some(format_timestamp(OffsetDateTime::now_utc())),
-            retention_hours: Some(self.active_retention_hours),
-            paused_until: self.last_status.paused_until.clone(),
-            events_captured: self.last_status.events_captured,
-            events_dropped: self
-                .base_dropped
-                .saturating_add(collector_health.dropped)
-                .saturating_add(self.pipeline.dropped()),
-            last_event_ts: self.last_status.last_event_ts.clone(),
-            degraded,
-            collector_failures: merge_collector_failures(
-                self.base_collector_failures,
-                &collector_health.collector_failures,
-            ),
-            permissions,
-        })
-    }
-}
-
-pub(super) fn configure_eventtap_start_gate(
-    status: Option<Result<PermissionStatus, PermissionError>>,
-    gate: &mut super::supervisor::EventTapStartGate,
-    degraded: &mut BTreeMap<String, String>,
-) {
-    let Some(status) = status else {
-        return;
-    };
-    if !matches!(status, Ok(PermissionStatus::Granted)) {
-        gate.defer();
-    }
-    if let Err(error) = status {
-        degraded.insert("permissions".to_owned(), error.to_string());
-    }
-}
-
-pub(super) fn service_permission_request_worker(
-    worker: &mut Option<PermissionRequestWorker>,
-    degraded: &mut BTreeMap<String, String>,
-    start_now: bool,
-    on_complete: impl FnOnce(bool),
-) {
-    let Some(active_worker) = worker.as_ref() else {
-        return;
-    };
-    let result = match active_worker.poll() {
-        PermissionRequestPoll::Pending => return,
-        PermissionRequestPoll::Complete(result) => result,
-        PermissionRequestPoll::Stopped => {
-            *worker = None;
-            degraded.insert(
-                "permission_request".to_owned(),
-                PERMISSION_REQUEST_WORKER_STOPPED_MESSAGE.to_owned(),
-            );
-            on_complete(start_now);
-            return;
-        }
-    };
-    *worker = None;
-    match result {
-        Ok(PermissionRequestOutcome::Completed) => {
-            degraded.remove("permission_request");
-        }
-        Ok(PermissionRequestOutcome::TimedOut) => {
-            degraded.insert(
-                "permission_request".to_owned(),
-                PERMISSION_REQUEST_TIMEOUT_MESSAGE.to_owned(),
-            );
-        }
-        Err(error) => {
-            degraded.insert("permission_request".to_owned(), error.to_string());
-        }
-    }
-    on_complete(start_now);
 }
 
 fn initialize_permission_dependent_runtime<T>(
@@ -654,28 +480,6 @@ fn initialize_permission_dependent_runtime<T>(
 ) -> Result<T, DaemonError> {
     writer.write_daemon_state(initial_heartbeat)?;
     initialize()
-}
-
-fn initial_heartbeat(
-    owner: &StoreOwner,
-    retention_hours: u64,
-    status: &StoreStatus,
-) -> DaemonState {
-    DaemonState {
-        pid: Some(i64::from(owner.pid)),
-        started_at: Some(owner.started_at.clone()),
-        instance_id: Some(owner.instance_id.clone()),
-        mode: Some(owner.mode),
-        heartbeat_at: Some(format_timestamp(OffsetDateTime::now_utc())),
-        retention_hours: Some(retention_hours),
-        paused_until: status.paused_until.clone(),
-        events_captured: status.events_captured,
-        events_dropped: status.events_dropped,
-        last_event_ts: status.last_event_ts.clone(),
-        degraded: BTreeMap::new(),
-        collector_failures: status.collector_failures.clone(),
-        permissions: None,
-    }
 }
 
 fn ensure_pipeline_running(

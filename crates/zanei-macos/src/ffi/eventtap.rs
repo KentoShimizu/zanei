@@ -1,4 +1,4 @@
-//! Safe ownership boundary for CGEventTap and Carbon Secure Input calls.
+//! Safe ownership boundary for CGEventTap calls.
 
 mod appkit;
 mod authorization;
@@ -25,6 +25,7 @@ use crate::{
     },
     focused_field::{FocusedField, FocusedFieldTracker},
     input_source::ImeState,
+    secure_input::{SecureInputProbe, SecureInputProbeError},
     text_capture::{InputAuthorization, InputAuthorizationPublisher},
 };
 
@@ -117,6 +118,8 @@ struct CallbackContext {
     focused_fields: Option<FocusedFieldTracker>,
     input_authorizations: Option<InputAuthorizationPublisher>,
     ime_state: ImeState,
+    secure_input_probe: Option<SecureInputProbe>,
+    capture_text_content: bool,
 }
 
 pub(crate) struct EventTap {
@@ -128,26 +131,31 @@ pub(crate) struct EventTap {
     capture_text_content: bool,
 }
 
+pub(crate) struct EventTapConfig {
+    pub(crate) queue_capacity: usize,
+    pub(crate) mode: EventTapMode,
+    pub(crate) dropped_events: Arc<AtomicU64>,
+    pub(crate) degraded_operations: Arc<AtomicU64>,
+    pub(crate) focused_fields: Option<FocusedFieldTracker>,
+    pub(crate) input_authorizations: Option<InputAuthorizationPublisher>,
+    pub(crate) ime_state: ImeState,
+    pub(crate) secure_input_probe: Option<SecureInputProbe>,
+}
+
 impl EventTap {
-    pub(crate) fn create(
-        queue_capacity: usize,
-        mode: EventTapMode,
-        dropped_events: Arc<AtomicU64>,
-        degraded_operations: Arc<AtomicU64>,
-        focused_fields: Option<FocusedFieldTracker>,
-        input_authorizations: Option<InputAuthorizationPublisher>,
-        ime_state: ImeState,
-    ) -> Result<Self, &'static str> {
-        let (sender, receiver) = sync_channel(queue_capacity);
+    pub(crate) fn create(config: EventTapConfig) -> Result<Self, &'static str> {
+        let (sender, receiver) = sync_channel(config.queue_capacity);
         let mut callback = Box::new(CallbackContext {
             sender,
-            dropped_events,
-            degraded_operations,
-            focused_fields,
-            input_authorizations,
-            ime_state,
+            dropped_events: config.dropped_events,
+            degraded_operations: config.degraded_operations,
+            focused_fields: config.focused_fields,
+            input_authorizations: config.input_authorizations,
+            ime_state: config.ime_state,
+            secure_input_probe: config.secure_input_probe,
+            capture_text_content: config.mode.captures_text_content(),
         });
-        let mask = event_mask_for(mode);
+        let mask = event_mask_for(config.mode);
         // SAFETY: callback remains boxed for the complete tap lifetime.
         let tap = unsafe {
             CGEventTapCreate(
@@ -185,7 +193,7 @@ impl EventTap {
             run_loop,
             receiver,
             _callback: callback,
-            capture_text_content: mode.captures_text_content(),
+            capture_text_content: config.mode.captures_text_content(),
         })
     }
 
@@ -203,7 +211,10 @@ impl EventTap {
         run_loop_once(timeout);
     }
 
-    pub(crate) fn try_next_event(&self) -> Option<NativeEvent> {
+    pub(crate) fn try_next_event(
+        &self,
+        text_read_allowed: impl FnOnce(Option<NativeInputTarget>) -> bool,
+    ) -> Option<NativeEvent> {
         match self.receiver.try_recv() {
             Ok(QueuedEvent::Disabled(reason)) => Some(NativeEvent::Disabled(reason)),
             Ok(QueuedEvent::Event {
@@ -219,6 +230,7 @@ impl EventTap {
                 secure_input,
                 ime_active,
                 self.capture_text_content,
+                text_read_allowed,
             )),
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
         }
@@ -247,11 +259,6 @@ pub(crate) fn run_loop_once(timeout: Duration) {
     unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout.as_secs_f64(), 1) };
 }
 
-pub(crate) fn secure_input_enabled() -> bool {
-    // SAFETY: Called only from the EventTap thread because Carbon marks it not thread-safe.
-    unsafe { IsSecureEventInputEnabled() != 0 }
-}
-
 extern "C" fn event_callback(
     _proxy: *mut c_void,
     event_type: u32,
@@ -268,7 +275,12 @@ extern "C" fn event_callback(
                 return event;
             };
             let occurred_at = Instant::now();
-            let secure_input = event_type == EVENT_KEY_DOWN && secure_input_enabled();
+            let secure_input = event_type == EVENT_KEY_DOWN
+                && secure_input_active(
+                    context.capture_text_content,
+                    context.secure_input_probe.as_ref(),
+                    &context.degraded_operations,
+                );
             let ime_active = event_type == EVENT_KEY_DOWN && context.ime_state.active();
             let input_target = (event_type == EVENT_KEY_DOWN)
                 .then(|| input_target(event.as_ptr(), context.focused_fields.as_ref()))
@@ -311,6 +323,41 @@ extern "C" fn event_callback(
     event
 }
 
+fn secure_input_active(
+    capture_text_content: bool,
+    probe: Option<&SecureInputProbe>,
+    degraded_operations: &AtomicU64,
+) -> bool {
+    if !capture_text_content {
+        return false;
+    }
+    let Some(probe) = probe else {
+        crate::trace::trace!(
+            "component=eventtap event=secure_input_probe enabled=true reason=probe_missing"
+        );
+        degraded_operations.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    match probe.enabled() {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            crate::trace::trace!(
+                "component=eventtap event=secure_input_probe enabled=true error={}",
+                secure_input_error(error)
+            );
+            degraded_operations.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+    }
+}
+
+const fn secure_input_error(error: SecureInputProbeError) -> &'static str {
+    match error {
+        SecureInputProbeError::Disconnected => "disconnected",
+        SecureInputProbeError::Timeout => "timeout",
+    }
+}
+
 fn decode_event(
     event: &RetainedEvent,
     input_target: Option<NativeInputTarget>,
@@ -318,6 +365,7 @@ fn decode_event(
     secure_input: bool,
     ime_active: bool,
     capture_text_content: bool,
+    text_read_allowed: impl FnOnce(Option<NativeInputTarget>) -> bool,
 ) -> NativeEvent {
     // SAFETY: event owns a valid CGEventRef while all fields are read.
     unsafe {
@@ -347,6 +395,7 @@ fn decode_event(
                             secure_input,
                             ime_active,
                             known_text_field,
+                            text_read_allowed(input_target),
                         )
                         .then(|| event_text(raw)),
                     },
@@ -390,8 +439,9 @@ const fn should_read_key_text(
     secure_input: bool,
     ime_active: bool,
     known_text_field: bool,
+    text_scope_allowed: bool,
 ) -> bool {
-    capture_text_content && !secure_input && !ime_active && known_text_field
+    capture_text_content && !secure_input && !ime_active && known_text_field && text_scope_allowed
 }
 
 unsafe fn event_text(event: CfMutableRef) -> String {
@@ -451,15 +501,16 @@ mod tests {
         let ime_active_at_callback = true;
         let ime_active_during_processing = false;
 
-        let text_was_read = should_read_key_text(true, false, ime_active_at_callback, true);
+        let text_was_read = should_read_key_text(true, false, ime_active_at_callback, true, true);
 
         assert!(!(text_was_read && !ime_active_during_processing));
     }
 
     #[test]
     fn missing_ax_tracking_blocks_key_text_at_the_callback() {
-        assert!(!should_read_key_text(true, false, false, false));
-        assert!(should_read_key_text(true, false, false, true));
+        assert!(!should_read_key_text(true, false, false, false, true));
+        assert!(!should_read_key_text(true, false, false, true, false));
+        assert!(should_read_key_text(true, false, false, true, true));
     }
 
     #[test]
@@ -535,9 +586,4 @@ unsafe extern "C" {
     fn CFRunLoopRemoveSource(run_loop: CfRef, source: CfRef, mode: CfRef);
     fn CFRunLoopRunInMode(mode: CfRef, seconds: c_double, return_after_handled: u8) -> i32;
     fn CFRunLoopSourceInvalidate(source: CfMutableRef);
-}
-
-#[link(name = "Carbon", kind = "framework")]
-unsafe extern "C" {
-    fn IsSecureEventInputEnabled() -> u8;
 }

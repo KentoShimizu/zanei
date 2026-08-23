@@ -34,8 +34,9 @@ use crate::{
 };
 
 fn text_policy() -> TextContentPolicy {
-    let (_, tracker) = chrome_eligibility_channel(FilterConfig::default());
-    TextContentPolicy::new(tracker)
+    let filter = FilterConfig::default();
+    let (_, tracker) = chrome_eligibility_channel(filter.clone());
+    TextContentPolicy::new(tracker, filter)
 }
 
 fn raw() -> RawEvent {

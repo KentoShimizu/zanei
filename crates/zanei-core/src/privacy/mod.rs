@@ -16,6 +16,14 @@ use redactor::redact_event;
 /// scope rules apply to it alone.
 pub const CHROME_BUNDLE_ID: &str = "com.google.Chrome";
 
+/// Selects one of the three independently configured privacy scopes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivacyScope {
+    AllEvents,
+    TextContent,
+    ContentSnapshot,
+}
+
 #[derive(Clone, Debug)]
 pub struct PrivacyFilter {
     config: FilterConfig,
@@ -35,11 +43,7 @@ impl PrivacyFilter {
             mut event,
             capture_context,
         } = normalized;
-        if !app_is_allowed(
-            &event.app,
-            &self.config.include_only_apps,
-            &self.config.exclude_apps,
-        ) {
+        if !app_is_allowed_for(PrivacyScope::AllEvents, &event.app, &self.config) {
             return None;
         }
 
@@ -48,21 +52,23 @@ impl PrivacyFilter {
         } else {
             capture_context.website_host
         };
-        let global_host_allowed = host_scope_is_allowed(
+        let global_host_allowed = website_scope_is_allowed(
+            PrivacyScope::AllEvents,
             &event.app,
             website_host.as_deref(),
-            &self.config.include_only_websites,
-            &self.config.exclude_websites,
+            &self.config,
         );
         if event.event_type.starts_with("browser.") && !global_host_allowed {
             return None;
         }
 
         if !global_host_allowed
-            || !scoped_event_is_allowed(
+            || !app_is_allowed_for(PrivacyScope::TextContent, &event.app, &self.config)
+            || !website_scope_is_allowed(
+                PrivacyScope::TextContent,
                 &event.app,
                 website_host.as_deref(),
-                &self.config.text_content,
+                &self.config,
             )
         {
             suppress_text_content(&mut event.data, &mut event.element);
@@ -82,33 +88,64 @@ impl PrivacyFilter {
     #[must_use]
     pub fn content_snapshot_is_allowed(&self, app: &App, website_host: Option<&str>) -> bool {
         self.content_snapshot_app_is_allowed(app)
-            && host_scope_is_allowed(
+            && website_scope_is_allowed(
+                PrivacyScope::ContentSnapshot,
                 app,
                 website_host,
-                &self.config.include_only_websites,
-                &self.config.exclude_websites,
-            )
-            && host_scope_is_allowed(
-                app,
-                website_host,
-                &self.config.content_snapshot.include_only_websites,
-                &self.config.content_snapshot.exclude_websites,
+                &self.config,
             )
     }
 
     /// Reports whether global and snapshot-specific app rules can include `app`.
     #[must_use]
     pub fn content_snapshot_app_is_allowed(&self, app: &App) -> bool {
-        app_is_allowed(
-            app,
-            &self.config.include_only_apps,
-            &self.config.exclude_apps,
-        ) && app_is_allowed(
-            app,
-            &self.config.content_snapshot.include_only_apps,
-            &self.config.content_snapshot.exclude_apps,
-        )
+        app_is_allowed_for(PrivacyScope::ContentSnapshot, app, &self.config)
     }
+}
+
+/// Applies the shared app matcher for the selected privacy scope.
+#[must_use]
+pub fn app_is_allowed_for(scope: PrivacyScope, app: &App, config: &FilterConfig) -> bool {
+    app_is_allowed(app, &config.include_only_apps, &config.exclude_apps)
+        && match scope {
+            PrivacyScope::AllEvents => true,
+            PrivacyScope::TextContent => app_is_allowed(
+                app,
+                &config.text_content.include_only_apps,
+                &config.text_content.exclude_apps,
+            ),
+            PrivacyScope::ContentSnapshot => app_is_allowed(
+                app,
+                &config.content_snapshot.include_only_apps,
+                &config.content_snapshot.exclude_apps,
+            ),
+        }
+}
+
+/// Applies the shared host matcher for the selected privacy scope.
+///
+/// `host` must already have been parsed by [`website_host`]. Missing hosts are denied.
+#[must_use]
+pub fn host_is_allowed_for(scope: PrivacyScope, host: Option<&str>, config: &FilterConfig) -> bool {
+    host.is_some_and(|host| {
+        host_is_allowed(
+            host,
+            &config.include_only_websites,
+            &config.exclude_websites,
+        ) && match scope {
+            PrivacyScope::AllEvents => true,
+            PrivacyScope::TextContent => host_is_allowed(
+                host,
+                &config.text_content.include_only_websites,
+                &config.text_content.exclude_websites,
+            ),
+            PrivacyScope::ContentSnapshot => host_is_allowed(
+                host,
+                &config.content_snapshot.include_only_websites,
+                &config.content_snapshot.exclude_websites,
+            ),
+        }
+    })
 }
 
 /// Removes optional text bodies while preserving the event and its factual metadata.
@@ -146,13 +183,8 @@ pub fn suppress_text_content(data: &mut EventData, element: &mut Option<Element>
 /// when the URL cannot be classified.
 #[must_use]
 pub fn website_is_allowed(url: &str, config: &FilterConfig) -> bool {
-    extract_url_host(url).is_some_and(|host| {
-        host_is_allowed(
-            &host,
-            &config.include_only_websites,
-            &config.exclude_websites,
-        )
-    })
+    let host = extract_url_host(url);
+    host_is_allowed_for(PrivacyScope::AllEvents, host.as_deref(), config)
 }
 
 /// Extracts a normalized host for capture-only website policy context.
@@ -161,30 +193,16 @@ pub fn website_host(url: &str) -> Option<String> {
     extract_url_host(url)
 }
 
-fn host_scope_is_allowed(
+fn website_scope_is_allowed(
+    scope: PrivacyScope,
     app: &App,
     host: Option<&str>,
-    include_only: &[String],
-    exclude: &[String],
+    config: &FilterConfig,
 ) -> bool {
     if app.bundle_id.as_deref() != Some(CHROME_BUNDLE_ID) {
         return true;
     }
-    host.is_some_and(|host| host_is_allowed(host, include_only, exclude))
-}
-
-fn scoped_event_is_allowed(
-    app: &App,
-    host: Option<&str>,
-    config: &crate::config::ScopedFilterConfig,
-) -> bool {
-    app_is_allowed(app, &config.include_only_apps, &config.exclude_apps)
-        && host_scope_is_allowed(
-            app,
-            host,
-            &config.include_only_websites,
-            &config.exclude_websites,
-        )
+    host_is_allowed_for(scope, host, config)
 }
 
 fn browser_url(event: &Event) -> Option<&str> {

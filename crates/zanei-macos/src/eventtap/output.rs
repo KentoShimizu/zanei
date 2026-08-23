@@ -30,16 +30,16 @@ pub(super) fn raw_event(
         );
         return None;
     };
-    let capture_context =
-        text_policy.capture_context(context.app.bundle_id.as_deref(), context.app.pid, window.id);
+    let app = App {
+        name: context.app.name.clone(),
+        bundle_id: context.app.bundle_id.clone(),
+        pid: Some(context.app.pid),
+    };
+    let capture_context = text_policy.decision(&app, window.id).capture_context();
     Some(RawEvent {
         source: SOURCE.to_owned(),
         event_type: event_type.to_owned(),
-        app: App {
-            name: context.app.name.clone(),
-            bundle_id: context.app.bundle_id.clone(),
-            pid: Some(context.app.pid),
-        },
+        app,
         window: Some(Window {
             title: window.title.clone(),
             id: window.id,
