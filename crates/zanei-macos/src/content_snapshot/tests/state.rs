@@ -10,7 +10,7 @@ fn key(pid: i64, window_id: i64) -> SnapshotWindowKey {
 }
 
 #[test]
-fn hashes_and_times_commit_only_after_successful_delivery() {
+fn hashes_and_times_commit_only_after_delivery_or_quarantine_reservation() {
     let base = Instant::now();
     let mut state = SnapshotState::new(base);
     let first = key(7, 11);

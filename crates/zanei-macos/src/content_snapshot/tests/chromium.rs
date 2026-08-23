@@ -123,7 +123,10 @@ fn chromium_profile_produces_snapshot_through_trigger_scheduler_and_worker() {
             );
         })
         .expect("spawn content worker");
-    let secure_worker = thread::spawn(move || secure_responder.respond_next(false));
+    let secure_worker = thread::spawn(move || {
+        secure_responder.respond_next(false);
+        secure_responder.respond_next(false);
+    });
 
     assert!(trigger_publisher.publish(SnapshotTrigger {
         app: chrome_app(),

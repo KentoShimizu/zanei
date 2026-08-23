@@ -24,6 +24,19 @@ const RESTART_DELAYS: [Duration; 5] = [
 ];
 const RESTART_STABLE_AFTER: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct CollectorCounters {
+    pub(super) dropped: u64,
+    pub(super) failures: u64,
+}
+
+impl CollectorCounters {
+    pub(super) fn accumulate(&mut self, counters: Self) {
+        self.dropped = self.dropped.saturating_add(counters.dropped);
+        self.failures = self.failures.saturating_add(counters.failures);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CollectorKind {
     ContentSnapshot,
@@ -98,7 +111,19 @@ impl CollectorSet {
 
     pub(super) fn remove_chrome_collector(&mut self) {
         stop_collector(&mut self.chrome, StopMode::Discard);
-        self.chrome = None;
+        if let Some(chrome) = self.chrome.take() {
+            let counters = removed_collector_counters(
+                CollectorCounters {
+                    dropped: chrome.collector.dropped_events(),
+                    failures: chrome.collector.degraded_operations(),
+                },
+                chrome.relay_dropped,
+            );
+            self.retained_collector_health
+                .entry("chrome".to_owned())
+                .or_default()
+                .accumulate(counters);
+        }
         self.start_errors.remove("chrome");
     }
 
@@ -122,8 +147,8 @@ impl CollectorSet {
         permissions: Option<&DaemonPermissions>,
         now: Instant,
     ) -> Result<(), DaemonError> {
-        // Preserve startup ordering: content consumes AX triggers, and AX/Chrome/content
-        // consume workspace lifecycle notifications.
+        // Preserve startup ordering: content consumes AX triggers, AX/content consume
+        // workspace lifecycle notifications, and Chrome consumes AX focus transitions.
         supervise_collector(
             &mut self.content_snapshot,
             sender,
@@ -169,6 +194,10 @@ impl CollectorSet {
             degraded: self.start_errors.clone(),
             ..CollectorHealth::default()
         };
+        for (name, counters) in &self.retained_collector_health {
+            health.dropped = health.dropped.saturating_add(counters.dropped);
+            add_failure_count(&mut health.collector_failures, name, counters.failures);
+        }
         if let Some(workspace) = self.workspace.as_ref() {
             health.dropped = health
                 .dropped
@@ -249,6 +278,16 @@ impl CollectorSet {
             );
         }
         health
+    }
+}
+
+pub(super) fn removed_collector_counters(
+    current: CollectorCounters,
+    relay_dropped: u64,
+) -> CollectorCounters {
+    CollectorCounters {
+        dropped: current.dropped.saturating_add(relay_dropped),
+        failures: current.failures,
     }
 }
 
@@ -533,6 +572,7 @@ fn permissions_granted(required: &BTreeSet<Permission>, permissions: &DaemonPerm
 
 fn add_failure_count(failures: &mut BTreeMap<String, u64>, collector: &str, count: u64) {
     if count > 0 {
-        failures.insert(collector.to_owned(), count);
+        let total = failures.entry(collector.to_owned()).or_default();
+        *total = total.saturating_add(count);
     }
 }

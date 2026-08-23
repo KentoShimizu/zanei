@@ -50,9 +50,12 @@ pub(super) fn emit(
             },
             version,
         );
+        // Conservatively reserve limits now: even a later quarantine drop consumes
+        // the global interval and daily budget, preventing unbounded held snapshots.
+        state.commit_save(key, hash, bytes, Instant::now());
         trace_candidate(
             &candidate,
-            "quarantine",
+            "quarantine_reserved",
             output.nodes,
             output.elapsed,
             bytes,
@@ -88,36 +91,12 @@ pub(super) fn emit(
 
 pub(super) fn emit_released(
     events: Vec<RawEvent>,
-    state: &mut SnapshotState,
     sender: &SyncSender<RawEvent>,
     health: &SharedHealth,
 ) {
     for event in events {
-        let key = event
-            .app
-            .pid
-            .zip(event.window.as_ref().and_then(|window| window.id));
-        let (hash, bytes) = match &event.data {
-            EventData::ContentSnapshot(data) => data
-                .text
-                .as_deref()
-                .map_or((0, 0), |body| (SnapshotState::text_hash(body), body.len())),
-            _ => (0, 0),
-        };
-        match sender.try_send(event) {
-            Ok(()) => {
-                if let Some((pid, window_id)) = key {
-                    state.commit_save(
-                        SnapshotWindowKey { pid, window_id },
-                        hash,
-                        bytes,
-                        Instant::now(),
-                    );
-                }
-            }
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
-                health.dropped.fetch_add(1, Ordering::Relaxed);
-            }
+        if sender.try_send(event).is_err() {
+            health.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

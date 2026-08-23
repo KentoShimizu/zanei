@@ -85,11 +85,9 @@ pub(super) fn run_worker_with_scanner<F>(
         }
         emit_released(
             quarantine.release(Instant::now(), &capture_policy),
-            state,
             &sender,
             &health,
         );
-        service_lifecycle(lifecycle, &mut scheduler, state);
         let wait = scheduler
             .next_deadline()
             .map_or(WORKER_POLL_INTERVAL, |deadline| {
@@ -98,13 +96,17 @@ pub(super) fn run_worker_with_scanner<F>(
                     .unwrap_or(Duration::ZERO)
                     .min(WORKER_POLL_INTERVAL)
             });
-        match trigger.recv_timeout(wait) {
-            Ok(observation) => {
-                health.processed_triggers.fetch_add(1, Ordering::Relaxed);
-                scheduler.observe(observation);
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        let observation = match trigger.recv_timeout(wait) {
+            Ok(observation) => Some(observation),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        // Content subscribes before AX, so a wake reset is queued before the
+        // focus resync trigger derived from it. Drain lifecycle before re-seeding.
+        service_lifecycle(lifecycle, &mut scheduler, state);
+        if let Some(observation) = observation {
+            health.processed_triggers.fetch_add(1, Ordering::Relaxed);
+            scheduler.observe(observation);
         }
         while let Some(candidate) = scheduler.take_due(Instant::now()) {
             process_candidate(
@@ -126,7 +128,7 @@ pub(super) fn run_worker_with_scanner<F>(
         }
         update_degraded(&health, state, Instant::now());
     }
-    emit_released(quarantine.flush(), state, &sender, &health);
+    emit_released(quarantine.flush(), &sender, &health);
     scheduler.stop();
 }
 
@@ -297,11 +299,7 @@ fn process_candidate<F>(
         u64::try_from(output.degraded_nodes).expect("degraded node count must fit u64"),
         Ordering::Relaxed,
     );
-    if stop.load(Ordering::Acquire) {
-        trace_output(&candidate, "stopped", &output);
-        return;
-    }
-    if output.cutoff == Some(SnapshotCutoff::Stopped) {
+    if stop.load(Ordering::Acquire) || output.cutoff == Some(SnapshotCutoff::Stopped) {
         trace_output(&candidate, "stopped", &output);
         return;
     }
@@ -318,6 +316,10 @@ fn process_candidate<F>(
             SaveBlock::DailyBudget => "daily_budget",
         };
         trace_output(&candidate, gate, &output);
+        return;
+    }
+    if !policy.secure_input_allows() {
+        trace_output(&candidate, "secure_input", &output);
         return;
     }
     emit(

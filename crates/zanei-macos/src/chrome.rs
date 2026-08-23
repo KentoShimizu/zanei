@@ -30,7 +30,6 @@ use crate::{
         Snapshot as NativeSnapshot,
     },
     focus_context::{FocusContext, FocusTransition, FocusTransitionReceiver},
-    workspace::WorkspaceEvent,
 };
 
 use zanei_core::privacy::CHROME_BUNDLE_ID;
@@ -41,11 +40,10 @@ use worker::{ChromeWorkerReceivers, run_worker};
 #[cfg(test)]
 use worker::{
     ChromeWorkerState, EVENT_SOURCE, EVENT_TYPE, NavigationTracker, ObservationOutcome,
-    SnapshotError, handle_focus_transition, handle_observation_trigger, handle_workspace_event,
-    observe_once, service_on_demand,
+    SnapshotError, handle_focus_transition, handle_observation_trigger, observe_once,
+    service_on_demand,
 };
 pub struct ChromeCollector {
-    workspace_events: Option<Receiver<WorkspaceEvent>>,
     focus_transitions: Option<FocusTransitionReceiver>,
     observation_triggers: Option<Receiver<ObservationTrigger>>,
     eligibility: ChromeEligibilityPublisher,
@@ -57,7 +55,6 @@ pub struct ChromeCollector {
 impl ChromeCollector {
     #[must_use]
     pub fn new(
-        workspace_events: Receiver<WorkspaceEvent>,
         eligibility: ChromeEligibilityPublisher,
         focus_context: FocusContext,
         observer: ChromeObserver,
@@ -65,7 +62,6 @@ impl ChromeCollector {
         let focus_transitions = focus_context.subscribe();
         let observation_triggers = observer.subscribe();
         Self {
-            workspace_events: Some(workspace_events),
             focus_transitions: Some(focus_transitions),
             observation_triggers: Some(observation_triggers),
             eligibility,
@@ -94,10 +90,7 @@ impl ChromeCollector {
             return;
         };
         runtime.stop.store(true, Ordering::Release);
-        if let Ok((workspace_events, focus_transitions, observation_triggers)) =
-            runtime.handle.join()
-        {
-            self.workspace_events = Some(workspace_events);
+        if let Ok((focus_transitions, observation_triggers)) = runtime.handle.join() {
             self.focus_transitions = Some(focus_transitions);
             self.observation_triggers = Some(observation_triggers);
         }
@@ -119,13 +112,6 @@ impl Collector for ChromeCollector {
                 collector: COLLECTOR_NAME.to_owned(),
             });
         }
-        let workspace_events =
-            self.workspace_events
-                .take()
-                .ok_or_else(|| CollectorError::Start {
-                    collector: COLLECTOR_NAME.to_owned(),
-                    message: "workspace event receiver is unavailable".to_owned(),
-                })?;
         let focus_transitions =
             self.focus_transitions
                 .take()
@@ -161,11 +147,10 @@ impl Collector for ChromeCollector {
                     Err(error) => {
                         metrics.degraded.fetch_add(1, Ordering::Relaxed);
                         let _ = startup_sender.send(Err(error.to_string()));
-                        return (workspace_events, focus_transitions, observation_triggers);
+                        return (focus_transitions, observation_triggers);
                     }
                 };
                 let receivers = ChromeWorkerReceivers {
-                    workspace: &workspace_events,
                     focus: &focus_transitions,
                     observations: &observation_triggers,
                 };
@@ -179,9 +164,10 @@ impl Collector for ChromeCollector {
                     initial_focus.map(|focus| FocusTransition {
                         previous: None,
                         current: Some(focus),
+                        resynced: false,
                     }),
                 );
-                (workspace_events, focus_transitions, observation_triggers)
+                (focus_transitions, observation_triggers)
             })
             .map_err(|error| CollectorError::Start {
                 collector: COLLECTOR_NAME.to_owned(),
@@ -194,8 +180,7 @@ impl Collector for ChromeCollector {
                 Ok(())
             }
             Ok(Err(message)) => {
-                if let Ok((workspace, focus, triggers)) = handle.join() {
-                    self.workspace_events = Some(workspace);
+                if let Ok((focus, triggers)) = handle.join() {
                     self.focus_transitions = Some(focus);
                     self.observation_triggers = Some(triggers);
                 }
@@ -205,8 +190,7 @@ impl Collector for ChromeCollector {
                 })
             }
             Err(error) => {
-                if let Ok((workspace, focus, triggers)) = handle.join() {
-                    self.workspace_events = Some(workspace);
+                if let Ok((focus, triggers)) = handle.join() {
                     self.focus_transitions = Some(focus);
                     self.observation_triggers = Some(triggers);
                 }
@@ -231,11 +215,7 @@ impl Drop for ChromeCollector {
 
 struct ChromeRuntime {
     stop: Arc<AtomicBool>,
-    handle: JoinHandle<(
-        Receiver<WorkspaceEvent>,
-        FocusTransitionReceiver,
-        Receiver<ObservationTrigger>,
-    )>,
+    handle: JoinHandle<(FocusTransitionReceiver, Receiver<ObservationTrigger>)>,
 }
 
 #[derive(Clone, Default)]

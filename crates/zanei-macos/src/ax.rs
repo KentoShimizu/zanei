@@ -328,9 +328,7 @@ fn run_ax_loop(
         output.send_all(pending);
     }
     if let Some(app) = api.frontmost_application() {
-        let window = i32::try_from(app.pid)
-            .ok()
-            .and_then(|pid| api.focused_window(pid).ok().flatten());
+        let window = focused_window(api, &app);
         publish_focus_transition(
             snapshot_trigger_publisher,
             focus_context.activate(app, window),
@@ -360,9 +358,7 @@ fn run_ax_loop(
                         &mut observer_health,
                     );
                     output.send_all(pending);
-                    let window = i32::try_from(app.pid)
-                        .ok()
-                        .and_then(|pid| api.focused_window(pid).ok().flatten());
+                    let window = focused_window(api, &app);
                     publish_focus_transition(
                         snapshot_trigger_publisher,
                         focus_context.activate(app, window),
@@ -391,7 +387,16 @@ fn run_ax_loop(
                         builder.remove_app(pid);
                     }
                 }
-                WorkspaceEvent::DidWake => {}
+                WorkspaceEvent::DidWake => {
+                    let transition = api.frontmost_application().map_or_else(
+                        || focus_context.resync_without_focus(),
+                        |app| {
+                            let window = focused_window(api, &app);
+                            focus_context.resync(app, window)
+                        },
+                    );
+                    publish_focus_transition(snapshot_trigger_publisher, Some(transition));
+                }
             }
         }
         for click in click_receiver
@@ -440,6 +445,12 @@ fn run_ax_loop(
     );
     output.flush();
     observer_health.clear();
+}
+
+fn focused_window(api: &mut impl AxApi, app: &ApplicationInfo) -> Option<NativeWindow> {
+    i32::try_from(app.pid)
+        .ok()
+        .and_then(|pid| api.focused_window(pid).ok().flatten())
 }
 
 fn send_observations(

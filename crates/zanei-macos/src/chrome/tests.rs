@@ -164,6 +164,7 @@ fn chrome_focus_transition_queries_immediately() {
                 focused_field: None,
                 field_generation: 1,
             }),
+            resynced: false,
         },
         &mut api,
         &sender,
@@ -177,7 +178,7 @@ fn chrome_focus_transition_queries_immediately() {
 }
 
 #[test]
-fn wake_invalidates_text_eligibility_until_the_next_trigger() {
+fn wake_resync_invalidates_then_reseeds_text_eligibility() {
     let mut state = ChromeWorkerState {
         navigation: NavigationTracker::default(),
         frontmost: Some(chrome_app()),
@@ -191,11 +192,82 @@ fn wake_invalidates_text_eligibility_until_the_next_trigger() {
             url: "https://example.com".to_owned(),
         },
     );
+    eligibility.observe(
+        99,
+        super::ChromeEligibilityObservation::Normal {
+            window_id: Some(9),
+            url: "https://stale.example".to_owned(),
+        },
+    );
     assert!(text.allows_text(42, Some(7)));
+    assert!(text.allows_text(99, Some(9)));
 
-    handle_workspace_event(WorkspaceEvent::DidWake, &mut state, &eligibility);
+    let mut api = FakeApi::new([Ok(ChromeObservation::Snapshot(snapshot(
+        "window-1",
+        "tab-1",
+        "https://example.com/after-wake",
+        "After wake",
+    )))]);
+    let (sender, receiver) = sync_channel(1);
+    assert!(handle_focus_transition(
+        FocusTransition {
+            previous: None,
+            current: Some(crate::focus_context::FocusSnapshot {
+                app: chrome_app(),
+                window: None,
+                generation: 2,
+                focused_field: None,
+                field_generation: 1,
+            }),
+            resynced: true,
+        },
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
+
+    assert_eq!(api.query_count, 1);
+    assert!(text.allows_text(42, Some(7)));
+    assert!(!text.allows_text(99, Some(9)));
+    assert!(receiver.try_recv().is_ok());
+}
+
+#[test]
+fn wake_resync_without_focus_clears_stale_text_eligibility() {
+    let mut state = ChromeWorkerState {
+        navigation: NavigationTracker::default(),
+        frontmost: Some(chrome_app()),
+        on_demand: None,
+    };
+    let (eligibility, text) = chrome_eligibility_channel(FilterConfig::default());
+    eligibility.observe(
+        42,
+        super::ChromeEligibilityObservation::Normal {
+            window_id: Some(7),
+            url: "https://before-sleep.example".to_owned(),
+        },
+    );
+    let mut api = FakeApi::new([]);
+    let (sender, _receiver) = sync_channel(1);
+
+    assert!(handle_focus_transition(
+        FocusTransition {
+            previous: None,
+            current: None,
+            resynced: true,
+        },
+        &mut api,
+        &sender,
+        &mut state,
+        &ChromeMetrics::default(),
+        &eligibility,
+    ));
 
     assert!(!text.allows_text(42, Some(7)));
+    assert!(state.frontmost.is_none());
+    assert_eq!(api.query_count, 0);
 }
 
 #[test]

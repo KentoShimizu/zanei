@@ -24,7 +24,10 @@ use crate::{
     daemon::{
         permission_worker::PermissionRequestWorker,
         runtime::{configure_eventtap_start_gate, service_permission_request_worker},
-        supervisor::{CollectorKind, EventTapStartGate, START_ORDER, STOP_ORDER},
+        supervisor::{
+            CollectorCounters, CollectorKind, EventTapStartGate, START_ORDER, STOP_ORDER,
+            removed_collector_counters,
+        },
     },
     permissions::PermissionRequestOutcome,
 };
@@ -123,6 +126,63 @@ fn content_snapshot_health_uses_the_stable_component_name() {
     assert_eq!(
         health.degraded.get("content_snapshot").map(String::as_str),
         Some("simulated content worker failure")
+    );
+}
+
+#[test]
+fn chrome_health_is_monotonic_across_remove_and_readd() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    let mut collectors = CollectorSet::new(&config);
+    collectors.retained_collector_health.insert(
+        "chrome".to_owned(),
+        CollectorCounters {
+            dropped: 2,
+            failures: 3,
+        },
+    );
+    collectors
+        .chrome
+        .as_mut()
+        .expect("Chrome collector")
+        .relay_dropped = 5;
+    let before_remove = collectors.health();
+
+    collectors.remove_chrome_collector();
+    let after_remove = collectors.health();
+    assert_eq!(after_remove.dropped, before_remove.dropped);
+    assert_eq!(
+        after_remove.collector_failures.get("chrome"),
+        before_remove.collector_failures.get("chrome")
+    );
+
+    collectors.add_chrome_collector();
+    collectors
+        .chrome
+        .as_mut()
+        .expect("re-added Chrome collector")
+        .relay_dropped = 7;
+    let after_readd = collectors.health();
+    assert_eq!(after_readd.dropped, before_remove.dropped + 7);
+    assert_eq!(after_readd.collector_failures.get("chrome"), Some(&3));
+}
+
+#[test]
+fn removed_collector_counters_fold_current_and_relay_totals() {
+    let current = removed_collector_counters(
+        CollectorCounters {
+            dropped: 5,
+            failures: 7,
+        },
+        11,
+    );
+
+    assert_eq!(
+        current,
+        CollectorCounters {
+            dropped: 16,
+            failures: 7,
+        }
     );
 }
 
@@ -358,6 +418,53 @@ fn content_snapshot_permission_matrix_honors_global_and_scoped_app_rules() {
         CollectorSet::new(&config).required_permissions(),
         BTreeSet::from([accessibility])
     );
+}
+
+#[test]
+fn browser_source_honors_global_chrome_scope_at_startup() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+
+    for filter in [
+        zanei_core::config::FilterConfig {
+            exclude_apps: vec!["com.google.Chrome".to_owned()],
+            ..zanei_core::config::FilterConfig::default()
+        },
+        zanei_core::config::FilterConfig {
+            include_only_apps: vec!["com.apple.Safari".to_owned()],
+            ..zanei_core::config::FilterConfig::default()
+        },
+    ] {
+        config.filter = filter;
+        let collectors = CollectorSet::new(&config);
+
+        assert!(!chrome_tracking_required(&config.capture, &config.filter));
+        assert!(collectors.chrome.is_none());
+        assert_eq!(
+            collectors.required_permissions(),
+            BTreeSet::from([Permission::Accessibility])
+        );
+    }
+}
+
+#[test]
+fn global_filter_reload_reconciles_browser_chrome_topology_without_applescript() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    config
+        .filter
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    let mut collectors = CollectorSet::new(&config);
+    assert!(collectors.chrome.is_none());
+
+    let mut admitted = config.filter.clone();
+    admitted.exclude_apps.clear();
+    collectors.replace_filter(admitted);
+    assert!(collectors.chrome.is_some());
+
+    collectors.replace_filter(config.filter);
+    assert!(collectors.chrome.is_none());
 }
 
 #[test]

@@ -3,8 +3,9 @@
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicU64, Ordering},
-    mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
+    mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError, sync_channel},
 };
+use std::time::Duration;
 
 use crate::{
     ffi::window_list::NativeWindow, focused_field::FocusedField, workspace::ApplicationInfo,
@@ -25,6 +26,7 @@ pub struct FocusSnapshot {
 pub struct FocusTransition {
     pub previous: Option<FocusSnapshot>,
     pub current: Option<FocusSnapshot>,
+    pub(crate) resynced: bool,
 }
 
 #[derive(Clone, Default)]
@@ -97,20 +99,42 @@ impl FocusContext {
         app: ApplicationInfo,
         window: Option<NativeWindow>,
     ) -> Option<FocusTransition> {
-        self.transition_to(Some((app, window)))
+        self.transition_to(Some((app, window)), false)
+    }
+
+    #[must_use]
+    pub(crate) fn resync(
+        &self,
+        app: ApplicationInfo,
+        window: Option<NativeWindow>,
+    ) -> FocusTransition {
+        self.resync_to(Some((app, window)))
+    }
+
+    #[must_use]
+    pub(crate) fn resync_without_focus(&self) -> FocusTransition {
+        self.resync_to(None)
+    }
+
+    fn resync_to(
+        &self,
+        candidate: Option<(ApplicationInfo, Option<NativeWindow>)>,
+    ) -> FocusTransition {
+        self.transition_to(candidate, true)
+            .expect("a forced focus resync always publishes a transition")
     }
 
     pub(crate) fn observe_window(&self, pid: i32, window: NativeWindow) -> Option<FocusTransition> {
         let current = self.current()?;
         (current.app.pid == i64::from(pid))
-            .then(|| self.transition_to(Some((current.app, Some(window)))))
+            .then(|| self.transition_to(Some((current.app, Some(window))), false))
             .flatten()
     }
 
     pub(crate) fn terminate(&self, pid: i64) -> Option<FocusTransition> {
         self.current()
             .filter(|current| current.app.pid == pid)
-            .and_then(|_| self.transition_to(None))
+            .and_then(|_| self.transition_to(None, false))
     }
 
     pub(crate) fn update_focused_field(&self, pid: i32, focused_field: Option<FocusedField>) {
@@ -135,12 +159,13 @@ impl FocusContext {
     fn transition_to(
         &self,
         candidate: Option<(ApplicationInfo, Option<NativeWindow>)>,
+        force: bool,
     ) -> Option<FocusTransition> {
         let mut state = self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if same_identity(state.current.as_ref(), candidate.as_ref()) {
+        if !force && same_identity(state.current.as_ref(), candidate.as_ref()) {
             if let Some((app, window)) = candidate
                 && let Some(current) = state.current.as_mut()
             {
@@ -172,6 +197,7 @@ impl FocusContext {
         let transition = FocusTransition {
             previous: std::mem::replace(&mut state.current, current.clone()),
             current,
+            resynced: force,
         };
         state
             .subscribers
@@ -206,6 +232,13 @@ fn same_field_scope(
 }
 
 impl FocusTransitionReceiver {
+    pub(crate) fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<FocusTransition, RecvTimeoutError> {
+        self.receiver.recv_timeout(timeout)
+    }
+
     pub fn try_recv(&self) -> Result<FocusTransition, TryRecvError> {
         self.receiver.try_recv()
     }
@@ -331,6 +364,54 @@ mod tests {
                 .and_then(|value| value.title.as_deref()),
             Some("Renamed")
         );
+        assert_eq!(context.generation(), 2);
+    }
+
+    #[test]
+    fn resync_always_increments_generation_and_publishes_the_current_identity() {
+        let context = FocusContext::new();
+        context.activate(app(7), Some(window(11, "First")));
+        let transitions = context.subscribe();
+        let before = context.current().expect("initial focus");
+
+        let transition = context.resync(app(7), Some(window(11, "First")));
+
+        assert_eq!(transition.previous.as_ref(), Some(&before));
+        let identity = |snapshot: &FocusSnapshot| {
+            (
+                snapshot.app.pid,
+                snapshot.window.as_ref().and_then(|window| window.id),
+            )
+        };
+        assert_eq!(
+            transition.previous.as_ref().map(identity),
+            transition.current.as_ref().map(identity)
+        );
+        assert_eq!(
+            transition
+                .current
+                .as_ref()
+                .map(|current| current.generation),
+            Some(before.generation + 1)
+        );
+        assert!(transition.resynced);
+        assert_eq!(transitions.try_recv(), Ok(transition));
+        assert_eq!(context.generation(), before.generation + 1);
+    }
+
+    #[test]
+    fn resync_without_focus_clears_stale_identity_and_publishes() {
+        let context = FocusContext::new();
+        context.activate(app(7), Some(window(11, "Before sleep")));
+        let transitions = context.subscribe();
+
+        let transition = context.resync_without_focus();
+
+        assert!(transition.previous.is_some());
+        assert!(transition.current.is_none());
+        assert!(transition.resynced);
+        assert_eq!(transitions.try_recv(), Ok(transition));
+        assert!(context.current().is_none());
         assert_eq!(context.generation(), 2);
     }
 

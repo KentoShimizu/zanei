@@ -20,10 +20,11 @@ pub(super) fn publish_focus_transition(
     let Some(window) = current.window else {
         return;
     };
-    let title_only = transition.previous.as_ref().is_some_and(|previous| {
-        previous.app.pid == current.app.pid
-            && previous.window.as_ref().and_then(|window| window.id) == window.id
-    });
+    let title_only = !transition.resynced
+        && transition.previous.as_ref().is_some_and(|previous| {
+            previous.app.pid == current.app.pid
+                && previous.window.as_ref().and_then(|window| window.id) == window.id
+        });
     publisher.publish(SnapshotTrigger {
         app: current.app,
         window,
@@ -93,6 +94,23 @@ mod tests {
         assert_eq!(
             receiver.try_recv().expect("title trigger").kind,
             SnapshotTriggerKind::Title
+        );
+    }
+
+    #[test]
+    fn resync_projects_a_focus_trigger_even_when_the_title_changed() {
+        let context = FocusContext::new();
+        context.activate(app(7), Some(window(11, "Before sleep")));
+        let (publisher, receiver) = snapshot_trigger_channel();
+
+        publish_focus_transition(
+            Some(&publisher),
+            Some(context.resync(app(7), Some(window(11, "After wake")))),
+        );
+
+        assert_eq!(
+            receiver.try_recv().expect("wake focus trigger").kind,
+            SnapshotTriggerKind::Focus
         );
     }
 }

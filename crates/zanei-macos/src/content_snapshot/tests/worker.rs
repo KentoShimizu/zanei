@@ -1,13 +1,31 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{channel, sync_channel},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
-use crate::content_snapshot::{
-    SnapshotAxError,
-    tests::walker::FakeNode,
-    worker::{SnapshotApplication, scan_application},
+use zanei_core::config::FilterConfig;
+
+use crate::{
+    CapturePolicy,
+    chrome::{ChromeObserver, chrome_eligibility_channel},
+    content_snapshot::{
+        SharedHealth, SnapshotAxError, SnapshotTriggerKind, SnapshotWalkOutput,
+        snapshot_trigger_channel,
+        state::SnapshotState,
+        tests::walker::FakeNode,
+        worker::{SnapshotApplication, run_worker_with_scanner, scan_application},
+    },
+    focus_context::FocusContext,
+    secure_input::secure_input_test_channel,
+    workspace::notification_channel,
 };
+
+use super::support::trigger;
 
 #[derive(Clone)]
 struct FakeApplication {
@@ -76,4 +94,70 @@ fn unknown_candidate_window_id_fails_closed() {
             .is_none()
     );
     assert_eq!(reads.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn secure_input_enabled_after_walk_discards_the_snapshot() {
+    let (trigger_publisher, trigger_receiver) = snapshot_trigger_channel();
+    let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
+    let (_control, controls) = channel();
+    let (sender, events) = sync_channel(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let focus_context = FocusContext::new();
+    let target = trigger(
+        7,
+        11,
+        SnapshotTriggerKind::Focus,
+        Instant::now() - Duration::from_secs(3),
+    );
+    focus_context.activate(target.app.clone(), Some(target.window.clone()));
+    let filter = FilterConfig::default();
+    let (_chrome_publisher, chrome) = chrome_eligibility_channel(filter.clone());
+    let (secure_input, secure_responder) = secure_input_test_channel();
+    let policy = CapturePolicy::new(chrome, filter, Some(secure_input));
+    let scan_calls = Arc::new(AtomicUsize::new(0));
+    let observed_scan_calls = Arc::clone(&scan_calls);
+    let worker_stop = Arc::clone(&stop);
+    let worker = thread::Builder::new()
+        .name("zanei-content".to_owned())
+        .spawn(move || {
+            let mut state = SnapshotState::new(Instant::now());
+            run_worker_with_scanner(
+                &trigger_receiver,
+                &lifecycle_receiver,
+                controls,
+                worker_stop,
+                sender,
+                policy,
+                ChromeObserver::new(),
+                SharedHealth::default(),
+                &mut state,
+                focus_context,
+                move |_pid, _window_id, _stop| {
+                    observed_scan_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(Some(SnapshotWalkOutput {
+                        text: "private".to_owned(),
+                        nodes: 1,
+                        ax_calls: 1,
+                        elapsed: Duration::from_millis(1),
+                        complete: true,
+                        cutoff: None,
+                        degraded_nodes: 0,
+                    }))
+                },
+            );
+        })
+        .expect("spawn content worker");
+    let secure_worker = thread::spawn(move || {
+        secure_responder.respond_next(false);
+        secure_responder.respond_next(true);
+    });
+
+    assert!(trigger_publisher.publish(target));
+    secure_worker.join().expect("Secure Input responder");
+    stop.store(true, Ordering::Release);
+    worker.join().expect("content worker");
+
+    assert_eq!(scan_calls.load(Ordering::Relaxed), 1);
+    assert!(events.try_recv().is_err());
 }

@@ -25,6 +25,7 @@ use super::{
 use crate::{
     CapturePolicy,
     chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
+    content_snapshot::{SnapshotTriggerKind, snapshot_trigger_channel},
     ffi::ax::{ManualAccessibilityPolicy, NativeElement, NativeWindow},
     focus_context::FocusContext,
     focused_field::{FieldClass, FocusedField},
@@ -456,6 +457,93 @@ fn frontmost_focus_notification_updates_focus_context() {
             class: FieldClass::KnownText(FieldKind::Text),
         })
     );
+}
+
+#[test]
+fn did_wake_resyncs_focus_and_publishes_a_focus_trigger() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut api = FakeAxApi {
+        frontmost_application: Some(app()),
+        focused_window: Some(window()),
+        stop_after_poll: Some(Arc::clone(&stop)),
+        ..FakeAxApi::default()
+    };
+    let (lifecycle_sender, lifecycle_receiver) = sync_channel(1);
+    lifecycle_sender
+        .send(WorkspaceEvent::DidWake)
+        .expect("queue wake event");
+    let (_click_sender, click_receiver) = click_channel();
+    let (output_sender, _output_receiver) = sync_channel(1);
+    let focus_context = FocusContext::new();
+    focus_context.activate(app(), Some(window()));
+    let (trigger_publisher, trigger_receiver) = snapshot_trigger_channel();
+    let current_degraded_observers = Arc::new(AtomicU64::new(0));
+
+    run_ax_loop(
+        &mut api,
+        stop.as_ref(),
+        &output_sender,
+        &lifecycle_receiver,
+        &click_receiver,
+        capture_policy(),
+        None,
+        manual_accessibility_policy(),
+        focus_context.clone(),
+        Some(&trigger_publisher),
+        &AtomicU64::new(0),
+        &AtomicU64::new(0),
+        current_degraded_observers,
+    );
+
+    assert_eq!(
+        trigger_receiver
+            .try_recv()
+            .expect("wake resync trigger")
+            .kind,
+        SnapshotTriggerKind::Focus
+    );
+    assert_eq!(focus_context.generation(), 2);
+}
+
+#[test]
+fn did_wake_without_frontmost_app_clears_stale_focus() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut api = FakeAxApi {
+        stop_after_poll: Some(Arc::clone(&stop)),
+        ..FakeAxApi::default()
+    };
+    let (lifecycle_sender, lifecycle_receiver) = sync_channel(1);
+    lifecycle_sender
+        .send(WorkspaceEvent::DidWake)
+        .expect("queue wake event");
+    let (_click_sender, click_receiver) = click_channel();
+    let (output_sender, _output_receiver) = sync_channel(1);
+    let focus_context = FocusContext::new();
+    focus_context.activate(app(), Some(window()));
+    let transitions = focus_context.subscribe();
+    let current_degraded_observers = Arc::new(AtomicU64::new(0));
+
+    run_ax_loop(
+        &mut api,
+        stop.as_ref(),
+        &output_sender,
+        &lifecycle_receiver,
+        &click_receiver,
+        capture_policy(),
+        None,
+        manual_accessibility_policy(),
+        focus_context.clone(),
+        None,
+        &AtomicU64::new(0),
+        &AtomicU64::new(0),
+        current_degraded_observers,
+    );
+
+    let transition = transitions.try_recv().expect("wake clear transition");
+    assert!(transition.resynced);
+    assert!(transition.current.is_none());
+    assert!(focus_context.current().is_none());
+    assert_eq!(focus_context.generation(), 2);
 }
 
 #[test]

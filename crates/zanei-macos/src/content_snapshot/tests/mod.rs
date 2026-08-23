@@ -2,6 +2,7 @@ mod budget;
 mod chromium;
 mod collector;
 mod event;
+mod output;
 mod policy;
 mod role;
 mod scheduler;

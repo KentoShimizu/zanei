@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     focus_context::{FocusTransition, FocusTransitionReceiver},
-    workspace::{ApplicationInfo, WorkspaceEvent},
+    workspace::ApplicationInfo,
 };
 
 pub(super) const EVENT_SOURCE: &str = "macos.applescript";
@@ -29,7 +29,6 @@ const WORKER_WAKE_INTERVAL: Duration = Duration::from_millis(100);
 const ON_DEMAND_DEBOUNCE: Duration = Duration::from_millis(200);
 
 pub(super) struct ChromeWorkerReceivers<'a> {
-    pub(super) workspace: &'a Receiver<WorkspaceEvent>,
     pub(super) focus: &'a FocusTransitionReceiver,
     pub(super) observations: &'a Receiver<ObservationTrigger>,
 }
@@ -59,8 +58,20 @@ pub(super) fn run_worker<A: ChromeApi>(
                     .saturating_duration_since(Instant::now())
                     .min(WORKER_WAKE_INTERVAL)
             });
-        match receivers.workspace.recv_timeout(wait) {
-            Ok(event) => handle_workspace_event(event, &mut state, eligibility),
+        match receivers.focus.recv_timeout(wait) {
+            Ok(transition) => {
+                if !handle_focus_transition(
+                    transition,
+                    api,
+                    sender,
+                    &mut state,
+                    metrics,
+                    eligibility,
+                ) {
+                    eligibility.clear_all();
+                    return;
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -165,25 +176,6 @@ pub(super) struct ChromeWorkerState {
     pub(super) on_demand: Option<(i64, Instant)>,
 }
 
-pub(super) fn handle_workspace_event(
-    event: WorkspaceEvent,
-    state: &mut ChromeWorkerState,
-    eligibility: &ChromeEligibilityPublisher,
-) {
-    match event {
-        WorkspaceEvent::Terminated(app) if is_chrome(&app) => {
-            eligibility.observe(app.pid, ChromeEligibilityObservation::Unavailable);
-            state.frontmost = None;
-            state.on_demand = None;
-            state.navigation.reset();
-        }
-        WorkspaceEvent::DidWake => eligibility.clear_all(),
-        WorkspaceEvent::Activated(_)
-        | WorkspaceEvent::Launched(_)
-        | WorkspaceEvent::Terminated(_) => {}
-    }
-}
-
 pub(super) fn handle_focus_transition<A: ChromeApi>(
     transition: FocusTransition,
     api: &mut A,
@@ -192,6 +184,11 @@ pub(super) fn handle_focus_transition<A: ChromeApi>(
     metrics: &ChromeMetrics,
     eligibility: &ChromeEligibilityPublisher,
 ) -> bool {
+    // A wake resync is the single ordering boundary for Chrome state: invalidate
+    // stale eligibility, then immediately rebuild it from the re-read focus.
+    if transition.resynced {
+        eligibility.clear_all();
+    }
     let Some(current) = transition.current else {
         clear_frontmost(state, eligibility);
         return true;

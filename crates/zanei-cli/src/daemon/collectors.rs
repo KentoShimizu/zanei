@@ -7,7 +7,7 @@ use std::{
 
 use zanei_collector::{Collector, Permission, RawEvent};
 use zanei_core::config::{CaptureConfig, CaptureSource, Config, FilterConfig};
-use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyFilter};
+use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyFilter, PrivacyScope, app_is_allowed_for};
 use zanei_core::schema::App;
 use zanei_macos::{
     CapturePolicy, SecureInputMonitor,
@@ -22,7 +22,7 @@ use zanei_macos::{
     workspace::{WorkspaceCollector, WorkspaceEvent, WorkspaceObserver, notification_channel},
 };
 
-use super::supervisor::Managed;
+use super::supervisor::{CollectorCounters, Managed};
 
 #[cfg(test)]
 use self::relay::Relay;
@@ -43,6 +43,7 @@ pub(crate) struct CollectorSet {
     focus_context: FocusContext,
     capture: CaptureConfig,
     _secure_input_monitor: Option<SecureInputMonitor>,
+    pub(super) retained_collector_health: BTreeMap<String, CollectorCounters>,
     pub(super) start_errors: BTreeMap<String, String>,
     pub(super) eventtap_start_gate: super::supervisor::EventTapStartGate,
 }
@@ -69,9 +70,9 @@ impl CollectorSet {
         let chrome_observer = ChromeObserver::new();
 
         let mut subscribers = Vec::new();
-        let ax_lifecycle = capture_ax.then(|| subscriber(&mut subscribers));
+        // Queue the content reset before AX publishes the focus resync trigger.
         let content_lifecycle = capture_content.then(|| subscriber(&mut subscribers));
-        let chrome_lifecycle = chrome_required.then(|| subscriber(&mut subscribers));
+        let ax_lifecycle = capture_ax.then(|| subscriber(&mut subscribers));
         let workspace = (capture_app || capture_ax || capture_browser || chrome_required)
             .then(|| Managed::new(WorkspaceCollector::new(subscribers)));
 
@@ -159,9 +160,8 @@ impl CollectorSet {
                 focus_context.clone(),
             ))
         });
-        let chrome = chrome_lifecycle.map(|lifecycle| {
+        let chrome = chrome_required.then(|| {
             Managed::new(ChromeCollector::new(
-                lifecycle,
                 chrome_eligibility.clone(),
                 focus_context.clone(),
                 chrome_observer.clone(),
@@ -180,6 +180,7 @@ impl CollectorSet {
             focus_context: focus_context.clone(),
             capture: config.capture.clone(),
             _secure_input_monitor: secure_input_monitor,
+            retained_collector_health: BTreeMap::new(),
             start_errors,
             eventtap_start_gate: super::supervisor::EventTapStartGate::open(),
         }
@@ -217,16 +218,7 @@ impl CollectorSet {
     }
 
     fn add_chrome_collector(&mut self) {
-        let Some(workspace) = self.workspace.as_ref() else {
-            self.start_errors.insert(
-                "chrome".to_owned(),
-                "workspace lifecycle collector is unavailable".to_owned(),
-            );
-            return;
-        };
-        let lifecycle = workspace.collector.subscribe();
         self.chrome = Some(Managed::new(ChromeCollector::new(
-            lifecycle,
             self.chrome_eligibility.clone(),
             self.focus_context.clone(),
             self.chrome_observer.clone(),
@@ -282,12 +274,13 @@ pub(crate) fn chrome_tracking_required(capture: &CaptureConfig, filter: &FilterC
     let sources = &capture.sources;
     let captures_ui_or_input =
         sources.contains(&CaptureSource::Ui) || sources.contains(&CaptureSource::Input);
-    let captures_browser = sources.contains(&CaptureSource::Browser);
     let chrome = App {
         name: "Google Chrome".to_owned(),
         bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
         pid: None,
     };
+    let captures_browser = sources.contains(&CaptureSource::Browser)
+        && app_is_allowed_for(PrivacyScope::AllEvents, &chrome, filter);
     let privacy = PrivacyFilter::new(filter.clone());
     let needs_chrome_privacy = capture.text_content
         && captures_ui_or_input

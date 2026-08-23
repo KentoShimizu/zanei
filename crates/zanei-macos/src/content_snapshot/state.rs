@@ -1,4 +1,4 @@
-//! Successful-delivery state, daily accounting, and per-process backoff.
+//! Snapshot reservation state, daily accounting, and per-process backoff.
 
 use std::{
     collections::HashMap,
