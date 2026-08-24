@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use zanei_core::store::StoreStatus;
 
+use super::super::human_text::sanitize_human_text;
 use crate::daemon::StoreOwner;
 use crate::error::CliError;
 
@@ -115,19 +116,6 @@ impl HealthReport {
     }
 }
 
-fn sanitize_human_text(value: &str) -> String {
-    value
-        .chars()
-        .fold(String::new(), |mut sanitized, character| {
-            if character.is_control() {
-                sanitized.extend(character.escape_default());
-            } else {
-                sanitized.push(character);
-            }
-            sanitized
-        })
-}
-
 pub(super) enum StatusRead {
     Readable(StoreStatus),
     Unreadable(CliError),
@@ -180,8 +168,11 @@ mod tests {
     use zanei_core::config::Config;
     use zanei_core::store::{DaemonMode, DaemonPermissions, PermissionState, StoreStatus};
 
-    use super::{HealthReport, HealthState, sanitize_human_text};
+    use super::{HealthReport, HealthState};
     use crate::daemon::StoreOwner;
+
+    const CONTROL_TEXT_COMPONENT: &str = "chrome\nforged\r\u{1b}[2J";
+    const CONTROL_TEXT_REASON: &str = "failed\r\n\u{1b}[31m";
 
     #[test]
     fn fresh_heartbeat_without_permission_snapshot_is_pending_for_start() {
@@ -250,20 +241,24 @@ mod tests {
             running: true,
             instance_id: Some(owner.instance_id.clone()),
             degraded: BTreeMap::from([(
-                "chrome\nforged".to_owned(),
-                "failed\r\n\u{1b}[31m".to_owned(),
+                CONTROL_TEXT_COMPONENT.to_owned(),
+                CONTROL_TEXT_REASON.to_owned(),
             )]),
+            collector_failures: BTreeMap::from([(CONTROL_TEXT_COMPONENT.to_owned(), 3)]),
             ..StoreStatus::default()
         };
         let report = HealthReport::from_status(&status, Some(&owner));
 
-        assert!(
-            report
-                .render_human()
-                .contains("  chrome\\nforged: failed\\r\\n\\u{1b}[31m\nCOLLECTOR FAILURES none")
-        );
+        assert!(report.render_human().contains(
+            "  chrome\\nforged\\r\\u{1b}[2J: failed\\r\\n\\u{1b}[31m\n\
+                     COLLECTOR FAILURES\n  chrome\\nforged\\r\\u{1b}[2J: 3"
+        ));
         let json = serde_json::to_value(&report).expect("serialize health report");
-        assert_eq!(json["degraded"]["chrome\nforged"], "failed\r\n\u{1b}[31m");
+        assert_eq!(
+            json["degraded"][CONTROL_TEXT_COMPONENT],
+            CONTROL_TEXT_REASON
+        );
+        assert_eq!(json["collector_failures"][CONTROL_TEXT_COMPONENT], 3);
 
         let unreadable = HealthReport::status_unreadable("bad\n\u{1b}[2J".to_owned());
         assert!(
@@ -275,11 +270,6 @@ mod tests {
             serde_json::to_value(&unreadable).expect("serialize unreadable health")["status_error"],
             "bad\n\u{1b}[2J"
         );
-    }
-
-    #[test]
-    fn sanitizer_preserves_printable_unicode() {
-        assert_eq!(sanitize_human_text("Chrome: 利用不可"), "Chrome: 利用不可");
     }
 
     #[test]
