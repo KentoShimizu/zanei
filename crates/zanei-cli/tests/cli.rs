@@ -219,10 +219,7 @@ fn status_and_doctor_share_control_text_rendering_without_changing_json() {
     const VISIBLE_COMPONENT: &str = "chrome\\nforged\\r\\u{1b}[2J";
     const VISIBLE_REASON: &str = "failed\\r\\n\\u{1b}[31m";
 
-    let fixture = Fixture::empty();
-    let mut recorder = spawn_foreground_daemon(&fixture.config, &fixture.store);
-    wait_for_daemon_ready(&mut recorder, &fixture.store);
-    signal_child(&mut recorder, "STOP");
+    let fixture = Fixture::populated();
     let status = fixture
         .open_reader()
         .status()
@@ -245,6 +242,7 @@ fn status_and_doctor_share_control_text_rendering_without_changing_json() {
             permissions: status.permissions,
         })
         .expect("control text health fixture");
+    let _store_owner = fixture.hold_store_owner();
 
     let status_human = fixture
         .command()
@@ -267,9 +265,6 @@ fn status_and_doctor_share_control_text_rendering_without_changing_json() {
         .output()
         .expect("doctor JSON output");
 
-    signal_child(&mut recorder, "CONT");
-    signal_child(&mut recorder, "TERM");
-    assert!(wait_for_child(&mut recorder).success());
     for output in [&status_human, &doctor_human, &status_json, &doctor_json] {
         assert!(output.status.success());
     }

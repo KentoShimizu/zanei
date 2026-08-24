@@ -3,10 +3,14 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Seek, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use rustix::fs::{FlockOperation, flock};
+use serde::Serialize;
 use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
 use zanei_core::config::DEFAULT_RETENTION_HOURS;
@@ -83,6 +87,44 @@ impl Fixture {
         StoreWriter::open_with_key(&self.store, Some(&self.key())).expect("fixture writer")
     }
 
+    /// Holds recorder ownership matching the daemon state already stored until the file is dropped.
+    ///
+    /// The private production ownership type is not reachable from integration tests, so this is
+    /// a minimal mirror of its lock-file contract whose behavior the CLI's own probe verifies;
+    /// open/Drop differences from production are acceptable inside the trusted TempDir.
+    pub fn hold_store_owner(&self) -> File {
+        let status = self.open_reader().status().expect("fixture daemon status");
+        let owner = FixtureStoreOwner {
+            pid: u32::try_from(status.pid.expect("fixture daemon pid"))
+                .expect("fixture daemon pid fits u32"),
+            instance_id: status.instance_id.expect("fixture daemon instance id"),
+            mode: match status.mode.expect("fixture daemon mode") {
+                DaemonMode::Foreground => "foreground",
+                DaemonMode::Launchd => "launchd",
+            },
+            started_at: status.started_at.expect("fixture daemon start time"),
+        };
+        let mut lock_path = self.store.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        let mut lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock_path)
+            .expect("fixture store ownership file");
+        flock(&lock, FlockOperation::NonBlockingLockExclusive)
+            .expect("fixture store ownership lock");
+        lock.set_len(0).expect("truncate fixture store owner");
+        lock.rewind().expect("rewind fixture store owner");
+        serde_json::to_writer(&mut lock, &owner).expect("serialize fixture store owner");
+        lock.write_all(b"\n").expect("write fixture store owner");
+        lock.sync_all().expect("sync fixture store owner");
+        lock
+    }
+
     pub fn set_recorder_permissions(&self, permissions_ok: bool) {
         let status = self.open_reader().status().expect("fixture daemon status");
         StoreWriter::open_with_key(&self.store, Some(&self.key()))
@@ -157,6 +199,14 @@ enum StoreContents {
     Populated,
     Empty,
     Uninitialized,
+}
+
+#[derive(Serialize)]
+struct FixtureStoreOwner {
+    pid: u32,
+    instance_id: String,
+    mode: &'static str,
+    started_at: String,
 }
 
 fn populate_store(store: &Path, key: &StoreKey) {
