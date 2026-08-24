@@ -1,6 +1,9 @@
 //! Per-application AX observer state and focused-value lifecycle.
 
+#[cfg(test)]
+mod test_support;
 mod value_lifecycle;
+pub(in crate::ffi::ax) mod value_registration;
 
 use std::{
     sync::{
@@ -13,22 +16,24 @@ use time::OffsetDateTime;
 
 use crate::{
     capture_policy::{CaptureDecision, CapturePolicy},
-    focused_field::{FieldClass, field_class},
+    focused_field::FieldClass,
     text_capture::{FocusedTarget, InputAuthorizations},
 };
 use zanei_core::{privacy::PrivacyScope, schema::App};
 
 use super::{
     NativeAxError, NativeAxEvent, ObserverContext, TargetKind,
-    accessibility::set_manual_accessibility,
+    accessibility::{AccessibilityActivation, set_manual_accessibility},
     add_notification,
     cf::{CfRef, OwnedCf, remove_current_run_loop_source},
     element::{
-        FocusedElementSnapshot, cf_equal, copy_element, focused_element_snapshot, window_snapshot,
+        FocusedElementSnapshot, cf_equal, copy_element, element_role, focused_element_snapshot,
+        window_snapshot,
     },
     remove_notification,
     value_context::{FocusedValueContext, after_target_preparation},
 };
+use value_registration::{RegistrationError, ValueNotificationRegistration};
 
 pub(super) struct AppObserver {
     pub(super) application: OwnedCf,
@@ -44,6 +49,9 @@ pub(super) struct AppObserver {
     app: App,
     capture_policy: CapturePolicy,
     manual_accessibility: bool,
+    accessibility_activation: AccessibilityActivation,
+    #[cfg(test)]
+    skip_native_cleanup: bool,
 }
 
 struct RegisteredTarget {
@@ -54,21 +62,7 @@ struct RegisteredTarget {
 struct RegisteredFocusedTarget {
     element: OwnedCf,
     context: FocusedValueContext,
-    notification_registered: bool,
-}
-
-enum FocusChangeResolution {
-    Immediate(Option<NativeAxEvent>),
-    Deferred,
-}
-
-impl FocusChangeResolution {
-    fn into_parts(self) -> (Option<NativeAxEvent>, bool) {
-        match self {
-            Self::Immediate(event) => (event, false),
-            Self::Deferred => (None, true),
-        }
-    }
+    value_notification: ValueNotificationRegistration,
 }
 
 impl AppObserver {
@@ -98,6 +92,9 @@ impl AppObserver {
             app,
             capture_policy,
             manual_accessibility,
+            accessibility_activation: AccessibilityActivation::default(),
+            #[cfg(test)]
+            skip_native_cleanup: false,
         }
     }
 
@@ -108,6 +105,50 @@ impl AppObserver {
             self.manual_accessibility,
             enabled,
         );
+    }
+
+    pub(super) fn activate_accessibility_tree(&mut self, now: Instant) {
+        let application = self.application.as_ptr();
+        self.activate_accessibility_tree_with(now, || {
+            let _ = element_role(application);
+        });
+    }
+
+    pub(in crate::ffi::ax) fn activate_accessibility_tree_with(
+        &mut self,
+        now: Instant,
+        query_application_role: impl FnOnce(),
+    ) {
+        self.accessibility_activation
+            .activate_with_role_query(now, query_application_role);
+    }
+
+    pub(super) fn reconcile_accessibility_if_due(
+        &mut self,
+        now: Instant,
+        observed_at: OffsetDateTime,
+        secure_input: bool,
+        authorizations: &mut InputAuthorizations,
+    ) -> Vec<NativeAxEvent> {
+        self.reconcile_accessibility_if_due_with(now, |observer| {
+            observer.reconcile_focused_element_or_clear(
+                now,
+                observed_at,
+                secure_input,
+                authorizations,
+            )
+        })
+        .unwrap_or_default()
+    }
+
+    pub(in crate::ffi::ax) fn reconcile_accessibility_if_due_with<T>(
+        &mut self,
+        now: Instant,
+        reconcile_focused_element: impl FnOnce(&mut Self) -> T,
+    ) -> Option<T> {
+        self.accessibility_activation
+            .take_due(now)
+            .then(|| reconcile_focused_element(self))
     }
 
     pub(super) fn update_attach(&mut self, app: App, manual_accessibility: bool) {
@@ -138,7 +179,7 @@ impl AppObserver {
             TargetKind::Value => self
                 .focused_target
                 .current()
-                .filter(|target| target.notification_registered)
+                .filter(|target| target.value_notification.accepts_delivery())
                 .map(|target| &target.element),
         };
         target.is_some_and(|target| cf_equal(target.as_ptr(), element))
@@ -164,17 +205,21 @@ impl AppObserver {
         }))
     }
 
-    pub(super) fn focused_element_events(
+    fn focused_element_events(
         &mut self,
         notification_at: Instant,
         observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
+        emit_unchanged_focus: bool,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
         let target = copy_element(self.application.as_ptr(), "AXFocusedUIElement")?;
         if self.same_value_target(target.as_ref()) {
-            self.refresh_current_field_class(secure_input, authorizations);
-            return Ok(vec![self.focus_event(observed_at)]);
+            let class_changed = self.refresh_current_field_class(secure_input, authorizations);
+            return Ok((class_changed || emit_unchanged_focus)
+                .then(|| self.focus_event(observed_at))
+                .into_iter()
+                .collect());
         }
 
         let snapshot = target
@@ -206,11 +251,45 @@ impl AppObserver {
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Vec<NativeAxEvent> {
+        self.focused_element_or_clear_with(
+            notification_at,
+            observed_at,
+            secure_input,
+            authorizations,
+            true,
+        )
+    }
+
+    pub(super) fn reconcile_focused_element_or_clear(
+        &mut self,
+        notification_at: Instant,
+        observed_at: OffsetDateTime,
+        secure_input: bool,
+        authorizations: &mut InputAuthorizations,
+    ) -> Vec<NativeAxEvent> {
+        self.focused_element_or_clear_with(
+            notification_at,
+            observed_at,
+            secure_input,
+            authorizations,
+            false,
+        )
+    }
+
+    fn focused_element_or_clear_with(
+        &mut self,
+        notification_at: Instant,
+        observed_at: OffsetDateTime,
+        secure_input: bool,
+        authorizations: &mut InputAuthorizations,
+        emit_unchanged_focus: bool,
+    ) -> Vec<NativeAxEvent> {
         match self.focused_element_events(
             notification_at,
             observed_at,
             secure_input,
             authorizations,
+            emit_unchanged_focus,
         ) {
             Ok(events) => events,
             Err(error) => {
@@ -268,39 +347,39 @@ impl AppObserver {
         let generation = self.focused_target.next_generation();
         match target.zip(snapshot) {
             Some((element, snapshot)) => {
-                let notification_registered = matches!(
-                    field_class(
-                        snapshot.element.role.as_deref(),
-                        snapshot.element.subrole.as_deref(),
-                    ),
-                    FieldClass::KnownText(_) | FieldClass::KnownSafeNonText
+                let mut value_notification = ValueNotificationRegistration::default();
+                let registration = value_notification.reconcile(
+                    snapshot.field_class,
+                    || {
+                        add_notification(
+                            self.observer.as_ptr(),
+                            element.as_ptr(),
+                            "AXValueChanged",
+                            (&raw const *self.context).cast_mut().cast(),
+                        )
+                    },
+                    || Ok(()),
                 );
-                let registration = if notification_registered {
-                    add_notification(
-                        self.observer.as_ptr(),
-                        element.as_ptr(),
-                        "AXValueChanged",
-                        (&raw const *self.context).cast_mut().cast(),
-                    )
-                } else {
-                    Ok(())
-                };
-                if let Err(error) = registration {
-                    crate::trace::trace!(
-                        "component=ax phase=focus_target action=register pid={} target_generation={} registration=error operation={} code={}",
-                        self.context.pid,
-                        generation,
-                        error.operation(),
-                        error.code()
-                    );
-                    return Err(error);
+                match registration {
+                    Err(RegistrationError::Register(error)) => {
+                        crate::trace::trace!(
+                            "component=ax phase=focus_target action=register pid={} target_generation={} registration=error operation={} code={}",
+                            self.context.pid,
+                            generation,
+                            error.operation(),
+                            error.code()
+                        );
+                        return Err(error);
+                    }
+                    Err(RegistrationError::Unregister(error)) => return Err(error),
+                    Ok(()) => {}
                 }
                 crate::trace::trace!(
                     "component=ax phase=focus_target action=prepare pid={} target_generation={} field_class={} registration={}",
                     self.context.pid,
                     generation,
                     crate::trace::field_class_name(snapshot.field_class),
-                    if notification_registered {
+                    if value_notification.accepts_delivery() {
                         "registered"
                     } else {
                         "skipped"
@@ -317,7 +396,7 @@ impl AppObserver {
                         generation,
                         snapshot.field_class,
                     ),
-                    notification_registered,
+                    value_notification,
                 }))
             }
             None => {
@@ -339,7 +418,7 @@ impl AppObserver {
         let installed = registered.is_some();
         let registration = registered
             .as_ref()
-            .is_some_and(|target| target.notification_registered);
+            .is_some_and(|target| target.value_notification.accepts_delivery());
         if let Ok(previous) = self
             .focused_target
             .transition::<NativeAxError>(Ok(registered))
@@ -376,16 +455,20 @@ impl AppObserver {
         target: Option<RegisteredFocusedTarget>,
         defer_context: bool,
     ) {
-        let Some(target) = target else {
+        let Some(mut target) = target else {
             return;
         };
         let generation = target.context.generation;
-        if target.notification_registered
-            && remove_notification(
-                self.observer.as_ptr(),
-                target.element.as_ptr(),
-                "AXValueChanged",
-            )
+        let needed_cleanup = target.value_notification.needs_cleanup();
+        if target
+            .value_notification
+            .clear(|| {
+                remove_notification(
+                    self.observer.as_ptr(),
+                    target.element.as_ptr(),
+                    "AXValueChanged",
+                )
+            })
             .is_err()
         {
             self.stale_targets.push(RegisteredTarget {
@@ -398,7 +481,7 @@ impl AppObserver {
                 generation
             );
             self.record_degraded();
-        } else if target.notification_registered {
+        } else if needed_cleanup {
             crate::trace::trace!(
                 "component=ax phase=focus_target action=unregister pid={} target_generation={} result=removed",
                 self.context.pid,
@@ -481,6 +564,10 @@ impl AppObserver {
 
 impl Drop for AppObserver {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if self.skip_native_cleanup {
+            return;
+        }
         unsafe { remove_current_run_loop_source(self.source) };
         if let Some(target) = self.window_target.as_ref() {
             let _ = remove_notification(self.observer.as_ptr(), target.as_ptr(), "AXTitleChanged");
@@ -488,7 +575,7 @@ impl Drop for AppObserver {
         if let Some(target) = self
             .focused_target
             .current()
-            .filter(|target| target.notification_registered)
+            .filter(|target| target.value_notification.needs_cleanup())
         {
             let _ = remove_notification(
                 self.observer.as_ptr(),

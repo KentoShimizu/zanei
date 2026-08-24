@@ -151,6 +151,7 @@ impl NativeAx {
             manual_accessibility,
         );
         app_observer.set_manual_accessibility(true);
+        app_observer.activate_accessibility_tree(Instant::now());
         app_observer.refresh_window_target();
         let focused = app_observer.focused_element_or_clear(
             Instant::now(),
@@ -248,6 +249,12 @@ impl NativeAx {
             "poll",
         );
         for observer in self.observers.values_mut() {
+            events.extend(observer.reconcile_accessibility_if_due(
+                now,
+                OffsetDateTime::now_utc(),
+                secure_input,
+                &mut self.authorizations,
+            ));
             events.extend(observer.take_due_value_events(
                 now,
                 secure_input,
