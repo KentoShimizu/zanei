@@ -4,15 +4,11 @@ Zanei ships as a background-only macOS app bundle. `Zanei.app/Contents/MacOS/zan
 
 Release artifacts use Developer ID signing, notarization, and stapling. `make-app.sh` performs the same bundle assembly and signing locally; it does not notarize.
 
-## Template inputs
+## LaunchAgent registration
 
-Before installing `launchd/dev.zanei.agent.plist`, replace every placeholder with an absolute path. `@ZANEI_BIN@` must point to `Zanei.app/Contents/MacOS/zanei`:
+Run `zanei start` to start background recording. The CLI generates the current LaunchAgent plist at `$HOME/Library/LaunchAgents/dev.zanei.agent.plist` and registers it with `launchd`. The generated plist uses the resolved Zanei executable together with the active config, store, and log paths. The CLI implementation is the canonical source for launchd settings; packaging does not provide a separate plist template.
 
-- `@ZANEI_BIN@`
-- `@CONFIG_PATH@`
-- `@STORE_PATH@`
-- `@STDOUT_LOG@`
-- `@STDERR_LOG@`
+## Homebrew formula inputs
 
 The Homebrew formula is published from the separate tap repository after replacing `@VERSION@` and `@SHA256@` with the universal release values. It installs `Zanei.app` under `libexec` and creates only the CLI symlink in `bin`.
 
