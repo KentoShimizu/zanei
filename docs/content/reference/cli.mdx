@@ -322,6 +322,7 @@ Human-readable output is a fixed set of lines rather than a table selected with 
 | `TEXT CONTENT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` or `off (opt-in: zanei config set capture.text_content true)` |
 | `CONTENT SNAPSHOT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` or `off (opt-in: zanei config set capture.content_snapshot true)` |
 | `PERMISSIONS OK` | `true` or `false` |
+| `COLLECTOR FAILURES` | `none` for an empty map; `-` when the store cannot be read; otherwise followed by one indented `component: count` line per entry |
 | `DEGRADED` | `false` for an empty map; otherwise `true` followed by one indented `component: reason` line per entry |
 
 JSON fields not listed in this human-output table are not printed in human mode.

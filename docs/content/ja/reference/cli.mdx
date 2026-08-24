@@ -320,6 +320,7 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | `TEXT CONTENT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` または `off (opt-in: zanei config set capture.text_content true)` |
 | `CONTENT SNAPSHOT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` または `off (opt-in: zanei config set capture.content_snapshot true)` |
 | `PERMISSIONS OK` | `true` または `false` |
+| `COLLECTOR FAILURES` | 空 map は `none`。store を読み取れない場合は `-`。それ以外は各 entry の indented `component: count` 行が続く |
 | `DEGRADED` | 空 map は `false`。それ以外は `true` と、各 entry の indented `component: reason` 行 |
 
 この human 出力表にない JSON field は human mode では表示されません。
