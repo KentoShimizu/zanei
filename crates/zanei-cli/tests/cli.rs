@@ -80,6 +80,64 @@ fn status_uses_the_owner_lock_instead_of_a_fresh_orphaned_heartbeat() {
 }
 
 #[test]
+fn status_json_stdout_matches_integration_snapshot() {
+    let fixture = Fixture::empty();
+    let store_path = serde_json::to_string(&fixture.store.display().to_string())
+        .expect("serialize empty fixture store path");
+    let store_size = fs::metadata(&fixture.store)
+        .expect("empty fixture store metadata")
+        .len();
+    let output = fixture
+        .command()
+        .args(["status", "--json"])
+        .output()
+        .expect("status JSON output");
+
+    assert_eq!(output.status.code(), Some(4));
+    let snapshot = format!(
+        r#"{{
+  "state": "stopped",
+  "running": false,
+  "paused": false,
+  "since": null,
+  "instance": null,
+  "mode": null,
+  "uptime_s": null,
+  "events_captured": 0,
+  "events_dropped": 0,
+  "collector_failures": {{}},
+  "last_event_ts": null,
+  "heartbeat_freshness": "missing",
+  "heartbeat_age_s": null,
+  "last_event_age_s": null,
+  "store_write_state": "stopped",
+  "degraded": {{}},
+  "store": {{
+    "path": {},
+    "size_bytes": {},
+    "retention_hours": 48,
+    "oldest_event_ts": null,
+    "encryption": "sqlcipher",
+    "retired_plaintext": []
+  }},
+  "capture": {{
+    "sources": [
+      "app"
+    ],
+    "text_content": false,
+    "content_snapshot": false
+  }},
+  "permissions_ok": true
+}}"#,
+        store_path, store_size,
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("status JSON stdout"),
+        format!("{snapshot}\n")
+    );
+}
+
+#[test]
 fn status_ignores_orphaned_heartbeat_retention() {
     let fixture = Fixture::populated();
     fs::write(

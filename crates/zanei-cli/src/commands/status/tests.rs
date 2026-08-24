@@ -10,10 +10,7 @@ use zanei_core::{
 
 use super::{
     HeartbeatFreshness, StatusReport, StatusState, StoreWriteState, infer_store_write_state,
-    inspect,
-    model::{CaptureReport, CaptureScopeReport, StoreReport},
-    render::render_human,
-    store_error_report,
+    inspect, render::render_human, store_error_report,
 };
 use crate::{
     daemon::{StoreOwner, StoreOwnership},
@@ -203,7 +200,7 @@ fn invalid_persisted_timestamp_is_store_corrupt_with_exit_one() {
 
 #[test]
 fn healthy_json_and_human_output_snapshot() {
-    let report = readable_output_report();
+    let report = readable_output_report(output_store_status());
     assert_output_snapshot(
         &report,
         r#"{
@@ -260,12 +257,13 @@ DEGRADED          false
 
 #[test]
 fn degraded_json_and_human_output_snapshot() {
-    let mut report = readable_output_report();
-    report.collector_failures = Some(BTreeMap::from([("chrome".to_owned(), 3)]));
-    report.degraded = BTreeMap::from([(
+    let mut status = output_store_status();
+    status.collector_failures = BTreeMap::from([("chrome".to_owned(), 3)]);
+    status.degraded = BTreeMap::from([(
         "chrome".to_owned(),
         "state=unavailable phase=query kind=apple_event code=-1712".to_owned(),
     )]);
+    let report = readable_output_report(status);
     assert_output_snapshot(
         &report,
         r#"{
@@ -328,7 +326,7 @@ DEGRADED          true
 
 #[test]
 fn stale_json_and_human_output_snapshot() {
-    let mut report = readable_output_report();
+    let mut report = readable_output_report(output_store_status());
     report.heartbeat_freshness = Some(HeartbeatFreshness::Stale);
     report.heartbeat_age_s = Some(61);
     report.store_write_state = Some(StoreWriteState::HeartbeatStale);
@@ -388,9 +386,10 @@ DEGRADED          false
 
 #[test]
 fn owner_mismatch_json_and_human_output_snapshot() {
-    let mut report = readable_output_report();
-    report.store_write_state = Some(StoreWriteState::SuspectedUnavailable);
-    report.collector_failures = Some(BTreeMap::from([("chrome".to_owned(), 3)]));
+    let mut status = output_store_status();
+    status.instance_id = Some("prior-instance".to_owned());
+    status.collector_failures = BTreeMap::from([("chrome".to_owned(), 3)]);
+    let report = readable_output_report(status);
     assert_output_snapshot(
         &report,
         r#"{
@@ -451,9 +450,7 @@ DEGRADED          false
 #[test]
 fn store_failure_json_and_human_output_snapshot() {
     let report = store_failure_output_report();
-    assert_output_snapshot(
-        &report,
-        r#"{
+    let json = r#"{
   "state": "store_unavailable",
   "running": false,
   "paused": null,
@@ -470,11 +467,11 @@ fn store_failure_json_and_human_output_snapshot() {
   "last_event_age_s": null,
   "store_write_state": null,
   "degraded": {
-    "store": "database is unavailable"
+    "store": "failed to read database: database is unavailable"
   },
   "store": {
     "path": "/tmp/zanei-test/store.sqlite",
-    "size_bytes": null,
+    "size_bytes": 0,
     "retention_hours": null,
     "oldest_event_ts": null,
     "encryption": null,
@@ -486,8 +483,9 @@ fn store_failure_json_and_human_output_snapshot() {
     "content_snapshot": false
   },
   "permissions_ok": true
-}"#,
-        r#"STATE             store_unavailable
+}"#
+    .replace("/tmp/zanei-test/store.sqlite", &report.store.path);
+    let human = r#"STATE             store_unavailable
 PAUSED            -
 SINCE             -
 INSTANCE          -
@@ -503,9 +501,10 @@ CONTENT SNAPSHOT  off (opt-in: zanei config set capture.content_snapshot true)
 PERMISSIONS OK    true
 COLLECTOR FAILURES -
 DEGRADED          true
-  store: database is unavailable
-"#,
-    );
+  store: failed to read database: database is unavailable
+"#
+    .replace("/tmp/zanei-test/store.sqlite", &report.store.path);
+    assert_output_snapshot(&report, &json, &human);
 }
 
 fn test_paths(directory: &TempDir) -> Paths {
@@ -515,72 +514,59 @@ fn test_paths(directory: &TempDir) -> Paths {
     }
 }
 
-fn readable_output_report() -> StatusReport {
-    StatusReport {
-        state: StatusState::Running,
-        running: true,
-        paused: Some(false),
-        since: Some("2026-08-24T10:00:00Z".to_owned()),
-        instance: Some("current-instance".to_owned()),
-        mode: Some("foreground".to_owned()),
-        uptime_s: Some(120),
-        events_captured: Some(42),
-        events_dropped: Some(0),
-        collector_failures: Some(BTreeMap::new()),
+fn output_store_status() -> StoreStatus {
+    StoreStatus {
+        instance_id: Some("current-instance".to_owned()),
+        heartbeat_at: Some(format_timestamp(OffsetDateTime::now_utc())),
+        retention_hours: Some(72),
+        events_captured: 42,
         last_event_ts: Some("2026-08-24T10:01:57Z".to_owned()),
-        heartbeat_freshness: Some(HeartbeatFreshness::Fresh),
-        heartbeat_age_s: Some(2),
-        last_event_age_s: Some(3),
-        store_write_state: Some(StoreWriteState::Healthy),
-        degraded: BTreeMap::new(),
-        store: StoreReport {
-            path: "/tmp/zanei-test/store.sqlite".to_owned(),
-            size_bytes: Some(4096),
-            retention_hours: Some(72),
-            oldest_event_ts: Some("2026-08-23T10:00:00Z".to_owned()),
-            encryption: Some("sqlcipher"),
-            retired_plaintext: Vec::new(),
-        },
-        capture: CaptureReport {
-            sources: Vec::new(),
-            text_content: false,
-            content_snapshot: false,
-            text_scope: CaptureScopeReport {
-                apps: "all".to_owned(),
-                sites: "all".to_owned(),
-            },
-            snapshot_scope: CaptureScopeReport {
-                apps: "all".to_owned(),
-                sites: "all".to_owned(),
-            },
-        },
-        permissions_ok: true,
+        ..StoreStatus::default()
     }
 }
 
-fn store_failure_output_report() -> StatusReport {
-    let mut report = readable_output_report();
-    report.state = StatusState::StoreUnavailable;
-    report.running = false;
-    report.paused = None;
-    report.since = None;
-    report.instance = None;
-    report.mode = None;
-    report.uptime_s = None;
-    report.events_captured = None;
-    report.events_dropped = None;
-    report.collector_failures = None;
-    report.last_event_ts = None;
-    report.heartbeat_freshness = None;
-    report.heartbeat_age_s = None;
-    report.last_event_age_s = None;
-    report.store_write_state = None;
-    report.degraded = BTreeMap::from([("store".to_owned(), "database is unavailable".to_owned())]);
-    report.store.size_bytes = None;
-    report.store.retention_hours = None;
-    report.store.oldest_event_ts = None;
-    report.store.encryption = None;
+fn readable_output_report(status: StoreStatus) -> StatusReport {
+    let paths = Paths {
+        config: "/tmp/zanei-test/config.toml".into(),
+        store: "/tmp/zanei-test/store.sqlite".into(),
+    };
+    let config = Config::from_toml("[capture]\nsources = []\n\n[output]\nretention_hours = 72\n")
+        .expect("snapshot config");
+    let owner = StoreOwner {
+        pid: 42,
+        instance_id: "current-instance".to_owned(),
+        mode: DaemonMode::Foreground,
+        started_at: "2026-08-24T10:00:00Z".to_owned(),
+    };
+    let mut report = StatusReport::readable(
+        &paths,
+        &config,
+        &status,
+        Some(&owner),
+        super::StoreInspection {
+            size_bytes: 4096,
+            oldest_event_ts: Some("2026-08-23T10:00:00Z".to_owned()),
+            format: StoreFormat::Encrypted,
+            retired: super::RetiredReport::default(),
+        },
+    )
+    .expect("readable snapshot report");
+    report.uptime_s = Some(120);
+    report.heartbeat_age_s = Some(2);
+    report.last_event_age_s = Some(3);
     report
+}
+
+fn store_failure_output_report() -> StatusReport {
+    let directory = TempDir::new().expect("temporary directory");
+    let paths = test_paths(&directory);
+    std::fs::write(&paths.store, []).expect("empty store fixture");
+    let config = Config::from_toml("[capture]\nsources = []\n").expect("snapshot config");
+    let error = StoreError::io(
+        "read database",
+        std::io::Error::other("database is unavailable"),
+    );
+    store_error_report(&paths, &config, None, &error).expect("store failure snapshot report")
 }
 
 fn assert_output_snapshot(report: &StatusReport, json: &str, human: &str) {
