@@ -1,22 +1,63 @@
-//! Shared Chrome window eligibility used to authorize text capture.
+//! Versioned Chrome window eligibility shared by text and snapshot capture.
 
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
+    time::Instant,
 };
 
-use zanei_core::{config::FilterConfig, privacy::website_is_allowed};
+use zanei_core::{
+    config::FilterConfig,
+    privacy::{PrivacyScope, host_is_allowed_for, website_host},
+    schema::CaptureContext,
+};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChromeWindowEligibility {
-    Normal,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ChromeWindowState {
+    Normal { host: Option<String> },
     Incognito,
-    ExcludedSite,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChromeEligibilityObservation {
+    Normal { window_id: Option<i64>, url: String },
+    Incognito { window_id: Option<i64> },
+    Unavailable { window_id: Option<i64> },
+}
+
+#[derive(Clone, Debug)]
+struct WindowRecord {
+    state: Option<ChromeWindowState>,
+    version: u64,
+    observed_at: Instant,
+    applescript_window_id: Option<i64>,
 }
 
 struct EligibilityState {
     filter: FilterConfig,
-    windows: HashMap<(i32, i64), ChromeWindowEligibility>,
+    windows: HashMap<(i32, i64), WindowRecord>,
+    next_version: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct ChromeEligibilityDecision {
+    allowed: bool,
+    capture_context: CaptureContext,
+    version: Option<u64>,
+}
+
+impl ChromeEligibilityDecision {
+    pub(crate) const fn is_allowed(&self) -> bool {
+        self.allowed
+    }
+
+    pub(crate) fn capture_context(&self) -> CaptureContext {
+        self.capture_context.clone()
+    }
+
+    pub(crate) const fn version(&self) -> Option<u64> {
+        self.version
+    }
 }
 
 #[derive(Clone)]
@@ -25,61 +66,106 @@ pub struct ChromeEligibilityPublisher {
 }
 
 impl ChromeEligibilityPublisher {
-    pub(crate) fn publish_normal(&self, pid: i64, window_id: Option<i64>, url: &str) {
-        let (Ok(pid), Some(window_id)) = (i32::try_from(pid), window_id) else {
-            self.clear_pid(pid);
-            return;
-        };
-        if let Ok(mut state) = self.state.write() {
-            state
-                .windows
-                .retain(|(window_pid, _), _| *window_pid != pid);
-            let eligibility = if website_is_allowed(url, &state.filter) {
-                ChromeWindowEligibility::Normal
-            } else {
-                ChromeWindowEligibility::ExcludedSite
-            };
-            state.windows.insert((pid, window_id), eligibility);
-        }
+    pub fn observe(&self, pid: i64, observation: ChromeEligibilityObservation) {
+        self.observe_at(pid, observation, Instant::now());
     }
 
-    pub(crate) fn publish_incognito(&self, pid: i64, window_id: Option<i64>) {
-        let (Ok(pid), Some(window_id)) = (i32::try_from(pid), window_id) else {
-            self.clear_pid(pid);
-            return;
-        };
-        if let Ok(mut state) = self.state.write() {
-            state
-                .windows
-                .retain(|(window_pid, _), _| *window_pid != pid);
-            state
-                .windows
-                .insert((pid, window_id), ChromeWindowEligibility::Incognito);
-        }
+    pub(crate) fn observe_at(
+        &self,
+        pid: i64,
+        observation: ChromeEligibilityObservation,
+        observed_at: Instant,
+    ) {
+        self.observe_with_window_id_at(pid, observation, None, observed_at);
     }
 
-    pub(crate) fn clear_pid(&self, pid: i64) {
+    pub(crate) fn observe_with_window_id_at(
+        &self,
+        pid: i64,
+        observation: ChromeEligibilityObservation,
+        applescript_window_id: Option<i64>,
+        observed_at: Instant,
+    ) {
         let Ok(pid) = i32::try_from(pid) else {
             return;
         };
-        if let Ok(mut state) = self.state.write() {
+        let (key, next_state) = match observation {
+            ChromeEligibilityObservation::Normal { window_id, url } => (
+                window_id.map(|window_id| (pid, window_id)),
+                Some(ChromeWindowState::Normal {
+                    host: website_host(&url),
+                }),
+            ),
+            ChromeEligibilityObservation::Incognito { window_id } => (
+                window_id.map(|window_id| (pid, window_id)),
+                Some(ChromeWindowState::Incognito),
+            ),
+            ChromeEligibilityObservation::Unavailable { window_id } => {
+                let Ok(mut state) = self.state.write() else {
+                    crate::trace::trace!(
+                        "component=chrome phase=eligibility action=observe result=poisoned"
+                    );
+                    return;
+                };
+                mark_unavailable(&mut state, pid, window_id, observed_at);
+                return;
+            }
+        };
+        let Ok(mut state) = self.state.write() else {
+            crate::trace::trace!(
+                "component=chrome phase=eligibility action=observe result=poisoned"
+            );
+            return;
+        };
+        let Some(key) = key else {
+            return;
+        };
+        if let Some(record) = state.windows.get_mut(&key)
+            && record.state.as_ref() == next_state.as_ref()
+        {
+            record.observed_at = observed_at;
+            if applescript_window_id.is_some() {
+                record.applescript_window_id = applescript_window_id;
+            }
+            return;
+        }
+        let remembered_window_id = applescript_window_id.or_else(|| {
             state
                 .windows
-                .retain(|(window_pid, _), _| *window_pid != pid);
-        }
+                .get(&key)
+                .and_then(|record| record.applescript_window_id)
+        });
+        let version = next_version(&mut state);
+        state.windows.insert(
+            key,
+            WindowRecord {
+                state: next_state,
+                version,
+                observed_at,
+                applescript_window_id: remembered_window_id,
+            },
+        );
     }
 
     pub(crate) fn clear_all(&self) {
-        if let Ok(mut state) = self.state.write() {
-            state.windows.clear();
+        let Ok(mut state) = self.state.write() else {
+            return;
+        };
+        let observed_at = Instant::now();
+        let keys: Vec<_> = state.windows.keys().copied().collect();
+        for key in keys {
+            mark_record_unavailable(&mut state, key, observed_at);
         }
     }
 
-    pub fn replace_filter(&self, filter: FilterConfig) {
-        if let Ok(mut state) = self.state.write() {
-            state.filter = filter;
-            state.windows.clear();
-        }
+    pub(crate) fn applescript_window_id(&self, pid: i64, window_id: i64) -> Option<i64> {
+        let pid = i32::try_from(pid).ok()?;
+        self.state
+            .read()
+            .ok()?
+            .windows
+            .get(&(pid, window_id))
+            .and_then(|record| record.applescript_window_id)
     }
 }
 
@@ -89,23 +175,92 @@ pub struct ChromeEligibilityTracker {
 }
 
 impl ChromeEligibilityTracker {
-    pub(crate) fn allows_text(&self, pid: i64, window_id: Option<i64>) -> bool {
-        let (Ok(pid), Some(window_id)) = (i32::try_from(pid), window_id) else {
-            return false;
-        };
-        self.state.read().is_ok_and(|state| {
-            state.windows.get(&(pid, window_id)) == Some(&ChromeWindowEligibility::Normal)
+    pub fn allows_url_events(&self, pid: i64, window_id: Option<i64>) -> bool {
+        self.decision(PrivacyScope::AllEvents, pid, window_id)
+            .is_allowed()
+    }
+
+    pub fn allows_text(&self, pid: i64, window_id: Option<i64>) -> bool {
+        self.decision(PrivacyScope::TextContent, pid, window_id)
+            .is_allowed()
+    }
+
+    pub fn allows_snapshot(&self, pid: i64, window_id: Option<i64>) -> bool {
+        self.decision(PrivacyScope::ContentSnapshot, pid, window_id)
+            .is_allowed()
+    }
+
+    pub(crate) fn replace_filter(&self, filter: FilterConfig) {
+        match self.state.write() {
+            Ok(mut state) => state.filter = filter,
+            Err(_) => crate::trace::trace!(
+                "component=chrome phase=eligibility action=replace_filter result=poisoned"
+            ),
+        }
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn state_version(&self, pid: i64, window_id: i64) -> Option<u64> {
+        let pid = i32::try_from(pid).ok()?;
+        self.state.read().ok().and_then(|state| {
+            state
+                .windows
+                .get(&(pid, window_id))
+                .filter(|record| record.state.is_some())
+                .map(|record| record.version)
         })
     }
 
-    #[cfg(test)]
-    fn eligibility(&self, pid: i64, window_id: i64) -> Option<ChromeWindowEligibility> {
+    #[must_use]
+    pub fn observed_at(&self, pid: i64, window_id: i64) -> Option<Instant> {
+        let pid = i32::try_from(pid).ok()?;
         self.state
             .read()
             .ok()?
             .windows
-            .get(&(i32::try_from(pid).ok()?, window_id))
-            .copied()
+            .get(&(pid, window_id))
+            .map(|record| record.observed_at)
+    }
+
+    pub(crate) fn decision(
+        &self,
+        scope: PrivacyScope,
+        pid: i64,
+        window_id: Option<i64>,
+    ) -> ChromeEligibilityDecision {
+        let (Ok(pid), Some(window_id)) = (i32::try_from(pid), window_id) else {
+            return ChromeEligibilityDecision::default();
+        };
+        let Ok(state) = self.state.read() else {
+            return ChromeEligibilityDecision::default();
+        };
+        let Some(record) = state.windows.get(&(pid, window_id)) else {
+            return ChromeEligibilityDecision::default();
+        };
+        let capture_context = record
+            .state
+            .as_ref()
+            .map(|window| CaptureContext {
+                website_host: match window {
+                    ChromeWindowState::Normal { host } => host.clone(),
+                    ChromeWindowState::Incognito => None,
+                },
+            })
+            .unwrap_or_default();
+        let allowed = match record.state.as_ref() {
+            Some(ChromeWindowState::Normal { host }) => {
+                host_is_allowed_for(scope, host.as_deref(), &state.filter)
+            }
+            Some(ChromeWindowState::Incognito) | None => false,
+        };
+        let version = record.state.as_ref().map(|_| record.version);
+        debug_assert!(!allowed || version.is_some());
+        ChromeEligibilityDecision {
+            allowed,
+            capture_context,
+            version,
+        }
     }
 }
 
@@ -116,6 +271,7 @@ pub fn chrome_eligibility_channel(
     let state = Arc::new(RwLock::new(EligibilityState {
         filter,
         windows: HashMap::new(),
+        next_version: 0,
     }));
     (
         ChromeEligibilityPublisher {
@@ -125,50 +281,215 @@ pub fn chrome_eligibility_channel(
     )
 }
 
+fn mark_unavailable(
+    state: &mut EligibilityState,
+    pid: i32,
+    window_id: Option<i64>,
+    observed_at: Instant,
+) {
+    if let Some(window_id) = window_id {
+        let key = (pid, window_id);
+        if state.windows.contains_key(&key) {
+            mark_record_unavailable(state, key, observed_at);
+        } else {
+            let version = next_version(state);
+            state.windows.insert(
+                key,
+                WindowRecord {
+                    state: None,
+                    version,
+                    observed_at,
+                    applescript_window_id: None,
+                },
+            );
+        }
+        return;
+    }
+    let keys: Vec<_> = state
+        .windows
+        .keys()
+        .filter(|key| key.0 == pid)
+        .copied()
+        .collect();
+    for key in keys {
+        mark_record_unavailable(state, key, observed_at);
+    }
+}
+
+fn mark_record_unavailable(state: &mut EligibilityState, key: (i32, i64), observed_at: Instant) {
+    let state_changed = state
+        .windows
+        .get(&key)
+        .is_some_and(|record| record.state.is_some());
+    let version = state_changed.then(|| next_version(state));
+    let record = state
+        .windows
+        .get_mut(&key)
+        .expect("Chrome window key remains present");
+    record.state = None;
+    if let Some(version) = version {
+        record.version = version;
+    }
+    record.observed_at = observed_at;
+}
+
+fn next_version(state: &mut EligibilityState) -> u64 {
+    state.next_version = state.next_version.saturating_add(1);
+    state.next_version
+}
+
 #[cfg(test)]
 mod tests {
-    use zanei_core::config::FilterConfig;
+    use zanei_core::config::{FilterConfig, ScopedFilterConfig};
 
     use super::*;
 
+    fn normal(window_id: i64, url: &str) -> ChromeEligibilityObservation {
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(window_id),
+            url: url.to_owned(),
+        }
+    }
+
     #[test]
-    fn normal_incognito_and_excluded_sites_are_pid_and_window_scoped() {
-        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig {
-            exclude_websites: vec!["private.example".to_owned()],
+    fn unchanged_observation_preserves_version() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        let first_observation = Instant::now();
+        publisher.observe_at(7, normal(11, "https://example.com"), first_observation);
+        let version = tracker.state_version(7, 11).expect("version");
+
+        let confirmation = first_observation + std::time::Duration::from_millis(1);
+        publisher.observe_at(7, normal(11, "https://example.com"), confirmation);
+
+        assert_eq!(tracker.state_version(7, 11), Some(version));
+        assert_eq!(tracker.observed_at(7, 11), Some(confirmation));
+    }
+
+    #[test]
+    fn ownership_unavailable_reobservation_preserves_version() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        let initial = Instant::now();
+        publisher.observe_at(7, normal(11, "https://example.com"), initial);
+        let normal_version = tracker.state_version(7, 11).expect("normal version");
+        publisher.observe_at(
+            7,
+            ChromeEligibilityObservation::Unavailable {
+                window_id: Some(11),
+            },
+            initial + std::time::Duration::from_millis(1),
+        );
+        let repeated = initial + std::time::Duration::from_millis(2);
+        publisher.observe_at(
+            7,
+            ChromeEligibilityObservation::Unavailable {
+                window_id: Some(11),
+            },
+            repeated,
+        );
+        assert_eq!(tracker.observed_at(7, 11), Some(repeated));
+
+        publisher.observe_at(
+            7,
+            normal(11, "https://example.com"),
+            initial + std::time::Duration::from_millis(3),
+        );
+
+        assert_eq!(tracker.state_version(7, 11), Some(normal_version + 2));
+    }
+
+    #[test]
+    fn host_mode_change_and_disappearance_advance_version() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        publisher.observe(7, normal(11, "https://example.com"));
+        let normal_version = tracker.state_version(7, 11).expect("normal version");
+
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Incognito {
+                window_id: Some(11),
+            },
+        );
+        let incognito_version = tracker.state_version(7, 11).expect("incognito version");
+        assert!(incognito_version > normal_version);
+        assert!(!tracker.allows_text(7, Some(11)));
+
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Unavailable { window_id: None },
+        );
+        assert_eq!(tracker.state_version(7, 11), None);
+    }
+
+    #[test]
+    fn observing_another_window_preserves_prior_window_until_targeted_unavailable() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        publisher.observe(7, normal(11, "https://first.example"));
+        let first_version = tracker.state_version(7, 11);
+
+        publisher.observe(7, normal(12, "https://second.example"));
+
+        assert_eq!(tracker.state_version(7, 11), first_version);
+        assert!(tracker.allows_snapshot(7, Some(11)));
+        assert!(tracker.allows_snapshot(7, Some(12)));
+
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Unavailable {
+                window_id: Some(11),
+            },
+        );
+
+        assert_eq!(tracker.state_version(7, 11), None);
+        assert!(tracker.allows_snapshot(7, Some(12)));
+    }
+
+    #[test]
+    fn filter_replacement_rechecks_preserved_host_without_changing_version() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        publisher.observe(7, normal(11, "https://example.com"));
+        let version = tracker.state_version(7, 11);
+
+        tracker.replace_filter(FilterConfig {
+            text_content: ScopedFilterConfig {
+                exclude_websites: vec!["example.com".to_owned()],
+                ..ScopedFilterConfig::default()
+            },
             ..FilterConfig::default()
         });
 
-        publisher.publish_normal(7, Some(11), "https://example.com");
-        assert!(tracker.allows_text(7, Some(11)));
-        assert!(!tracker.allows_text(7, Some(12)));
-        assert!(!tracker.allows_text(8, Some(11)));
-
-        publisher.publish_incognito(7, Some(11));
-        assert_eq!(
-            tracker.eligibility(7, 11),
-            Some(ChromeWindowEligibility::Incognito)
-        );
-        assert!(!tracker.allows_text(7, Some(11)));
-
-        publisher.publish_normal(7, Some(11), "https://private.example/path");
-        assert_eq!(
-            tracker.eligibility(7, 11),
-            Some(ChromeWindowEligibility::ExcludedSite)
-        );
+        assert_eq!(tracker.state_version(7, 11), version);
         assert!(!tracker.allows_text(7, Some(11)));
     }
 
     #[test]
-    fn filter_replacement_invalidates_existing_decisions() {
+    fn unknown_incognito_and_hostless_windows_fail_closed() {
         let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
-        publisher.publish_normal(7, Some(11), "https://example.com");
-        assert!(tracker.allows_text(7, Some(11)));
-
-        publisher.replace_filter(FilterConfig {
-            exclude_websites: vec!["example.com".to_owned()],
-            ..FilterConfig::default()
-        });
-
         assert!(!tracker.allows_text(7, Some(11)));
+
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Incognito {
+                window_id: Some(11),
+            },
+        );
+        assert!(!tracker.allows_text(7, Some(11)));
+
+        publisher.observe(7, normal(11, "about:blank"));
+        assert!(!tracker.allows_text(7, Some(11)));
+    }
+
+    #[test]
+    fn decision_returns_allow_context_and_version_from_one_record() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        publisher.observe(7, normal(11, "https://example.com/path"));
+
+        let decision = tracker.decision(PrivacyScope::TextContent, 7, Some(11));
+
+        assert!(decision.is_allowed());
+        assert_eq!(
+            decision.capture_context().website_host.as_deref(),
+            Some("example.com")
+        );
+        assert!(decision.version().is_some());
     }
 }

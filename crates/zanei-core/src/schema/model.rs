@@ -4,8 +4,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::EventData;
 
-pub const EVENT_SCHEMA_VERSION: u8 = 1;
-pub const KNOWN_EVENT_TYPES: [&str; 13] = [
+const LEGACY_EVENT_SCHEMA_VERSION: u8 = 1;
+const CONTENT_SNAPSHOT_SCHEMA_VERSION: u8 = 2;
+pub const KNOWN_EVENT_TYPES: [&str; 14] = [
     "app.activate",
     "app.launch",
     "app.terminate",
@@ -19,7 +20,21 @@ pub const KNOWN_EVENT_TYPES: [&str; 13] = [
     "browser.navigate",
     "clipboard.copy",
     "clipboard.paste",
+    "content.snapshot",
 ];
+
+#[must_use]
+pub fn event_schema_version(event_type: &str) -> Option<u8> {
+    match event_type {
+        "app.activate" | "app.launch" | "app.terminate" | "window.focus" | "window.title"
+        | "ui.focus" | "ui.click" | "ui.value" | "input.key" | "input.scroll"
+        | "browser.navigate" | "clipboard.copy" | "clipboard.paste" => {
+            Some(LEGACY_EVENT_SCHEMA_VERSION)
+        }
+        "content.snapshot" => Some(CONTENT_SNAPSHOT_SCHEMA_VERSION),
+        _ => None,
+    }
+}
 
 pub fn is_known_event_type(event_type: &str) -> bool {
     KNOWN_EVENT_TYPES.contains(&event_type)
@@ -104,10 +119,10 @@ impl<'de> Deserialize<'de> for Event {
         D: Deserializer<'de>,
     {
         let envelope = EventEnvelope::deserialize(deserializer)?;
-        if envelope.version != EVENT_SCHEMA_VERSION {
+        if event_schema_version(&envelope.event_type) != Some(envelope.version) {
             return Err(serde::de::Error::custom(format!(
-                "unsupported event schema version: {}",
-                envelope.version
+                "event type {} does not use schema version {}",
+                envelope.event_type, envelope.version
             )));
         }
         let rule_marks_truncation = envelope
@@ -145,10 +160,10 @@ impl Serialize for Event {
     where
         S: Serializer,
     {
-        if self.version != EVENT_SCHEMA_VERSION {
+        if event_schema_version(&self.event_type) != Some(self.version) {
             return Err(serde::ser::Error::custom(format!(
-                "unsupported event schema version: {}",
-                self.version
+                "event type {} does not use schema version {}",
+                self.event_type, self.version
             )));
         }
         self.validate().map_err(serde::ser::Error::custom)?;
@@ -202,6 +217,12 @@ impl Event {
                 None => return Err("browser URL may be null only when the event is truncated"),
             }
         }
+        if let EventData::ContentSnapshot(data) = &self.data
+            && data.text.is_none()
+            && !self.is_truncated()
+        {
+            return Err("content snapshot text may be null only when the event is truncated");
+        }
         Ok(())
     }
 
@@ -218,7 +239,8 @@ impl Event {
             EventData::InputKey(_)
             | EventData::InputScroll(_)
             | EventData::BrowserNavigate(_)
-            | EventData::ClipboardPaste(_) => has_window && !has_element,
+            | EventData::ClipboardPaste(_)
+            | EventData::ContentSnapshot(_) => has_window && !has_element,
             EventData::ClipboardCopy(data) => match data.origin {
                 super::ClipboardOrigin::CopyShortcut => has_window && !has_element,
                 super::ClipboardOrigin::Unknown => {
@@ -319,14 +341,22 @@ struct EventRef<'a> {
     redaction: &'a Redaction,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CaptureContext {
+    pub website_host: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawEvent {
+    /// Source-observed wall time. Normalization falls back to ingestion time when absent.
+    pub observed_at: Option<OffsetDateTime>,
     pub source: String,
     pub event_type: String,
     pub app: App,
     pub window: Option<Window>,
     pub element: Option<Element>,
     pub data: EventData,
+    pub capture_context: CaptureContext,
 }
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>

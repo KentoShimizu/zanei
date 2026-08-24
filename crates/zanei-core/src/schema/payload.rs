@@ -105,6 +105,14 @@ pub enum ClipboardOrigin {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentSnapshotTrigger {
+    Settle,
+    Refresh,
+    FocusOut,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyData {}
@@ -217,6 +225,16 @@ pub struct ClipboardPasteData {
     pub field_kind: Option<FieldKind>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentSnapshotData {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub text: Option<String>,
+    pub chars: u64,
+    pub complete: bool,
+    pub trigger: ContentSnapshotTrigger,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EventData {
     AppActivate(EmptyData),
@@ -232,6 +250,7 @@ pub enum EventData {
     BrowserNavigate(BrowserNavigateData),
     ClipboardCopy(ClipboardCopyData),
     ClipboardPaste(ClipboardPasteData),
+    ContentSnapshot(ContentSnapshotData),
 }
 
 impl EventData {
@@ -256,6 +275,7 @@ impl EventData {
             "browser.navigate" => from_value(value, Self::BrowserNavigate),
             "clipboard.copy" => from_value(value, Self::ClipboardCopy),
             "clipboard.paste" => from_value(value, Self::ClipboardPaste),
+            "content.snapshot" => from_value(value, Self::ContentSnapshot),
             _ => Err(<serde_json::Error as serde::de::Error>::custom(format!(
                 "unknown event type: {event_type}"
             ))),
@@ -277,6 +297,7 @@ impl EventData {
             Self::BrowserNavigate(_) => "browser.navigate",
             Self::ClipboardCopy(_) => "clipboard.copy",
             Self::ClipboardPaste(_) => "clipboard.paste",
+            Self::ContentSnapshot(_) => "content.snapshot",
         }
     }
 
@@ -304,6 +325,7 @@ impl Serialize for EventData {
             Self::BrowserNavigate(value) => value.serialize(serializer),
             Self::ClipboardCopy(value) => value.serialize(serializer),
             Self::ClipboardPaste(value) => value.serialize(serializer),
+            Self::ContentSnapshot(value) => value.serialize(serializer),
         }
     }
 }

@@ -47,7 +47,7 @@ Returns the LLM-ready timeline for a range. Equivalent to `zanei timeline`. The 
 }
 ```
 
-With `format: "structured"`, the result matches the `sessions[]` structure of `timeline --format json` in the [CLI reference](/reference/cli#timeline). Each session includes at most 100 `event_ids` and always reports `event_ids_truncated`; if the token budget still cannot be met, all IDs are omitted before sessions are removed.
+With `format: "structured"`, the result matches the `sessions[]` structure of `timeline --format json` in the [CLI reference](/reference/cli#timeline). The result includes `skipped_unknown_types`. Every session includes `content_snapshots`, including `0`, at most 100 `event_ids`, and always reports `event_ids_truncated`; if the token budget still cannot be met, all IDs are omitted before sessions are removed. Markdown adds `Content snapshots: N` after a session's activity only when the count is nonzero. Snapshot bodies are never inlined.
 
 ### `query_events`
 
@@ -59,7 +59,7 @@ Returns raw events matching the given conditions. Equivalent to `zanei query`. F
 | --- | --- | --- | --- |
 | `since` | string | `"15m"` | Start of range |
 | `until` | string | `now` | End of range |
-| `types` | string[] | `[]` | [Event types](/reference/events); wildcards like `browser.*` allowed. An empty array applies no event-type filter |
+| `types` | string[] | `[]` | [Event types](/reference/events); wildcards like `browser.*` allowed. An empty array returns normal activity but excludes `content.*`; request `content.snapshot` or `content.*` explicitly |
 | `app` | string | — | Filter by app name |
 | `bundle_id` | string | — | Filter by bundle ID |
 | `limit` | integer | `200` | Max events; valid range is 1 through 1000 |
@@ -71,6 +71,7 @@ Returns raw events matching the given conditions. Equivalent to `zanei query`. F
   "range": { "since": "2026-08-16T08:45:00Z", "until": "2026-08-16T09:00:00Z" },
   "count": 42,
   "truncated": false,
+  "skipped_unknown_types": 0,
   "events": [
     {
       "v": 1, "id": "evt_01J...", "ts": "2026-08-16T08:46:12.120Z", "mono_ns": 128374651234,
@@ -86,7 +87,9 @@ Returns raw events matching the given conditions. Equivalent to `zanei query`. F
 }
 ```
 
-`truncated: true` when `limit` was exceeded. Event contents are privacy-processed at capture time (secure-field exclusion, redaction); the MCP layer does not add back anything that was excluded.
+`truncated: true` when `limit` was exceeded. `skipped_unknown_types` counts stored rows skipped because this binary does not recognize their type. Event contents are privacy-processed at capture time (secure-field exclusion, redaction); the MCP layer does not add back anything that was excluded.
+
+Content snapshots can be as large as 32 KiB and may contain messages or documents written by other people. Request them only with an explicit type, a narrow `since`/`until` range, and a small `limit`. Do not send their bodies outside the current task unless the user explicitly asks.
 
 ### `get_status`
 
@@ -106,7 +109,7 @@ Lightweight check for agents: is recording running? A subset of `zanei status`.
   "collector_failures": { "eventtap": 1 },
   "retention_hours": 48,
   "oldest_event_ts": "2026-08-14T09:00:00Z",
-  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false },
   "permissions_ok": true
 }
 ```
@@ -116,6 +119,7 @@ Lightweight check for agents: is recording running? A subset of `zanei status`.
 | `events_dropped` | Cumulative events intended for recording but actually lost to backpressure, a full queue, disconnection, or a similar delivery failure; inputs outside the recording scope because they cannot be attributed to an app or window, and unflushed data lost to a crash or `SIGKILL`, are not included |
 | `degraded` | Current collector or runtime degradation by component; removed when the component recovers. AX reports observer unavailability only for apps used since daemon startup: apps activated after startup or currently frontmost. Successful observer attachment removes the degradation |
 | `collector_failures` | Cumulative collector operation failures by collector; a nonzero value alone does not mean the collector is currently degraded |
+| `capture.content_snapshot` | Whether frontmost-window content snapshots are enabled. Snapshots exist only when this is `true`; scope details are available through CLI `zanei filter show` |
 | `permissions_ok` | The running recorder's own permission result while its heartbeat is fresh; a local probe when no recorder is running |
 
 An agent that sees `running: false` can tell the user that activity is not currently being recorded, instead of answering from nothing.
@@ -159,4 +163,4 @@ Not provided today; all would sit on the same read-only store view, and write ac
 
 - The server itself performs **no external transmission** (stdio only, no network surface).
 - Once an agent receives tool results, forwarding them to an LLM provider is the **agent's** responsibility. Given the sensitivity of activity history, the shipped skill files instruct agents to narrow the requested range before sending.
-- Stored content is privacy-processed at capture time; with the default `text_content: false`, typed content simply does not exist in the store.
+- Stored content is privacy-processed at capture time. Typed content and content snapshots are separate opt-ins and both default to off.

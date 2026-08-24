@@ -7,11 +7,13 @@ use std::time::Instant;
 use time::OffsetDateTime;
 
 use crate::schema::{
-    Event, EventData, FieldKind, InputKeyKind, RawEvent, Redaction, ScrollDirection,
+    CaptureContext, Event, EventData, FieldKind, InputKeyKind, RawEvent, Redaction, ScrollDirection,
 };
 
 pub(crate) use limits::enforce_size_limits;
-pub use limits::{TEXT_FIELD_MAX_BYTES, URL_TITLE_FIELD_MAX_BYTES};
+pub use limits::{
+    CONTENT_SNAPSHOT_SAFETY_MAX_BYTES, TEXT_FIELD_MAX_BYTES, URL_TITLE_FIELD_MAX_BYTES,
+};
 
 const NANOS_PER_MILLISECOND: u32 = 1_000_000;
 const KEY_GAP_NS: u64 = 2_000_000_000;
@@ -37,6 +39,26 @@ pub enum NormalizeError {
     EventContract(#[from] serde_json::Error),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormalizedEvent {
+    pub event: Event,
+    pub capture_context: CaptureContext,
+}
+
+impl std::ops::Deref for NormalizedEvent {
+    type Target = Event;
+
+    fn deref(&self) -> &Self::Target {
+        &self.event
+    }
+}
+
+impl std::ops::DerefMut for NormalizedEvent {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.event
+    }
+}
+
 pub struct Normalizer {
     monotonic_origin: Instant,
     last_seen_mono_ns: Option<u64>,
@@ -59,10 +81,11 @@ impl Normalizer {
         }
     }
 
-    pub fn push(&mut self, raw: RawEvent) -> Result<Vec<Event>, NormalizeError> {
+    pub fn push(&mut self, raw: RawEvent) -> Result<Vec<NormalizedEvent>, NormalizeError> {
         let elapsed = self.monotonic_origin.elapsed().as_nanos();
         let mono_ns = u64::try_from(elapsed).map_err(|_| NormalizeError::MonotonicClockOverflow)?;
-        self.push_at(raw, OffsetDateTime::now_utc(), mono_ns)
+        let wall_time = raw.observed_at.unwrap_or_else(OffsetDateTime::now_utc);
+        self.push_at(raw, wall_time, mono_ns)
     }
 
     pub fn push_at(
@@ -70,7 +93,7 @@ impl Normalizer {
         raw: RawEvent,
         wall_time: OffsetDateTime,
         mono_ns: u64,
-    ) -> Result<Vec<Event>, NormalizeError> {
+    ) -> Result<Vec<NormalizedEvent>, NormalizeError> {
         if let Some(previous) = self.last_seen_mono_ns
             && mono_ns < previous
         {
@@ -86,7 +109,7 @@ impl Normalizer {
         let Some(kind) = pending_kind(&event) else {
             emitted.extend(self.drain_pending());
             emitted.push(event);
-            emitted.sort_by_key(|item| item.mono_ns);
+            emitted.sort_by_key(|item| item.event.mono_ns);
             return Ok(emitted);
         };
 
@@ -99,16 +122,16 @@ impl Normalizer {
                 kind,
             });
         }
-        emitted.sort_by_key(|item| item.mono_ns);
+        emitted.sort_by_key(|item| item.event.mono_ns);
         Ok(emitted)
     }
 
     #[must_use]
-    pub fn flush(&mut self) -> Vec<Event> {
+    pub fn flush(&mut self) -> Vec<NormalizedEvent> {
         self.drain_pending()
     }
 
-    fn flush_expired(&mut self, now_mono_ns: u64) -> Vec<Event> {
+    fn flush_expired(&mut self, now_mono_ns: u64) -> Vec<NormalizedEvent> {
         let mut emitted = Vec::new();
         let mut retained = Vec::with_capacity(self.pending.len());
         for pending in self.pending.drain(..) {
@@ -119,13 +142,13 @@ impl Normalizer {
             }
         }
         self.pending = retained;
-        emitted.sort_by_key(|item| item.mono_ns);
+        emitted.sort_by_key(|item| item.event.mono_ns);
         emitted
     }
 
-    fn drain_pending(&mut self) -> Vec<Event> {
+    fn drain_pending(&mut self) -> Vec<NormalizedEvent> {
         let mut events: Vec<_> = self.pending.drain(..).map(|item| item.event).collect();
-        events.sort_by_key(|event| event.mono_ns);
+        events.sort_by_key(|event| event.event.mono_ns);
         events
     }
 }
@@ -134,7 +157,7 @@ pub fn normalize(
     raw: RawEvent,
     wall_time: OffsetDateTime,
     mono_ns: u64,
-) -> Result<Event, NormalizeError> {
+) -> Result<NormalizedEvent, NormalizeError> {
     let timestamp_ms = wall_time
         .unix_timestamp_nanos()
         .div_euclid(NANOS_PER_SECOND / MILLIS_PER_SECOND);
@@ -144,17 +167,32 @@ pub fn normalize(
         .ok_or(NormalizeError::WallClockOutOfRange)?;
     let random = ulid::Ulid::new().random();
     let id = ulid::Ulid::from_parts(timestamp_ms, random);
+    let RawEvent {
+        observed_at: _,
+        source,
+        event_type,
+        app,
+        window,
+        element,
+        data,
+        capture_context,
+    } = raw;
+    let version = crate::schema::event_schema_version(&event_type).ok_or_else(|| {
+        NormalizeError::EventContract(<serde_json::Error as serde::de::Error>::custom(format!(
+            "unknown event type: {event_type}"
+        )))
+    })?;
     let mut event = Event {
-        version: crate::schema::EVENT_SCHEMA_VERSION,
+        version,
         id: format!("evt_{id}"),
         ts: format_timestamp(wall_time),
         mono_ns,
-        source: raw.source,
-        event_type: raw.event_type,
-        app: raw.app,
-        window: raw.window,
-        element: raw.element,
-        data: raw.data,
+        source,
+        event_type,
+        app,
+        window,
+        element,
+        data,
         redaction: Redaction {
             applied: false,
             rules: Vec::new(),
@@ -162,7 +200,10 @@ pub fn normalize(
     };
     enforce_size_limits(&mut event);
     serde_json::to_value(&event)?;
-    Ok(event)
+    Ok(NormalizedEvent {
+        event,
+        capture_context,
+    })
 }
 
 #[must_use]
@@ -181,7 +222,7 @@ pub fn format_timestamp(value: OffsetDateTime) -> String {
 }
 
 struct Pending {
-    event: Event,
+    event: NormalizedEvent,
     last_mono_ns: u64,
     kind: PendingKind,
 }
@@ -191,6 +232,7 @@ enum PendingKind {
     Key {
         app: String,
         window: WindowKey,
+        website_host: Option<String>,
         field_kind: Option<FieldKind>,
         kind: InputKeyKind,
     },
@@ -221,7 +263,8 @@ enum WindowKey {
     Title(Option<String>),
 }
 
-fn pending_kind(event: &Event) -> Option<PendingKind> {
+fn pending_kind(normalized: &NormalizedEvent) -> Option<PendingKind> {
+    let event = &normalized.event;
     if event.is_truncated() {
         return None;
     }
@@ -242,6 +285,7 @@ fn pending_kind(event: &Event) -> Option<PendingKind> {
             Some(PendingKind::Key {
                 app,
                 window,
+                website_host: normalized.capture_context.website_host.clone(),
                 field_kind: data.field_kind,
                 kind: data.kind,
             })
@@ -269,10 +313,10 @@ fn window_key(event: &Event) -> WindowKey {
         })
 }
 
-fn merge(pending: &mut Pending, incoming: Event) -> Result<(), NormalizeError> {
-    let already_truncated = pending.event.is_truncated();
-    let incoming_mono_ns = incoming.mono_ns;
-    match (&mut pending.event.data, &incoming.data) {
+fn merge(pending: &mut Pending, incoming: NormalizedEvent) -> Result<(), NormalizeError> {
+    let already_truncated = pending.event.event.is_truncated();
+    let incoming_mono_ns = incoming.event.mono_ns;
+    match (&mut pending.event.event.data, &incoming.event.data) {
         (EventData::InputKey(current), EventData::InputKey(next)) => {
             current.count = current
                 .count
@@ -300,7 +344,7 @@ fn merge(pending: &mut Pending, incoming: Event) -> Result<(), NormalizeError> {
         (EventData::WindowTitle(_), EventData::WindowTitle(_)) => pending.event = incoming,
         _ => unreachable!("pending kind guarantees matching payload variants"),
     }
-    enforce_size_limits(&mut pending.event);
+    enforce_size_limits(&mut pending.event.event);
     pending.last_mono_ns = incoming_mono_ns;
     Ok(())
 }

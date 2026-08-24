@@ -1,63 +1,87 @@
 //! Chrome URL collection and OS-independent navigation change detection.
 
 mod eligibility;
+mod observer;
+mod worker;
 
 pub use eligibility::{
-    ChromeEligibilityPublisher, ChromeEligibilityTracker, chrome_eligibility_channel,
+    ChromeEligibilityObservation, ChromeEligibilityPublisher, ChromeEligibilityTracker,
+    chrome_eligibility_channel,
 };
+pub use observer::ChromeObserver;
 
 use std::{
     fmt::Display,
     sync::{
-        Arc,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
+        mpsc::{Receiver, SyncSender, sync_channel},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
 };
 
 use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
-use zanei_core::schema::{
-    App, BrowserMode, BrowserNavigateData, BrowserTransition, EventData, Window,
-};
+#[cfg(test)]
+use zanei_core::schema::BrowserTransition;
 
 use crate::{
     ffi::applescript::{
         AppleScriptClient, AppleScriptError, Observation as NativeObservation,
         Snapshot as NativeSnapshot,
     },
-    ffi::eventtap::current_context,
-    workspace::{ApplicationInfo, WorkspaceEvent},
+    focus_context::{FocusContext, FocusTransition, FocusTransitionReceiver},
 };
 
-const CHROME_BUNDLE_ID: &str = "com.google.Chrome";
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 const COLLECTOR_NAME: &str = "chrome";
-const EVENT_SOURCE: &str = "macos.applescript";
-const EVENT_TYPE: &str = "browser.navigate";
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+use observer::ObservationTrigger;
+use worker::{ChromeWorkerReceivers, run_worker};
+
+#[cfg(test)]
+use worker::{
+    ChromeWorkerState, EVENT_SOURCE, EVENT_TYPE, NavigationTracker, ObservationContext,
+    ObservationOutcome, SnapshotError, handle_focus_transition as handle_focus_transition_impl,
+    handle_observation_trigger as handle_observation_trigger_impl, observe_query_once,
+    service_on_demand as service_on_demand_impl,
+};
 pub struct ChromeCollector {
-    workspace_events: Option<Receiver<WorkspaceEvent>>,
+    channels: Arc<Mutex<ChromeWorkerChannels>>,
     eligibility: ChromeEligibilityPublisher,
+    focus_context: FocusContext,
     runtime: Option<ChromeRuntime>,
     permissions: [Permission; 1],
     metrics: ChromeMetrics,
+    #[cfg(test)]
+    panic_next_worker: Arc<AtomicBool>,
+}
+
+struct ChromeWorkerChannels {
+    focus_transitions: FocusTransitionReceiver,
+    observation_triggers: Receiver<ObservationTrigger>,
 }
 impl ChromeCollector {
     #[must_use]
     pub fn new(
-        workspace_events: Receiver<WorkspaceEvent>,
         eligibility: ChromeEligibilityPublisher,
+        focus_context: FocusContext,
+        observer: ChromeObserver,
     ) -> Self {
+        let focus_transitions = focus_context.subscribe();
+        let observation_triggers = observer.subscribe();
         Self {
-            workspace_events: Some(workspace_events),
+            channels: Arc::new(Mutex::new(ChromeWorkerChannels {
+                focus_transitions,
+                observation_triggers,
+            })),
             eligibility,
+            focus_context,
             runtime: None,
             permissions: [Permission::Automation {
                 bundle_id: CHROME_BUNDLE_ID.to_owned(),
             }],
             metrics: ChromeMetrics::default(),
+            #[cfg(test)]
+            panic_next_worker: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -72,14 +96,16 @@ impl ChromeCollector {
     }
 
     fn stop_worker(&mut self) {
-        self.eligibility.clear_all();
         let Some(runtime) = self.runtime.take() else {
             return;
         };
         runtime.stop.store(true, Ordering::Release);
-        if let Ok(workspace_events) = runtime.handle.join() {
-            self.workspace_events = Some(workspace_events);
-        }
+        let _ = runtime.handle.join();
+    }
+
+    #[cfg(test)]
+    fn panic_next_worker_for_test(&self) {
+        self.panic_next_worker.store(true, Ordering::Release);
     }
 }
 
@@ -98,41 +124,55 @@ impl Collector for ChromeCollector {
                 collector: COLLECTOR_NAME.to_owned(),
             });
         }
-        let workspace_events =
-            self.workspace_events
-                .take()
-                .ok_or_else(|| CollectorError::Start {
-                    collector: COLLECTOR_NAME.to_owned(),
-                    message: "workspace event receiver is unavailable".to_owned(),
-                })?;
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let metrics = self.metrics.clone();
         let eligibility = self.eligibility.clone();
+        let focus_context = self.focus_context.clone();
+        let initial_focus = focus_context.current();
+        let channels = Arc::clone(&self.channels);
         let (startup_sender, startup_receiver) = sync_channel(1);
+        #[cfg(test)]
+        let panic_next_worker = Arc::clone(&self.panic_next_worker);
         let handle = thread::Builder::new()
             .name("zanei-chrome".to_owned())
             .spawn(move || {
+                let channels = lock_worker_channels(&channels);
+                let _clear_eligibility = EligibilityClearGuard::new(&eligibility);
+                #[cfg(test)]
+                if panic_next_worker.swap(false, Ordering::AcqRel) {
+                    let _ = startup_sender.send(Ok(()));
+                    panic!("injected Chrome worker panic");
+                }
                 let mut api = match AppleScriptClient::new() {
-                    Ok(api) => {
+                    Ok(client) => {
                         let _ = startup_sender.send(Ok(()));
-                        api
+                        SystemChromeApi { client }
                     }
                     Err(error) => {
                         metrics.degraded.fetch_add(1, Ordering::Relaxed);
                         let _ = startup_sender.send(Err(error.to_string()));
-                        return workspace_events;
+                        return;
                     }
+                };
+                let receivers = ChromeWorkerReceivers {
+                    focus: &channels.focus_transitions,
+                    observations: &channels.observation_triggers,
+                    focus_context: &focus_context,
                 };
                 run_worker(
                     &mut api,
-                    &workspace_events,
+                    &receivers,
                     &sender,
                     &worker_stop,
                     &metrics,
                     &eligibility,
+                    initial_focus.map(|focus| FocusTransition {
+                        previous: None,
+                        current: Some(focus),
+                        resynced: false,
+                    }),
                 );
-                workspace_events
             })
             .map_err(|error| CollectorError::Start {
                 collector: COLLECTOR_NAME.to_owned(),
@@ -145,14 +185,14 @@ impl Collector for ChromeCollector {
                 Ok(())
             }
             Ok(Err(message)) => {
-                self.workspace_events = handle.join().ok();
+                let _ = handle.join();
                 Err(CollectorError::Start {
                     collector: COLLECTOR_NAME.to_owned(),
                     message,
                 })
             }
             Err(error) => {
-                self.workspace_events = handle.join().ok();
+                let _ = handle.join();
                 Err(CollectorError::Start {
                     collector: COLLECTOR_NAME.to_owned(),
                     message: error.to_string(),
@@ -174,7 +214,31 @@ impl Drop for ChromeCollector {
 
 struct ChromeRuntime {
     stop: Arc<AtomicBool>,
-    handle: JoinHandle<Receiver<WorkspaceEvent>>,
+    handle: JoinHandle<()>,
+}
+
+struct EligibilityClearGuard<'a> {
+    eligibility: &'a ChromeEligibilityPublisher,
+}
+
+impl<'a> EligibilityClearGuard<'a> {
+    const fn new(eligibility: &'a ChromeEligibilityPublisher) -> Self {
+        Self { eligibility }
+    }
+}
+
+impl Drop for EligibilityClearGuard<'_> {
+    fn drop(&mut self) {
+        self.eligibility.clear_all();
+    }
+}
+
+fn lock_worker_channels(
+    channels: &Mutex<ChromeWorkerChannels>,
+) -> MutexGuard<'_, ChromeWorkerChannels> {
+    channels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Clone, Default)]
@@ -186,27 +250,71 @@ struct ChromeMetrics {
 trait ChromeApi {
     type Error: Display;
 
-    fn query(&mut self, pid: i64) -> Result<ChromeObservation, Self::Error>;
+    fn query(&mut self, query: ChromeQuery) -> Result<ChromeObservation, Self::Error>;
 }
 
-impl ChromeApi for AppleScriptClient {
+struct SystemChromeApi {
+    client: AppleScriptClient,
+}
+
+impl ChromeApi for SystemChromeApi {
     type Error = AppleScriptError;
 
-    fn query(&mut self, pid: i64) -> Result<ChromeObservation, Self::Error> {
-        let observation = AppleScriptClient::query(self)?;
-        let window_id = current_context()
-            .filter(|context| context.app.pid == pid)
-            .and_then(|context| context.window)
-            .and_then(|window| window.id);
+    fn query(&mut self, query: ChromeQuery) -> Result<ChromeObservation, Self::Error> {
+        let observation = match query {
+            ChromeQuery::FrontWindow { .. } => self.client.query()?,
+            ChromeQuery::Window {
+                applescript_window_id,
+                ..
+            } => self.client.query_window(applescript_window_id)?,
+        };
+        let window_id = query.window_id();
         Ok(match observation {
             NativeObservation::Snapshot(snapshot) => {
-                ChromeObservation::Snapshot(ChromeSnapshot::from_native(snapshot, window_id))
+                ChromeObservation::Snapshot(ChromeSnapshot::from_native(snapshot, window_id)?)
             }
             NativeObservation::Incognito => ChromeObservation::Incognito { window_id },
-            NativeObservation::NotFrontmost => ChromeObservation::NotFrontmost,
             NativeObservation::NoWindow => ChromeObservation::NoWindow,
             NativeObservation::NotRunning => ChromeObservation::NotRunning,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChromeQuery {
+    FrontWindow {
+        pid: i64,
+        window_id: Option<i64>,
+    },
+    Window {
+        pid: i64,
+        window_id: i64,
+        applescript_window_id: i64,
+    },
+}
+
+impl ChromeQuery {
+    const fn pid(self) -> i64 {
+        match self {
+            Self::FrontWindow { pid, .. } | Self::Window { pid, .. } => pid,
+        }
+    }
+
+    const fn window_id(self) -> Option<i64> {
+        match self {
+            Self::FrontWindow { window_id, .. } => window_id,
+            Self::Window { window_id, .. } => Some(window_id),
+        }
+    }
+
+    const fn applescript_window_id(self) -> Option<i64> {
+        match self {
+            Self::Window {
+                applescript_window_id,
+                ..
+            } => Some(applescript_window_id),
+            Self::FrontWindow { .. } => None,
+        }
     }
 }
 
@@ -214,7 +322,6 @@ impl ChromeApi for AppleScriptClient {
 enum ChromeObservation {
     Snapshot(ChromeSnapshot),
     Incognito { window_id: Option<i64> },
-    NotFrontmost,
     NoWindow,
     NotRunning,
 }
@@ -222,6 +329,7 @@ enum ChromeObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChromeSnapshot {
     window_id: Option<i64>,
+    applescript_window_id: i64,
     window_key: String,
     window_title: Option<String>,
     tab_key: String,
@@ -230,307 +338,101 @@ struct ChromeSnapshot {
 }
 
 impl ChromeSnapshot {
-    fn from_native(value: NativeSnapshot, window_id: Option<i64>) -> Self {
-        Self {
+    fn from_native(
+        value: NativeSnapshot,
+        window_id: Option<i64>,
+    ) -> Result<Self, AppleScriptError> {
+        let applescript_window_id = value
+            .window_key
+            .parse()
+            .map_err(|_| AppleScriptError::InvalidResponse("Chrome window id is not an integer"))?;
+        Ok(Self {
             window_id,
+            applescript_window_id,
             window_key: value.window_key,
             window_title: value.window_title,
             tab_key: value.tab_key,
             url: value.url,
             tab_title: value.tab_title,
-        }
+        })
     }
 }
 
-fn run_worker<A: ChromeApi>(
-    api: &mut A,
-    workspace_events: &Receiver<WorkspaceEvent>,
-    sender: &SyncSender<RawEvent>,
-    stop: &AtomicBool,
-    metrics: &ChromeMetrics,
-    eligibility: &ChromeEligibilityPublisher,
-) {
-    let mut state = ChromeWorkerState::default();
-
-    while !stop.load(Ordering::Acquire) {
-        let wait = state
-            .next_poll
-            .map_or(STOP_CHECK_INTERVAL, |deadline: Instant| {
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(STOP_CHECK_INTERVAL)
-            });
-        match workspace_events.recv_timeout(wait) {
-            Ok(event) => {
-                if !handle_workspace_event(event, api, sender, &mut state, metrics, eligibility) {
-                    break;
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                let Some(deadline) = state.next_poll else {
-                    continue;
-                };
-                if Instant::now() < deadline {
-                    continue;
-                }
-                let Some(app) = state.frontmost.as_ref() else {
-                    state.next_poll = None;
-                    continue;
-                };
-                match poll_once(
-                    api,
-                    &mut state.navigation,
-                    app,
-                    sender,
-                    metrics,
-                    eligibility,
-                ) {
-                    PollOutcome::Continue => state.next_poll = Some(Instant::now() + POLL_INTERVAL),
-                    PollOutcome::Inactive => {
-                        state.frontmost = None;
-                        state.next_poll = None;
-                    }
-                    PollOutcome::Stop => break,
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-    }
-    eligibility.clear_all();
-}
-
-#[derive(Default)]
-struct ChromeWorkerState {
-    navigation: NavigationTracker,
-    frontmost: Option<ApplicationInfo>,
-    next_poll: Option<Instant>,
-}
-
-fn handle_workspace_event<A: ChromeApi>(
-    event: WorkspaceEvent,
+#[cfg(test)]
+fn handle_focus_transition<A: ChromeApi>(
+    transition: FocusTransition,
+    observed_at: std::time::Instant,
     api: &mut A,
     sender: &SyncSender<RawEvent>,
     state: &mut ChromeWorkerState,
     metrics: &ChromeMetrics,
     eligibility: &ChromeEligibilityPublisher,
 ) -> bool {
-    match event {
-        WorkspaceEvent::Activated(app) if is_chrome(&app) => {
-            eligibility.clear_pid(app.pid);
-            let outcome = poll_once(
-                api,
-                &mut state.navigation,
-                &app,
-                sender,
-                metrics,
-                eligibility,
-            );
-            match outcome {
-                PollOutcome::Continue => {
-                    state.frontmost = Some(app);
-                    state.next_poll = Some(Instant::now() + POLL_INTERVAL);
-                }
-                PollOutcome::Inactive => {
-                    state.frontmost = None;
-                    state.next_poll = None;
-                }
-                PollOutcome::Stop => return false,
-            }
-        }
-        WorkspaceEvent::Activated(_) => {
-            if let Some(app) = state.frontmost.as_ref() {
-                eligibility.clear_pid(app.pid);
-            }
-            state.frontmost = None;
-            state.next_poll = None;
-        }
-        WorkspaceEvent::Terminated(app) if is_chrome(&app) => {
-            eligibility.clear_pid(app.pid);
-            state.frontmost = None;
-            state.next_poll = None;
-            state.navigation.reset();
-        }
-        WorkspaceEvent::DidWake => eligibility.clear_all(),
-        WorkspaceEvent::Launched(_) | WorkspaceEvent::Terminated(_) => {}
+    let focus_context = FocusContext::new();
+    if let Some(current) = transition.current.as_ref() {
+        focus_context.activate(current.app.clone(), current.window.clone());
     }
-    true
+    let stop = AtomicBool::new(false);
+    let context = ObservationContext {
+        sender,
+        stop: &stop,
+        focus_context: &focus_context,
+        metrics,
+        eligibility,
+    };
+    handle_focus_transition_impl(transition, observed_at, api, state, &context)
 }
 
-fn is_chrome(app: &ApplicationInfo) -> bool {
-    app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID)
-}
-
-enum PollOutcome {
-    Continue,
-    Inactive,
-    Stop,
-}
-
-fn poll_once<A: ChromeApi>(
+#[cfg(test)]
+fn handle_observation_trigger<A: ChromeApi>(
+    trigger: ObservationTrigger,
+    now: std::time::Instant,
     api: &mut A,
-    tracker: &mut NavigationTracker,
-    app: &ApplicationInfo,
     sender: &SyncSender<RawEvent>,
+    state: &mut ChromeWorkerState,
     metrics: &ChromeMetrics,
     eligibility: &ChromeEligibilityPublisher,
-) -> PollOutcome {
-    eligibility.clear_pid(app.pid);
-    match api.query(app.pid) {
-        Ok(ChromeObservation::Snapshot(snapshot)) => {
-            eligibility.publish_normal(app.pid, snapshot.window_id, &snapshot.url);
-            let navigation = match tracker.observe(snapshot) {
-                Ok(navigation) => navigation,
-                Err(_) => {
-                    eligibility.clear_pid(app.pid);
-                    metrics.degraded.fetch_add(1, Ordering::Relaxed);
-                    return PollOutcome::Stop;
-                }
-            };
-            let Some(navigation) = navigation else {
-                return PollOutcome::Continue;
-            };
-            match sender.try_send(raw_event(app, navigation)) {
-                Ok(()) => PollOutcome::Continue,
-                Err(TrySendError::Full(_)) => {
-                    metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                    PollOutcome::Continue
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                    metrics.degraded.fetch_add(1, Ordering::Relaxed);
-                    PollOutcome::Stop
-                }
-            }
-        }
-        Ok(ChromeObservation::Incognito { window_id }) => {
-            eligibility.publish_incognito(app.pid, window_id);
-            tracker.reset();
-            PollOutcome::Continue
-        }
-        Ok(ChromeObservation::NoWindow) => {
-            tracker.reset();
-            PollOutcome::Continue
-        }
-        Ok(ChromeObservation::NotRunning) => {
-            tracker.reset();
-            PollOutcome::Inactive
-        }
-        Ok(ChromeObservation::NotFrontmost) => PollOutcome::Inactive,
-        Err(_) => {
-            metrics.degraded.fetch_add(1, Ordering::Relaxed);
-            PollOutcome::Stop
-        }
-    }
-}
-
-fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
-    RawEvent {
-        source: EVENT_SOURCE.to_owned(),
-        event_type: EVENT_TYPE.to_owned(),
-        app: App {
-            name: app.name.clone(),
-            bundle_id: app.bundle_id.clone(),
-            pid: Some(app.pid),
-        },
-        window: Some(Window {
-            title: navigation.snapshot.window_title,
-            // Chrome's AppleScript ID is a browser session ID, not CGWindowNumber.
-            id: None,
-        }),
-        element: None,
-        data: EventData::BrowserNavigate(BrowserNavigateData {
-            url: navigation.snapshot.url.into(),
-            tab_title: navigation.snapshot.tab_title,
-            mode: BrowserMode::Normal,
-            transition: navigation.transition,
-        }),
-    }
-}
-
-#[derive(Default)]
-struct NavigationTracker {
-    previous: Option<ObservedPage>,
-}
-
-impl NavigationTracker {
-    fn observe(&mut self, snapshot: ChromeSnapshot) -> Result<Option<Navigation>, SnapshotError> {
-        validate_snapshot(&snapshot)?;
-        let current = ObservedPage {
-            window_key: snapshot.window_key.clone(),
-            tab_key: snapshot.tab_key.clone(),
-            url: snapshot.url.clone(),
-        };
-        let transition = match self.previous.as_ref() {
-            None => None,
-            Some(previous)
-                if previous.window_key != current.window_key
-                    || previous.tab_key != current.tab_key =>
-            {
-                Some(BrowserTransition::TabSwitch)
-            }
-            Some(previous) if previous.url != current.url => Some(BrowserTransition::Navigate),
-            Some(_) => {
-                self.previous = Some(current);
-                return Ok(None);
-            }
-        };
-        self.previous = Some(current);
-        Ok(Some(Navigation {
-            snapshot,
-            transition,
-        }))
-    }
-
-    fn reset(&mut self) {
-        self.previous = None;
-    }
-}
-
-struct ObservedPage {
-    window_key: String,
-    tab_key: String,
-    url: String,
-}
-
-struct Navigation {
-    snapshot: ChromeSnapshot,
-    transition: Option<BrowserTransition>,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum SnapshotError {
-    #[error("Chrome window identity is empty")]
-    EmptyWindowIdentity,
-    #[error("Chrome tab identity is empty")]
-    EmptyTabIdentity,
-    #[error("Chrome returned a non-absolute URL")]
-    InvalidUrl,
-}
-
-fn validate_snapshot(snapshot: &ChromeSnapshot) -> Result<(), SnapshotError> {
-    if snapshot.window_key.is_empty() {
-        return Err(SnapshotError::EmptyWindowIdentity);
-    }
-    if snapshot.tab_key.is_empty() {
-        return Err(SnapshotError::EmptyTabIdentity);
-    }
-    if !is_absolute_uri(&snapshot.url) {
-        return Err(SnapshotError::InvalidUrl);
-    }
-    Ok(())
-}
-
-fn is_absolute_uri(value: &str) -> bool {
-    let Some((scheme, remainder)) = value.split_once(':') else {
-        return false;
+) -> bool {
+    let focus_context = test_focus_context(state.frontmost.as_ref());
+    let stop = AtomicBool::new(false);
+    let context = ObservationContext {
+        sender,
+        stop: &stop,
+        focus_context: &focus_context,
+        metrics,
+        eligibility,
     };
-    !scheme.is_empty()
-        && scheme.bytes().enumerate().all(|(index, byte)| {
-            byte.is_ascii_alphabetic()
-                || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
-        })
-        && !remainder.is_empty()
-        && !value.chars().any(char::is_whitespace)
+    handle_observation_trigger_impl(trigger, now, api, state, &context)
+}
+
+#[cfg(test)]
+fn service_on_demand<A: ChromeApi>(
+    now: std::time::Instant,
+    api: &mut A,
+    sender: &SyncSender<RawEvent>,
+    state: &mut ChromeWorkerState,
+    metrics: &ChromeMetrics,
+    eligibility: &ChromeEligibilityPublisher,
+) -> bool {
+    let focus_context = test_focus_context(state.frontmost.as_ref());
+    let stop = AtomicBool::new(false);
+    let context = ObservationContext {
+        sender,
+        stop: &stop,
+        focus_context: &focus_context,
+        metrics,
+        eligibility,
+    };
+    service_on_demand_impl(now, api, state, &context)
+}
+
+#[cfg(test)]
+fn test_focus_context(focus: Option<&crate::focus_context::FocusSnapshot>) -> FocusContext {
+    let context = FocusContext::new();
+    if let Some(focus) = focus {
+        context.activate(focus.app.clone(), focus.window.clone());
+    }
+    context
 }
 
 #[cfg(test)]

@@ -9,11 +9,14 @@ use std::{
     },
     time::Instant,
 };
+use time::OffsetDateTime;
 
 use crate::{
+    capture_policy::{CaptureDecision, CapturePolicy},
     focused_field::{FieldClass, field_class},
     text_capture::{FocusedTarget, InputAuthorizations},
 };
+use zanei_core::{privacy::PrivacyScope, schema::App};
 
 use super::{
     NativeAxError, NativeAxEvent, ObserverContext, TargetKind,
@@ -38,6 +41,9 @@ pub(super) struct AppObserver {
     stale_targets: Vec<RegisteredTarget>,
     degraded: Arc<AtomicU64>,
     capture_text_content: bool,
+    app: App,
+    capture_policy: CapturePolicy,
+    manual_accessibility: bool,
 }
 
 struct RegisteredTarget {
@@ -74,6 +80,9 @@ impl AppObserver {
         context: Box<ObserverContext>,
         degraded: Arc<AtomicU64>,
         capture_text_content: bool,
+        app: App,
+        capture_policy: CapturePolicy,
+        manual_accessibility: bool,
     ) -> Self {
         Self {
             application,
@@ -86,6 +95,9 @@ impl AppObserver {
             stale_targets: Vec::new(),
             degraded,
             capture_text_content,
+            app,
+            capture_policy,
+            manual_accessibility,
         }
     }
 
@@ -93,9 +105,31 @@ impl AppObserver {
         set_manual_accessibility(
             self.application.as_ptr(),
             self.context.pid,
-            self.capture_text_content,
+            self.manual_accessibility,
             enabled,
         );
+    }
+
+    pub(super) fn update_attach(&mut self, app: App, manual_accessibility: bool) {
+        self.app = app;
+        self.reconcile_manual_accessibility(manual_accessibility);
+    }
+
+    pub(super) fn app(&self) -> &App {
+        &self.app
+    }
+
+    pub(super) fn reconcile_manual_accessibility(&mut self, manual_accessibility: bool) {
+        if self.manual_accessibility == manual_accessibility {
+            return;
+        }
+        if self.manual_accessibility {
+            self.set_manual_accessibility(false);
+        }
+        self.manual_accessibility = manual_accessibility;
+        if self.manual_accessibility {
+            self.set_manual_accessibility(true);
+        }
     }
 
     pub(super) fn is_current_target(&self, kind: TargetKind, element: CfRef) -> bool {
@@ -110,7 +144,10 @@ impl AppObserver {
         target.is_some_and(|target| cf_equal(target.as_ptr(), element))
     }
 
-    pub(super) fn focused_window_event(&mut self) -> Result<Option<NativeAxEvent>, NativeAxError> {
+    pub(super) fn focused_window_event(
+        &mut self,
+        observed_at: OffsetDateTime,
+    ) -> Result<Option<NativeAxEvent>, NativeAxError> {
         let target = copy_element(self.application.as_ptr(), "AXFocusedWindow")?;
         let window_result = target
             .as_ref()
@@ -123,46 +160,58 @@ impl AppObserver {
         Ok(window.map(|window| NativeAxEvent::WindowFocused {
             pid: self.context.pid,
             window,
+            observed_at,
         }))
     }
 
     pub(super) fn focused_element_events(
         &mut self,
         notification_at: Instant,
+        observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
         let target = copy_element(self.application.as_ptr(), "AXFocusedUIElement")?;
         if self.same_value_target(target.as_ref()) {
             self.refresh_current_field_class(secure_input, authorizations);
-            return Ok(vec![self.focus_event()]);
+            return Ok(vec![self.focus_event(observed_at)]);
         }
 
         let snapshot = target
             .as_ref()
             .map(|element| {
-                focused_element_snapshot(element.as_ptr(), self.capture_text_content, secure_input)
+                focused_element_snapshot(
+                    element.as_ptr(),
+                    |window| self.text_content_allowed(window),
+                    secure_input,
+                )
             })
             .transpose()?
             .flatten();
         let prepared = self.prepare_focused_target(target, snapshot);
         let (prepared, focus_change) = after_target_preparation(prepared, || {
-            self.resolve_focus_change(notification_at, secure_input, authorizations)
+            self.resolve_focus_change(notification_at, observed_at, secure_input, authorizations)
         })?;
         let (event, defer_previous) = focus_change.into_parts();
         let mut events = event.into_iter().collect::<Vec<_>>();
         self.commit_focused_target(prepared, defer_previous);
-        events.push(self.focus_event());
+        events.push(self.focus_event(observed_at));
         Ok(events)
     }
 
     pub(super) fn focused_element_or_clear(
         &mut self,
         notification_at: Instant,
+        observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Vec<NativeAxEvent> {
-        match self.focused_element_events(notification_at, secure_input, authorizations) {
+        match self.focused_element_events(
+            notification_at,
+            observed_at,
+            secure_input,
+            authorizations,
+        ) {
             Ok(events) => events,
             Err(error) => {
                 crate::trace::trace!(
@@ -173,7 +222,7 @@ impl AppObserver {
                 );
                 self.record_degraded();
                 self.clear_focused_target();
-                vec![self.focus_event()]
+                vec![self.focus_event(observed_at)]
             }
         }
     }
@@ -194,7 +243,7 @@ impl AppObserver {
         }
     }
 
-    fn focus_event(&self) -> NativeAxEvent {
+    fn focus_event(&self, observed_at: OffsetDateTime) -> NativeAxEvent {
         NativeAxEvent::UiFocused {
             pid: self.context.pid,
             generation: self.focused_target.generation(),
@@ -207,6 +256,7 @@ impl AppObserver {
                 .current()
                 .filter(|target| target.context.field_class != FieldClass::SecureText)
                 .map(|target| target.context.element.clone()),
+            observed_at,
         }
     }
 
@@ -256,12 +306,13 @@ impl AppObserver {
                         "skipped"
                     }
                 );
+                let capture_text_content = self.text_content_allowed(snapshot.window.as_ref());
                 Ok(Some(RegisteredFocusedTarget {
                     element,
                     context: FocusedValueContext::new(
                         snapshot.window,
                         snapshot.element,
-                        self.capture_text_content,
+                        capture_text_content,
                         snapshot.text_baseline,
                         generation,
                         snapshot.field_class,
@@ -407,6 +458,24 @@ impl AppObserver {
 
     fn record_degraded(&self) {
         self.degraded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn text_content_allowed(&self, window: Option<&super::NativeWindow>) -> bool {
+        self.text_content_decision(window)
+            .is_some_and(|decision| decision.is_allowed())
+    }
+
+    pub(super) fn text_content_decision(
+        &self,
+        window: Option<&super::NativeWindow>,
+    ) -> Option<CaptureDecision> {
+        self.capture_text_content.then(|| {
+            self.capture_policy.decision(
+                PrivacyScope::TextContent,
+                &self.app,
+                window.and_then(|window| window.id),
+            )
+        })
     }
 }
 

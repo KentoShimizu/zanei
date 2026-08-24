@@ -1,7 +1,8 @@
-//! Safe ownership boundary for CGEventTap and Carbon Secure Input calls.
+//! Safe ownership boundary for CGEventTap calls.
 
 mod appkit;
 mod authorization;
+mod types;
 
 use std::{
     ffi::{c_double, c_ulong, c_void},
@@ -15,20 +16,23 @@ use std::{
 };
 
 #[cfg(test)]
-pub(crate) use appkit::{NativeApp, NativeWindow};
-pub(crate) use appkit::{NativeContext, Pasteboard, WakeObserver, current_context};
+pub(crate) use appkit::NativeWindow;
+pub(crate) use appkit::{NativeApp, NativeContext, Pasteboard, WakeObserver};
 
 use crate::{
     eventtap::{
         EventTapMode,
         logic::{KeyModifiers, KeyObservation},
     },
-    focused_field::{FocusedField, FocusedFieldTracker},
+    focus_context::FocusContext,
     input_source::ImeState,
+    secure_input::{SecureInputProbe, SecureInputProbeError},
     text_capture::{InputAuthorization, InputAuthorizationPublisher},
 };
 
 use authorization::{input_target, prepare_input_authorization, trace_target};
+use time::OffsetDateTime;
+pub(crate) use types::{NativeDisableReason, NativeEvent, NativeInputTarget};
 
 type CfRef = *const c_void;
 type CfMutableRef = *mut c_void;
@@ -55,40 +59,6 @@ const FLAG_ALTERNATE: u64 = 1 << 19;
 const FLAG_COMMAND: u64 = 1 << 20;
 const FLAG_SECONDARY_FN: u64 = 1 << 23;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeDisableReason {
-    Timeout,
-    UserInput,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum NativeEvent {
-    Key {
-        observation: KeyObservation,
-        target: Option<NativeInputTarget>,
-        authorization: Option<InputAuthorization>,
-        secure_input: bool,
-        ime_active: bool,
-    },
-    Scroll {
-        vertical: f64,
-        horizontal: f64,
-    },
-    MouseDown {
-        x: f64,
-        y: f64,
-        button: u32,
-        click_count: i64,
-    },
-    Disabled(NativeDisableReason),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct NativeInputTarget {
-    pub(crate) pid: i32,
-    pub(crate) focused_field: Option<FocusedField>,
-}
-
 #[derive(Debug)]
 struct RetainedEvent(NonNull<c_void>);
 
@@ -102,21 +72,32 @@ impl Drop for RetainedEvent {
 enum QueuedEvent {
     Event {
         event: RetainedEvent,
-        input_target: Option<NativeInputTarget>,
+        input_target: Option<Box<NativeInputTarget>>,
         authorization: Option<InputAuthorization>,
         secure_input: bool,
         ime_active: bool,
+        observed_at: OffsetDateTime,
     },
     Disabled(NativeDisableReason),
+}
+
+struct DecodeContext {
+    input_target: Option<NativeInputTarget>,
+    authorization: Option<InputAuthorization>,
+    secure_input: bool,
+    ime_active: bool,
+    observed_at: OffsetDateTime,
 }
 
 struct CallbackContext {
     sender: SyncSender<QueuedEvent>,
     dropped_events: Arc<AtomicU64>,
     degraded_operations: Arc<AtomicU64>,
-    focused_fields: Option<FocusedFieldTracker>,
     input_authorizations: Option<InputAuthorizationPublisher>,
     ime_state: ImeState,
+    secure_input_probe: Option<SecureInputProbe>,
+    focus_context: FocusContext,
+    capture_text_content: bool,
 }
 
 pub(crate) struct EventTap {
@@ -128,26 +109,31 @@ pub(crate) struct EventTap {
     capture_text_content: bool,
 }
 
+pub(crate) struct EventTapConfig {
+    pub(crate) queue_capacity: usize,
+    pub(crate) mode: EventTapMode,
+    pub(crate) dropped_events: Arc<AtomicU64>,
+    pub(crate) degraded_operations: Arc<AtomicU64>,
+    pub(crate) input_authorizations: Option<InputAuthorizationPublisher>,
+    pub(crate) ime_state: ImeState,
+    pub(crate) secure_input_probe: Option<SecureInputProbe>,
+    pub(crate) focus_context: FocusContext,
+}
+
 impl EventTap {
-    pub(crate) fn create(
-        queue_capacity: usize,
-        mode: EventTapMode,
-        dropped_events: Arc<AtomicU64>,
-        degraded_operations: Arc<AtomicU64>,
-        focused_fields: Option<FocusedFieldTracker>,
-        input_authorizations: Option<InputAuthorizationPublisher>,
-        ime_state: ImeState,
-    ) -> Result<Self, &'static str> {
-        let (sender, receiver) = sync_channel(queue_capacity);
+    pub(crate) fn create(config: EventTapConfig) -> Result<Self, &'static str> {
+        let (sender, receiver) = sync_channel(config.queue_capacity);
         let mut callback = Box::new(CallbackContext {
             sender,
-            dropped_events,
-            degraded_operations,
-            focused_fields,
-            input_authorizations,
-            ime_state,
+            dropped_events: config.dropped_events,
+            degraded_operations: config.degraded_operations,
+            input_authorizations: config.input_authorizations,
+            ime_state: config.ime_state,
+            secure_input_probe: config.secure_input_probe,
+            focus_context: config.focus_context,
+            capture_text_content: config.mode.captures_text_content(),
         });
-        let mask = event_mask_for(mode);
+        let mask = event_mask_for(config.mode);
         // SAFETY: callback remains boxed for the complete tap lifetime.
         let tap = unsafe {
             CGEventTapCreate(
@@ -185,7 +171,7 @@ impl EventTap {
             run_loop,
             receiver,
             _callback: callback,
-            capture_text_content: mode.captures_text_content(),
+            capture_text_content: config.mode.captures_text_content(),
         })
     }
 
@@ -203,7 +189,10 @@ impl EventTap {
         run_loop_once(timeout);
     }
 
-    pub(crate) fn try_next_event(&self) -> Option<NativeEvent> {
+    pub(crate) fn try_next_event(
+        &self,
+        text_read_allowed: impl FnOnce(Option<&NativeInputTarget>) -> bool,
+    ) -> Option<NativeEvent> {
         match self.receiver.try_recv() {
             Ok(QueuedEvent::Disabled(reason)) => Some(NativeEvent::Disabled(reason)),
             Ok(QueuedEvent::Event {
@@ -212,13 +201,18 @@ impl EventTap {
                 authorization,
                 secure_input,
                 ime_active,
+                observed_at,
             }) => Some(decode_event(
                 &event,
-                input_target,
-                authorization,
-                secure_input,
-                ime_active,
+                DecodeContext {
+                    input_target: input_target.map(|target| *target),
+                    authorization,
+                    secure_input,
+                    ime_active,
+                    observed_at,
+                },
                 self.capture_text_content,
+                text_read_allowed,
             )),
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
         }
@@ -247,11 +241,6 @@ pub(crate) fn run_loop_once(timeout: Duration) {
     unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout.as_secs_f64(), 1) };
 }
 
-pub(crate) fn secure_input_enabled() -> bool {
-    // SAFETY: Called only from the EventTap thread because Carbon marks it not thread-safe.
-    unsafe { IsSecureEventInputEnabled() != 0 }
-}
-
 extern "C" fn event_callback(
     _proxy: *mut c_void,
     event_type: u32,
@@ -268,27 +257,39 @@ extern "C" fn event_callback(
                 return event;
             };
             let occurred_at = Instant::now();
-            let secure_input = event_type == EVENT_KEY_DOWN && secure_input_enabled();
+            let observed_at = OffsetDateTime::now_utc();
+            let secure_input = event_type == EVENT_KEY_DOWN
+                && secure_input_active(
+                    context.capture_text_content,
+                    context.secure_input_probe.as_ref(),
+                    &context.degraded_operations,
+                );
             let ime_active = event_type == EVENT_KEY_DOWN && context.ime_state.active();
             let input_target = (event_type == EVENT_KEY_DOWN)
-                .then(|| input_target(event.as_ptr(), context.focused_fields.as_ref()))
+                .then(|| input_target(event.as_ptr(), &context.focus_context))
                 .flatten();
             if event_type == EVENT_KEY_DOWN {
-                trace_target(input_target, secure_input, ime_active);
+                trace_target(input_target.as_ref(), secure_input, ime_active);
             }
             let authorization = (event_type == EVENT_KEY_DOWN)
                 .then(|| {
-                    prepare_input_authorization(context, input_target, occurred_at, secure_input)
+                    prepare_input_authorization(
+                        context,
+                        input_target.as_ref(),
+                        occurred_at,
+                        secure_input,
+                    )
                 })
                 .flatten();
             // SAFETY: retain transfers one reference before the borrowed callback event expires.
             unsafe { CFRetain(event.as_ptr().cast_const()) };
             QueuedEvent::Event {
-                input_target,
+                input_target: input_target.map(Box::new),
                 authorization,
                 event: RetainedEvent(event),
                 secure_input,
                 ime_active,
+                observed_at,
             }
         }
     };
@@ -311,14 +312,54 @@ extern "C" fn event_callback(
     event
 }
 
+fn secure_input_active(
+    capture_text_content: bool,
+    probe: Option<&SecureInputProbe>,
+    degraded_operations: &AtomicU64,
+) -> bool {
+    if !capture_text_content {
+        return false;
+    }
+    let Some(probe) = probe else {
+        crate::trace::trace!(
+            "component=eventtap event=secure_input_probe enabled=true reason=probe_missing"
+        );
+        degraded_operations.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    match probe.enabled() {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            crate::trace::trace!(
+                "component=eventtap event=secure_input_probe enabled=true error={}",
+                secure_input_error(error)
+            );
+            degraded_operations.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+    }
+}
+
+const fn secure_input_error(error: SecureInputProbeError) -> &'static str {
+    match error {
+        SecureInputProbeError::Disconnected => "disconnected",
+        SecureInputProbeError::Timeout => "timeout",
+    }
+}
+
 fn decode_event(
     event: &RetainedEvent,
-    input_target: Option<NativeInputTarget>,
-    authorization: Option<InputAuthorization>,
-    secure_input: bool,
-    ime_active: bool,
+    context: DecodeContext,
     capture_text_content: bool,
+    text_read_allowed: impl FnOnce(Option<&NativeInputTarget>) -> bool,
 ) -> NativeEvent {
+    let DecodeContext {
+        input_target,
+        authorization,
+        secure_input,
+        ime_active,
+        observed_at,
+    } = context;
     // SAFETY: event owns a valid CGEventRef while all fields are read.
     unsafe {
         let raw = event.0.as_ptr();
@@ -326,6 +367,7 @@ fn decode_event(
             EVENT_KEY_DOWN => {
                 let flags = CGEventGetFlags(raw);
                 let known_text_field = input_target
+                    .as_ref()
                     .and_then(|target| target.focused_field)
                     .is_some_and(|field| field.class.is_known_text());
                 NativeEvent::Key {
@@ -347,6 +389,7 @@ fn decode_event(
                             secure_input,
                             ime_active,
                             known_text_field,
+                            text_read_allowed(input_target.as_ref()),
                         )
                         .then(|| event_text(raw)),
                     },
@@ -354,6 +397,7 @@ fn decode_event(
                     authorization,
                     secure_input,
                     ime_active,
+                    observed_at,
                 }
             }
             EVENT_SCROLL_WHEEL => {
@@ -363,6 +407,7 @@ fn decode_event(
                 NativeEvent::Scroll {
                     vertical: CGEventGetDoubleValueField(raw, SCROLL_FIXED_AXIS_1_FIELD),
                     horizontal: CGEventGetDoubleValueField(raw, SCROLL_FIXED_AXIS_2_FIELD),
+                    observed_at,
                 }
             }
             _ => {
@@ -379,6 +424,7 @@ fn decode_event(
                     ))
                     .unwrap_or(u32::MAX),
                     click_count: CGEventGetIntegerValueField(raw, MOUSE_CLICK_STATE_FIELD),
+                    observed_at,
                 }
             }
         }
@@ -390,8 +436,9 @@ const fn should_read_key_text(
     secure_input: bool,
     ime_active: bool,
     known_text_field: bool,
+    text_scope_allowed: bool,
 ) -> bool {
-    capture_text_content && !secure_input && !ime_active && known_text_field
+    capture_text_content && !secure_input && !ime_active && known_text_field && text_scope_allowed
 }
 
 unsafe fn event_text(event: CfMutableRef) -> String {
@@ -451,15 +498,16 @@ mod tests {
         let ime_active_at_callback = true;
         let ime_active_during_processing = false;
 
-        let text_was_read = should_read_key_text(true, false, ime_active_at_callback, true);
+        let text_was_read = should_read_key_text(true, false, ime_active_at_callback, true, true);
 
         assert!(!(text_was_read && !ime_active_during_processing));
     }
 
     #[test]
     fn missing_ax_tracking_blocks_key_text_at_the_callback() {
-        assert!(!should_read_key_text(true, false, false, false));
-        assert!(should_read_key_text(true, false, false, true));
+        assert!(!should_read_key_text(true, false, false, false, true));
+        assert!(!should_read_key_text(true, false, false, true, false));
+        assert!(should_read_key_text(true, false, false, true, true));
     }
 
     #[test]
@@ -535,9 +583,4 @@ unsafe extern "C" {
     fn CFRunLoopRemoveSource(run_loop: CfRef, source: CfRef, mode: CfRef);
     fn CFRunLoopRunInMode(mode: CfRef, seconds: c_double, return_after_handled: u8) -> i32;
     fn CFRunLoopSourceInvalidate(source: CfMutableRef);
-}
-
-#[link(name = "Carbon", kind = "framework")]
-unsafe extern "C" {
-    fn IsSecureEventInputEnabled() -> u8;
 }

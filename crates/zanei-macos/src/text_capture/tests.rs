@@ -1,13 +1,21 @@
 use std::time::{Duration, Instant};
 
-use zanei_core::schema::FieldKind;
+use zanei_core::{
+    config::{FilterConfig, ScopedFilterConfig},
+    privacy::{CHROME_BUNDLE_ID, PrivacyScope},
+    schema::{App, FieldKind},
+};
 
 use super::{
     AUTHORIZATION_QUEUE_CAPACITY, FocusChangeCapture, FocusedTarget, INPUT_WINDOW,
     InputAuthorizations, VALUE_DEBOUNCE, VALUE_MAX_HOLD, ValueCapture, ValueEmission,
     ValueObservation, input_authorization_channel,
 };
-use crate::focused_field::FieldClass;
+use crate::{
+    CapturePolicy,
+    chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
+    focused_field::FieldClass,
+};
 
 fn observation(pid: i32, generation: u64, at: Instant, value: &str) -> ValueObservation {
     ValueObservation {
@@ -17,6 +25,7 @@ fn observation(pid: i32, generation: u64, at: Instant, value: &str) -> ValueObse
         value: Some(value.to_owned()),
         value_len: u64::try_from(value.chars().count()).ok(),
         field_class: FieldClass::KnownText(FieldKind::Text),
+        capture_decision: None,
     }
 }
 
@@ -39,6 +48,121 @@ fn authorized_capture(
         ),
         authorizations,
     )
+}
+
+#[test]
+fn aggregation_window_version_change_discards_earlier_fragments() {
+    let now = Instant::now();
+    let filter = FilterConfig::default();
+    let (eligibility, tracker) = chrome_eligibility_channel(filter.clone());
+    let policy = CapturePolicy::new(tracker, filter, None);
+    let app = App {
+        name: "Google Chrome".to_owned(),
+        bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
+        pid: Some(7),
+    };
+    eligibility.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://v1.example/".to_owned(),
+        },
+    );
+    let first_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let (publisher, mut authorizations) = input_authorization_channel();
+    let authorization = publisher
+        .prepare(7, 1, now)
+        .expect("authorization channel should accept the reservation");
+    authorization.confirm();
+    let mut capture = ValueCapture::new(
+        true,
+        Some("A".to_owned()),
+        FieldClass::KnownText(FieldKind::Text),
+    );
+    let mut first = observation(7, 1, now, "Ab");
+    first.capture_decision = Some(first_decision.clone());
+    assert_eq!(capture.observe(first, &mut authorizations), None);
+
+    eligibility.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://v2.example/".to_owned(),
+        },
+    );
+    let second_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    assert_ne!(
+        first_decision.chrome_version(),
+        second_decision.chrome_version()
+    );
+    let second_at = now + Duration::from_millis(10);
+    let mut second = observation(7, 1, second_at, "Abc");
+    second.capture_decision = Some(second_decision.clone());
+    assert_eq!(capture.observe(second, &mut authorizations), None);
+
+    let emission = capture
+        .take_due(second_at + VALUE_DEBOUNCE, &mut authorizations)
+        .expect("post-change value should emit");
+    assert_eq!(emission.text.as_deref(), Some("c"));
+    assert_eq!(emission.capture_decision(), Some(&second_decision));
+}
+
+#[test]
+fn aggregation_window_denial_discards_the_pending_body() {
+    let now = Instant::now();
+    let filter = FilterConfig::default();
+    let (eligibility, tracker) = chrome_eligibility_channel(filter.clone());
+    let policy = CapturePolicy::new(tracker, filter, None);
+    let app = App {
+        name: "Google Chrome".to_owned(),
+        bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
+        pid: Some(7),
+    };
+    eligibility.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://denied.example/".to_owned(),
+        },
+    );
+    let first_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let (publisher, mut authorizations) = input_authorization_channel();
+    let authorization = publisher
+        .prepare(7, 1, now)
+        .expect("authorization channel should accept the reservation");
+    authorization.confirm();
+    let mut capture = ValueCapture::new(
+        true,
+        Some("A".to_owned()),
+        FieldClass::KnownText(FieldKind::Text),
+    );
+    let mut first = observation(7, 1, now, "Ab");
+    first.capture_decision = Some(first_decision.clone());
+    assert_eq!(capture.observe(first, &mut authorizations), None);
+
+    policy.replace_filter(FilterConfig {
+        text_content: ScopedFilterConfig {
+            exclude_websites: vec!["denied.example".to_owned()],
+            ..ScopedFilterConfig::default()
+        },
+        ..FilterConfig::default()
+    });
+    let denied_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    assert!(!denied_decision.is_allowed());
+    assert_eq!(
+        first_decision.chrome_version(),
+        denied_decision.chrome_version()
+    );
+    let second_at = now + Duration::from_millis(10);
+    let mut second = observation(7, 1, second_at, "Abc");
+    second.capture_decision = Some(denied_decision.clone());
+    assert_eq!(capture.observe(second, &mut authorizations), None);
+
+    let emission = capture
+        .take_due(second_at + VALUE_DEBOUNCE, &mut authorizations)
+        .expect("denied observation retains metadata");
+    assert_eq!(emission.text, None);
+    assert_eq!(emission.capture_decision(), Some(&denied_decision));
 }
 
 #[test]
@@ -92,6 +216,7 @@ fn unauthorized_transition_advances_baseline_inside_debounce_window() {
             element_value: None,
             value_len: Some(9),
             text: Some("x".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -129,6 +254,7 @@ fn rejected_pending_value_is_not_backfilled_by_the_next_authorization() {
             element_value: None,
             value_len: Some(9),
             text: Some("x".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -166,6 +292,7 @@ fn late_confirmation_before_debounce_preserves_the_complete_delta() {
             element_value: None,
             value_len: Some(9),
             text: Some(" secretx".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -202,6 +329,7 @@ fn confirmed_windows_coalesce_and_remain_available_until_expiry() {
             element_value: None,
             value_len: Some(9),
             text: Some(" secretx".to_owned()),
+            capture_decision: None,
         })
     );
 
@@ -216,6 +344,7 @@ fn confirmed_windows_coalesce_and_remain_available_until_expiry() {
             element_value: None,
             value_len: Some(10),
             text: Some("y".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -252,6 +381,7 @@ fn rejected_keystroke_does_not_close_a_confirmed_window() {
             element_value: None,
             value_len: Some(9),
             text: Some("x secret".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -277,6 +407,7 @@ fn one_confirmed_keystroke_authorizes_multiple_observations_within_its_window() 
             element_value: None,
             value_len: Some(2),
             text: Some("b".to_owned()),
+            capture_decision: None,
         })
     );
 
@@ -289,6 +420,7 @@ fn one_confirmed_keystroke_authorizes_multiple_observations_within_its_window() 
             element_value: None,
             value_len: Some(3),
             text: Some("c".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -316,6 +448,7 @@ fn one_confirmed_keystroke_authorizes_multiple_observations_in_one_batch() {
             element_value: None,
             value_len: Some(3),
             text: Some("bc".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -365,6 +498,7 @@ fn matching_does_not_retire_confirmed_windows() {
             element_value: None,
             value_len: Some(2),
             text: Some("x".to_owned()),
+            capture_decision: None,
         })
     );
 
@@ -376,6 +510,7 @@ fn matching_does_not_retire_confirmed_windows() {
             element_value: None,
             value_len: Some(3),
             text: Some("y".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -429,6 +564,7 @@ fn queue_integrity_loss_before_flush_invalidates_a_matched_window() {
             element_value: None,
             value_len: Some(2),
             text: None,
+            capture_decision: None,
         })
     );
 }
@@ -444,6 +580,7 @@ fn authorization_requires_matching_pid() {
             element_value: None,
             value_len: Some(2),
             text: None,
+            capture_decision: None,
         })
     );
 }
@@ -459,6 +596,7 @@ fn authorization_requires_matching_target_generation() {
             element_value: None,
             value_len: Some(2),
             text: None,
+            capture_decision: None,
         })
     );
 }
@@ -480,6 +618,7 @@ fn authorization_expires_after_three_seconds() {
             element_value: None,
             value_len: Some(2),
             text: None,
+            capture_decision: None,
         })
     );
 }
@@ -499,6 +638,7 @@ fn authorization_is_valid_at_three_second_boundary() {
             element_value: None,
             value_len: Some(2),
             text: Some("x".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -523,6 +663,7 @@ fn confirmed_window_survives_an_emission() {
             element_value: None,
             value_len: Some(3),
             text: Some("y".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -555,6 +696,7 @@ fn late_worker_confirmation_authorizes_the_observed_value() {
             element_value: None,
             value_len: Some(2),
             text: Some("x".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -589,6 +731,7 @@ fn focus_change_defers_duplicate_value_until_late_confirmation() {
             element_value: None,
             value_len: Some(2),
             text: Some("x".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -618,6 +761,7 @@ fn deferred_focus_change_fails_closed_after_worker_rejection() {
             element_value: None,
             value_len: Some(2),
             text: None,
+            capture_decision: None,
         })
     );
 }
@@ -648,6 +792,7 @@ fn confirmed_focus_change_flushes_duplicate_value_immediately() {
             element_value: None,
             value_len: Some(2),
             text: Some("x".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -688,6 +833,7 @@ fn changed_focus_snapshot_defers_the_latest_pending_reservation() {
             element_value: None,
             value_len: Some(3),
             text: Some("xy".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -826,6 +972,7 @@ fn trace_shaped_window_cases_preserve_only_authorized_deltas() {
                 element_value: None,
                 value_len: Some(6),
                 text: Some("bcdef".to_owned()),
+                capture_decision: None,
             },
         },
         Case {
@@ -858,6 +1005,7 @@ fn trace_shaped_window_cases_preserve_only_authorized_deltas() {
                 element_value: None,
                 value_len: Some(3),
                 text: Some("bc".to_owned()),
+                capture_decision: None,
             },
         },
         Case {
@@ -890,6 +1038,7 @@ fn trace_shaped_window_cases_preserve_only_authorized_deltas() {
                 element_value: None,
                 value_len: Some(10),
                 text: Some("x".to_owned()),
+                capture_decision: None,
             },
         },
         Case {
@@ -911,6 +1060,7 @@ fn trace_shaped_window_cases_preserve_only_authorized_deltas() {
                 element_value: None,
                 value_len: Some(2),
                 text: None,
+                capture_decision: None,
             },
         },
         Case {
@@ -973,6 +1123,7 @@ fn trace_shaped_window_cases_preserve_only_authorized_deltas() {
                 element_value: None,
                 value_len: Some(11),
                 text: Some("z".to_owned()),
+                capture_decision: None,
             },
         },
         Case {
@@ -995,6 +1146,7 @@ fn trace_shaped_window_cases_preserve_only_authorized_deltas() {
                 element_value: None,
                 value_len: Some(2),
                 text: None,
+                capture_decision: None,
             },
         },
         Case {
@@ -1017,6 +1169,7 @@ fn trace_shaped_window_cases_preserve_only_authorized_deltas() {
                 element_value: None,
                 value_len: Some(2),
                 text: None,
+                capture_decision: None,
             },
         },
     ];
@@ -1171,6 +1324,7 @@ fn unreadable_focus_snapshot_preserves_pending_authorization() {
             element_value: None,
             value_len: Some(2),
             text: Some("x".to_owned()),
+            capture_decision: None,
         })
     );
 }
@@ -1195,6 +1349,7 @@ fn pending_worker_keystroke_fails_closed_without_consuming_its_window() {
             element_value: None,
             value_len: Some(2),
             text: None,
+            capture_decision: None,
         })
     );
     authorization.confirm();
@@ -1222,6 +1377,7 @@ fn rejected_worker_reservation_fails_closed() {
             element_value: None,
             value_len: Some(2),
             text: None,
+            capture_decision: None,
         })
     );
 }
@@ -1247,6 +1403,7 @@ fn input_after_the_notification_does_not_authorize_the_value() {
             element_value: None,
             value_len: Some(2),
             text: None,
+            capture_decision: None,
         })
     );
 }
@@ -1289,6 +1446,7 @@ fn unknown_transition_invalidates_baseline_and_authorization() {
             element_value: None,
             value_len: Some(10),
             text: None,
+            capture_decision: None,
         })
     );
 }
@@ -1313,6 +1471,7 @@ fn secure_transition_invalidates_baseline_and_authorization() {
             element_value: None,
             value_len: Some(10),
             text: None,
+            capture_decision: None,
         })
     );
 }

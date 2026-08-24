@@ -2,19 +2,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
-use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-
-use crate::schema::{
-    App, ClipboardOrigin, Element, Event, EventData, Redaction, Window, is_known_event_type,
-};
 
 use super::RetiredPlaintext;
 use super::{
     COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
-    DaemonPermissions, HEARTBEAT_STALE_AFTER_SECONDS, LEGACY_STORE_SCHEMA_VERSION, QueryFilter,
+    DaemonPermissions, HEARTBEAT_STALE_AFTER_SECONDS, LEGACY_STORE_SCHEMA_VERSION,
+    PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION, QueryFilter, QueryResult,
     RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreFormat, StoreKey,
     StoreStatus, file_uri, retention_cutoff, retired_plaintext_stores, store_uri, unlock,
 };
@@ -174,7 +170,7 @@ impl StoreReader {
 
     /// Schema names holding an `events` table: the live store and every attached
     /// set-aside store.
-    fn event_sources(&self) -> Vec<String> {
+    pub(super) fn event_sources(&self) -> Vec<String> {
         std::iter::once("main".to_owned())
             .chain((0..self.retired.len()).map(retired_alias))
             .collect()
@@ -201,22 +197,18 @@ impl StoreReader {
         &self,
         filter: &QueryFilter,
         configured_retention_hours: u64,
-    ) -> Result<Vec<Event>, StoreError> {
+    ) -> Result<QueryResult, StoreError> {
         let now = OffsetDateTime::now_utc();
         let retention_hours = self.effective_retention_hours_at(now, configured_retention_hours)?;
         let cutoff = retention_cutoff(now, retention_hours)?;
-        let (sql, parameters) = build_query(filter, &cutoff, &self.event_sources())?;
-        let mut statement = self.connection.prepare(&sql)?;
-        let mut rows = statement.query(params_from_iter(parameters.iter()))?;
-        let mut events = Vec::new();
-
-        while let Some(row) = rows.next()? {
-            events.push(read_event(row)?);
-        }
-        Ok(events)
+        super::query::run(self, filter, &cutoff)
     }
 
-    fn effective_retention_hours_at(
+    pub(super) const fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub(super) fn effective_retention_hours_at(
         &self,
         now: OffsetDateTime,
         configured_retention_hours: u64,
@@ -254,6 +246,13 @@ impl StoreReader {
             ..StoreStatus::default()
         }
         .effective_retention_hours(configured_retention_hours))
+    }
+
+    pub fn query_metadata(
+        &self,
+        filter: &super::MetadataFilter,
+    ) -> Result<Vec<super::EventMetadata>, StoreError> {
+        super::event_metadata::run(self, filter)
     }
 
     pub fn status(&self) -> Result<StoreStatus, StoreError> {
@@ -302,7 +301,7 @@ impl StoreReader {
                  collector_failures_json, NULL \
                  FROM daemon_state WHERE id = 1"
             }
-            STORE_SCHEMA_VERSION => {
+            PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION | STORE_SCHEMA_VERSION => {
                 "SELECT pid, started_at, instance_id, mode, heartbeat_at, retention_hours, \
                  paused_until, events_captured, events_dropped, last_event_ts, degraded_json, \
                  collector_failures_json, last_known_permissions_json \
@@ -336,11 +335,12 @@ impl StoreReader {
             .and_then(|state| state.last_known_permissions_json.as_deref())
             .map(|json| deserialize_permissions("last_known_permissions_json", json))
             .transpose()?;
-        let last_known_permissions = if self.schema_version < STORE_SCHEMA_VERSION {
-            permissions.clone()
-        } else {
-            last_known_permissions
-        };
+        let last_known_permissions =
+            if self.schema_version < PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION {
+                permissions.clone()
+            } else {
+                last_known_permissions
+            };
         transaction.commit()?;
         state.map_or_else(
             || Ok(StoreStatus::default()),
@@ -465,216 +465,6 @@ fn retired_alias(index: usize) -> String {
     format!("retired{index}")
 }
 
-/// Builds the event query over `sources` (schema names with an `events` table).
-/// With several sources the per-source selections are combined with
-/// `UNION ALL`, each carrying the same conditions, and ordered as one.
-fn build_query(
-    filter: &QueryFilter,
-    retention_cutoff: &str,
-    sources: &[String],
-) -> Result<(String, Vec<SqlValue>), StoreError> {
-    filter.validate()?;
-    let mut conditions = Vec::new();
-    let mut parameters = Vec::new();
-
-    conditions.push("ts >= ?".to_owned());
-    parameters.push(SqlValue::Text(retention_cutoff.to_owned()));
-
-    add_optional_bound(
-        &mut conditions,
-        &mut parameters,
-        "ts >= ?",
-        "since",
-        filter.since.as_deref(),
-    )?;
-    add_optional_bound(
-        &mut conditions,
-        &mut parameters,
-        "ts <= ?",
-        "until",
-        filter.until.as_deref(),
-    )?;
-    add_type_filter(&mut conditions, &mut parameters, &filter.types);
-    add_optional_text(
-        &mut conditions,
-        &mut parameters,
-        "app_name = ?",
-        filter.app.as_deref(),
-    );
-    add_optional_text(
-        &mut conditions,
-        &mut parameters,
-        "bundle_id = ?",
-        filter.bundle_id.as_deref(),
-    );
-
-    const COLUMNS: &str = "id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
-                           window_title, window_id, element_json, data_json, redaction_json";
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", conditions.join(" AND "))
-    };
-    let selections = sources
-        .iter()
-        .map(|source| format!("SELECT {COLUMNS} FROM {source}.events{where_clause}"))
-        .collect::<Vec<_>>();
-    let mut sql = if selections.len() == 1 {
-        selections.into_iter().next().unwrap_or_default()
-    } else {
-        format!("SELECT {COLUMNS} FROM ({})", selections.join(" UNION ALL "))
-    };
-    let per_source = parameters.clone();
-    for _ in 1..sources.len() {
-        parameters.extend(per_source.iter().cloned());
-    }
-    sql.push_str(" ORDER BY ts ASC, mono_ns ASC, id ASC");
-    if let Some(limit) = filter.limit {
-        let limit = i64::try_from(limit).map_err(|_| StoreError::NumericOverflow("limit"))?;
-        sql.push_str(" LIMIT ?");
-        parameters.push(SqlValue::Integer(limit));
-    }
-
-    Ok((sql, parameters))
-}
-
-fn add_optional_bound(
-    conditions: &mut Vec<String>,
-    parameters: &mut Vec<SqlValue>,
-    condition: &str,
-    field: &'static str,
-    value: Option<&str>,
-) -> Result<(), StoreError> {
-    if let Some(value) = normalized_bound(field, value)? {
-        conditions.push(condition.to_owned());
-        parameters.push(SqlValue::Text(value));
-    }
-    Ok(())
-}
-
-/// Validates an optional RFC3339 bound and normalizes it to the store's timestamp form.
-pub(super) fn normalized_bound(
-    field: &'static str,
-    value: Option<&str>,
-) -> Result<Option<String>, StoreError> {
-    value
-        .map(|value| parse_timestamp(field, value).map(crate::normalize::format_timestamp))
-        .transpose()
-}
-
-fn add_optional_text(
-    conditions: &mut Vec<String>,
-    parameters: &mut Vec<SqlValue>,
-    condition: &str,
-    value: Option<&str>,
-) {
-    if let Some(value) = value {
-        conditions.push(condition.to_owned());
-        parameters.push(SqlValue::Text(value.to_owned()));
-    }
-}
-
-fn add_type_filter(
-    conditions: &mut Vec<String>,
-    parameters: &mut Vec<SqlValue>,
-    patterns: &[String],
-) {
-    if patterns.is_empty() {
-        return;
-    }
-
-    let mut type_conditions = Vec::with_capacity(patterns.len());
-    for pattern in patterns {
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            type_conditions.push("type LIKE ? ESCAPE '\\'".to_owned());
-            parameters.push(SqlValue::Text(format!("{}%", escape_like(prefix))));
-        } else {
-            type_conditions.push("type = ?".to_owned());
-            parameters.push(SqlValue::Text(pattern.clone()));
-        }
-    }
-    conditions.push(format!("({})", type_conditions.join(" OR ")));
-}
-
-fn escape_like(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
-fn read_event(row: &rusqlite::Row<'_>) -> Result<Event, StoreError> {
-    let event_type: String = row.get(4)?;
-    if !is_known_event_type(&event_type) {
-        return Err(StoreError::invalid_json(
-            "event",
-            <serde_json::Error as serde::de::Error>::custom(format!(
-                "unknown event type in v1 store: {event_type}"
-            )),
-        ));
-    }
-    let data_json: String = row.get(11)?;
-    let data_value = serde_json::from_str(&data_json)
-        .map_err(|error| StoreError::invalid_json("data_json", error))?;
-    let data = EventData::from_type_and_value(&event_type, data_value)
-        .map_err(|error| StoreError::invalid_json("data_json", error))?;
-    let element_json: Option<String> = row.get(10)?;
-    let element = element_json
-        .as_deref()
-        .map(|json| {
-            serde_json::from_str::<Element>(json)
-                .map_err(|error| StoreError::invalid_json("element_json", error))
-        })
-        .transpose()?;
-    let redaction_json: String = row.get(12)?;
-    let redaction = serde_json::from_str::<Redaction>(&redaction_json)
-        .map_err(|error| StoreError::invalid_json("redaction_json", error))?;
-    let window_title: Option<String> = row.get(8)?;
-    let window_id: Option<i64> = row.get(9)?;
-    let window = (window_title.is_some() || window_id.is_some() || requires_window(&data))
-        .then_some(Window {
-            title: window_title,
-            id: window_id,
-        });
-    let mono_ns = unsigned("mono_ns", row.get(2)?)?;
-
-    let event = Event {
-        version: crate::schema::EVENT_SCHEMA_VERSION,
-        id: row.get(0)?,
-        ts: row.get(1)?,
-        mono_ns,
-        source: row.get(3)?,
-        event_type,
-        app: App {
-            bundle_id: row.get(5)?,
-            name: row.get(6)?,
-            pid: row.get(7)?,
-        },
-        window,
-        element,
-        data,
-        redaction,
-    };
-    serde_json::to_value(&event).map_err(|error| StoreError::invalid_json("event", error))?;
-    Ok(event)
-}
-
-fn requires_window(data: &EventData) -> bool {
-    match data {
-        EventData::WindowFocus(_)
-        | EventData::WindowTitle(_)
-        | EventData::UiFocus(_)
-        | EventData::UiClick(_)
-        | EventData::UiValue(_)
-        | EventData::InputKey(_)
-        | EventData::InputScroll(_)
-        | EventData::BrowserNavigate(_)
-        | EventData::ClipboardPaste(_) => true,
-        EventData::ClipboardCopy(data) => data.origin == ClipboardOrigin::CopyShortcut,
-        EventData::AppActivate(_) | EventData::AppLaunch(_) | EventData::AppTerminate(_) => false,
-    }
-}
-
 fn parse_timestamp(field: &'static str, value: &str) -> Result<OffsetDateTime, StoreError> {
     OffsetDateTime::parse(value, &Rfc3339)
         .map_err(|_| StoreError::invalid_timestamp(field, value.to_owned()))
@@ -699,6 +489,7 @@ fn readable_schema_version(connection: &Connection) -> Result<i64, StoreError> {
             | DAEMON_IDENTITY_STORE_SCHEMA_VERSION
             | RETENTION_STORE_SCHEMA_VERSION
             | COLLECTOR_FAILURES_STORE_SCHEMA_VERSION
+            | PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION
             | STORE_SCHEMA_VERSION
     ) {
         Ok(version)

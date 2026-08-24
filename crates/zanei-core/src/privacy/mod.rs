@@ -4,13 +4,25 @@ mod matcher;
 mod redactor;
 
 use crate::config::FilterConfig;
-use crate::normalize::enforce_size_limits;
-use crate::schema::{Event, EventData};
+use crate::normalize::{NormalizedEvent, enforce_size_limits};
+use crate::schema::{App, Element, Event, EventData};
 
 pub use matcher::{BUILT_IN_EXCLUDED_APP_NAMES, BUILT_IN_EXCLUDED_BUNDLE_IDS};
 
 use matcher::{app_is_allowed, extract_url_host, host_is_allowed};
 use redactor::redact_event;
+
+/// Chrome is the only browser whose window mode and URL Zanei can read, so website
+/// scope rules apply to it alone.
+pub const CHROME_BUNDLE_ID: &str = "com.google.Chrome";
+
+/// Selects one of the three independently configured privacy scopes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivacyScope {
+    AllEvents,
+    TextContent,
+    ContentSnapshot,
+}
 
 #[derive(Clone, Debug)]
 pub struct PrivacyFilter {
@@ -26,24 +38,148 @@ impl PrivacyFilter {
     ///
     /// Browser events without a strict, hierarchical URL host are rejected rather than
     /// bypassing website policy.
-    pub fn process(&self, event: Event) -> Option<Event> {
-        if !app_is_allowed(
-            &event.app,
-            &self.config.include_only_apps,
-            &self.config.exclude_apps,
-        ) {
+    pub fn process(&self, normalized: NormalizedEvent) -> Option<Event> {
+        let NormalizedEvent {
+            mut event,
+            capture_context,
+        } = normalized;
+        if !app_is_allowed_for(PrivacyScope::AllEvents, &event.app, &self.config) {
             return None;
         }
 
-        if event.event_type.starts_with("browser.")
-            && !website_is_allowed(browser_url(&event)?, &self.config)
+        let website_host = if event.event_type.starts_with("browser.") {
+            Some(extract_url_host(browser_url(&event)?)?)
+        } else {
+            capture_context.website_host
+        };
+        let global_host_allowed = website_scope_is_allowed(
+            PrivacyScope::AllEvents,
+            &event.app,
+            website_host.as_deref(),
+            &self.config,
+        );
+        if event.event_type.starts_with("browser.") && !global_host_allowed {
+            return None;
+        }
+
+        if !global_host_allowed
+            || !app_is_allowed_for(PrivacyScope::TextContent, &event.app, &self.config)
+            || !website_scope_is_allowed(
+                PrivacyScope::TextContent,
+                &event.app,
+                website_host.as_deref(),
+                &self.config,
+            )
+        {
+            suppress_text_content(&mut event.data, &mut event.element);
+        }
+        if event.event_type.starts_with("content.")
+            && !self.content_snapshot_is_allowed(&event.app, website_host.as_deref())
         {
             return None;
         }
 
-        let mut event = redact_event(event, &self.config.redactors);
+        event = redact_event(event, &self.config.redactors);
         enforce_size_limits(&mut event);
         Some(event)
+    }
+
+    /// Rechecks whether a snapshot may cross the capture-time privacy boundary.
+    #[must_use]
+    pub fn content_snapshot_is_allowed(&self, app: &App, website_host: Option<&str>) -> bool {
+        self.content_snapshot_app_is_allowed(app)
+            && website_scope_is_allowed(
+                PrivacyScope::ContentSnapshot,
+                app,
+                website_host,
+                &self.config,
+            )
+    }
+
+    /// Reports whether global and text-content app rules can include `app`.
+    #[must_use]
+    pub fn text_content_app_is_allowed(&self, app: &App) -> bool {
+        app_is_allowed_for(PrivacyScope::TextContent, app, &self.config)
+    }
+
+    /// Reports whether global and snapshot-specific app rules can include `app`.
+    #[must_use]
+    pub fn content_snapshot_app_is_allowed(&self, app: &App) -> bool {
+        app_is_allowed_for(PrivacyScope::ContentSnapshot, app, &self.config)
+    }
+}
+
+/// Applies the shared app matcher for the selected privacy scope.
+#[must_use]
+pub fn app_is_allowed_for(scope: PrivacyScope, app: &App, config: &FilterConfig) -> bool {
+    app_is_allowed(app, &config.include_only_apps, &config.exclude_apps)
+        && match scope {
+            PrivacyScope::AllEvents => true,
+            PrivacyScope::TextContent => app_is_allowed(
+                app,
+                &config.text_content.include_only_apps,
+                &config.text_content.exclude_apps,
+            ),
+            PrivacyScope::ContentSnapshot => app_is_allowed(
+                app,
+                &config.content_snapshot.include_only_apps,
+                &config.content_snapshot.exclude_apps,
+            ),
+        }
+}
+
+/// Applies the shared host matcher for the selected privacy scope.
+///
+/// `host` must already have been parsed by [`website_host`]. Missing hosts are denied.
+#[must_use]
+pub fn host_is_allowed_for(scope: PrivacyScope, host: Option<&str>, config: &FilterConfig) -> bool {
+    host.is_some_and(|host| {
+        host_is_allowed(
+            host,
+            &config.include_only_websites,
+            &config.exclude_websites,
+        ) && match scope {
+            PrivacyScope::AllEvents => true,
+            PrivacyScope::TextContent => host_is_allowed(
+                host,
+                &config.text_content.include_only_websites,
+                &config.text_content.exclude_websites,
+            ),
+            PrivacyScope::ContentSnapshot => host_is_allowed(
+                host,
+                &config.content_snapshot.include_only_websites,
+                &config.content_snapshot.exclude_websites,
+            ),
+        }
+    })
+}
+
+/// Removes optional text bodies while preserving the event and its factual metadata.
+pub fn suppress_text_content(data: &mut EventData, element: &mut Option<Element>) {
+    if let Some(element) = element {
+        element.value = None;
+    }
+    match data {
+        EventData::InputKey(value) => value.text = None,
+        EventData::UiValue(value) => value.text = None,
+        EventData::ClipboardCopy(value) => {
+            value.text = None;
+            value.size_bytes = None;
+        }
+        EventData::ClipboardPaste(value) => {
+            value.text = None;
+            value.size_bytes = None;
+        }
+        EventData::ContentSnapshot(_) => {}
+        EventData::AppActivate(_)
+        | EventData::AppLaunch(_)
+        | EventData::AppTerminate(_)
+        | EventData::WindowFocus(_)
+        | EventData::WindowTitle(_)
+        | EventData::UiFocus(_)
+        | EventData::UiClick(_)
+        | EventData::InputScroll(_)
+        | EventData::BrowserNavigate(_) => {}
     }
 }
 
@@ -53,13 +189,26 @@ impl PrivacyFilter {
 /// when the URL cannot be classified.
 #[must_use]
 pub fn website_is_allowed(url: &str, config: &FilterConfig) -> bool {
-    extract_url_host(url).is_some_and(|host| {
-        host_is_allowed(
-            &host,
-            &config.include_only_websites,
-            &config.exclude_websites,
-        )
-    })
+    let host = extract_url_host(url);
+    host_is_allowed_for(PrivacyScope::AllEvents, host.as_deref(), config)
+}
+
+/// Extracts a normalized host for capture-only website policy context.
+#[must_use]
+pub fn website_host(url: &str) -> Option<String> {
+    extract_url_host(url)
+}
+
+fn website_scope_is_allowed(
+    scope: PrivacyScope,
+    app: &App,
+    host: Option<&str>,
+    config: &FilterConfig,
+) -> bool {
+    if app.bundle_id.as_deref() != Some(CHROME_BUNDLE_ID) {
+        return true;
+    }
+    host_is_allowed_for(scope, host, config)
 }
 
 fn browser_url(event: &Event) -> Option<&str> {
@@ -88,7 +237,7 @@ mod tests {
 
         assert!(
             PrivacyFilter::new(config)
-                .process(browser_event("https://example.com"))
+                .process(normalized(browser_event("https://example.com")))
                 .is_none()
         );
     }
@@ -104,7 +253,11 @@ mod tests {
             ..FilterConfig::default()
         };
 
-        assert!(PrivacyFilter::new(config).process(event).is_none());
+        assert!(
+            PrivacyFilter::new(config)
+                .process(normalized(event))
+                .is_none()
+        );
     }
 
     #[test]
@@ -116,12 +269,12 @@ mod tests {
 
         assert!(
             filter
-                .process(browser_event("https://api.example.com/path"))
+                .process(normalized(browser_event("https://api.example.com/path")))
                 .is_none()
         );
         assert!(
             filter
-                .process(browser_event("https://evil-example.com"))
+                .process(normalized(browser_event("https://evil-example.com")))
                 .is_some()
         );
     }
@@ -129,10 +282,14 @@ mod tests {
     #[test]
     fn browser_event_with_malformed_or_hostless_url_is_dropped() {
         let filter = PrivacyFilter::new(FilterConfig::default());
-        assert!(filter.process(browser_event("not a url")).is_none());
         assert!(
             filter
-                .process(browser_event("file:///private/path"))
+                .process(normalized(browser_event("not a url")))
+                .is_none()
+        );
+        assert!(
+            filter
+                .process(normalized(browser_event("file:///private/path")))
                 .is_none()
         );
     }
@@ -148,7 +305,7 @@ mod tests {
         assert!(event.is_truncated());
         assert!(
             PrivacyFilter::new(FilterConfig::default())
-                .process(event)
+                .process(normalized(event))
                 .is_none()
         );
     }
@@ -160,7 +317,9 @@ mod tests {
             ..FilterConfig::default()
         });
         let redacted = filter
-            .process(browser_event("https://example.com/alice@example.com"))
+            .process(normalized(browser_event(
+                "https://example.com/alice@example.com",
+            )))
             .expect("event should pass");
 
         let EventData::BrowserNavigate(data) = redacted.data else {
@@ -184,7 +343,7 @@ mod tests {
         event.app.bundle_id = None;
 
         let redacted = filter
-            .process(event)
+            .process(normalized(event))
             .expect("raw app name should pass before redaction");
 
         assert_eq!(redacted.app.name, "Mail [REDACTED:email]");
@@ -201,7 +360,9 @@ mod tests {
         let mut event = browser_event("https://example.com");
         event.window.as_mut().expect("window").title = Some("a@b.co ".repeat(500));
 
-        let processed = filter.process(event).expect("event should pass");
+        let processed = filter
+            .process(normalized(event))
+            .expect("event should pass");
 
         assert_eq!(
             processed
@@ -242,6 +403,13 @@ mod tests {
                 applied: false,
                 rules: Vec::new(),
             },
+        }
+    }
+
+    fn normalized(event: Event) -> NormalizedEvent {
+        NormalizedEvent {
+            event,
+            capture_context: crate::schema::CaptureContext::default(),
         }
     }
 }

@@ -17,13 +17,14 @@ zanei config path   # 設定ファイルのパスを表示
 zanei config show   # 有効設定（既定値マージ後）を表示
 zanei config edit   # $EDITOR で開く
 zanei config set capture.text_content true
+zanei config set capture.content_snapshot true
 ```
 
 `zanei config init` は不足している親ディレクトリを作成し、以下の完全なテンプレートを
 書き込みます。既存ファイルは上書きせず、生成先が存在する場合はそのパスを表示して終了コード
 1 で終了します。既定以外の場所を初期化するにはグローバル `--config <path>` を使います。
 
-`capture.text_content`、`output.batch_interval_s`、`output.retention_hours` には
+`capture.text_content`、`capture.content_snapshot`、`output.batch_interval_s`、`output.retention_hours` には
 [`zanei config set`](/ja/reference/cli#config)を使います。filter リストには
 [`zanei filter`](/ja/reference/cli#filter)、その他の配列には `config edit` を使います。
 
@@ -33,6 +34,7 @@ zanei config set capture.text_content true
 [capture]
 sources = ["app", "window", "ui", "input", "browser"]
 text_content = false            # 内容の捕捉は明示的な opt-in
+content_snapshot = false        # 前面ウィンドウの Accessibility text は別の opt-in
 
 [filter]                        # capture-time フィルタ = プライバシー境界（ストア書込前に適用）
 exclude_apps = ["1Password", "Keychain Access"]   # 不許可リスト（bundle_id 推奨）。既定除外を同梱
@@ -40,6 +42,20 @@ include_only_apps = []          # 非空で許可リストモードに切替
 exclude_websites = []           # Chrome URL event/本文。URL host のドット境界サフィックス一致
 include_only_websites = []      # Chrome URL event/本文の許可リスト
 redactors = ["email", "credit_card", "token"]     # 捕捉値のスクラブ（二次防御）
+
+[filter.text_content]           # 入力・clipboard 本文だけ。event と内容以外の事実は残る
+exclude_apps = ["com.apple.Safari", "org.mozilla.firefox", "com.brave.Browser",
+                "com.microsoft.edgemac", "com.vivaldi.Vivaldi", "company.thebrowser.Browser"]
+include_only_apps = []
+exclude_websites = []
+include_only_websites = []
+
+[filter.content_snapshot]       # content.snapshot event だけ
+exclude_apps = ["com.apple.Safari", "org.mozilla.firefox", "com.brave.Browser",
+                "com.microsoft.edgemac", "com.vivaldi.Vivaldi", "company.thebrowser.Browser"]
+include_only_apps = []
+exclude_websites = []
+include_only_websites = []
 
 [output]
 batch_interval_s = 5
@@ -50,14 +66,17 @@ egress に相当する設定は存在しません — 外部送信は機能と�
 
 ## バリデーション
 
-省略した設定に既定値を補完した後にバリデーションを実行します。受理するのは以下の 9 キー（それぞれ定義された section 内）だけで、それ以外のキーがあるとファイル全体を不正とします。ルールに違反するファイルは受理されず、`config show` や `config edit` を含む設定を読み込むすべてのコマンドが exit code 1 で終了します。`config set` や `filter` に渡した不正値は使用法エラー（code 2）で、何も保存されません。`config set` が受け付けるのはスカラーキー（`capture.text_content`・`output.batch_interval_s`・`output.retention_hours`）のみで、配列キーは `filter` か手編集で変更します。
+省略した設定に既定値を補完した後にバリデーションを実行します。受理するのは以下の 18 キー（それぞれ定義された section 内）だけで、それ以外のキーがあるとファイル全体を不正とします。`config init` は 18 項目をすべて出力します。ルールに違反するファイルは受理されず、`config show` や `config edit` を含む設定を読み込むすべてのコマンドが exit code 1 で終了します。`config set` や `filter` に渡した不正値は使用法エラー（code 2）で、何も保存されません。`config set` が受け付けるのはスカラーキー（`capture.text_content`・`capture.content_snapshot`・`output.batch_interval_s`・`output.retention_hours`）のみで、配列キーは `filter` か手編集で変更します。
 
 | キー | 受理する値 |
 | --- | --- |
 | `capture.sources` | `app`・`window`・`ui`・`input`・`browser` のうち 0 個以上。重複不可 |
 | `capture.text_content` | TOML boolean。`config set` では `true` / `false` と完全一致する値のみ |
+| `capture.content_snapshot` | TOML boolean。`config set` では `true` / `false` と完全一致する値のみ。有効化時は現在の scope を表示して `[y/N]` を確認（[CLI リファレンス](/ja/reference/cli#config)参照） |
 | `filter.exclude_apps`・`filter.include_only_apps` | 文字列。各 entry は非空・前後 whitespace なし・リスト内で大文字小文字を無視して一意。既存値（大文字小文字違いを含む）の `filter ... add` は no-op（code 0） |
 | `filter.exclude_websites`・`filter.include_only_websites` | ドメイン名。非空・whitespace・一意性のルールは上と同じ。末尾の `.` は 1 個まで。それを除いて全体 253 bytes 以下、dot 区切りの各 label は 1〜63 bytes の ASCII 英数字と `-` で、先頭と末尾は英数字。同梱の public suffix snapshot に含まれる値（`com` など）は受理するが、`filter ... add` は `--quiet` 未指定なら warning を表示 |
+| `filter.text_content.exclude_apps`・`filter.text_content.include_only_apps`・`filter.content_snapshot.exclude_apps`・`filter.content_snapshot.include_only_apps` | 同じ app list rule。両方の `exclude_apps` は全体例に示した Safari・Firefox・Brave・Edge・Vivaldi・Arc の bundle ID が既定値。他の app list は `[]` |
+| `filter.text_content.exclude_websites`・`filter.text_content.include_only_websites`・`filter.content_snapshot.exclude_websites`・`filter.content_snapshot.include_only_websites` | 同じ domain list rule。4 list とも既定値は `[]` |
 | `filter.redactors` | `email`・`credit_card`・`token` のうち 0 個以上。重複不可 |
 | `output.batch_interval_s`・`output.retention_hours` | 0 より大きい符号なし整数（`u64`） |
 ## `[capture]`
@@ -66,10 +85,13 @@ egress に相当する設定は存在しません — 外部送信は機能と�
 | --- | --- | --- |
 | `sources` | `["app", "window", "ui", "input", "browser"]` | 捕捉するイベントファミリー。`browser` がない場合、Chrome Automation が必要なのは `text_content` と `ui` または `input` を有効にしたときだけです。`window` 単独では不要です（[権限](/ja/guides/permissions)参照） |
 | `text_content` | `false` | 入力・フィールド内容（`ui.value`・`input.key`・クリップボードの中身）の捕捉。既定オフ。[プライバシーモデル](/ja/guides/privacy)参照 |
+| `content_snapshot` | `false` | 前面ウィンドウに表示された Accessibility text を `content.snapshot` として捕捉。`sources` と `text_content` から独立しており、`window` が `sources` に無くてもこの opt-in は Accessibility を必要とし snapshot を記録可能。再起動が必要 |
 
 ## `[filter]`
 
-capture-time フィルタはストア書込**前に**適用されます。アプリ一致は全イベントを破棄し、サイト一致は Chrome URL イベントと本文を抑止します。タイトルと操作メタデータは残ります。セマンティクス・マッチング・優先順位は[フィルタガイド](/ja/guides/filters)を参照。手編集より [`zanei filter`](/ja/reference/cli#filter) での管理を推奨します。
+capture-time フィルタはストア書込**前に**適用されます。scope は 3 つです：全 event の `[filter]`、入力・clipboard 本文の `[filter.text_content]`、snapshot event の `[filter.content_snapshot]`。app / website の各軸では、`include_only_*` が非空なら only mode、空なら exclude mode です。`exclude_*` はどちらの mode でも常に優先します。
+
+評価順は組み込み除外、`[filter]` の app と Chrome website、`[filter.text_content]`、`[filter.content_snapshot]` です。text-content scope 外では event と事実を残して本文 field を null にし、その window だけ `capture.text_content = false` と同じ形にします。snapshot scope 外では `content.snapshot` 自体を生成しません。website rule は Chrome だけに適用します。詳細は[フィルタガイド](/ja/guides/filters)を参照し、list は [`zanei filter`](/ja/reference/cli#filter) で管理してください。
 
 | キー | 既定値 | 説明 |
 | --- | --- | --- |
@@ -79,7 +101,11 @@ capture-time フィルタはストア書込**前に**適用されます。アプ
 | `include_only_websites` | `[]` | Chrome URL イベントと本文に対する URL host の許可リスト |
 | `redactors` | `["email", "credit_card", "token"]` | 捕捉値に適用する redaction ルール |
 
-デーモンは設定ファイルを約 2 秒間隔で監視しており、フィルタの変更は数秒以内に反映されます — デーモン再起動は不要です。
+nested scope も同じ 4 list 名を使います。既定値と挙動は上記のとおりです。デーモンは 3 scope すべてを約 2 秒間隔で監視しており、フィルタの変更は数秒以内に反映されます — デーモン再起動は不要です。
+
+:::warning[0.3.0 の挙動変更]
+新しい既定の `[filter.text_content].exclude_apps` は、既存の 0.2.x 設定ですでに `capture.text_content = true` でも適用されます。Safari・Firefox・Brave・Edge・Vivaldi・Arc の本文は既定で null になり、event と内容以外の事実は残ります。
+:::
 
 ## `[output]`
 
@@ -93,9 +119,9 @@ capture-time フィルタはストア書込**前に**適用されます。アプ
 
 ## 変更の反映
 
-- `[filter]` の変更はデーモンの設定監視（約 2 秒間隔）で検知され、数秒以内に反映されます — 再起動は不要です。
+- `[filter]`・`[filter.text_content]`・`[filter.content_snapshot]` の変更はデーモンの設定監視（約 2 秒間隔）で検知され、数秒以内に反映されます — 再起動は不要です。
 - `output.retention_hours` は daemon 再起動なしで反映され、新しい保持期間の外にある
-  event を即時 purge します。それ以外（`capture.sources`・`output.batch_interval_s` 等）は
+  event を即時 purge します。それ以外（`capture.sources`・`capture.content_snapshot`・`output.batch_interval_s` 等）は
   デーモン再起動後に反映：
   `zanei stop && zanei start`
 

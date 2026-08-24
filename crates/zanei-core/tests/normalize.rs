@@ -133,7 +133,7 @@ fn oversized_ui_value_text_is_dropped_without_losing_value_length() {
     assert_eq!(data.text, None);
     assert_eq!(data.value_len, Some(value_len));
     assert!(event.is_truncated());
-    let encoded = serde_json::to_value(event).expect("truncated event should serialize");
+    let encoded = serde_json::to_value(&event.event).expect("truncated event should serialize");
     assert_eq!(encoded["truncated"], true);
     assert_eq!(
         encoded["redaction"]["rules"],
@@ -195,6 +195,7 @@ fn coalesced_input_text_is_dropped_when_the_combined_bytes_exceed_the_limit() {
 
 fn base(event_type: &str, data: EventData) -> RawEvent {
     RawEvent {
+        observed_at: None,
         source: "macos.eventtap".to_owned(),
         event_type: event_type.to_owned(),
         app: App {
@@ -208,6 +209,7 @@ fn base(event_type: &str, data: EventData) -> RawEvent {
         }),
         element: None,
         data,
+        capture_context: Default::default(),
     }
 }
 

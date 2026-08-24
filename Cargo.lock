@@ -1814,6 +1814,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "jsonschema",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
@@ -1856,7 +1857,9 @@ dependencies = [
 name = "zanei-macos"
 version = "0.2.0"
 dependencies = [
+ "tempfile",
  "thiserror",
+ "time",
  "zanei-collector",
  "zanei-core",
 ]

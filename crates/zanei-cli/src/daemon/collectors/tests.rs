@@ -17,25 +17,31 @@ use zanei_core::{
 use zanei_macos::permission::PermissionStatus;
 
 use super::{
-    CollectorSet, Managed, ManagedCollector, SourceGate, start_collector,
+    CollectorSet, Managed, ManagedCollector, SourceGate, chrome_tracking_required, start_collector,
     start_collector_if_allowed, supervise_collector,
 };
 use crate::{
     daemon::{
         permission_worker::PermissionRequestWorker,
         runtime::{configure_eventtap_start_gate, service_permission_request_worker},
-        supervisor::EventTapStartGate,
+        supervisor::{
+            CollectorCounters, CollectorKind, EventTapStartGate, START_ORDER, STOP_ORDER,
+            removed_collector_counters,
+        },
     },
     permissions::PermissionRequestOutcome,
 };
 
 #[test]
 fn source_gate_maps_support_collector_events_to_configured_families() {
-    let gate = SourceGate::new(&[
-        CaptureSource::Window,
-        CaptureSource::Input,
-        CaptureSource::Browser,
-    ]);
+    let gate = SourceGate::new(
+        &[
+            CaptureSource::Window,
+            CaptureSource::Input,
+            CaptureSource::Browser,
+        ],
+        false,
+    );
 
     assert!(!gate.allows_type("app.activate"));
     assert!(gate.allows_type("window.focus"));
@@ -43,12 +49,172 @@ fn source_gate_maps_support_collector_events_to_configured_families() {
     assert!(gate.allows_type("input.key"));
     assert!(gate.allows_type("clipboard.copy"));
     assert!(gate.allows_type("browser.navigate"));
+    assert!(!gate.allows_type("content.snapshot"));
     assert!(!gate.allows_type("future.event"));
 }
 
 #[test]
+fn content_snapshot_gate_is_independent_from_capture_sources() {
+    let gate = SourceGate::new(&[], true);
+
+    assert!(gate.allows_type("content.snapshot"));
+    assert!(!gate.allows_type("window.focus"));
+}
+
+#[test]
+fn secure_input_monitor_is_created_only_for_an_enabled_consumer() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources.clear();
+    config.capture.text_content = false;
+    config.capture.content_snapshot = false;
+    assert!(CollectorSet::new(&config)._secure_input_monitor.is_none());
+
+    config.capture.text_content = true;
+    assert!(
+        CollectorSet::new(&config)._secure_input_monitor.is_none(),
+        "text opt-in without the input source has no Secure Input consumer"
+    );
+
+    config.capture.sources = vec![CaptureSource::Input];
+    assert!(CollectorSet::new(&config)._secure_input_monitor.is_some());
+
+    config.capture.sources.clear();
+    config.capture.text_content = false;
+    config.capture.content_snapshot = true;
+    assert!(CollectorSet::new(&config)._secure_input_monitor.is_some());
+}
+
+#[test]
+fn content_snapshot_collector_and_internal_dependencies_exist_only_when_opted_in() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources.clear();
+    let disabled = CollectorSet::new(&config);
+    assert!(disabled.content_snapshot.is_none());
+    assert!(disabled.ax.is_none());
+    assert!(disabled.workspace.is_none());
+
+    config.capture.content_snapshot = true;
+    let enabled = CollectorSet::new(&config);
+    assert!(enabled.content_snapshot.is_some());
+    assert!(enabled.ax.is_some(), "AX produces snapshot triggers");
+    assert!(
+        enabled.workspace.is_some(),
+        "workspace cleans process state"
+    );
+    assert!(
+        !enabled
+            .content_snapshot
+            .as_ref()
+            .expect("content collector")
+            .collector
+            .is_running(),
+        "construction alone does not start zanei-content"
+    );
+}
+
+#[test]
+fn content_snapshot_health_uses_the_stable_component_name() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.content_snapshot = true;
+    let mut collectors = CollectorSet::new(&config);
+    collectors.start_errors.insert(
+        "content_snapshot".to_owned(),
+        "simulated content worker failure".to_owned(),
+    );
+
+    let health = collectors.health();
+    assert_eq!(
+        health.degraded.get("content_snapshot").map(String::as_str),
+        Some("simulated content worker failure")
+    );
+}
+
+#[test]
+fn chrome_health_is_monotonic_across_remove_and_readd() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    let mut collectors = CollectorSet::new(&config);
+    collectors.retained_collector_health.insert(
+        "chrome".to_owned(),
+        CollectorCounters {
+            dropped: 2,
+            failures: 3,
+        },
+    );
+    collectors
+        .chrome
+        .as_mut()
+        .expect("Chrome collector")
+        .relay_dropped = 5;
+    let before_remove = collectors.health();
+
+    collectors.remove_chrome_collector();
+    let after_remove = collectors.health();
+    assert_eq!(after_remove.dropped, before_remove.dropped);
+    assert_eq!(
+        after_remove.collector_failures.get("chrome"),
+        before_remove.collector_failures.get("chrome")
+    );
+
+    collectors.add_chrome_collector();
+    collectors
+        .chrome
+        .as_mut()
+        .expect("re-added Chrome collector")
+        .relay_dropped = 7;
+    let after_readd = collectors.health();
+    assert_eq!(after_readd.dropped, before_remove.dropped + 7);
+    assert_eq!(after_readd.collector_failures.get("chrome"), Some(&3));
+}
+
+#[test]
+fn removed_collector_counters_fold_current_and_relay_totals() {
+    let current = removed_collector_counters(
+        CollectorCounters {
+            dropped: 5,
+            failures: 7,
+        },
+        11,
+    );
+
+    assert_eq!(
+        current,
+        CollectorCounters {
+            dropped: 16,
+            failures: 7,
+        }
+    );
+}
+
+#[test]
+fn content_worker_lifecycle_order_keeps_trigger_production_outside_its_lifetime() {
+    assert_eq!(
+        START_ORDER,
+        [
+            CollectorKind::ContentSnapshot,
+            CollectorKind::Ax,
+            CollectorKind::Chrome,
+            CollectorKind::Workspace,
+            CollectorKind::EventTap,
+        ]
+    );
+    let ax_stop = STOP_ORDER
+        .iter()
+        .position(|collector| *collector == CollectorKind::Ax)
+        .expect("AX stop position");
+    let content_stop = STOP_ORDER
+        .iter()
+        .position(|collector| *collector == CollectorKind::ContentSnapshot)
+        .expect("content stop position");
+    assert!(
+        ax_stop < content_stop,
+        "AX producer stops before content discard"
+    );
+}
+
+#[test]
 fn source_gate_drops_every_family_when_capture_is_disabled() {
-    let gate = SourceGate::new(&[]);
+    let gate = SourceGate::new(&[], false);
 
     for event_type in [
         "app.launch",
@@ -64,7 +230,7 @@ fn source_gate_drops_every_family_when_capture_is_disabled() {
 
 #[test]
 fn ui_only_gate_rejects_input_and_clipboard_events() {
-    let gate = SourceGate::new(&[CaptureSource::Ui]);
+    let gate = SourceGate::new(&[CaptureSource::Ui], false);
 
     for event_type in ["ui.focus", "ui.click", "ui.value"] {
         assert!(gate.allows_type(event_type));
@@ -127,11 +293,13 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
 
     config.capture.sources = vec![CaptureSource::Input];
     let collectors = CollectorSet::new(&config);
-    assert!(collectors.ax.is_none());
+    assert!(collectors.ax.is_some());
     assert!(collectors.eventtap.is_some());
     assert_eq!(
         collectors.required_permissions(),
-        [Permission::InputMonitoring].into_iter().collect()
+        [Permission::Accessibility, Permission::InputMonitoring]
+            .into_iter()
+            .collect()
     );
 
     config.capture.text_content = true;
@@ -141,6 +309,7 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
     assert_eq!(
         collectors.required_permissions(),
         [
+            Permission::Accessibility,
             Permission::InputMonitoring,
             Permission::Automation {
                 bundle_id: "com.google.Chrome".to_owned(),
@@ -154,9 +323,12 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
     config.capture.sources = vec![CaptureSource::Browser];
     assert_eq!(
         CollectorSet::new(&config).required_permissions(),
-        [Permission::Automation {
-            bundle_id: "com.google.Chrome".to_owned(),
-        }]
+        [
+            Permission::Accessibility,
+            Permission::Automation {
+                bundle_id: "com.google.Chrome".to_owned(),
+            },
+        ]
         .into_iter()
         .collect()
     );
@@ -185,348 +357,168 @@ fn text_content_chrome_automation_permission_matrix() {
         ),
         (
             CaptureSource::Input,
-            BTreeSet::from([Permission::InputMonitoring, automation.clone()]),
+            BTreeSet::from([
+                Permission::Accessibility,
+                Permission::InputMonitoring,
+                automation.clone(),
+            ]),
         ),
     ] {
         config.capture.sources = vec![source];
 
         assert_eq!(CollectorSet::new(&config).required_permissions(), expected);
     }
+
+    config.capture.sources = vec![CaptureSource::Ui];
+    config
+        .filter
+        .text_content
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    assert!(!chrome_tracking_required(&config.capture, &config.filter));
+    let excluded = CollectorSet::new(&config);
+    assert!(excluded.chrome.is_none());
+    assert_eq!(
+        excluded.required_permissions(),
+        BTreeSet::from([Permission::Accessibility, Permission::InputMonitoring])
+    );
 }
 
 #[test]
-fn eventtap_gate_does_not_block_other_collectors() {
-    let eventtap_state = Arc::new(FakeState::default());
-    let deferred_eventtap_state = Arc::new(FakeState::default());
-    let other_state = Arc::new(FakeState::default());
-    let mut eventtap = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&eventtap_state),
-        BTreeSet::new(),
-    )));
-    let mut deferred_eventtap = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&deferred_eventtap_state),
-        BTreeSet::new(),
-    )));
-    let mut other = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&other_state),
-        BTreeSet::new(),
-    )));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let mut errors = BTreeMap::new();
-    let mut degraded = BTreeMap::new();
-    let mut gate = EventTapStartGate::open();
-    let mut deferred_gate = EventTapStartGate::open();
-    let now = Instant::now();
+fn content_snapshot_permission_matrix_honors_global_and_scoped_app_rules() {
+    let accessibility = Permission::Accessibility;
+    let automation = Permission::Automation {
+        bundle_id: "com.google.Chrome".to_owned(),
+    };
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources.clear();
+    config.capture.content_snapshot = true;
 
-    configure_eventtap_start_gate(
-        Some(Ok(PermissionStatus::Granted)),
-        &mut gate,
-        &mut degraded,
+    assert_eq!(
+        CollectorSet::new(&config).required_permissions(),
+        BTreeSet::from([accessibility.clone(), automation.clone()])
     );
-    configure_eventtap_start_gate(
-        Some(Ok(PermissionStatus::Denied)),
-        &mut deferred_gate,
-        &mut degraded,
-    );
-    start_collector_if_allowed(&mut eventtap, &pipeline, &mut errors, now, gate);
-    start_collector_if_allowed(
-        &mut deferred_eventtap,
-        &pipeline,
-        &mut errors,
-        now,
-        deferred_gate,
-    );
-    start_collector(&mut other, &pipeline, &mut errors, now);
-    assert_eq!(eventtap_state.starts.load(Ordering::Relaxed), 1);
-    assert_eq!(deferred_eventtap_state.starts.load(Ordering::Relaxed), 0);
-    assert_eq!(other_state.starts.load(Ordering::Relaxed), 1);
 
-    eventtap_state.finish();
-    other_state.finish();
-    wait_for_relay(&eventtap);
-    wait_for_relay(&other);
+    config
+        .filter
+        .content_snapshot
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    assert_eq!(
+        CollectorSet::new(&config).required_permissions(),
+        BTreeSet::from([accessibility.clone()])
+    );
+
+    config.filter.content_snapshot.exclude_apps.clear();
+    config
+        .filter
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    assert_eq!(
+        CollectorSet::new(&config).required_permissions(),
+        BTreeSet::from([accessibility])
+    );
 }
 
 #[test]
-fn eventtap_waits_for_the_typed_permission_completion_channel() {
-    let state = Arc::new(FakeState::default());
-    let mut eventtap = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&state),
-        BTreeSet::new(),
-    )));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let (release, release_rx) = mpsc::sync_channel(1);
-    let mut worker = Some(
-        PermissionRequestWorker::start_with(move || {
-            release_rx.recv().expect("release permission worker");
-            Ok(PermissionRequestOutcome::Completed)
-        })
-        .expect("permission worker"),
-    );
-    let mut errors = BTreeMap::new();
-    let mut degraded = BTreeMap::new();
-    let mut gate = EventTapStartGate::open();
-    configure_eventtap_start_gate(
-        Some(Ok(PermissionStatus::NotDetermined)),
-        &mut gate,
-        &mut degraded,
-    );
+fn browser_source_honors_global_chrome_scope_at_startup() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
 
-    start_collector_if_allowed(&mut eventtap, &pipeline, &mut errors, Instant::now(), gate);
-    service_permission_request_worker(&mut worker, &mut degraded, true, |_| {
-        panic!("pending worker must not release EventTap")
-    });
-    assert_eq!(state.starts.load(Ordering::Relaxed), 0);
-    assert!(!gate.allows_start());
+    for filter in [
+        zanei_core::config::FilterConfig {
+            exclude_apps: vec!["com.google.Chrome".to_owned()],
+            ..zanei_core::config::FilterConfig::default()
+        },
+        zanei_core::config::FilterConfig {
+            include_only_apps: vec!["com.apple.Safari".to_owned()],
+            ..zanei_core::config::FilterConfig::default()
+        },
+    ] {
+        config.filter = filter;
+        let collectors = CollectorSet::new(&config);
 
-    release.send(()).expect("complete permission worker");
-    complete_permission_worker(
-        &mut worker,
-        &mut gate,
-        &mut eventtap,
-        &pipeline,
-        &mut errors,
-        &mut degraded,
-        true,
-    );
-
-    assert!(gate.allows_start());
-    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
-    state.finish();
-    wait_for_relay(&eventtap);
+        assert!(!chrome_tracking_required(&config.capture, &config.filter));
+        assert!(collectors.chrome.is_none());
+        assert_eq!(
+            collectors.required_permissions(),
+            BTreeSet::from([Permission::Accessibility])
+        );
+    }
 }
 
 #[test]
-fn permission_timeout_attempts_eventtap_start() {
-    let state = Arc::new(FakeState::default());
-    let mut eventtap = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&state),
-        BTreeSet::new(),
-    )));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let mut worker = Some(
-        PermissionRequestWorker::start_with(|| Ok(PermissionRequestOutcome::TimedOut))
-            .expect("permission worker"),
+fn global_filter_reload_reconciles_browser_chrome_topology_without_applescript() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    config
+        .filter
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    let mut collectors = CollectorSet::new(&config);
+    assert!(collectors.chrome.is_none());
+
+    let mut admitted = config.filter.clone();
+    admitted.exclude_apps.clear();
+    collectors.replace_filter(admitted);
+    assert!(collectors.chrome.is_some());
+
+    collectors.replace_filter(config.filter);
+    assert!(collectors.chrome.is_none());
+}
+
+#[test]
+fn filter_reload_reconciles_chrome_collector_topology_without_applescript() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources.clear();
+    config.capture.content_snapshot = true;
+    config
+        .filter
+        .content_snapshot
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    let mut collectors = CollectorSet::new(&config);
+    assert!(!chrome_tracking_required(&config.capture, &config.filter));
+    assert!(collectors.chrome.is_none());
+
+    let mut admitted = config.filter.clone();
+    admitted.content_snapshot.exclude_apps.clear();
+    assert!(chrome_tracking_required(&config.capture, &admitted));
+    collectors.replace_filter(admitted);
+    assert!(
+        collectors.chrome.is_some(),
+        "reload creates the managed collector"
     );
-    let mut errors = BTreeMap::new();
-    let mut degraded = BTreeMap::new();
-    let mut gate = EventTapStartGate::open();
-    gate.defer();
 
-    complete_permission_worker(
-        &mut worker,
-        &mut gate,
-        &mut eventtap,
-        &pipeline,
-        &mut errors,
-        &mut degraded,
-        true,
+    collectors.replace_filter(config.filter.clone());
+    assert!(
+        collectors.chrome.is_none(),
+        "reload stops and drops the collector"
     );
-
-    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
-    assert!(degraded["permission_request"].contains("timed out"));
-    state.finish();
-    wait_for_relay(&eventtap);
 }
 
 #[test]
-fn inactive_daemon_opens_gate_without_starting_eventtap() {
-    let state = Arc::new(FakeState::default());
-    let mut eventtap = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&state),
-        BTreeSet::new(),
-    )));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let mut worker = Some(
-        PermissionRequestWorker::start_with(|| Ok(PermissionRequestOutcome::Completed))
-            .expect("permission worker"),
-    );
-    let mut errors = BTreeMap::new();
-    let mut degraded = BTreeMap::new();
-    let mut gate = EventTapStartGate::open();
-    gate.defer();
+fn text_scope_reload_starts_chrome_tracking_when_chrome_becomes_allowed() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Ui];
+    config.capture.text_content = true;
+    config
+        .filter
+        .text_content
+        .exclude_apps
+        .push("com.google.Chrome".to_owned());
+    let mut collectors = CollectorSet::new(&config);
+    assert!(!chrome_tracking_required(&config.capture, &config.filter));
+    assert!(collectors.chrome.is_none());
 
-    complete_permission_worker(
-        &mut worker,
-        &mut gate,
-        &mut eventtap,
-        &pipeline,
-        &mut errors,
-        &mut degraded,
-        false,
-    );
-    assert!(gate.allows_start());
-    assert_eq!(state.starts.load(Ordering::Relaxed), 0);
-
-    start_collector_if_allowed(&mut eventtap, &pipeline, &mut errors, Instant::now(), gate);
-    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
-    state.finish();
-    wait_for_relay(&eventtap);
+    let mut admitted = config.filter.clone();
+    admitted.text_content.exclude_apps.clear();
+    assert!(chrome_tracking_required(&config.capture, &admitted));
+    collectors.replace_filter(admitted);
+    assert!(collectors.chrome.is_some());
 }
 
-#[test]
-fn unexpected_collector_exit_is_degraded_and_restarted_after_backoff() {
-    let state = Arc::new(FakeState::default());
-    let mut managed = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&state),
-        BTreeSet::new(),
-    )));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let mut errors = BTreeMap::new();
-    let started = Instant::now();
-    super::start_collector(&mut managed, &pipeline, &mut errors, started);
-    state.finish();
-    wait_for_relay(&managed);
-
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&granted_permissions()),
-        &mut errors,
-        started,
-    )
-    .expect("supervise failed collector");
-    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
-    assert!(errors["fake"].contains("terminated unexpectedly"));
-
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&granted_permissions()),
-        &mut errors,
-        started + Duration::from_secs(5),
-    )
-    .expect("restart collector");
-    assert_eq!(state.starts.load(Ordering::Relaxed), 2);
-    assert!(!errors.contains_key("fake"));
-}
-
-#[test]
-fn collector_supervision_continues_while_permission_snapshot_is_pending() {
-    let state = Arc::new(FakeState::default());
-    let mut managed = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&state),
-        BTreeSet::new(),
-    )));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let mut errors = BTreeMap::new();
-    let started = Instant::now();
-    start_collector(&mut managed, &pipeline, &mut errors, started);
-    state.finish();
-    wait_for_relay(&managed);
-
-    supervise_collector(&mut managed, &pipeline, None, &mut errors, started)
-        .expect("observe collector while permissions are pending");
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        None,
-        &mut errors,
-        started + Duration::from_secs(5),
-    )
-    .expect("restart collector while permissions are pending");
-
-    assert_eq!(state.starts.load(Ordering::Relaxed), 2);
-    state.finish();
-    wait_for_relay(&managed);
-}
-
-#[test]
-fn pending_snapshot_observes_permission_required_failure_without_restarting() {
-    let state = Arc::new(FakeState::default());
-    let mut managed = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&state),
-        BTreeSet::from([Permission::Accessibility]),
-    )));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let mut errors = BTreeMap::new();
-    let started = Instant::now();
-    start_collector(&mut managed, &pipeline, &mut errors, started);
-    state.finish();
-    wait_for_relay(&managed);
-
-    supervise_collector(&mut managed, &pipeline, None, &mut errors, started)
-        .expect("observe collector while permissions are pending");
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        None,
-        &mut errors,
-        started + Duration::from_secs(60),
-    )
-    .expect("hold restart while permissions are pending");
-    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
-    assert!(errors["fake"].contains("terminated unexpectedly"));
-
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&granted_permissions()),
-        &mut errors,
-        started + Duration::from_secs(61),
-    )
-    .expect("restart after permission snapshot is granted");
-    assert_eq!(state.starts.load(Ordering::Relaxed), 2);
-    state.finish();
-    wait_for_relay(&managed);
-}
-
-#[test]
-fn collector_start_failure_is_recorded_without_failing_the_daemon_start() {
-    let state = Arc::new(FakeState::default());
-    let mut managed = Some(Managed::new(FakeCollector::failing(Arc::clone(&state))));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let mut errors = BTreeMap::new();
-
-    super::start_collector(&mut managed, &pipeline, &mut errors, Instant::now());
-
-    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
-    assert_eq!(errors["fake"], "missing permission");
-}
-
-#[test]
-fn permission_blocked_collector_waits_for_granted_transition() {
-    let state = Arc::new(FakeState::default());
-    let mut managed = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&state),
-        BTreeSet::from([Permission::Accessibility]),
-    )));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let mut errors = BTreeMap::new();
-    let started = Instant::now();
-    super::start_collector(&mut managed, &pipeline, &mut errors, started);
-    state.finish();
-    wait_for_relay(&managed);
-
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&denied_permissions()),
-        &mut errors,
-        started,
-    )
-    .expect("record permission failure");
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&denied_permissions()),
-        &mut errors,
-        started + Duration::from_secs(60),
-    )
-    .expect("hold restart");
-    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
-
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&granted_permissions()),
-        &mut errors,
-        started + Duration::from_secs(61),
-    )
-    .expect("permission recovery");
-    assert_eq!(state.starts.load(Ordering::Relaxed), 2);
-    assert!(!errors.contains_key("fake"));
-}
+mod supervisor_tests;
 
 #[derive(Default)]
 struct FakeState {

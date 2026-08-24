@@ -52,6 +52,9 @@ fn markdown(timeline: &Timeline) -> String {
                 let _ = writeln!(output, "  - [{}] {}", interaction.ts, interaction.activity);
             }
         }
+        if session.content_snapshots > 0 {
+            let _ = writeln!(output, "Content snapshots: {}", session.content_snapshots);
+        }
     }
     output
 }

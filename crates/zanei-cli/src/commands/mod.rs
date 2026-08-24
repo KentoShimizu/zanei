@@ -1,3 +1,4 @@
+mod apps;
 mod config;
 mod control;
 mod doctor;
@@ -9,6 +10,7 @@ mod record;
 mod status;
 pub(crate) use status::RETIRED_STORE_DEGRADED_COMPONENT;
 
+use zanei_collector::AppDirectory;
 use zanei_core::config::Config;
 use zanei_core::store::DaemonMode;
 
@@ -18,10 +20,24 @@ use crate::paths::Paths;
 use crate::setup::{SetupRequest, execute as setup_agent};
 
 pub const EXIT_SUCCESS: u8 = 0;
+pub const EXIT_USAGE: u8 = 2;
 pub const EXIT_MISSING_PERMISSIONS: u8 = 3;
 pub const EXIT_NO_DAEMON: u8 = 4;
 
+#[cfg(target_os = "macos")]
 pub fn run(cli: Cli) -> Result<u8, CliError> {
+    run_with_app_directory(cli, &zanei_macos::app_directory::MacosAppDirectory)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn run(cli: Cli) -> Result<u8, CliError> {
+    run_with_app_directory(cli, &UnsupportedAppDirectory)
+}
+
+pub(crate) fn run_with_app_directory(
+    cli: Cli,
+    app_directory: &dyn AppDirectory,
+) -> Result<u8, CliError> {
     let paths = Paths::resolve(cli.config, cli.store)?;
     if cli.verbose > 0 {
         eprintln!(
@@ -39,14 +55,17 @@ pub fn run(cli: Cli) -> Result<u8, CliError> {
         Command::Resume => control::resume(&paths.store, cli.quiet),
         Command::Status => status::run(&paths, cli.json),
         Command::Record(args) => record::run(&paths.config, args),
-        Command::Query(args) => read::query(&paths.config, &paths.store, args, cli.json),
-        Command::Timeline(args) => read::timeline(&paths.config, &paths.store, args, cli.json),
+        Command::Query(args) => read::query(&paths.config, &paths.store, args, cli.json, cli.quiet),
+        Command::Timeline(args) => {
+            read::timeline(&paths.config, &paths.store, args, cli.json, cli.quiet)
+        }
         Command::Export(args) => {
             read::export(&paths.config, &paths.store, args, cli.json, cli.quiet)
         }
         Command::Purge(args) => purge::run(&paths.store, args, cli.quiet),
-        Command::Filter(args) => filter::run(&paths.config, args, cli.quiet),
-        Command::Config(args) => config::run(&paths.config, &paths.store, args, cli.quiet),
+        Command::Apps(args) => apps::run(&paths, app_directory, args, cli.json),
+        Command::Filter(args) => filter::run(&paths, app_directory, args, cli.quiet),
+        Command::Config(args) => config::run(&paths, app_directory, args, cli.quiet),
         Command::Mcp => {
             zanei_mcp::run(
                 paths.store,
@@ -73,6 +92,29 @@ pub fn run(cli: Cli) -> Result<u8, CliError> {
             crate::daemon::run_daemon(&paths.config, &paths.store, DaemonMode::Launchd)?;
             Ok(EXIT_SUCCESS)
         }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+struct UnsupportedAppDirectory;
+
+#[cfg(not(target_os = "macos"))]
+impl AppDirectory for UnsupportedAppDirectory {
+    fn installed(
+        &self,
+    ) -> Result<zanei_collector::InstalledApps, zanei_collector::AppDirectoryError> {
+        Ok(zanei_collector::InstalledApps::default())
+    }
+
+    fn running(&self) -> Result<Vec<zanei_collector::AppInfo>, zanei_collector::AppDirectoryError> {
+        Ok(Vec::new())
+    }
+
+    fn installed_by_id(
+        &self,
+        _: &str,
+    ) -> Result<Option<zanei_collector::AppInfo>, zanei_collector::AppDirectoryError> {
+        Ok(None)
     }
 }
 

@@ -37,6 +37,14 @@ pub enum CliError {
     Time(#[from] zanei_core::config::TimeExpressionError),
     #[error("store error: {0}")]
     Store(#[from] zanei_core::store::StoreError),
+    #[error("application discovery failed: {0}")]
+    AppDirectory(#[from] zanei_collector::AppDirectoryError),
+    #[error("invalid recent-app timestamp {value:?}: {source}")]
+    RecentAppTimestamp {
+        value: String,
+        #[source]
+        source: time::error::Parse,
+    },
     #[error("timeline error: {0}")]
     Timeline(#[from] zanei_core::timeline::TimelineError),
     #[error("permission diagnostic failed: {0}")]

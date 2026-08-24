@@ -6,39 +6,49 @@
 //! it sets the file aside (see [`retired`]) and readers merge it back in.
 
 mod error;
+mod event_metadata;
+mod event_row;
 mod key;
 mod key_store;
+mod query;
 mod reader;
 mod retired;
+mod selection;
 mod snapshot;
 mod types;
 
+#[cfg(feature = "write")]
+mod migration;
 #[cfg(feature = "write")]
 mod writer;
 
 use rusqlite::Connection;
 
 pub use error::{LockedReason, StoreError, StoreFailureKind};
+pub use event_metadata::{EventMetadata, MetadataFilter};
 pub use key::{STORE_KEY_BYTES, StoreFormat, StoreKey};
 pub use key_store::{KeyStore, KeyStoreError, KeyStoreInteraction, load_or_create};
+pub use query::{QueryFilter, QueryResult};
 pub use reader::{SkippedRetired, StoreReader};
 pub use retired::{RetiredPlaintext, remove_retired, resolve_store_path, retired_plaintext_stores};
+pub use selection::EventSelection;
 pub use snapshot::{SnapshotReport, export_plain_sqlite};
 pub use types::{
     DaemonMode, DaemonPermissions, DaemonState, HEARTBEAT_STALE_AFTER_SECONDS, PermissionState,
-    QueryFilter, StoreStatus,
+    StoreStatus,
 };
 
 #[cfg(feature = "write")]
 pub use retired::{RetiredRetention, purge_retired_plaintext, set_aside_plaintext};
 #[cfg(feature = "write")]
-pub use writer::StoreWriter;
+pub use writer::{PurgeFilter, StoreWriter};
 
 const LEGACY_STORE_SCHEMA_VERSION: i64 = 1;
 const DAEMON_IDENTITY_STORE_SCHEMA_VERSION: i64 = 2;
 const RETENTION_STORE_SCHEMA_VERSION: i64 = 3;
 const COLLECTOR_FAILURES_STORE_SCHEMA_VERSION: i64 = 4;
-const STORE_SCHEMA_VERSION: i64 = 5;
+const PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION: i64 = 5;
+const STORE_SCHEMA_VERSION: i64 = 6;
 
 /// SQLCipher file-format generation pinned so a future library default cannot
 /// silently make existing stores unreadable.
@@ -93,7 +103,7 @@ CREATE TABLE IF NOT EXISTS meta (
     schema_version INTEGER NOT NULL
 );
 INSERT INTO meta(schema_version)
-SELECT 5 WHERE NOT EXISTS (SELECT 1 FROM meta);
+SELECT 6 WHERE NOT EXISTS (SELECT 1 FROM meta);
 ";
 
 /// The instant before which events are outside a `retention_hours` window.

@@ -71,6 +71,8 @@ pub enum Command {
     Export(ExportArgs),
     #[command(about = "Delete stored events manually (destructive)")]
     Purge(PurgeArgs),
+    #[command(about = "List apps available for filter selection")]
+    Apps(AppsArgs),
     #[command(about = "Manage capture-time allow and deny lists")]
     Filter(FilterArgs),
     #[command(about = "Initialize, show, locate, or edit configuration")]
@@ -238,6 +240,12 @@ pub struct ExportArgs {
     pub until: String,
     #[arg(
         long,
+        value_name = "TYPE,...",
+        help = "Export comma-separated event types; trailing wildcards are allowed"
+    )]
+    pub types: Option<String>,
+    #[arg(
+        long,
         value_enum,
         default_value = "jsonl",
         help = "Write events in this output format"
@@ -260,7 +268,12 @@ pub enum ExportFormat {
 }
 
 #[derive(Debug, Args)]
-#[command(group(ArgGroup::new("range").required(true).multiple(false).args(["before", "all"])))]
+#[command(group(
+    ArgGroup::new("selection")
+        .required(true)
+        .multiple(true)
+        .args(["before", "all", "types"])
+))]
 pub struct PurgeArgs {
     #[arg(
         long,
@@ -268,14 +281,36 @@ pub struct PurgeArgs {
         help = "Delete events older than this time expression"
     )]
     pub before: Option<String>,
-    #[arg(long, help = "Delete every stored event; prompts unless --quiet")]
+    #[arg(
+        long,
+        conflicts_with_all = ["before", "types", "app", "bundle_id"],
+        help = "Delete every stored event; prompts unless --quiet"
+    )]
     pub all: bool,
+    #[arg(
+        long,
+        value_name = "TYPE,...",
+        help = "Delete comma-separated event types; trailing wildcards are allowed"
+    )]
+    pub types: Option<String>,
+    #[arg(long, requires = "types", conflicts_with = "bundle_id")]
+    pub app: Option<String>,
+    #[arg(long, requires = "types", conflicts_with = "app")]
+    pub bundle_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct FilterArgs {
+    #[arg(value_enum, value_name = "SCOPE")]
+    pub scope: Option<FilterScopeArg>,
     #[command(subcommand)]
     pub command: FilterCommand,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum FilterScopeArg {
+    TextContent,
+    ContentSnapshot,
 }
 
 #[derive(Debug, Subcommand)]
@@ -301,9 +336,19 @@ pub struct FilterMutationArgs {
 #[derive(Debug, Subcommand)]
 pub enum FilterAction {
     #[command(about = "Add an entry to the selected filter list")]
-    Add { value: String },
+    Add {
+        value: Option<String>,
+        #[arg(long, help = "Save an app value without verifying that it exists")]
+        unverified: bool,
+    },
     #[command(about = "Remove an entry from the selected filter list")]
     Remove { value: String },
+}
+
+#[derive(Debug, Args)]
+pub struct AppsArgs {
+    #[arg(value_name = "QUERY")]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Args)]

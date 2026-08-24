@@ -23,6 +23,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 | [`timeline`](#timeline) | LLM-ready・token budget 付きタイムライン |
 | [`export`](#export) | 生イベントの一括ダンプ |
 | [`purge`](#purge) | 保存イベントの手動削除（破壊的） |
+| [`apps`](#apps) | filter 選択用の app 一覧 |
 | [`filter`](#filter) | capture-time 許可/不許可リストの管理 |
 | [`config`](#config) | 設定の初期化・表示・パス・編集 |
 | [`mcp`](#mcp) | stdio MCP サーバの起動 |
@@ -72,7 +73,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 | 値 | 対象コマンド | 説明 |
 | --- | --- | --- |
 | `jsonl` | `query`・`export`・`record` | 1 行 1 イベントの生イベント（機械可読） |
-| `json` | `query`・`export`・`timeline` | 単一 JSON。`timeline` では構造化タイムライン |
+| `json` | `query`・`export`・`timeline` | 単一 JSON。`query` と `export` は event array、`timeline` は構造化 timeline object |
 | `md` | `timeline` | LLM-ready Markdown（既定） |
 | `table` | `query` | 人間可読の整形テーブル |
 | `sqlite` | `export` | 範囲内のストアの平文 SQLite スナップショット。`--out` が必須 |
@@ -97,7 +98,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 
 ## `doctor`
 
-設定中の `capture.sources` に照らして、必要な TCC 権限（アクセシビリティ / 入力監視 / オートメーション）の付与状況を診断します。
+設定中の source と content opt-in に照らして、必要な TCC 権限（アクセシビリティ / 入力監視 / オートメーション）の付与状況を診断します。
 
 ```bash
 zanei doctor            # 人間可読。不足があれば付与手順と System Settings ペインを案内
@@ -127,7 +128,7 @@ zanei doctor --json     # agent 向け機械可読
   "reported_by_recorder": true,
   "capture_sources": ["app", "window", "ui", "input", "browser"],
   "permissions": {
-    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value"] },
+    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"] },
     "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
     "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
   },
@@ -179,6 +180,16 @@ Record typed text and clipboard contents too? They stay in the local store like 
 bootstrap 前は、永続化された recorder の last-known 権限報告を使用します。この報告で確認しなかった場合、`start` は recorder を bootstrap して生存を待ち、今回の recorder 報告を確認します。この判定に CLI プロセスのローカル権限 probe は使用しません。ローカル probe は recorder ではなくターミナルの TCC identity を反映するためです。
 
 `y` または `Y` のみが内容記録を有効にし、Enter、その他の回答、EOF、読取エラーは `false` を選びます。Zanei は `config set` と同じ経路で明示値を保存してファイルのその他の内容を維持し、`Text content will be recorded.` または `Text content stays off.` を表示します。bootstrap 後に確認した場合、`y` ではさらに `Restarting the recorder to apply text content capture...` と表示し、canonical な stop→start 経路で再起動します。`false` の回答は recorder の既定のオフ動作を維持するため、再起動しません。どちらの回答でもキーを書き込むため、確認は繰り返しません。
+
+この質問に回答した直後、`start` は別 opt-in の案内を次の英語どおりに表示します。content snapshot の y/N は確認しません：
+
+```text
+Content snapshots (text shown in apps you choose) are a separate opt-in. Choose the apps first
+(zanei filter content-snapshot only-app add <APP>, or exclude-app), then enable it with
+zanei config set capture.content_snapshot true.
+```
+
+`capture.text_content` がすでに明示済みで質問を表示しない場合、この案内も表示しません。恒常的な入口は `CONTENT SNAPSHOT` status 行です。
 
 `--foreground`、stdin または stderr が非 TTY、`--quiet`、`--json`、権限不足、権限状態を判定できない場合には確認しません。スキップした `start` は設定を未決定のままにして、従来の opt-in 案内を表示します。キーが明示的に `true` または `false` なら確認しません。
 
@@ -234,9 +245,7 @@ zanei status
 zanei status --json
 ```
 
-人間向け出力は、有効時に `TEXT CONTENT      on (opt-in)`、無効時に
-`TEXT CONTENT      off (opt-in: zanei config set capture.text_content true)` を表示します。
-プライバシーに関わる opt-in 状態と明示的な有効化コマンドを JSON なしで確認できます。
+人間向け出力は、有効な `TEXT CONTENT` と `CONTENT SNAPSHOT` に現在の app/site scope を表示し、無効な行には明示的な有効化 command を表示します。例は `TEXT CONTENT      on (apps: exclude 6, sites: exclude 0)` と `CONTENT SNAPSHOT   off (opt-in: zanei config set capture.content_snapshot true)` です。両方の privacy-sensitive な opt-in を JSON なしで確認できます。
 
 ```json
 {
@@ -257,7 +266,7 @@ zanei status --json
   "store_write_state": "healthy",
   "degraded": {},
   "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z", "encryption": "sqlcipher" },
-  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false },
   "permissions_ok": true
 }
 ```
@@ -290,6 +299,7 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | `store.retired_plaintext` | string[] | 暗号化へのアップグレード時に退避した平文ストアのうち、読み取りがまだ含めているもの（古い順）。保持期間を外れると空になります。人間向け出力では `PREVIOUS STORE` 行として表示。読めないものはスキップし `degraded.retired_store` に報告します |
 | `capture.sources` | `string[]` | 現在の設定の source。null にならない |
 | `capture.text_content` | boolean | 現在の設定の text-content opt-in。null にならない |
+| `capture.content_snapshot` | boolean | 現在の設定の frontmost-window content-snapshot opt-in。`capture.sources` から独立し、null にならない |
 | `permissions_ok` | boolean | 現在の owner と instance が一致する fresh heartbeat の permission snapshot があればその値。snapshot がない場合、または heartbeat が stale・future・missing な場合はローカル probe。null にならない |
 
 人間向け出力は `--format` で選ぶ table ではなく、次の固定行です。
@@ -307,7 +317,8 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | `HEARTBEAT` | freshness と、age があれば `(<N>s old)`。freshness が null なら `-` |
 | `STORE WRITES` | `store_write_state`。null は `-` |
 | `STORE` | `store.path`。`store.encryption` が null でなければ ` (encrypted)` または ` (plaintext; the recorder encrypts it on its next start)` が続く |
-| `TEXT CONTENT` | `on (opt-in)` または `off (opt-in: zanei config set capture.text_content true)` |
+| `TEXT CONTENT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` または `off (opt-in: zanei config set capture.text_content true)` |
+| `CONTENT SNAPSHOT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` または `off (opt-in: zanei config set capture.content_snapshot true)` |
 | `PERMISSIONS OK` | `true` または `false` |
 | `DEGRADED` | 空 map は `false`。それ以外は `true` と、各 entry の indented `component: reason` 行 |
 
@@ -361,6 +372,8 @@ zanei query --since 2h --app Safari --format json --limit 500
 
 これらは query-time フィルタです — 読み出しを絞るだけで、記録対象には影響しません（[フィルタ](/ja/guides/filters)参照）。
 
+`--types` を省略すると `content.*` を除外します。snapshot 本文を読むときは `--types content.snapshot` または `--types content.*` を明示します。他の family と併記できます。`--format json` は event object の array のままです。store に未知の event type があれば skip し、件数を stderr に warning として出します。global `--quiet` で抑止できます。
+
 ## `timeline`
 
 生イベントをセッション分割・重複除去・coalesce し、token budget 内に収めた LLM 向け要約を返します。**agent が最もよく叩くコマンド**です。
@@ -391,12 +404,13 @@ Truncated: no
 Title: Reviewing PR #42
 - Browsed 3 pages on github.com
 - Edited text in "Reviewing PR #42"
+Content snapshots: 3
 ```
 
-`--format json` では同じ session を `range`・`token_estimate`・`truncated`・`sessions` で
-表し、activity には同じ固定句を使います。JSON session は `event_ids_truncated` を
+`--format json` では同じ session を `range`・`token_estimate`・`truncated`・`skipped_unknown_types`・`sessions` で表し、activity には同じ固定句を使います。各 JSON session は 0 を含めて `content_snapshots` を常に持ちます。Markdown は snapshot 件数が 0 でないときだけ activity の後に `Content snapshots: N` を表示し、本文は inline しません。JSON session は `event_ids_truncated` を
 常に含み、token budget が許す場合は最大 100 件の `event_ids` も含みます。`event_ids` は
 session を削除する前に省略されることがあります。
+snapshot だけの範囲や最初の通常 event より前の snapshot でも、metadata に基づく空の activity・event list を持つ session を出力します。
 
 ## `export`
 
@@ -405,15 +419,19 @@ session を削除する前に省略されることがあります。
 ```bash
 zanei export --since 24h --format jsonl --out dump.jsonl
 zanei export --since 24h --format sqlite --out snapshot.sqlite
+zanei export --since 24h --types app.*,window.*,ui.*,input.*,browser.*,clipboard.* --format sqlite --out share.sqlite
 ```
 
 | フラグ | 説明 |
 | --- | --- |
 | `--since` / `--until` | 対象範囲（既定 `--since 24h`） |
+| `--types <TYPE,...>` | 任意の event-type filter。`jsonl` / `json` / `sqlite` すべてに適用 |
 | `--format` | `jsonl` / `json` / `sqlite` |
 | `--out <FILE>` | 出力ファイル。`--format sqlite` では必須 |
 
-`--format sqlite` は、稼働中のストアと同じテーブル（`events`・`daemon_state`・`daemon_permissions`・`meta`）を持つ平文の SQLite スナップショットを、指定範囲について書き出します。保持期間は他の読み取りと同様に適用されます。`--out` は必須で、省略すると使用法エラー（code 2）です。ファイルは所有者のみ読み書き可（mode 0600）で作成され、上書きはしません。既存のパスを指定すると code 1 で失敗し、`snapshot file already exists at PATH; choose another --out path` を表示します。成功時は `Wrote a plaintext SQLite snapshot with N events to PATH` を表示します（`--quiet` で抑制）。スナップショットは暗号化されていません — JSONL エクスポートと同じように扱ってください。`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディング、および `zanei query --store snapshot.sqlite` で開けます。
+`export` は全形式で既定ですべての event type を含み、`content.snapshot` も含みます。`query` と異なり、`--types` 省略時に content を隠しません。`--format json` は event object の array のままです。JSON / JSONL export は未知の event type を skip し、`--quiet` でなければ件数を stderr に warning として出します。
+
+`--format sqlite` は、稼働中のストアと同じテーブル（`events`・`daemon_state`・`daemon_permissions`・`meta`）を持つ平文の SQLite スナップショットを、指定範囲について書き出します。保持期間は他の読み取りと同様に適用されます。SQLite export は対象 row を decode せず copy するため、未知 type も skip せず copy します。`--out` は必須で、省略すると使用法エラー（code 2）です。ファイルは所有者のみ読み書き可（mode 0600）で作成され、上書きはしません。既存のパスを指定すると code 1 で失敗し、`snapshot file already exists at PATH; choose another --out path` を表示します。成功時は `Wrote a plaintext SQLite snapshot with N events to PATH` を表示します（`--quiet` で抑制）。snapshot は暗号化されず、`content.*` が対象なら本文を平文で含みます。機微な JSONL export と同様に扱い、共有・外部処理に必要な family だけを `--types` で選んでください。`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディング、および `zanei query --store snapshot.sqlite` で開けます。
 
 ## `purge`
 
@@ -422,38 +440,62 @@ zanei export --since 24h --format sqlite --out snapshot.sqlite
 ```bash
 zanei purge --before 24h   # 24 時間より古いイベントを削除
 zanei purge --all          # 全削除（確認プロンプトあり。--quiet で抑制）
+zanei purge --types '*'    # これも全削除（--all と同じ確認）
+zanei purge --types content.* --before 24h
+zanei purge --types content.* --app Slack
+zanei purge --types content.* --bundle-id com.tinyspeck.slackmacgap
 ```
 
 | フラグ | 説明 |
 | --- | --- |
 | `--before <TIME>` | これより古いイベントを削除 |
+| `--types <TYPE,...>` | 一致する event type だけ削除。wildcard 可。scope のない `'*'` は `--all` と同じ確認あり |
+| `--app <NAME>` / `--bundle-id <ID>` | 一致する app の event だけ削除。相互排他 |
 | `--all` | 全削除（確認プロンプトあり） |
 
-store が存在しない場合、`purge` は `Purged 0 events` を表示し、store を作成しません。暗号化へのアップグレード時に退避した平文ストアも対象です：`--before` は該当イベントを削除し、`--all` はファイルごと削除します。
+`--types` は `--before` と app selector 1 つを組み合わせられます。後から app を除外したとき、その app の snapshot だけを削除できます。scope のない `--types '*'` は全件選択なので、`--quiet` を指定しない限り `--all` と同じ確認が必要です。`content.*` のような狭い type pattern では確認しません。この削除は不可逆で dry-run はありません。command は適用 scope と削除件数を報告します。store が存在しない場合、`purge` は `Purged 0 events` を表示し、store を作成しません。暗号化への upgrade 時に退避した平文 store も対象で、scoped option は一致 row を削除し、`--all` は file ごと削除します。
+
+## `apps`
+
+filter で選べる app を installed app・running app・store に残る `app.activate` event から一覧します。
+
+```bash
+zanei apps
+zanei apps slack
+zanei apps slack --json
+```
+
+任意の `QUERY` は name または bundle ID の大文字小文字を無視した部分一致です。table は `NAME`・`BUNDLE ID`・`SOURCES`（`installed` / `running` / `recent`）・`LAST USED` を表示します。recent、その他の running、installed の順です。該当なしも code 0 で、stderr に `No apps match "QUERY".` を表示します。TCC 権限は不要で、daemon 停止中も動きます。
+
+`--json` は同じ順序で `{ "apps": [{ "name", "bundle_id", "path", "installed", "running", "last_used" }], "recent_unavailable": null, "installed_unreadable": 0 }` を返します。store が不在または開けない場合も installed / running app は残り、`recent_unavailable` に理由が入ります。`Info.plist` がない、読めない、または不正な app bundle は読み飛ばし、その件数を `installed_unreadable` に返します。0 より大きい場合は stderr に `warning: N app bundles could not be read` も表示します。
 
 ## `filter`
 
-capture-time の許可/不許可リストを管理します。アプリ一致はストア書込前に破棄し、Chrome のサイト一致は URL イベントと本文を抑止します。タイトルと操作メタデータは残ります。セマンティクスとマッチングルールは[フィルタガイド](/ja/guides/filters)を参照。`config.toml` の `[filter]` 編集と等価ですが、キー検証と重複排除を行うぶん安全です。
+3 つの capture-time scope を管理します：全 event の `[filter]`、入力・clipboard 本文の `[filter.text_content]`、snapshot event の `[filter.content_snapshot]`。コマンドの形は `zanei filter [<scope>] <list> add|remove [VALUE]` で、`<scope>` は省略・`text-content`・`content-snapshot` のいずれかです。
 
 ```bash
-zanei filter show                                      # 全リストと有効モード
-zanei filter exclude-app add com.1password.1password
-zanei filter exclude-app remove com.1password.1password
-zanei filter only-app add com.apple.Safari
-zanei filter exclude-site add example.com
-zanei filter only-site add github.com
+zanei filter show
+zanei filter exclude-app add 1Password
+zanei filter text-content exclude-app add Slack
+zanei filter content-snapshot only-app add Terminal
+zanei filter content-snapshot exclude-site add mail.google.com
+zanei filter content-snapshot exclude-app add FutureApp --unverified
 ```
 
-| サブコマンド | `[filter]` キー | 意味 |
+| list | config suffix | 意味 |
 | --- | --- | --- |
-| `exclude-app (add\|remove) <BUNDLE_ID か NAME>` | `exclude_apps` | 不許可リスト（その他は捕捉） |
-| `only-app (add\|remove) <BUNDLE_ID か NAME>` | `include_only_apps` | 許可リスト（設定時は列挙分のみ捕捉） |
-| `exclude-site (add\|remove) <DOMAIN>` | `exclude_websites` | Chrome URL イベントと本文の不許可リスト。URL host で照合 |
-| `only-site (add\|remove) <DOMAIN>` | `include_only_websites` | Chrome URL イベントと本文の許可リスト。URL host で照合 |
+| `exclude-app` | `exclude_apps` | 指定 app を除外。exclude / only mode の両方で有効 |
+| `only-app` | `include_only_apps` | 非空なら指定 app だけを含める |
+| `exclude-site` | `exclude_websites` | 指定 Chrome URL host を除外。両 mode で有効 |
+| `only-site` | `include_only_websites` | 非空なら指定 Chrome URL host だけを含める |
 
-- アプリは `BUNDLE_ID`（推奨）または表示名で指定。`filter show` は既定の除外リスト（`1Password`・`Keychain Access` 等）も併せて表示します。
-- 変更は次の設定監視サイクルで反映され、通常 2 秒以内です。それまでに発生したイベントには旧フィルタが適用されます。デーモン再起動は不要です。
-- `only-app` をひとつでも追加すると許可リストモードに切り替わります。`filter show` が現在のモードを明示します。
+- 全 app list の `add` は表示名または bundle ID を受け付け、[`zanei apps`](#apps) の候補に対して解決し、bundle ID があればそれを保存します。未解決値は保存せず code 2 で終了し、近い候補があれば提示します。`--unverified` は未解決値を warning 付きで明示保存します。
+- 値なしの `add` は recent 順の番号選択を開きます。非 TTY または `--quiet` では値が必須で、省略すると code 2 です。`remove` は現在の list 内で解決するため、uninstall 済み entry も消せます。
+- `filter show` は 3 scope、apps/sites の mode と件数、解決した表示名、未解決 entry の `(not installed)` を表示します。hard-coded の組み込み除外も別に表示します。
+- 両 content scope は Safari・Firefox・Brave・Edge・Vivaldi・Arc を既定で除外します。`only-app` に追加するとき、または `exclude-app` から外すときは、private-window 判定がないため `--quiet` 未指定なら warning を表示します。既定値は編集できます。
+- website rule は Chrome のみです。変更は次の設定監視 cycle（通常 2 秒以内）で反映され、再起動は不要です。
+
+評価順と各 scope が除外する field は[フィルタガイド](/ja/guides/filters)を参照してください。
 
 ## `config`
 
@@ -463,6 +505,7 @@ zanei config path   # 設定ファイルのパスを表示
 zanei config show   # 有効設定（既定値マージ後）を表示
 zanei config edit   # $EDITOR で設定を開く
 zanei config set capture.text_content true
+zanei config set capture.content_snapshot true
 ```
 
 `config init` は、対応する全設定項目と現在の既定値を含むコメント付きテンプレートを
@@ -476,18 +519,38 @@ zanei config set capture.text_content true
 | キー | 設定できる値 |
 | --- | --- |
 | `capture.text_content` | `true`、`false` |
+| `capture.content_snapshot` | `true`、`false` |
 | `output.batch_interval_s` | 0 より大きい符号なし整数 |
 | `output.retention_hours` | 0 より大きい符号なし整数 |
 
 配列設定には対応しません。filter リストには [`zanei filter`](#filter)、その他の配列には
 `zanei config edit` を使います。不明なキー、配列キー、不正な値は保存せず終了コード 2 で
 終了します。`output.retention_hours` は稼働中デーモンが再読込し、即時 retention purge に
-反映します。記録デーモンの稼働中に `capture.text_content` または
+反映します。記録デーモンの稼働中に `capture.text_content`・`capture.content_snapshot` または
 `output.batch_interval_s` の変更に成功すると、次のメッセージを表示します。
 
 ```text
 Restart recording with `zanei stop && zanei start` for this to take effect.
 ```
+
+`config set capture.content_snapshot true` は、先に現在の app/site scope を表示し、既定 N の `[y/N]` を待ちます。有効な list に応じて summary を作り、削除までの時間には読み込んだ `output.retention_hours` を使います。既定値では次の英語を表示します：
+
+```text
+Content snapshots record the text shown in the frontmost window, including messages and
+documents written by other people and text you typed that is on screen. Password fields and
+Chrome Incognito windows are never captured; stored text is redacted and deleted after 48 hours.
+
+Current scope (change it first if this is not what you want):
+  Apps:  every app except 6 excluded (Safari, Firefox, Brave, Edge, Vivaldi, Arc)
+  Sites: every site
+  zanei filter content-snapshot only-app add <APP>      record only these apps
+  zanei filter content-snapshot exclude-app add <APP>   everything except these
+  zanei apps                                            list apps to choose from
+
+Enable content snapshots with this scope? [y/N]
+```
+
+`N`・Enter・EOF は file を変更しません。非 TTY で書き込むには `--quiet` が必須で、未指定なら scope summary を stderr に出し、保存せず code 2 で終了します。agent は `filter content-snapshot` で scope を先に決め、何を記録するかを明言してから `zanei config set capture.content_snapshot true --quiet` を使い、再起動します。`false` への変更は確認しません。
 
 スキーマは[設定リファレンス](/ja/reference/config)を参照。
 

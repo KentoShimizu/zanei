@@ -4,7 +4,9 @@ use std::path::Path;
 use time::OffsetDateTime;
 use zanei_core::config::parse_time_expression;
 use zanei_core::normalize::format_timestamp;
-use zanei_core::store::{StoreWriter, remove_retired, retired_plaintext_stores};
+use zanei_core::store::{
+    PurgeFilter, StoreFormat, StoreWriter, remove_retired, retired_plaintext_stores,
+};
 
 use super::EXIT_SUCCESS;
 use crate::cli::PurgeArgs;
@@ -12,22 +14,32 @@ use crate::error::CliError;
 use crate::store_access::{self, KeyAccess, KeyPrompt};
 
 pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliError> {
-    let cutoff = if args.all {
-        if !quiet && !confirmed()? {
-            println!("Purge cancelled");
-            return Ok(EXIT_SUCCESS);
-        }
-        None
+    let filter = if args.all {
+        PurgeFilter::all()
     } else {
         let before = args
             .before
             .as_deref()
-            .ok_or_else(|| CliError::InvalidValue("--before is required".to_owned()))?;
-        Some(format_timestamp(parse_time_expression(
+            .map(|before| parse_time_expression(before, OffsetDateTime::now_utc()))
+            .transpose()?
+            .map(format_timestamp);
+        let types = args
+            .types
+            .as_deref()
+            .map(super::read::parse_types)
+            .transpose()?
+            .unwrap_or_else(|| vec!["*".to_owned()]);
+        PurgeFilter {
+            types,
             before,
-            OffsetDateTime::now_utc(),
-        )?))
+            app: args.app,
+            bundle_id: args.bundle_id,
+        }
     };
+    if filter.is_universal() && !quiet && !confirmed()? {
+        println!("Purge cancelled");
+        return Ok(EXIT_SUCCESS);
+    }
     // The live store and the set-aside plaintext stores are purged
     // independently: either may exist without the other (a set-aside store
     // outlives a crash before the encrypted store was created), and none of
@@ -39,24 +51,28 @@ pub fn run(store_path: &Path, args: PurgeArgs, quiet: bool) -> Result<u8, CliErr
     if live_store_exists {
         let mut writer =
             store_access::open_writer(store_path, KeyAccess::Existing, KeyPrompt::Allowed)?;
-        deleted += match cutoff.as_deref() {
-            Some(cutoff) => writer.purge_before(cutoff)?,
-            None => writer.purge_all()?,
-        };
+        deleted += writer.purge(&filter)?;
     }
     // Listed after the live purge: the recorder's first start after the
     // upgrade may set the live store aside at any moment, and a set-aside that
     // coincides with the purge waits for the purge's connection, so listing
     // afterwards sees every file the purge has not already emptied.
     for retired in retired_plaintext_stores(store_path)? {
-        match cutoff.as_deref() {
-            Some(cutoff) => deleted += StoreWriter::open(&retired.path)?.purge_before(cutoff)?,
-            None => {
-                deleted += StoreWriter::open(&retired.path)
-                    .and_then(|mut retired_writer| retired_writer.purge_all())
-                    .unwrap_or(0);
-                remove_retired(&retired)?;
+        let actual = StoreFormat::probe(&retired.path)?;
+        if actual != StoreFormat::Plaintext {
+            return Err(zanei_core::store::StoreError::UnexpectedStoreFormat {
+                path: retired.path,
+                expected: StoreFormat::Plaintext,
+                actual,
             }
+            .into());
+        }
+        let mut retired_writer =
+            StoreWriter::open_known(&retired.path, StoreFormat::Plaintext, None)?;
+        deleted += retired_writer.purge(&filter)?;
+        drop(retired_writer);
+        if args.all {
+            remove_retired(&retired)?;
         }
     }
     if !quiet {

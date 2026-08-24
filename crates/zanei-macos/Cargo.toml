@@ -10,6 +10,10 @@ rust-version.workspace = true
 zanei-collector = { path = "../zanei-collector" }
 zanei-core = { path = "../zanei-core" }
 thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints.rust]
 unsafe_code = "deny"

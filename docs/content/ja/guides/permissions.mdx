@@ -3,20 +3,22 @@ title: macOS 権限のセットアップ
 description: Zanei が要求する TCC 権限の一覧、付与手順、zanei doctor による recorder 状態の確認。
 ---
 
-何を記録するか（設定の `capture.sources`）に応じて、Zanei は最大 3 種類の macOS 権限（TCC）を使います。画面収録は含まれません。
+`capture.sources` と 2 つの content opt-in に応じて、Zanei は最大 3 種類の macOS 権限（TCC）を使います。画面収録は含まれません。
 
 ## 必要な権限
 
 | 権限 | System Settings 上の項目 | 何のために使うか | 関係するイベント型 |
 | --- | --- | --- | --- |
-| アクセシビリティ | Accessibility | ウィンドウタイトル・フォーカス・UI 要素の取得 | `window.*` `ui.*` |
+| アクセシビリティ | Accessibility | 共有する前面ウィンドウ識別、ウィンドウタイトル・フォーカス・UI 要素・可視 content snapshot の取得 | `window.*` `ui.*` `input.*` `clipboard.*` `browser.navigate` `content.snapshot` |
 | 入力監視 | Input Monitoring | キー・スクロール・クリックの検知 | `input.*` `ui.click` `clipboard.*` |
-| オートメーション | Automation（対象アプリごと） | Chrome の URL と window eligibility を取得し、URL 捕捉と本文抑止に使用 | `browser.navigate`、Chrome の `ui.value`/`input.key`/clipboard 本文 |
+| オートメーション | Automation（対象アプリごと） | Chrome の URL と window eligibility を取得し、URL 捕捉と content 抑止に使用 | `browser.navigate`、Chrome の `ui.value`/`input.key`/clipboard 本文と `content.snapshot` |
 
 2 つの性質があります。
 
 - アプリの起動・終了・前面切替（`app.*`）は権限なしで記録できます。何も付与しなくても、アプリ単位の行動履歴は記録されます。
-- 権限が必須になるのは、それを必要とする機能が有効な場合だけです。たとえば `capture.sources` から `input` と `ui` の両方を外すと入力監視は不要です。`browser` がない場合、Chrome Automation が必要なのは `text_content` と `ui` または `input` を有効にしたときだけです。`window` 単独では不要です。
+- `input` と `browser` は、event を app と window に結び付ける単一の前面ウィンドウ識別に Accessibility を使います。event の検出自体には、それぞれ入力監視と Automation も使います。
+- 権限が必須になるのは、それを必要とする機能が有効な場合だけです。`capture.content_snapshot` は `capture.sources` から独立しており、`window` がなくても Accessibility が必要です。snapshot 単独では入力監視は不要です。
+- `browser` がない場合も、`text_content` が有効かつ `ui` または `input` を含むとき、または content-snapshot scope が Chrome を含み得るときは Chrome Automation が必要です。関連 scope が Chrome を完全に除外する場合は不要です。
 
 ## 初回セットアップ
 
@@ -67,7 +69,7 @@ zanei doctor --json
   "reported_by_recorder": true,
   "capture_sources": ["app", "window", "ui", "input", "browser"],
   "permissions": {
-    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value"] },
+    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"] },
     "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
     "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
   },

@@ -146,7 +146,11 @@ fn status_human_output_shows_text_content_opt_in_state() {
         .expect("opt-in human status output");
 
     assert_eq!(output.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("TEXT CONTENT      on (opt-in)"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("TEXT CONTENT      on (apps: exclude 6, sites: exclude 0)"));
+    assert!(stdout.contains(
+        "CONTENT SNAPSHOT  off (opt-in: zanei config set capture.content_snapshot true)"
+    ));
 }
 
 #[test]
@@ -331,7 +335,7 @@ fn config_init_creates_a_complete_template_and_never_overwrites() {
             .lines()
             .filter(|line| line.starts_with("# "))
             .count(),
-        9
+        18
     );
 
     let sentinel = "# keep this existing file\n";
@@ -484,7 +488,7 @@ fn purge_all_quiet_deletes_fixture_events_without_prompt() {
         .open_reader()
         .query(&QueryFilter::default(), 48)
         .expect("remaining events");
-    assert!(events.is_empty());
+    assert!(events.events.is_empty());
 }
 
 #[test]
@@ -579,9 +583,8 @@ fn missing_daemon_uses_the_dedicated_exit_code() {
     assert_eq!(value["events_captured"], serde_json::Value::Null);
 }
 
-// The runner's TCC state is out of the test's control (developer machines
-// usually lack Input Monitoring, CI images usually have it), so assert that
-// doctor's exit code and JSON are consistent with whichever state is real.
+// The runner's TCC state is out of the test's control, so assert that doctor's
+// exit code and JSON are consistent with whichever required states are real.
 #[test]
 fn doctor_json_matches_the_real_permission_state() {
     let directory = TempDir::new().expect("doctor fixture");
@@ -597,22 +600,32 @@ fn doctor_json_matches_the_real_permission_state() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     assert_eq!(value["capture_sources"], serde_json::json!(["input"]));
     assert_eq!(value["reported_by_recorder"], false);
-    let granted = value["permissions"]["input_monitoring"]["status"] == "granted";
-    if granted {
+    let accessibility_granted = value["permissions"]["accessibility"]["status"] == "granted";
+    let input_granted = value["permissions"]["input_monitoring"]["status"] == "granted";
+    if accessibility_granted && input_granted {
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(value["ok"], true);
         assert_eq!(value["missing_required"], serde_json::json!([]));
     } else {
         assert_eq!(output.status.code(), Some(3));
         assert_eq!(value["ok"], false);
+        let expected_missing = [
+            (!accessibility_granted).then_some("accessibility"),
+            (!input_granted).then_some("input_monitoring"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
         assert_eq!(
             value["missing_required"],
-            serde_json::json!(["input_monitoring"])
+            serde_json::to_value(expected_missing).expect("missing permissions JSON")
         );
-        assert_eq!(
-            value["settings_pane"],
+        let expected_pane = if accessibility_granted {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
-        );
+        } else {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        };
+        assert_eq!(value["settings_pane"], expected_pane);
     }
 }
 
@@ -768,6 +781,7 @@ fn daemon_hot_reloads_retention_purges_immediately_and_reports_the_active_value(
     let now = OffsetDateTime::now_utc();
     let expired = normalize(
         RawEvent {
+            observed_at: None,
             source: "macos.workspace".to_owned(),
             event_type: "app.launch".to_owned(),
             app: App {
@@ -778,11 +792,13 @@ fn daemon_hot_reloads_retention_purges_immediately_and_reports_the_active_value(
             window: None,
             element: None,
             data: EventData::AppLaunch(EmptyData::default()),
+            capture_context: Default::default(),
         },
         now - time::Duration::hours(2),
         1,
     )
-    .expect("normalize expired fixture");
+    .expect("normalize expired fixture")
+    .event;
     StoreWriter::open_with_key(&store, Some(&read_key(&key_file_for(&store))))
         .and_then(|mut writer| writer.append(&expired))
         .expect("store expired fixture");
@@ -1078,9 +1094,15 @@ fn export_sqlite_writes_a_plaintext_snapshot_any_sqlite_client_can_open() {
     }
     let events = StoreReader::open(&out)
         .expect("snapshot opens without a key")
-        .query(&QueryFilter::default(), 48)
+        .query(
+            &QueryFilter {
+                types: vec!["*".to_owned()],
+                ..QueryFilter::default()
+            },
+            48,
+        )
         .expect("snapshot events");
-    assert_eq!(events.len(), KNOWN_EVENT_TYPES.len());
+    assert_eq!(events.events.len(), KNOWN_EVENT_TYPES.len());
 
     let via_cli = command(&fixture.config, &out)
         .args(["query", "--since", "1h", "--format", "json"])
@@ -1149,6 +1171,7 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
     fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
     let legacy = normalize(
         RawEvent {
+            observed_at: None,
             source: "macos.workspace".to_owned(),
             event_type: "app.launch".to_owned(),
             app: App {
@@ -1159,11 +1182,13 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
             window: None,
             element: None,
             data: EventData::AppLaunch(EmptyData::default()),
+            capture_context: Default::default(),
         },
         OffsetDateTime::now_utc() - time::Duration::minutes(5),
         1,
     )
-    .expect("normalize legacy fixture");
+    .expect("normalize legacy fixture")
+    .event;
     StoreWriter::open(&store)
         .and_then(|mut writer| {
             writer.append(&legacy)?;
@@ -1214,7 +1239,7 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
         .expect("open new store")
         .query(&QueryFilter::default(), 48)
         .expect("merged events");
-    assert_eq!(merged, vec![legacy]);
+    assert_eq!(merged.events, vec![legacy]);
     let query = command(&config, &store)
         .args(["query", "--since", "1h", "--format", "json"])
         .output()
@@ -1283,6 +1308,7 @@ fn purge_covers_set_aside_stores_even_without_a_live_store() {
             writer.append(
                 &normalize(
                     RawEvent {
+                        observed_at: None,
                         source: "macos.workspace".to_owned(),
                         event_type: "app.launch".to_owned(),
                         app: App {
@@ -1293,11 +1319,13 @@ fn purge_covers_set_aside_stores_even_without_a_live_store() {
                         window: None,
                         element: None,
                         data: EventData::AppLaunch(EmptyData::default()),
+                        capture_context: Default::default(),
                     },
                     OffsetDateTime::now_utc() - time::Duration::minutes(5),
                     1,
                 )
-                .expect("normalize leftover event"),
+                .expect("normalize leftover event")
+                .event,
             )
         })
         .expect("set-aside store");

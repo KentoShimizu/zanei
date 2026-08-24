@@ -36,6 +36,50 @@ The store is encrypted at rest.
   file and its directory when they are missing.
 - SQLCipher (BSD-3-Clause) is compiled in; see `THIRD_PARTY_NOTICES.md`.
 
+Content snapshots add a separate, scoped opt-in for text shown in the
+frontmost window.
+
+- `capture.content_snapshot` records `content.snapshot` events from macOS
+  Accessibility. It does not take screenshots or use OCR or screen-recording
+  APIs. Password subtrees, single-line input values, Secure Input periods,
+  Chrome Incognito windows, and out-of-scope apps/sites are not captured.
+- Configuration now accepts 18 keys: the snapshot opt-in plus four app/site
+  lists under each of `[filter.text_content]` and
+  `[filter.content_snapshot]`. Filter scopes hot-reload; the snapshot opt-in
+  requires a restart and enabling it shows the current scope with a `[y/N]`
+  confirmation. Non-TTY enablement requires `--quiet` and otherwise exits 2
+  without writing.
+- **Behavior change for existing content capture:** both content scopes
+  exclude Safari, Firefox, Brave, Edge, Vivaldi, and Arc by default because
+  their private windows cannot be identified reliably. A 0.2.x user with
+  `capture.text_content = true` therefore gets null typed/copied bodies in
+  those browsers by default; events and non-content facts remain.
+- `zanei apps [QUERY] [--json]` lists installed, running, and recently used
+  apps. Every app-list `add` now resolves display names or bundle IDs and
+  saves a normalized bundle ID. A previously accepted unresolved string now
+  exits 2 without writing unless `--unverified` is explicit; argument-free
+  `add` provides a numbered interactive selector.
+- `query` and MCP `query_events` exclude `content.*` unless `types` is
+  explicit. `export` includes all event types in jsonl, JSON, and SQLite by
+  default and adds `--types` for narrowing. Plaintext SQLite exports include
+  snapshot bodies when selected.
+- CLI `query --format json` and `export --format json` remain event arrays.
+  Unknown stored event types are skipped with a stderr warning, suppressed by
+  `--quiet`. MCP `query_events`, JSON timeline output, and structured MCP
+  timelines expose `skipped_unknown_types` in their existing result objects.
+- Timeline sessions report snapshot counts without inline bodies: Markdown
+  prints `Content snapshots: N` for nonzero counts, and JSON always includes
+  `content_snapshots`. CLI/MCP status exposes `capture.content_snapshot` and
+  human status shows the app/site modes for both content scopes.
+- `purge --types <TYPES> [--before <TIME>] [--app <NAME> | --bundle-id <ID>]`
+  deletes a selected subset. It is irreversible and has no dry-run.
+  `export --types` applies to every format.
+- The one-time first 0.3.0 start both sets aside an older plaintext store and
+  creates the encrypted live store at schema version 6. A 0.2.x binary cannot
+  open that live store, and its strict config reader can reject the new bool
+  and nested filter sections. Downgrade by restoring a pre-upgrade backup and
+  removing those settings; never edit the schema version metadata.
+
 ## 0.2.0 — 2026-08-18
 
 Typed-text capture now works in Electron and Chromium apps.

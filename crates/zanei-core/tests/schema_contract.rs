@@ -1,10 +1,17 @@
 use serde_json::{Value, json};
-use zanei_core::schema::{Event, EventData, KNOWN_EVENT_TYPES};
+use time::OffsetDateTime;
+use zanei_core::config::{FilterConfig, RedactorKind};
+use zanei_core::normalize::{CONTENT_SNAPSHOT_SAFETY_MAX_BYTES, normalize};
+use zanei_core::privacy::PrivacyFilter;
+use zanei_core::schema::{
+    App, ContentSnapshotData, ContentSnapshotTrigger, Event, EventData, KNOWN_EVENT_TYPES,
+    RawEvent, Window,
+};
 
 const EVENT_SCHEMA: &str = include_str!("../../../docs/public/schema/event.schema.json");
 
 #[test]
-fn all_thirteen_event_types_match_the_json_schema_and_round_trip() {
+fn all_fourteen_event_types_match_the_json_schema_and_round_trip() {
     let validator = validator();
     let fixtures = fixtures();
 
@@ -64,6 +71,13 @@ fn schema_and_rust_accept_the_same_boundary_corpus() {
     let mut invalid_ulid = valid_launch.clone();
     invalid_ulid["id"] = json!("evt_Z0000000000000000000000000");
     let unknown_type = envelope("future.event", json!({}));
+    let mut content_with_v1 = envelope(
+        "content.snapshot",
+        json!({ "text": "Visible", "chars": 7, "complete": true, "trigger": "settle" }),
+    );
+    content_with_v1["v"] = json!(1);
+    let mut existing_with_v2 = envelope("app.launch", json!({}));
+    existing_with_v2["v"] = json!(2);
 
     let mut app_activate_without_window = envelope("app.activate", json!({}));
     app_activate_without_window["window"] = Value::Null;
@@ -133,6 +147,8 @@ fn schema_and_rust_accept_the_same_boundary_corpus() {
         ("integer boundaries", maximum_integers, true),
         ("ULID overflow", invalid_ulid, false),
         ("unknown event type", unknown_type, false),
+        ("content snapshot with v1", content_with_v1, false),
+        ("existing event with v2", existing_with_v2, false),
         (
             "app.activate without window",
             app_activate_without_window,
@@ -234,6 +250,93 @@ fn truncated_browser_url_round_trips_with_the_size_limit_rule() {
     assert_eq!(serde_json::to_value(event).expect("round trip"), truncated);
 }
 
+#[test]
+fn serialization_rejects_mismatched_type_version_pairs() {
+    let mut existing: Event =
+        serde_json::from_value(envelope("app.launch", json!({}))).expect("existing event");
+    existing.version = 2;
+    assert!(serde_json::to_value(existing).is_err());
+
+    let mut content: Event = serde_json::from_value(envelope(
+        "content.snapshot",
+        json!({ "text": "Visible", "chars": 7, "complete": true, "trigger": "settle" }),
+    ))
+    .expect("content event");
+    content.version = 1;
+    assert!(serde_json::to_value(content).is_err());
+}
+
+#[test]
+fn content_snapshot_redaction_and_independent_size_boundaries_are_preserved() {
+    let original = "Contact alice@example.com";
+    let filter = PrivacyFilter::new(FilterConfig {
+        redactors: vec![RedactorKind::Email],
+        ..Default::default()
+    });
+    let redacted = filter
+        .process(normalized_snapshot(original.to_owned(), true))
+        .expect("snapshot remains in scope");
+    let EventData::ContentSnapshot(data) = redacted.data else {
+        panic!("expected content.snapshot");
+    };
+    assert_eq!(data.text.as_deref(), Some("Contact [REDACTED:email]"));
+    assert_eq!(data.chars, original.chars().count() as u64);
+    assert!(data.complete);
+    assert_eq!(redacted.redaction.rules, ["email"]);
+
+    for bytes in [32 * 1024, 32 * 1024 + 1, CONTENT_SNAPSHOT_SAFETY_MAX_BYTES] {
+        let event = normalized_snapshot("x".repeat(bytes), bytes <= 32 * 1024).event;
+        let EventData::ContentSnapshot(data) = &event.data else {
+            panic!("expected content.snapshot");
+        };
+        assert_eq!(data.text.as_ref().map(String::len), Some(bytes));
+        assert_eq!(data.chars, bytes as u64);
+        assert_eq!(data.complete, bytes <= 32 * 1024);
+        assert!(!event.is_truncated());
+    }
+
+    let oversized_bytes = CONTENT_SNAPSHOT_SAFETY_MAX_BYTES + 1;
+    let event = normalized_snapshot("x".repeat(oversized_bytes), false).event;
+    let EventData::ContentSnapshot(data) = &event.data else {
+        panic!("expected content.snapshot");
+    };
+    assert_eq!(data.text, None);
+    assert_eq!(data.chars, oversized_bytes as u64);
+    assert!(!data.complete);
+    assert!(event.is_truncated());
+}
+
+fn normalized_snapshot(text: String, complete: bool) -> zanei_core::normalize::NormalizedEvent {
+    let chars = text.chars().count() as u64;
+    normalize(
+        RawEvent {
+            observed_at: None,
+            source: "macos.ax".to_owned(),
+            event_type: "content.snapshot".to_owned(),
+            app: App {
+                name: "Example".to_owned(),
+                bundle_id: Some("com.example.App".to_owned()),
+                pid: Some(42),
+            },
+            window: Some(Window {
+                title: Some("Example window".to_owned()),
+                id: Some(7),
+            }),
+            element: None,
+            data: EventData::ContentSnapshot(ContentSnapshotData {
+                text: Some(text),
+                chars,
+                complete,
+                trigger: ContentSnapshotTrigger::Settle,
+            }),
+            capture_context: Default::default(),
+        },
+        OffsetDateTime::UNIX_EPOCH,
+        1,
+    )
+    .expect("valid content snapshot")
+}
+
 fn validator() -> jsonschema::Validator {
     let schema: Value = serde_json::from_str(EVENT_SCHEMA).expect("schema must be JSON");
     jsonschema::draft202012::options()
@@ -328,6 +431,17 @@ fn fixtures() -> Vec<Fixture> {
             }),
             json!({ "content_kind": "text", "size_bytes": null, "text": null }),
         ),
+        fixture(
+            "content.snapshot",
+            json!({
+                "text": "Visible text", "chars": 12,
+                "complete": true, "trigger": "settle"
+            }),
+            json!({
+                "text": "Visible text", "chars": 12,
+                "complete": true, "trigger": "unknown"
+            }),
+        ),
     ]
 }
 
@@ -341,7 +455,7 @@ fn fixture(event_type: &'static str, valid_data: Value, invalid_data: Value) -> 
 
 fn envelope(event_type: &str, data: Value) -> Value {
     let mut value = json!({
-        "v": 1,
+        "v": if event_type == "content.snapshot" { 2 } else { 1 },
         "id": format!("evt_{}", ulid::Ulid::new()),
         "ts": "2026-08-16T12:34:56.789Z",
         "mono_ns": 123456789,
@@ -372,6 +486,7 @@ fn envelope(event_type: &str, data: Value) -> Value {
             | "browser.navigate"
             | "clipboard.copy"
             | "clipboard.paste"
+            | "content.snapshot"
     ) {
         value["window"] = window();
     }

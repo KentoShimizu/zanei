@@ -26,6 +26,7 @@ pub(super) enum GetTimelineOutput {
         sessions: Vec<SessionOutput>,
         token_estimate: usize,
         truncated: bool,
+        skipped_unknown_types: u64,
     },
 }
 
@@ -49,12 +50,14 @@ impl GetTimelineOutput {
         sessions: Vec<Session>,
         token_estimate: usize,
         truncated: bool,
+        skipped_unknown_types: u64,
     ) -> Self {
         Self::Structured {
             range: range.into(),
             sessions: sessions.into_iter().map(SessionOutput::from).collect(),
             token_estimate,
             truncated,
+            skipped_unknown_types,
         }
     }
 }
@@ -64,6 +67,7 @@ pub(super) struct QueryEventsOutput {
     pub(super) range: RangeOutput,
     pub(super) count: usize,
     pub(super) truncated: bool,
+    pub(super) skipped_unknown_types: u64,
     #[schemars(with = "Vec<serde_json::Value>")]
     pub(super) events: Vec<Event>,
 }
@@ -86,6 +90,7 @@ pub(super) struct GetStatusOutput {
 pub(super) struct CaptureOutput {
     pub(super) sources: Vec<String>,
     pub(super) text_content: bool,
+    pub(super) content_snapshot: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -110,6 +115,7 @@ pub(super) struct SessionOutput {
     app: String,
     title_summary: Option<String>,
     activities: Vec<String>,
+    content_snapshots: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     event_ids: Option<Vec<String>>,
     event_ids_truncated: bool,
@@ -125,6 +131,7 @@ impl From<Session> for SessionOutput {
             app: session.app,
             title_summary: session.title_summary,
             activities: session.activities,
+            content_snapshots: session.content_snapshots,
             event_ids: session.event_ids,
             event_ids_truncated: session.event_ids_truncated,
             interactions: session

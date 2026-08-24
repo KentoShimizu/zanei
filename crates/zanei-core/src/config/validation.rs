@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::{Config, ConfigError, RedactorKind};
+use super::{Config, ConfigError, RedactorKind, ScopedFilterConfig};
 
 pub(super) fn validate(config: &Config) -> Result<(), ConfigError> {
     if config.output.batch_interval_s == 0 {
@@ -20,7 +20,45 @@ pub(super) fn validate(config: &Config) -> Result<(), ConfigError> {
         "filter.include_only_websites",
         &config.filter.include_only_websites,
     )?;
+    validate_scope("filter.text_content", &config.filter.text_content)?;
+    validate_scope("filter.content_snapshot", &config.filter.content_snapshot)?;
     unique_redactors(&config.filter.redactors)
+}
+
+fn validate_scope(prefix: &'static str, scope: &ScopedFilterConfig) -> Result<(), ConfigError> {
+    let fields = [
+        ("exclude_apps", &scope.exclude_apps, false),
+        ("include_only_apps", &scope.include_only_apps, false),
+        ("exclude_websites", &scope.exclude_websites, true),
+        ("include_only_websites", &scope.include_only_websites, true),
+    ];
+    for (name, values, website) in fields {
+        let field = match (prefix, name) {
+            ("filter.text_content", "exclude_apps") => "filter.text_content.exclude_apps",
+            ("filter.text_content", "include_only_apps") => "filter.text_content.include_only_apps",
+            ("filter.text_content", "exclude_websites") => "filter.text_content.exclude_websites",
+            ("filter.text_content", "include_only_websites") => {
+                "filter.text_content.include_only_websites"
+            }
+            ("filter.content_snapshot", "exclude_apps") => "filter.content_snapshot.exclude_apps",
+            ("filter.content_snapshot", "include_only_apps") => {
+                "filter.content_snapshot.include_only_apps"
+            }
+            ("filter.content_snapshot", "exclude_websites") => {
+                "filter.content_snapshot.exclude_websites"
+            }
+            ("filter.content_snapshot", "include_only_websites") => {
+                "filter.content_snapshot.include_only_websites"
+            }
+            _ => unreachable!("validate_scope accepts known scope and field names"),
+        };
+        if website {
+            domains(field, values)?;
+        } else {
+            nonempty_unique(field, values)?;
+        }
+    }
+    Ok(())
 }
 
 fn nonempty_unique(field: &'static str, values: &[String]) -> Result<(), ConfigError> {

@@ -14,6 +14,7 @@ mod supervisor;
 
 use std::{io, path::PathBuf, process::ExitStatus};
 
+pub(crate) use collectors::chrome_tracking_required;
 pub(crate) use control::{
     DAEMON_CONTROL_POLL_INTERVAL, DAEMON_CONTROL_TIMEOUT, bootout, is_bootstrapped,
     start_launch_agent, terminate, wait_for_launch_agent_removal,

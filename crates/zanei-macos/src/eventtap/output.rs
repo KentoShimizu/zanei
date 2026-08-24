@@ -5,11 +5,23 @@ use std::sync::{
     mpsc::{SyncSender, TrySendError},
 };
 
+use time::OffsetDateTime;
 use zanei_collector::RawEvent;
-use zanei_core::schema::{App, EventData, Window};
+use zanei_core::{
+    privacy::PrivacyScope,
+    schema::{App, EventData, Window},
+};
 
 use crate::trace;
-use crate::{ffi::eventtap::NativeContext, text_capture::InputAuthorization};
+use crate::{
+    capture_policy::{CaptureDecision, CapturePolicy},
+    ffi::eventtap::NativeContext,
+    text_capture::{
+        InputAuthorization, ReleasedEvent, TextBodyRoute, TextQuarantine, route_text_body,
+    },
+};
+
+use super::clipboard::ClipboardOutput;
 
 const SOURCE: &str = "macos.eventtap";
 
@@ -17,6 +29,8 @@ pub(super) fn raw_event(
     event_type: &str,
     context: &NativeContext,
     data: EventData,
+    capture_policy: &CapturePolicy,
+    observed_at: OffsetDateTime,
 ) -> Option<RawEvent> {
     let Some(window) = context.window.as_ref() else {
         trace::trace!(
@@ -26,25 +40,32 @@ pub(super) fn raw_event(
         );
         return None;
     };
+    let app = App {
+        name: context.app.name.clone(),
+        bundle_id: context.app.bundle_id.clone(),
+        pid: Some(context.app.pid),
+    };
+    let capture_context = capture_policy
+        .decision(PrivacyScope::TextContent, &app, window.id)
+        .capture_context();
     Some(RawEvent {
+        observed_at: Some(observed_at),
         source: SOURCE.to_owned(),
         event_type: event_type.to_owned(),
-        app: App {
-            name: context.app.name.clone(),
-            bundle_id: context.app.bundle_id.clone(),
-            pid: Some(context.app.pid),
-        },
+        app,
         window: Some(Window {
             title: window.title.clone(),
             id: window.id,
         }),
         element: None,
         data,
+        capture_context,
     })
 }
 
-pub(super) fn unknown_clipboard_event(data: EventData) -> RawEvent {
+pub(super) fn unknown_clipboard_event(data: EventData, observed_at: OffsetDateTime) -> RawEvent {
     RawEvent {
+        observed_at: Some(observed_at),
         source: SOURCE.to_owned(),
         event_type: "clipboard.copy".to_owned(),
         app: App {
@@ -55,6 +76,7 @@ pub(super) fn unknown_clipboard_event(data: EventData) -> RawEvent {
         window: None,
         element: None,
         data,
+        capture_context: Default::default(),
     }
 }
 
@@ -67,6 +89,62 @@ pub(super) fn emit(
         return EmitResult::Filtered;
     };
     try_send_counted(sender, event, dropped_events)
+}
+
+pub(super) fn emit_clipboard(
+    sender: &SyncSender<RawEvent>,
+    output: Option<ClipboardOutput>,
+    capture_policy: &CapturePolicy,
+    quarantine: &mut TextQuarantine,
+    dropped_events: &AtomicU64,
+) -> EmitResult {
+    let Some(output) = output else {
+        return EmitResult::Filtered;
+    };
+    emit_or_quarantine(
+        sender,
+        Some(output.event),
+        capture_policy,
+        output.decision.as_ref(),
+        quarantine,
+        dropped_events,
+    )
+}
+
+pub(super) fn emit_or_quarantine(
+    sender: &SyncSender<RawEvent>,
+    event: Option<RawEvent>,
+    capture_policy: &CapturePolicy,
+    earlier_decision: Option<&CaptureDecision>,
+    quarantine: &mut TextQuarantine,
+    dropped_events: &AtomicU64,
+) -> EmitResult {
+    let Some(event) = event else {
+        return EmitResult::Filtered;
+    };
+    match route_text_body(event, capture_policy, earlier_decision) {
+        TextBodyRoute::Send(event) => try_send_counted(sender, event, dropped_events),
+        TextBodyRoute::Quarantine {
+            event,
+            key,
+            version,
+            observed_at,
+        } => {
+            quarantine.hold_text(event, key, version, observed_at);
+            EmitResult::Sent
+        }
+    }
+}
+
+pub(super) fn emit_released(
+    sender: &SyncSender<RawEvent>,
+    events: Vec<ReleasedEvent>,
+    dropped_events: &AtomicU64,
+) -> bool {
+    events.into_iter().all(|event| {
+        let (event, _) = event.into_parts();
+        try_send_counted(sender, event, dropped_events).continues()
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

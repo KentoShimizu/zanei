@@ -9,7 +9,7 @@ Zanei は PC 上での操作を記録します。機微なデータなので既�
 
 1. **外部送信なし。** データをどこかへ送る機能がありません。すべてローカルの SQLite ファイルに留まります。
 2. **画面録画なし。** スクリーンショットも画面収録 API も使いません。読むのは OS のアクセシビリティ／イベントのメタデータです。
-3. **キー入力の内容は既定で記録しない。** 記録されるのは「この種類のフィールドで入力があった」という事実です。何を打ったかは、opt-in しない限り記録されません。
+3. **内容は既定で記録しない。** 記録されるのは「この種類のフィールドで入力があった」という事実で、何を打ったかは記録しません。ウィンドウに表示されたテキストも記録しません。入力内容と content snapshot は別々の opt-in です。
 4. **capture-time フィルタ。** 除外アプリに帰属できたイベントはストアに書き込まれる前に破棄されます。帰属不能な clipboard 変化は除外アプリと照合できないため、`app.name: "Unknown"` として保存されることがあります。除外した Chrome サイトは URL イベントを生成せず、本文も記録しません。
 5. **read-only な MCP 公開。** [MCP サーバ](/ja/reference/mcp)は読み取り専用のビューです。MCP 経由だけで接続した agent はタイムラインを読めますが、記録対象やフィルタは変更できません。
 6. **保存時に暗号化。** ストアファイルは暗号化されています。鍵は recorder の初回起動時に生成してログインキーチェーンに保存し、iCloud キーチェーンには同期しません。バックアップ・同期フォルダ・別のマシンにあるファイルのコピーは鍵なしでは読めず、鍵を削除すればすべてのコピーが読めなくなります。
@@ -23,8 +23,9 @@ Zanei は PC 上での操作を記録します。機微なデータなので既�
 | UI 操作（クリック・フォーカス移動）の要素メタデータ | パスワード欄（`AXSecureTextField`）の値。捕捉段階で除外 |
 | 入力・スクロール・クリップボード操作の事実 | Chrome シークレットウィンドウの URL・タブ情報・本文 |
 | Chrome の URL とタブタイトル（通常ウィンドウのみ） | 除外アプリに帰属できたイベント（既定でパスワードマネージャ等） |
+|  | アプリのウィンドウに表示されたテキスト（`content.snapshot`） |
 
-## 内容の記録は opt-in
+## 入力内容の記録は opt-in
 
 [設定](/ja/reference/config)で `capture.text_content = true` にすると、認可された打鍵文字（`input.key`）、フィールドに入力された差分（`ui.value.data.text`）、クリップボードの中身の記録が有効になります。自由入力フィールドで捕捉するのは、同じアプリ・同じフォーカス要素への打鍵またはペーストから 3 秒以内に増えた差分だけで、表示されている文書やフィールドの全体値ではありません。連続して入力している間は変更をまとめ、1 秒の間が空いたとき、または最長 5 秒ごとに記録します。コピー本文には、同じプロセスの Command-C と 500 ミリ秒以内に対応することも必要です。`element.value` は自由入力および不明な要素では null のままで、値を持つのは安全と分類した非テキスト要素（ボタン・チェックボックス・スライダー等）だけです。初回セットアップでは、`config.toml` に `capture.text_content` がまだ明示されていない場合、最初に成功した対話式のバックグラウンド `start` が選択を求めます。既定の回答は `N` なので、opt-in しなければ内容記録はオフのままです。回答は保存され、確認は繰り返しません。後から `zanei config set capture.text_content <true|false>` で変更できます。有効にした場合：
 
@@ -34,6 +35,7 @@ Zanei は PC 上での操作を記録します。機微なデータなので既�
 - Accessibility が既知の非 secure 入力欄を確認できない場合、`input.key.text` とペースト本文は null のままです。
 - confirmed な打鍵またはペーストが開く 3 秒の認可窓外にある値変化は、テキストを記録しません。rejected な入力は窓を開きません。
 - Chrome の incognito・サイト除外中は本文が null のままです。ウィンドウタイトルと操作メタデータは残り得ます。
+- Chrome のテキストと snapshot 本文は、入力後の観測によってそのウィンドウが引き続き許可サイトを表示していると Zanei が確認した場合にだけ書き込まれます。除外サイトまたは incognito のタブへ切り替える直前に入力または表示されたテキストは省かれます。
 - 不明な UI 要素は `element.value` を記録しません。
 - IME 使用中、および入力ソース種別が不明なときの `input.key.text` は null です。確定文字列は認可された `ui.value.data.text` の差分としてのみ捕捉されます。
 - 音声入力自体は、記録済みの打鍵またはペーストのトリガーを伴わないため認可窓を開きません。ただし、同じアプリ・同じフォーカス要素世代への直前の打鍵またはペーストが開いた 3 秒の窓が有効な間に音声テキストが挿入されると、そのテキストが認可された `ui.value.data.text` の差分に含まれ得ます。
@@ -42,6 +44,27 @@ Zanei は PC 上での操作を記録します。機微なデータなので既�
 :::danger
 `text_content` を有効にすると、入力内容が保持期間のあいだローカルストアに残ります。[フィルタ](/ja/guides/filters)と短い `retention_hours` を併用してください。
 :::
+
+0.3.0 では、private window を確実に判定できないため、既定の `[filter.text_content]` scope が Safari・Firefox・Brave・Edge・Vivaldi・Arc を除外します。`capture.text_content = true` のまま upgrade した利用者にも適用され、これらの browser では入力・clipboard 本文が既定で null になります。event と内容以外の事実は残ります。`zanei filter` の warning を確認したうえで、編集可能な既定値を変更できます。
+
+## Content snapshot は opt-in
+
+`capture.content_snapshot = true` は、前面ウィンドウの可視範囲で macOS Accessibility が公開するテキストを記録します。スクリーンショット・OCR・画面収録 API は使いません。ウィンドウの内容が静止した後、同じウィンドウで操作を続けている間の定期取得、ウィンドウを離れるときに snapshot の候補を作ります。1 event の UTF-8 本文は最大 32 KiB で、途中までしか読めなかった場合は `data.complete: false` になります。
+
+Content snapshot は入力内容の捕捉とも `capture.sources` とも独立しています。secure field の subtree と単行入力欄の値は読みません。Secure Input 中は snapshot を取りません。ただし、入力したテキストがウィンドウ内の別の場所や複数行のテキスト領域に表示されると含まれ得ます。他人が書いた message・document・その他の表示テキストも含み得ます。
+
+有効化する前に scope を決めます：
+
+```bash
+zanei apps
+zanei filter content-snapshot only-app add Terminal
+zanei config set capture.content_snapshot true
+zanei stop && zanei start
+```
+
+ストアは暗号化され、通常の保持期間が適用されます。plain SQLite export は `--types` で除外しない限り snapshot 本文を含むため、他の機微な export と同様に保護してください。画面共有中に表示テキストを記録したくない場合は、先に `zanei pause` を実行します。会社管理の端末では、第三者の message・document に関する所属組織の規則に従ってください。
+
+recorder は 1 日の snapshot 本文が 128 MiB に達すると新しい snapshot の生成を止めます。これはメモリ内の backstop で、daemon の再起動時にリセットされます。daemon が動き続ける場合、既定の 48 時間保持では database overhead を除いて約 256 MiB が上限の目安です。同じ本文は重複保存しないため、通常利用はこれより大幅に少ない想定です。
 
 ## 自動除外
 
@@ -55,7 +78,8 @@ Zanei は PC 上での操作を記録します。機微なデータなので既�
 
 ## 制限
 
-- **Chrome 以外のブラウザのウィンドウタイトル。** Safari や Firefox はプライベートウィンドウを確実に判定する手段がないため、URL 捕捉は行いませんが、ウィンドウタイトルは他のアプリ同様に記録されるため、プライベートウィンドウのページタイトルがタイトルとして残り得ます。避けたい場合は対象ブラウザを除外してください。Safari の例：`zanei filter exclude-app add com.apple.Safari`。
+- **Chrome 以外の private window。** Safari・Firefox・Brave・Edge・Vivaldi・Arc には、Zanei が利用できる信頼できる private-window signal がありません。そのため両方の `[filter.text_content]` と `[filter.content_snapshot]` で既定除外します。この既定値は編集できますが、外すと private window の本文を記録し得ます。ウィンドウタイトルは全 event の `[filter]` scope で別に扱うため、タイトルも抑止するにはそこで browser を除外します。Safari の例：`zanei filter exclude-app add com.apple.Safari`。
+- **website scope は Chrome のみ。** Zanei が URL と window mode を取得できる browser は Chrome だけです。他の browser に website rule は効かず、app scope だけで制御します。
 - **Chrome incognito・除外サイトのウィンドウタイトル。** 本文は null のままですが、Accessibility はタイトルを `window.title` イベントとして記録し得ます。タイトルも抑止するには Chrome 自体を除外してください：`zanei filter exclude-app add com.google.Chrome`。
 - **シェルを持つ agent。** シェルアクセスを持つ agent は、host の承認ポリシーに従い、CLI 経由で記録設定・フィルタ・保存済み記録を変更できます。同梱の skill は、ユーザーの明示的な依頼なしにこれらを変更しないよう指示しています。
 - **あなたとして `zanei` を実行できるプロセス。** 暗号化が守るのはファイルのコピーであって、CLI ではありません。あなたのユーザーとして動くもの — `zanei export` を実行できる、シェルを持つ agent を含む — はデータを読めます。root や、プロセスメモリを読めるものも同様です。ディスク自体の盗難は Zanei ではなく FileVault が覆います。

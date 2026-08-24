@@ -1,6 +1,7 @@
 //! Focused and retired AX value lifecycle.
 
 use std::{sync::atomic::Ordering, time::Instant};
+use time::OffsetDateTime;
 
 use crate::{
     focused_field::FieldClass,
@@ -17,10 +18,18 @@ use crate::ffi::ax::{
 impl AppObserver {
     pub(in crate::ffi::ax) fn value_changed_events(
         &mut self,
-        observed_at: Instant,
+        notification_at: Instant,
+        observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
+        let capture_decision = self
+            .focused_target
+            .current()
+            .and_then(|target| self.text_content_decision(target.context.window.as_ref()));
+        let capture_text_content = capture_decision
+            .as_ref()
+            .is_some_and(crate::CaptureDecision::is_allowed);
         let (class_changed, value_event) = {
             let Some(target) = self.focused_target.current_mut() else {
                 crate::trace::trace!(
@@ -39,11 +48,8 @@ impl AppObserver {
             }
             let context = &mut target.context;
             let previous_class = context.field_class;
-            let snapshot = value_snapshot(
-                target.element.as_ptr(),
-                self.capture_text_content,
-                secure_input,
-            );
+            let snapshot =
+                value_snapshot(target.element.as_ptr(), capture_text_content, secure_input);
             crate::trace::trace!(
                 "component=ax phase=value action=observe pid={} target_generation={} field_class={} value_len={} degraded={}",
                 self.context.pid,
@@ -55,7 +61,13 @@ impl AppObserver {
             if snapshot.degraded {
                 self.degraded.fetch_add(1, Ordering::Relaxed);
             }
-            let observation = context.observation(self.context.pid, observed_at, snapshot);
+            let observation = context.observation(
+                self.context.pid,
+                notification_at,
+                observed_at,
+                snapshot,
+                capture_decision,
+            );
             let value_event = context
                 .capture
                 .observe(observation, authorizations)
@@ -64,7 +76,7 @@ impl AppObserver {
         };
         let mut events = Vec::new();
         if class_changed {
-            events.push(self.focus_event());
+            events.push(self.focus_event(observed_at));
         }
         events.extend(value_event);
         Ok(events)
@@ -218,9 +230,17 @@ impl AppObserver {
     pub(super) fn resolve_focus_change(
         &mut self,
         notification_at: Instant,
+        observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> FocusChangeResolution {
+        let capture_decision = self
+            .focused_target
+            .current()
+            .and_then(|target| self.text_content_decision(target.context.window.as_ref()));
+        let capture_text_content = capture_decision
+            .as_ref()
+            .is_some_and(crate::CaptureDecision::is_allowed);
         let Some(target) = self.focused_target.current_mut() else {
             return FocusChangeResolution::Immediate(None);
         };
@@ -228,11 +248,7 @@ impl AppObserver {
             return FocusChangeResolution::Immediate(None);
         }
         let context = &mut target.context;
-        let snapshot = value_snapshot(
-            target.element.as_ptr(),
-            self.capture_text_content,
-            secure_input,
-        );
+        let snapshot = value_snapshot(target.element.as_ptr(), capture_text_content, secure_input);
         if snapshot.degraded {
             self.degraded.fetch_add(1, Ordering::Relaxed);
             return match context
@@ -252,7 +268,13 @@ impl AppObserver {
                 }
             };
         }
-        let observation = context.observation(self.context.pid, notification_at, snapshot);
+        let observation = context.observation(
+            self.context.pid,
+            notification_at,
+            observed_at,
+            snapshot,
+            capture_decision,
+        );
         match context
             .capture
             .resolve_focus_change(observation, authorizations)

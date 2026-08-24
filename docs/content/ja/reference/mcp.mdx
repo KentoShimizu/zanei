@@ -47,7 +47,7 @@ description: zanei mcp が公開する read-only な MCP（Model Context Protoco
 }
 ```
 
-`format: "structured"` の場合、結果は [CLI リファレンス](/ja/reference/cli#timeline)の `timeline --format json` と同一の `sessions[]` 構造です。各 session の `event_ids` は最大 100 件で、`event_ids_truncated` は常に出力されます。token budget をなお満たせない場合は session を削除する前に全 ID が省略されます。
+`format: "structured"` の場合、結果は [CLI リファレンス](/ja/reference/cli#timeline)の `timeline --format json` と同一の `sessions[]` 構造です。result は `skipped_unknown_types` を含み、各 session は 0 を含めて常に `content_snapshots` を持ちます。`event_ids` は最大 100 件で、`event_ids_truncated` は常に出力されます。token budget をなお満たせない場合は session を削除する前に全 ID が省略されます。Markdown は snapshot 件数が 0 でない session だけ、activity の後に `Content snapshots: N` を追加します。snapshot 本文は inline しません。
 
 ### `query_events`
 
@@ -59,7 +59,7 @@ description: zanei mcp が公開する read-only な MCP（Model Context Protoco
 | --- | --- | --- | --- |
 | `since` | string | `"15m"` | 遡り開始 |
 | `until` | string | `now` | 終了 |
-| `types` | string[] | `[]` | [イベント型](/ja/reference/events)。`browser.*` 等のワイルドカード可。空配列の場合はイベント型で絞り込まない |
+| `types` | string[] | `[]` | [イベント型](/ja/reference/events)。`browser.*` 等のワイルドカード可。空配列は通常 activity を返すが `content.*` は除外。`content.snapshot` または `content.*` を明示して取得 |
 | `app` | string | — | アプリ名で絞り込み |
 | `bundle_id` | string | — | バンドル ID で絞り込み |
 | `limit` | integer | `200` | 最大件数。有効範囲は 1〜1000 |
@@ -71,6 +71,7 @@ description: zanei mcp が公開する read-only な MCP（Model Context Protoco
   "range": { "since": "2026-08-16T08:45:00Z", "until": "2026-08-16T09:00:00Z" },
   "count": 42,
   "truncated": false,
+  "skipped_unknown_types": 0,
   "events": [
     {
       "v": 1, "id": "evt_01J...", "ts": "2026-08-16T08:46:12.120Z", "mono_ns": 128374651234,
@@ -86,7 +87,9 @@ description: zanei mcp が公開する read-only な MCP（Model Context Protoco
 }
 ```
 
-`limit` を超えた場合は `truncated: true`。イベント内容は捕捉時点で既にプライバシー処理（secure field 除外・redaction）済みのものが格納されています — MCP 層で除外済みの情報が復元されることはありません。
+`limit` を超えた場合は `truncated: true`。`skipped_unknown_types` は、この binary が type を認識できず skip した store row の件数です。イベント内容は捕捉時点で既にプライバシー処理（secure field 除外・redaction）済みのものが格納されています — MCP 層で除外済みの情報が復元されることはありません。
+
+Content snapshot は 1 件 32 KiB までで、他人が書いた message や document を含み得ます。明示的な type、狭い `since` / `until`、小さい `limit` でだけ取得してください。ユーザーの明示要求なしに本文を現在の task 外へ送ってはいけません。
 
 ### `get_status`
 
@@ -106,7 +109,7 @@ agent 向けの軽量チェック：記録は動いているか。`zanei status`
   "collector_failures": { "eventtap": 1 },
   "retention_hours": 48,
   "oldest_event_ts": "2026-08-14T09:00:00Z",
-  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false },
   "permissions_ok": true
 }
 ```
@@ -116,6 +119,7 @@ agent 向けの軽量チェック：記録は動いているか。`zanei status`
 | `events_dropped` | 本来記録対象だったが、backpressure・queue full・切断などの配送障害で実際に失われたイベントの累計。app または window に帰属できず記録対象外となる入力と、crash / `SIGKILL` で失われた未 flush データは含まない |
 | `degraded` | component ごとの現在の collector / runtime 劣化状態。回復時に削除される。AX の observer 不在は、daemon 起動後に使用された app、すなわち起動後に activate されたか現在 frontmost の app のみ報告する。observer の attach 成功時に劣化状態から除去される |
 | `collector_failures` | collector ごとの累積処理失敗回数。非ゼロであることだけでは現在劣化中を意味しない |
+| `capture.content_snapshot` | 前面ウィンドウの content snapshot が有効か。snapshot が存在するのは `true` のときだけ。scope 詳細は CLI の `zanei filter show` で確認 |
 | `permissions_ok` | heartbeat が新鮮な間は実行中 recorder 自身の権限判定。recorder 不在時はローカル probe の結果 |
 
 `running: false` を見た agent は、何もないところから答えるのではなく「PC 操作履歴は現在記録されていない」とユーザーに伝えられます。
@@ -159,4 +163,4 @@ MCP サーバは記録の開始も権限付与も行いません。CLI で `zane
 
 - サーバ自体は外部送信を行いません（stdio のみ）。
 - ツール結果を受け取った agent がそれを LLM プロバイダへ送るのは **agent 側の責務**です。PC 操作履歴の機微性を踏まえ、同梱の skill ファイルは送信前に対象範囲を絞るよう agent に指示しています。
-- ストア内容は捕捉時点でプライバシー処理済みです。既定の `text_content: false` では、入力内容はそもそもストアに存在しません。
+- ストア内容は捕捉時点でプライバシー処理済みです。入力内容と content snapshot は別々の opt-in で、どちらも既定 off です。

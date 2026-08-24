@@ -1,7 +1,7 @@
 //! AppKit and window-context bindings used from the EventTap worker.
 
 use std::{
-    ffi::{CStr, c_char, c_int, c_void},
+    ffi::{CStr, c_char, c_void},
     mem,
     ptr::{self, NonNull},
     sync::{
@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::eventtap::logic::{PasteboardContent, PasteboardKind};
+pub(crate) use crate::ffi::window_list::NativeWindow;
 
 type ObjcId = *mut c_void;
 type ObjcClass = *mut c_void;
@@ -20,13 +21,6 @@ type ObjcIvar = *mut c_void;
 type ObjcBool = i8;
 #[cfg(not(target_arch = "x86_64"))]
 type ObjcBool = bool;
-type CfRef = *const c_void;
-type CfMutableRef = *mut c_void;
-
-const CF_STRING_UTF8: u32 = 0x0800_0100;
-const CF_NUMBER_SINT64: isize = 4;
-const WINDOW_LIST_OPTIONS: u32 = (1 << 0) | (1 << 4);
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeApp {
     pub(crate) name: String,
@@ -35,44 +29,9 @@ pub(crate) struct NativeApp {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct NativeWindow {
-    pub(crate) title: Option<String>,
-    pub(crate) id: Option<i64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeContext {
     pub(crate) app: NativeApp,
     pub(crate) window: Option<NativeWindow>,
-}
-
-pub(crate) fn current_context() -> Option<NativeContext> {
-    let _pool = AutoreleasePool::new();
-    // SAFETY: Selectors match NSWorkspace and NSRunningApplication signatures.
-    unsafe {
-        let workspace = msg_id(
-            objc_getClass(c"NSWorkspace".as_ptr()),
-            sel(c"sharedWorkspace"),
-        );
-        let application = msg_id(workspace, sel(c"frontmostApplication"));
-        if application.is_null() {
-            return None;
-        }
-        let name = ns_string(msg_id(application, sel(c"localizedName")))?;
-        let bundle_id = ns_string(msg_id(application, sel(c"bundleIdentifier")));
-        let pid = msg_i32(application, sel(c"processIdentifier"));
-        if pid <= 0 {
-            return None;
-        }
-        Some(NativeContext {
-            app: NativeApp {
-                name,
-                bundle_id,
-                pid: i64::from(pid),
-            },
-            window: front_window(i64::from(pid)),
-        })
-    }
 }
 
 pub(crate) struct Pasteboard;
@@ -218,66 +177,6 @@ impl Drop for WakeObserver {
     }
 }
 
-unsafe fn front_window(pid: i64) -> Option<NativeWindow> {
-    // SAFETY: CoreGraphics returns a retained CFArray or null.
-    let windows = NonNull::new(unsafe { CGWindowListCopyWindowInfo(WINDOW_LIST_OPTIONS, 0) })?;
-    let count = unsafe { CFArrayGetCount(windows.as_ptr()) };
-    let mut result = None;
-    for index in 0..count {
-        // SAFETY: index is inside this valid CFArray.
-        let dictionary = unsafe { CFArrayGetValueAtIndex(windows.as_ptr(), index) };
-        if unsafe { dictionary_i64(dictionary, kCGWindowOwnerPID) } == Some(pid)
-            && unsafe { dictionary_i64(dictionary, kCGWindowLayer) } == Some(0)
-        {
-            result = Some(NativeWindow {
-                title: unsafe { dictionary_string(dictionary, kCGWindowName) },
-                id: unsafe { dictionary_i64(dictionary, kCGWindowNumber) },
-            });
-            break;
-        }
-    }
-    // SAFETY: balances Copy ownership.
-    unsafe { CFRelease(windows.as_ptr().cast_const()) };
-    result
-}
-
-unsafe fn dictionary_i64(dictionary: CfRef, key: CfRef) -> Option<i64> {
-    let value = unsafe { CFDictionaryGetValue(dictionary, key) };
-    if value.is_null() {
-        return None;
-    }
-    let mut number = 0_i64;
-    // SAFETY: These documented window-info keys contain CFNumber values.
-    unsafe { CFNumberGetValue(value, CF_NUMBER_SINT64, (&mut number as *mut i64).cast()) };
-    Some(number)
-}
-
-unsafe fn dictionary_string(dictionary: CfRef, key: CfRef) -> Option<String> {
-    cf_string(unsafe { CFDictionaryGetValue(dictionary, key) })
-}
-
-fn cf_string(value: CfRef) -> Option<String> {
-    if value.is_null() {
-        return None;
-    }
-    let mut buffer = vec![0_i8; 4_096];
-    // SAFETY: value is a CFString and buffer is writable for its full length.
-    let copied = unsafe {
-        CFStringGetCString(
-            value,
-            buffer.as_mut_ptr(),
-            isize::try_from(buffer.len()).ok()?,
-            CF_STRING_UTF8,
-        )
-    };
-    (copied != 0).then(|| {
-        // SAFETY: success writes a NUL-terminated string.
-        unsafe { CStr::from_ptr(buffer.as_ptr()) }
-            .to_string_lossy()
-            .into_owned()
-    })
-}
-
 fn wake_observer_class() -> Result<ObjcClass, &'static str> {
     static CLASS: OnceLock<usize> = OnceLock::new();
     if let Some(class) = CLASS.get() {
@@ -386,7 +285,6 @@ macro_rules! msg_send_fn {
 }
 
 msg_send_fn!(msg_id, ObjcId, ());
-msg_send_fn!(msg_i32, c_int, ());
 msg_send_fn!(msg_i64, i64, ());
 msg_send_fn!(msg_usize, usize, ());
 msg_send_fn!(msg_c_string, *const c_char, ());
@@ -399,30 +297,6 @@ msg_send_fn!(msg_void_observer, (), (
     name: ObjcId,
     object: ObjcId
 ));
-
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-    fn CGWindowListCopyWindowInfo(options: u32, relative_window: u32) -> CfMutableRef;
-    static kCGWindowOwnerPID: CfRef;
-    static kCGWindowLayer: CfRef;
-    static kCGWindowName: CfRef;
-    static kCGWindowNumber: CfRef;
-}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFRelease(value: CfRef);
-    fn CFArrayGetCount(array: CfRef) -> isize;
-    fn CFArrayGetValueAtIndex(array: CfRef, index: isize) -> CfRef;
-    fn CFDictionaryGetValue(dictionary: CfRef, key: CfRef) -> CfRef;
-    fn CFNumberGetValue(number: CfRef, number_type: isize, value: *mut c_void) -> u8;
-    fn CFStringGetCString(
-        string: CfRef,
-        buffer: *mut c_char,
-        buffer_size: isize,
-        encoding: u32,
-    ) -> u8;
-}
 
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Zanei event envelope (v1)",
-  "description": "The authoritative closed OS-independent v1 envelope shared by every event Zanei records. One event per line (NDJSON) in raw outputs (query --format jsonl, record, export) and in the events[] array of the MCP query_events result. This file is the single machine-readable contract for all exposure surfaces; the Rust core's schema types are tested against it. Unknown fields and event types are rejected. Adding a field or event type requires a new v and matching store migration.",
+  "title": "Zanei event envelope (per-type versions 1 and 2)",
+  "description": "The authoritative closed OS-independent envelope shared by every event Zanei records. The existing 13 event types require v1 and content.snapshot requires v2. One event appears per line (NDJSON) in raw outputs (query --format jsonl, record, export) and in the events[] array of the MCP query_events result. This file is the single machine-readable contract for all exposure surfaces; the Rust core's schema types are tested against it. Unknown fields, event types, and type-version pairs are rejected. Adding an event type requires a new minimum v and matching store migration.",
   "type": "object",
   "additionalProperties": false,
   "required": ["v", "id", "ts", "mono_ns", "source", "type", "app", "window", "element", "data", "truncated", "redaction"],
@@ -20,8 +20,8 @@
   },
   "properties": {
     "v": {
-      "const": 1,
-      "description": "Envelope schema version."
+      "enum": [1, 2],
+      "description": "Minimum envelope version required to interpret this event type. Existing event types use 1; content.snapshot uses 2."
     },
     "id": {
       "type": "string",
@@ -46,8 +46,8 @@
     },
     "type": {
       "type": "string",
-      "enum": ["app.activate", "app.launch", "app.terminate", "window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "input.key", "input.scroll", "browser.navigate", "clipboard.copy", "clipboard.paste"],
-      "description": "Closed v1 event taxonomy. Adding an event type requires a new envelope version and matching store migration."
+      "enum": ["app.activate", "app.launch", "app.terminate", "window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "input.key", "input.scroll", "browser.navigate", "clipboard.copy", "clipboard.paste", "content.snapshot"],
+      "description": "Closed event taxonomy. Adding an event type requires a new minimum envelope version and matching store migration."
     },
     "app": {
       "type": "object",
@@ -115,7 +115,7 @@
     },
     "truncated": {
       "type": "boolean",
-      "description": "True when normalize removed at least one URL, title, or text field because its UTF-8 byte length exceeded the documented per-field limit. This required field is true exactly when redaction.rules contains size_limit."
+      "description": "True when normalize removed at least one URL, title, or text field because its UTF-8 byte length exceeded the documented per-field limit. For content.snapshot this is the core 64 KiB safety valve; it is independent from data.complete, which describes whether the collector completed traversal within its 32 KiB and other collection budgets. This required field is true exactly when redaction.rules contains size_limit."
     },
     "redaction": {
       "type": "object",
@@ -136,6 +136,15 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "content.snapshot" } } },
+      "then": { "properties": { "v": { "const": 2 } } },
+      "else": { "properties": { "v": { "const": 1 } } }
+    },
+    {
+      "if": { "properties": { "v": { "const": 2 } } },
+      "then": { "properties": { "type": { "const": "content.snapshot" } } }
+    },
     {
       "if": { "properties": { "type": { "enum": ["app.activate", "app.launch", "app.terminate", "window.focus"] } } },
       "then": {
@@ -380,6 +389,38 @@
       }
     },
     {
+      "if": { "properties": { "type": { "const": "content.snapshot" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "chars", "complete", "trigger"],
+            "properties": {
+              "text": {
+                "type": ["string", "null"],
+                "description": "Visible Accessibility text after configured redaction. The collector limits UTF-8 output to 32 KiB at a character boundary and reports that collection cut-off with complete=false. The core independently nulls text above its 64 KiB safety limit and marks the envelope truncated=true."
+              },
+              "chars": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615,
+                "description": "Character count measured by the collector before redaction. It is unchanged when redaction or the core size safety valve transforms text."
+              },
+              "complete": {
+                "type": "boolean",
+                "description": "True only when traversal completed within the collector's time, node, and 32 KiB byte budgets. This is independent from the envelope truncated flag, which reports the core's 64 KiB safety valve."
+              },
+              "trigger": {
+                "enum": ["settle", "refresh", "focus_out"],
+                "description": "The scheduling trigger that caused this snapshot."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "if": {
         "required": ["type", "data"],
         "properties": {
@@ -442,7 +483,7 @@
       }
     },
     {
-      "if": { "properties": { "type": { "enum": ["window.focus", "window.title", "input.key", "input.scroll", "browser.navigate", "clipboard.paste"] } } },
+      "if": { "properties": { "type": { "enum": ["window.focus", "window.title", "input.key", "input.scroll", "browser.navigate", "clipboard.paste", "content.snapshot"] } } },
       "then": {
         "properties": {
           "window": { "type": "object" },
@@ -486,6 +527,17 @@
           "type": { "const": "browser.navigate" },
           "data": {
             "properties": { "url": { "const": null } }
+          }
+        }
+      },
+      "then": { "properties": { "truncated": { "const": true } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "content.snapshot" },
+          "data": {
+            "properties": { "text": { "const": null } }
           }
         }
       },

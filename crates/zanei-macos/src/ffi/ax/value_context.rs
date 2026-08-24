@@ -1,14 +1,16 @@
 //! Focused and detached AX value-capture contexts.
 
 use std::time::Instant;
+use time::OffsetDateTime;
 
 use crate::{
+    capture_policy::CaptureDecision,
     focused_field::FieldClass,
     text_capture::{InputAuthorizations, ValueCapture, ValueEmission, ValueObservation},
 };
 
 use super::{
-    NativeAxEvent, NativeElement, NativeWindow,
+    NativeAxEvent, NativeElement, NativeUiValueEvent, NativeWindow,
     element::{ValueFieldSnapshot, ValueSnapshot},
 };
 
@@ -32,6 +34,7 @@ pub(super) struct FocusedValueContext {
     pub(super) capture: ValueCapture,
     pub(super) generation: u64,
     pub(super) field_class: FieldClass,
+    pub(super) observed_at: Option<OffsetDateTime>,
 }
 
 impl FocusedValueContext {
@@ -49,6 +52,7 @@ impl FocusedValueContext {
             capture: ValueCapture::new(capture_text_content, text_baseline, field_class),
             generation,
             field_class,
+            observed_at: None,
         }
     }
 
@@ -80,8 +84,11 @@ impl FocusedValueContext {
         &mut self,
         pid: i32,
         notification_at: Instant,
+        observed_at: OffsetDateTime,
         snapshot: ValueSnapshot,
+        capture_decision: Option<CaptureDecision>,
     ) -> ValueObservation {
+        self.observed_at = Some(observed_at);
         self.element.role = snapshot.role;
         self.element.subrole = snapshot.subrole;
         self.element.value = (snapshot.field_class == FieldClass::KnownSafeNonText)
@@ -96,6 +103,7 @@ impl FocusedValueContext {
             value: snapshot.value,
             value_len: snapshot.value_len,
             field_class: snapshot.field_class,
+            capture_decision,
         }
     }
 
@@ -103,12 +111,14 @@ impl FocusedValueContext {
         let mut element = self.element.clone();
         element.value = emission.element_value;
         element.value_len = emission.value_len;
-        NativeAxEvent::UiValueChanged {
+        NativeAxEvent::UiValueChanged(Box::new(NativeUiValueEvent {
             pid,
             window: self.window.clone(),
             element,
             text: emission.text,
-        }
+            capture_decision: emission.capture_decision,
+            observed_at: self.observed_at.unwrap_or_else(OffsetDateTime::now_utc),
+        }))
     }
 }
 

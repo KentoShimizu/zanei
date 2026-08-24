@@ -13,7 +13,7 @@ use super::{
         VALUE_CHANGE_READ_SURFACE, ValueFieldSnapshot, focused_element_is_excluded, gated_value,
         value_length,
     },
-    secure_input_active,
+    runtime::secure_input_active,
     value_context::{
         DeferredResolution, DeferredValueContext, FocusedValueContext, after_target_preparation,
         classified_field_snapshot,
@@ -21,7 +21,7 @@ use super::{
 };
 use crate::{
     focused_field::FieldClass,
-    secure_input::secure_input_channel,
+    secure_input::secure_input_test_channel,
     text_capture::{
         FocusedTarget, VALUE_DEBOUNCE, ValueCapture, ValueObservation, input_authorization_channel,
     },
@@ -98,13 +98,13 @@ fn character_count_is_available_without_captured_content() {
 
 #[test]
 fn secure_input_or_probe_failure_is_fail_closed() {
-    let (probe, responder) = secure_input_channel();
+    let (probe, responder) = secure_input_test_channel();
     let degraded = AtomicU64::new(0);
     let response = thread::spawn(move || responder.respond_next(true));
     assert!(secure_input_active(true, Some(&probe), &degraded, "test"));
     response.join().expect("Secure Input response thread");
 
-    let (probe, responder) = secure_input_channel();
+    let (probe, responder) = secure_input_test_channel();
     drop(responder);
     assert!(secure_input_active(true, Some(&probe), &degraded, "test"));
     assert_eq!(degraded.load(Ordering::Relaxed), 1);
@@ -120,7 +120,7 @@ fn actual_secure_text_field_is_excluded_from_focus_snapshot() {
 
 #[test]
 fn secure_input_disabled_allows_authorized_text_capture() {
-    let (probe, responder) = secure_input_channel();
+    let (probe, responder) = secure_input_test_channel();
     let degraded = AtomicU64::new(0);
     let response = thread::spawn(move || responder.respond_next(false));
 
@@ -174,6 +174,7 @@ fn detached_value_context_resolves_after_late_confirmation() {
             value: Some("Ax".to_owned()),
             value_len: Some(2),
             field_class: FieldClass::KnownText(FieldKind::Text),
+            capture_decision: None,
         },
         &mut authorizations,
     );
@@ -189,11 +190,12 @@ fn detached_value_context_resolves_after_late_confirmation() {
         capture,
         generation: 1,
         field_class: FieldClass::KnownText(FieldKind::Text),
+        observed_at: None,
     };
     let mut detached = DeferredValueContext::new(7, context);
 
     authorization.confirm();
-    let DeferredResolution::Complete(Some(NativeAxEvent::UiValueChanged { text, .. })) = detached
+    let DeferredResolution::Complete(Some(NativeAxEvent::UiValueChanged(event))) = detached
         .take_due(
             now + VALUE_DEBOUNCE + Duration::from_millis(10),
             false,
@@ -202,7 +204,7 @@ fn detached_value_context_resolves_after_late_confirmation() {
     else {
         panic!("detached value should resolve into a value event");
     };
-    assert_eq!(text.as_deref(), Some("x"));
+    assert_eq!(event.text.as_deref(), Some("x"));
 }
 
 #[test]
@@ -224,6 +226,7 @@ fn detached_context_without_pending_value_is_cleaned_up() {
         ),
         generation: 1,
         field_class: FieldClass::KnownText(FieldKind::Text),
+        observed_at: None,
     };
     let mut detached = DeferredValueContext::new(7, context);
 
@@ -253,6 +256,7 @@ fn degraded_same_target_classification_preserves_pending_value() {
             value: Some("Ax".to_owned()),
             value_len: Some(2),
             field_class: FieldClass::KnownText(FieldKind::Text),
+            capture_decision: None,
         },
         &mut authorizations,
     );
@@ -304,6 +308,7 @@ fn failed_target_preparation_does_not_consume_previous_value() {
             value: Some("Ax".to_owned()),
             value_len: Some(2),
             field_class: FieldClass::KnownText(FieldKind::Text),
+            capture_decision: None,
         },
         &mut authorizations,
     );
@@ -353,6 +358,7 @@ fn failed_focus_clears_current_and_defers_previous_value() {
             value: Some("Ax".to_owned()),
             value_len: Some(2),
             field_class: FieldClass::KnownText(FieldKind::Text),
+            capture_decision: None,
         },
         &mut authorizations,
     );
@@ -368,6 +374,7 @@ fn failed_focus_clears_current_and_defers_previous_value() {
         capture,
         generation: 1,
         field_class: FieldClass::KnownText(FieldKind::Text),
+        observed_at: None,
     };
     let mut target = FocusedTarget::new();
     assert!(matches!(
@@ -386,10 +393,10 @@ fn failed_focus_clears_current_and_defers_previous_value() {
 
     let mut deferred = DeferredValueContext::new(7, previous);
     authorization.confirm();
-    let DeferredResolution::Complete(Some(NativeAxEvent::UiValueChanged { text, .. })) =
+    let DeferredResolution::Complete(Some(NativeAxEvent::UiValueChanged(event))) =
         deferred.take_due(now + VALUE_DEBOUNCE, false, &mut authorizations)
     else {
         panic!("deferred previous value should resolve after late confirmation");
     };
-    assert_eq!(text.as_deref(), Some("x"));
+    assert_eq!(event.text.as_deref(), Some("x"));
 }

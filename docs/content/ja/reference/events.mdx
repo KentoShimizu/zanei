@@ -28,7 +28,7 @@ Zanei が記録するすべてのイベントは、ソースによらず OS 非�
 
 | フィールド | 説明 |
 | --- | --- |
-| `v` | エンベロープのスキーマバージョン（現在 `1`） |
+| `v` | この event type を解釈するために必要な最小 envelope version。既存 type は `1`、`content.snapshot` は `2` |
 | `id` | ULID ベースのイベント ID。一意かつ時刻順ソート可能 |
 | `ts` | 実時刻タイムスタンプ（RFC3339、ミリ秒精度） |
 | `mono_ns` | 単調時計（ナノ秒）— 実時刻が変わっても順序が保証される |
@@ -41,6 +41,8 @@ Zanei が記録するすべてのイベントは、ソースによらず OS 非�
 | `truncated` | normalize が上限超過の text・URL・title field を 1 つ以上除去した場合は `true` |
 | `redaction` | 適用された変換の有無と内訳。設定可能な privacy rule（`email` / `credit_card` / `token`）と常時適用の安全 rule `size_limit` を含みます。secure field は捕捉前に除外されるため痕跡は残りません |
 
+Chromium・Electron app など Accessibility の window number を公開しない app は、on-screen bounds により window ID と照合されます。
+
 このエンベロープは機械可読な JSON Schema としても公開されています：[`/schema/event.schema.json`](/schema/event.schema.json)。全露出面が共有する単一契約であり、Rust コアの型はこのファイルとの一致をテストで担保されます。
 
 ## field の byte 上限
@@ -49,7 +51,8 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 
 | 上限 | 対象 field | 根拠 |
 | --- | --- | --- |
-| 64 KiB（65,536 bytes） | `element.value`、`ui.value`・`input.key`・`clipboard.copy`・`clipboard.paste` の `data.text` | 有用な text・clipboard 差分を保持しつつ、field 単位の redaction・serialize・batch memory コストを制限するため |
+| 32 KiB（32,768 bytes） | 取得時の `content.snapshot.data.text` | 有用な可視 text を保ちながら Accessibility snapshot 1 件を制限。打ち切った snapshot は `data.complete: false` |
+| 64 KiB（65,536 bytes） | `element.value` と `content.snapshot` を含むすべての `data.text` | field 単位の redaction・serialize・batch memory コストを制限。snapshot は取得段階で 32 KiB に止まるため、この type には core の独立した安全弁としてだけ働く |
 | 4 KiB（4,096 bytes） | `window.title`、`element.title`、`window.title` の `data.prev_title`、`browser.navigate` の `data.url`・`data.tab_title` | URL/title は文脈 metadata であり、通常値を十分収めながら異常な OS・application payload を拒否するため |
 
 同じ上限を key event の coalesce 後と privacy redaction 後にも再検査します。文字列の連結や置換 marker により byte 数が増えるためです。URL が除去された browser event は website filter を評価できないため、filter を迂回させず event 全体を破棄します。
@@ -67,12 +70,13 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `ui.focus` | `macos.ax` | フォーカス UI 要素の変更 | アクセシビリティ |
 | `ui.click` | `macos.ax` | UI 要素へのクリック | アクセシビリティ（+ 入力監視） |
 | `ui.value` | `macos.ax` | 要素値の変化。新たに増えた入力内容のみ opt-in で記録し、自由入力の全体値は記録しない | アクセシビリティ |
-| `input.key` | `macos.eventtap` | キー / ショートカット。既定は「入力の事実 + フィールド種別」。内容は opt-in | 入力監視 |
-| `input.scroll` | `macos.eventtap` | スクロール | 入力監視 |
-| `browser.navigate` | `macos.applescript` | URL / タブの変化。**現在は Chrome のみ**。incognito は常に除外 | オートメーション |
-| `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | クリップボード操作。内容は opt-in | 入力監視 |
+| `input.key` | `macos.eventtap` | キー / ショートカット。既定は「入力の事実 + フィールド種別」。内容は opt-in | アクセシビリティ + 入力監視 |
+| `input.scroll` | `macos.eventtap` | スクロール | アクセシビリティ + 入力監視 |
+| `browser.navigate` | `macos.applescript` | URL / タブの変化。**現在は Chrome のみ**。incognito は常に除外 | アクセシビリティ + オートメーション |
+| `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | クリップボード操作。内容は opt-in | アクセシビリティ + 入力監視 |
+| `content.snapshot` | `macos.ax` | 前面ウィンドウの可視範囲に表示された Accessibility text。別の opt-in | アクセシビリティ |
 
-`--types` フィルタでは末尾ワイルドカードでファミリー全体を選べます：`browser.*`・`ui.*` など。
+`--types` フィルタでは末尾ワイルドカードでファミリー全体を選べます：`browser.*`・`ui.*`・`content.*` など。
 
 `type` は envelope version ごとの closed enum です。未知の型は拒否され、event type の追加には新しい `v` と対応する store migration が必要です。
 
@@ -94,6 +98,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `browser.navigate` | ✓ | — | `url`（size limit 適用後のみ null）、`tab_title`、`mode`（常に `"normal"`）、`transition`（`navigate`/`tab_switch`/null） |
 | `clipboard.copy` | ✓ / — | — | `origin`（`copy_shortcut`/`unknown`）、`content_kind`（`text`/`image`/`file`/`other`）、`size_bytes`、`text`。unknown origin は app/window 帰属と本文を持たない |
 | `clipboard.paste` | ✓ | — | `content_kind`、`size_bytes`、`text`、ペースト先の `field_kind` |
+| `content.snapshot` | ✓ | — | `text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`complete`（可視 tree を取得上限内で読み終えたか）、`trigger`（`settle` / `refresh` / `focus_out`）。source は `macos.ax` |
 
 `field_kind` はフォーカス中の入力フィールドの種別です：`text` / `search` / `url` / `email` / `number` / `other`、テキスト系要素にフォーカスがなければ null。`password` という値は存在しません。Accessibility が既知の非 secure 入力欄を確認できなければ、`input.key.text` とペースト本文は null です。
 
@@ -159,11 +164,21 @@ opt-in なのは「内容」（打った・コピーした文字列）だけで�
 
 ## スキーマのバージョニング
 
-公開 JSON Schema が `v: 1` の正規契約です。envelope・event taxonomy・context・型別 payload は closed で、未知の field と event type は拒否されます。field または event type の追加には新しい `v` と対応する store migration が必要です。
+envelope version は出力全体ではなく event type ごとに決まります。既存 13 type は `v: 1`、`content.snapshot` は `v: 2` が必要です。`v: 1` だけを理解する consumer は `v: 2` event を受理する必要がありません。envelope・event taxonomy・context・型別 payload は closed です。`content.snapshot` の `v: 1`、既存 type の `v: 2`、未知の field・event type は不正です。type の追加には新しい最小 `v` と対応する store migration が必要です。
+
+store reader は未知の event type を含む行を skip し、read 全体は失敗させません。CLI の `query` と `export` は JSON array の形を維持し、skip 件数を stderr に warning として出します。`--quiet` で抑止できます。MCP `query_events`、`timeline --format json`、structured MCP `get_timeline` は既存の result object に `skipped_unknown_types` を返します。
+
+## Content snapshot の読み取り
+
+`query` と MCP `query_events` は type filter 未指定なら `content.*` を返しません。snapshot 本文を読むときは `content.snapshot` または `content.*` を明示し、狭い時間範囲と小さい limit を使ってください。他の event family と併記できます。`export` は backup surface なので、全形式で既定ですべての type を含み、`--types` で絞ります。
+
+timeline は snapshot 本文を inline しません。各 session は snapshot 件数だけを示します。Markdown は activity 行の後に `Content snapshots: N` を追加し、0 件なら省略します。JSON は 0 を含めて常に `content_snapshots` を出します。
 
 ## ブラウザの URL 捕捉
 
 `browser.navigate`（URL 捕捉）は現在 Chrome のみ対応します。Chromium は AppleScript でウィンドウのモード（`normal` / `incognito`）を返します。incognito は URL イベントを生成せず、本文も設定なしで null のままです。
+
+navigation はタブ・ウィンドウ・タイトル・ページ読み込みの変化時に観測します。タイトルもフォーカスも変化しないページ内 navigation では `browser.navigate` が生成されない場合があります。
 
 | ブラウザ | URL 捕捉（現在） | プライベートウィンドウ |
 | --- | --- | --- |

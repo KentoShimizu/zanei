@@ -10,16 +10,35 @@ type ObjcBool = i8;
 #[cfg(not(target_arch = "x86_64"))]
 type ObjcBool = bool;
 
-const CHROME_SCRIPT_TEMPLATE: &str = r#"
+const FRONT_WINDOW_SCRIPT_TEMPLATE: &str = r#"
 set chromeApp to path to application id "com.google.Chrome"
 using terms from application "{application_path}"
 with timeout of 1 second
     if application chromeApp is not running then return {"not_running"}
     tell application chromeApp
-        if frontmost is false then return {"not_frontmost"}
         if (count of windows) is 0 then return {"no_window"}
 
         set current_window to front window
+        set current_mode to (mode of current_window) as text
+        if current_mode is "incognito" then return {"incognito"}
+        if current_mode is not "normal" then return {"unsupported_mode", current_mode}
+
+        set current_tab to active tab of current_window
+        return {"snapshot", (id of current_window) as text, name of current_window, (id of current_tab) as text, URL of current_tab, title of current_tab}
+    end tell
+end timeout
+end using terms from
+"#;
+
+const TARGET_WINDOW_SCRIPT_TEMPLATE: &str = r#"
+set chromeApp to path to application id "com.google.Chrome"
+using terms from application "{application_path}"
+with timeout of 1 second
+    if application chromeApp is not running then return {"not_running"}
+    tell application chromeApp
+        if not (exists window id {window_id}) then return {"no_window"}
+
+        set current_window to window id {window_id}
         set current_mode to (mode of current_window) as text
         if current_mode is "incognito" then return {"incognito"}
         if current_mode is not "normal" then return {"unsupported_mode", current_mode}
@@ -48,7 +67,6 @@ pub(crate) struct Snapshot {
 pub(crate) enum Observation {
     Snapshot(Snapshot),
     Incognito,
-    NotFrontmost,
     NoWindow,
     NotRunning,
 }
@@ -72,48 +90,30 @@ pub(crate) enum AppleScriptError {
 }
 
 pub(crate) struct AppleScriptClient {
-    script: RetainedObject,
+    application_path: String,
+    front_window_script: RetainedObject,
 }
 
 impl AppleScriptClient {
     pub(crate) fn new() -> Result<Self, AppleScriptError> {
         let _pool = AutoreleasePool::new()?;
         let application_path = chrome_application_path()?;
-        let source = script_source(&application_path);
-        let source = autoreleased_string(&source)?;
-        let class = class(c"NSAppleScript", "NSAppleScript")?;
-        let allocated = send_object(class, c"alloc");
-        let script = send_object_with_object(allocated, c"initWithSource:", source);
-        let script = RetainedObject::new(script, "NSAppleScript")?;
-
-        let mut error_info = std::ptr::null_mut();
-        if !send_bool_with_object_pointer(
-            script.as_ptr(),
-            c"compileAndReturnError:",
-            &mut error_info,
-        ) {
-            return Err(AppleScriptError::Compile {
-                code: error_code(error_info),
-            });
-        }
-
-        Ok(Self { script })
+        let front_window_script = compile_script(&front_window_source(&application_path))?;
+        Ok(Self {
+            application_path,
+            front_window_script,
+        })
     }
 
     pub(crate) fn query(&mut self) -> Result<Observation, AppleScriptError> {
         let _pool = AutoreleasePool::new()?;
-        let mut error_info = std::ptr::null_mut();
-        let reply = send_object_with_object_pointer(
-            self.script.as_ptr(),
-            c"executeAndReturnError:",
-            &mut error_info,
-        );
-        if reply.is_null() {
-            return Err(AppleScriptError::Execute {
-                code: error_code(error_info),
-            });
-        }
-        parse_reply(reply)
+        execute_script(&self.front_window_script)
+    }
+
+    pub(crate) fn query_window(&mut self, window_id: i64) -> Result<Observation, AppleScriptError> {
+        let _pool = AutoreleasePool::new()?;
+        let script = compile_script(&target_window_source(&self.application_path, window_id))?;
+        execute_script(&script)
     }
 }
 
@@ -130,9 +130,48 @@ fn chrome_application_path() -> Result<String, AppleScriptError> {
     object_string(path).ok_or(AppleScriptError::ChromeUnavailable)
 }
 
-fn script_source(application_path: &str) -> String {
+fn front_window_source(application_path: &str) -> String {
+    substitute_application_path(FRONT_WINDOW_SCRIPT_TEMPLATE, application_path)
+}
+
+fn target_window_source(application_path: &str, window_id: i64) -> String {
+    substitute_application_path(TARGET_WINDOW_SCRIPT_TEMPLATE, application_path)
+        .replace("{window_id}", &window_id.to_string())
+}
+
+fn substitute_application_path(template: &str, application_path: &str) -> String {
     let escaped_path = application_path.replace('\\', "\\\\").replace('"', "\\\"");
-    CHROME_SCRIPT_TEMPLATE.replace("{application_path}", &escaped_path)
+    template.replace("{application_path}", &escaped_path)
+}
+
+fn compile_script(source: &str) -> Result<RetainedObject, AppleScriptError> {
+    let source = autoreleased_string(source)?;
+    let class = class(c"NSAppleScript", "NSAppleScript")?;
+    let allocated = send_object(class, c"alloc");
+    let script = send_object_with_object(allocated, c"initWithSource:", source);
+    let script = RetainedObject::new(script, "NSAppleScript")?;
+    let mut error_info = std::ptr::null_mut();
+    if !send_bool_with_object_pointer(script.as_ptr(), c"compileAndReturnError:", &mut error_info) {
+        return Err(AppleScriptError::Compile {
+            code: error_code(error_info),
+        });
+    }
+    Ok(script)
+}
+
+fn execute_script(script: &RetainedObject) -> Result<Observation, AppleScriptError> {
+    let mut error_info = std::ptr::null_mut();
+    let reply = send_object_with_object_pointer(
+        script.as_ptr(),
+        c"executeAndReturnError:",
+        &mut error_info,
+    );
+    if reply.is_null() {
+        return Err(AppleScriptError::Execute {
+            code: error_code(error_info),
+        });
+    }
+    parse_reply(reply)
 }
 
 fn parse_reply(reply: Object) -> Result<Observation, AppleScriptError> {
@@ -144,7 +183,6 @@ fn parse_reply(reply: Object) -> Result<Observation, AppleScriptError> {
     match status.as_str() {
         "snapshot" => parse_snapshot(reply, item_count).map(Observation::Snapshot),
         "incognito" => parse_status(item_count, Observation::Incognito),
-        "not_frontmost" => parse_status(item_count, Observation::NotFrontmost),
         "no_window" => parse_status(item_count, Observation::NoWindow),
         "not_running" => parse_status(item_count, Observation::NotRunning),
         "unsupported_mode" => {
@@ -388,6 +426,28 @@ fn send_c_string(receiver: Object, method: &CStr) -> *const c_char {
 
 fn send_void(receiver: Object, method: &CStr) {
     send!(unsafe extern "C" fn(Object, Selector), receiver, method)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn front_window_source_leaves_frontmost_authority_to_focus_context() {
+        let source = front_window_source("/Applications/Google Chrome.app");
+
+        assert!(!source.contains("frontmost is false"));
+        assert!(source.contains("set current_window to front window"));
+    }
+
+    #[test]
+    fn targeted_source_reads_only_the_requested_window() {
+        let source = target_window_source("/Applications/Google Chrome.app", 4321);
+
+        assert!(source.contains("if not (exists window id 4321)"));
+        assert!(source.contains("set current_window to window id 4321"));
+        assert!(!source.contains("front window"));
+    }
 }
 
 #[link(name = "objc")]

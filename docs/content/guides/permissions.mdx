@@ -3,20 +3,22 @@ title: macOS permissions
 description: The TCC permissions Zanei requests, how to grant them, and how zanei doctor verifies the recorder's state.
 ---
 
-Depending on what you capture (the `capture.sources` setting), Zanei uses up to three macOS permissions (TCC). Screen recording is not one of them.
+Depending on `capture.sources` and the two content opt-ins, Zanei uses up to three macOS permissions (TCC). Screen recording is not one of them.
 
 ## Required permissions
 
 | Permission | System Settings item | Used for | Related event types |
 | --- | --- | --- | --- |
-| Accessibility | Accessibility | Window titles, focus, UI elements | `window.*` `ui.*` |
+| Accessibility | Accessibility | The shared frontmost-window identity, window titles, focus, UI elements, visible content snapshots | `window.*` `ui.*` `input.*` `clipboard.*` `browser.navigate` `content.snapshot` |
 | Input Monitoring | Input Monitoring | Detecting keys, scrolling, clicks | `input.*` `ui.click` `clipboard.*` |
-| Automation | Automation (per target app) | Reading Chrome URL/window eligibility for URL capture and text-body suppression | `browser.navigate`; Chrome `ui.value`/`input.key`/clipboard bodies |
+| Automation | Automation (per target app) | Reading Chrome URL/window eligibility for URL capture and content suppression | `browser.navigate`; Chrome `ui.value`/`input.key`/clipboard bodies and `content.snapshot` |
 
 Two important properties:
 
 - App launch, termination, and switching (`app.*`) require no permissions. With nothing granted, Zanei still records app-level activity.
-- A permission counts as required only when a feature that needs it is enabled. With both `input` and `ui` removed from `capture.sources`, for example, Input Monitoring is not required. Without `browser`, Chrome Automation is required only when `text_content` is enabled with `ui` or `input`; `window` alone does not require it.
+- `input` and `browser` use Accessibility for the single frontmost-window identity that binds their events to an app and window; their event detection still uses Input Monitoring and Automation respectively.
+- A permission counts as required only when a feature that needs it is enabled. `capture.content_snapshot` is independent from `capture.sources`: it requires Accessibility even when `window` is absent. Snapshot capture by itself does not require Input Monitoring.
+- Without `browser`, Chrome Automation is still required when `text_content` is enabled with `ui` or `input`, or when Chrome can be included by the content-snapshot scope. It is not required when the relevant scope excludes Chrome completely.
 
 ## First-time setup
 
@@ -67,7 +69,7 @@ zanei doctor --json
   "reported_by_recorder": true,
   "capture_sources": ["app", "window", "ui", "input", "browser"],
   "permissions": {
-    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value"] },
+    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"] },
     "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
     "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
   },

@@ -3,7 +3,7 @@ title: Filters
 description: Allow and deny lists that decide which apps and sites are recorded, applied before events reach the store.
 ---
 
-Filters decide which apps and sites are recorded. Events attributable to excluded apps are not stored. An unattributed clipboard change can still be stored as `clipboard.copy` with `app.name: "Unknown"` and null `bundle_id`, `pid`, `window`, and body because it cannot be matched to the excluded app. Excluded Chrome sites produce no URL events and no text-content-derived bodies; titles and interaction metadata can remain.
+Filters decide which apps and sites are recorded. Zanei has three capture-time scopes: all events, typed/copied bodies, and content snapshots. An unattributed clipboard change can still be stored as `clipboard.copy` with `app.name: "Unknown"` and null attribution and body because it cannot be matched to an app.
 
 ## Capture-time and query-time filtering
 
@@ -19,31 +19,76 @@ There are two ways to narrow by app, and they do different things:
 ## Managing the lists
 
 ```bash
-zanei filter show                                      # current lists and active mode
-zanei filter exclude-app add com.1password.1password   # deny list: add
-zanei filter exclude-app remove com.1password.1password
-zanei filter only-app add com.apple.Safari             # allow-only list: add
-zanei filter exclude-site add example.com              # exclude a Chrome URL host and its text bodies
-zanei filter only-site add github.com
+zanei filter show                                          # all three scopes and their modes
+zanei filter exclude-app add 1Password                     # all events
+zanei filter text-content exclude-app add Slack             # bodies only; facts remain
+zanei filter text-content only-site add github.com           # Chrome typed/copied bodies only on this site
+zanei filter content-snapshot only-app add Terminal          # snapshots only from this app
+zanei filter content-snapshot exclude-site add mail.google.com
 ```
 
-| Subcommand | `config.toml` key | Meaning |
-| --- | --- | --- |
-| `exclude-app` | `exclude_apps` | Deny list — everything else is captured |
-| `only-app` | `include_only_apps` | Allow list — when non-empty, only listed apps are captured |
-| `exclude-site` | `exclude_websites` | Deny list for Chrome URL events and text-content bodies, matched by URL host |
-| `only-site` | `include_only_websites` | Allow list for Chrome URL events and text-content bodies, matched by URL host |
+The command shape is `zanei filter [<scope>] <list> add|remove [VALUE]`. Omit `<scope>` for `[filter]`, or use `text-content` for `[filter.text_content]` and `content-snapshot` for `[filter.content_snapshot]`. The four lists have the same meaning in every scope:
 
-Editing `config.toml` directly is equivalent; the CLI additionally validates keys and deduplicates. The daemon watches the config file at roughly 2-second intervals, so changes apply within a few seconds without a restart.
+| List | Config key suffix | Meaning |
+| --- | --- | --- |
+| `exclude-app` | `exclude_apps` | Exclude these apps |
+| `only-app` | `include_only_apps` | When non-empty, include only these apps |
+| `exclude-site` | `exclude_websites` | Exclude these Chrome URL hosts |
+| `only-site` | `include_only_websites` | When non-empty, include only these Chrome URL hosts |
+
+For each app or site axis, a non-empty `include_only_*` list selects only mode; an empty one selects exclude mode. `exclude_*` always wins in either mode. The daemon reloads all three scopes at roughly 2-second intervals, so changes apply within a few seconds without a restart.
 
 :::warning[Allow-list mode]
-Adding even one entry with `only-app` switches app capture to allow-list mode: only listed apps are recorded. `zanei filter show` displays which mode is active.
+Adding one `only-app` entry switches that scope's app axis to only mode. Configure a snapshot scope before enabling `capture.content_snapshot`; otherwise the default exclude mode records every app except the exclusions.
 :::
+
+## What each scope removes
+
+The order is fixed:
+
+1. Built-in app exclusions.
+2. `[filter]` app rules, which discard every attributed event for a rejected app.
+3. `[filter]` website rules, which discard matching Chrome URL events and suppress typed/copied bodies and snapshots for that window.
+4. `[filter.text_content]` app and website rules. Outside this scope, `input.key.text`, `ui.value.data.text`, clipboard `text`/`size_bytes`, and `element.value` are null, but the event and non-content facts remain as if `capture.text_content` were false there.
+5. `[filter.content_snapshot]` app and website rules. Outside this scope, no `content.snapshot` event is created.
+
+Website rules work only for Chrome because it is the only supported browser that exposes both URL and private-window mode. Other browsers are controlled only by app rules.
+
+Admitting Chrome on a filter reload starts Chrome tracking without a recorder restart; excluding it again stops that tracking. The macOS Automation prompt appears when Chrome is first admitted and the permission is first needed.
+
+## Choosing apps
+
+```bash
+zanei apps                 # installed, running, and recently recorded apps
+zanei apps slack           # case-insensitive name or bundle-ID search
+zanei apps slack --json    # machine-readable candidates
+```
+
+For every app list, `add` accepts a display name or bundle ID, resolves it against the same candidates, and saves the bundle ID when one exists. It prints the normalized result, such as `Added com.apple.Terminal (Terminal)`. An unresolved value is not saved and exits with code 2, with a close candidate when available. Use `--unverified` only when you intentionally need to save an app that is not installed; Zanei warns that it could not verify the value.
+
+Running `add` without a value opens a numbered selector ordered by recent use. In a non-TTY or with `--quiet`, a value is required and omission exits with code 2. `remove` resolves against the current list, so an uninstalled entry can still be removed. `zanei filter show` adds display names to resolved entries and marks unresolved hand-edited values as `(not installed)`.
+
+`zanei apps [QUERY] [--json]` needs no TCC permission and works while the daemon is stopped. The table shows name, bundle ID, installed/running/recent sources, and last use. JSON returns `{ "apps": [...], "recent_unavailable": null, "installed_unreadable": 0 }`; if the store cannot provide recent apps, installed and running results remain and `recent_unavailable` explains why, while `installed_unreadable` counts app bundles whose metadata could not be read.
+
+## Default browser exclusions
+
+Both content scopes exclude these browsers by default because Zanei cannot reliably identify their private windows:
+
+| Browser | Bundle ID |
+| --- | --- |
+| Safari | `com.apple.Safari` |
+| Firefox | `org.mozilla.firefox` |
+| Brave | `com.brave.Browser` |
+| Edge | `com.microsoft.edgemac` |
+| Vivaldi | `com.vivaldi.Vivaldi` |
+| Arc | `company.thebrowser.Browser` |
+
+Adding one of these browsers with `only-app`, or removing it from `exclude-app`, prints a warning unless `--quiet` is set. The defaults are editable rather than built-in blocks. In 0.3.0 they also apply to existing users with `capture.text_content = true`: bodies become null in these browsers by default, while events and non-content facts remain.
 
 ## Matching
 
 - **Apps** — match by `bundle_id` (recommended; display names can change). An app that has a `bundle_id` is matched only by it; a display-name entry applies only to events whose app has no `bundle_id`. Matching is case-insensitive.
-- **Sites** — dot-boundary suffix match on the URL host: `example.com` also covers `api.example.com`, but not `evil-example.com`. There is no Public Suffix List handling — an entry like `com` matches every `.com` host, so prefer full domain names. Site rules drop matching Chrome URL events and keep `ui.value.data.text`, `input.key.text`, and clipboard text null for that window. Titles and interaction metadata remain.
+- **Sites** — dot-boundary suffix match on the Chrome URL host: `example.com` also covers `api.example.com`, but not `evil-example.com`. There is no Public Suffix List handling — an entry like `com` matches every `.com` host, so prefer full domain names.
 - **Precedence** — if `include_only_*` is non-empty, an event is captured only if it is in that list and not in `exclude_*`. If empty, everything not excluded is captured.
 - **App-level exclusion is total for attributed events** — it drops all event types that can be attributed to that app (`ui.*`, `input.*`, `window.*`, ...). An unattributed clipboard change may remain under `app.name: "Unknown"`.
 
@@ -52,6 +97,7 @@ Adding even one entry with `only-app` switches app capture to allow-list mode: o
 Independent of your lists:
 
 - **Private browsing** — Chrome Incognito produces no URL events and keeps text-content-derived bodies null. Titles and interaction metadata can remain.
+- **Secure Input** — while Secure Input is active, Zanei takes no content snapshot.
 - **Built-in exclusions** — password managers and credential stores (`1Password`, `Keychain Access`, ...) are excluded by a hard-coded layer that cannot be lifted, not even with `include_only_apps`. It is separate from the default entries you see in `exclude_apps` in `config.toml`; editing those does not affect it. `filter show` lists the built-in entries separately from your own.
 
 ## Filters and MCP

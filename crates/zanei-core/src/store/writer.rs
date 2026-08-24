@@ -4,18 +4,62 @@ use std::io;
 use std::path::Path;
 use std::time::Duration as StdDuration;
 
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, Transaction, params, params_from_iter};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::schema::Event;
 
 use super::{
-    COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
-    DaemonState, LEGACY_STORE_SCHEMA_VERSION, LockedReason, RETENTION_STORE_SCHEMA_VERSION,
-    STORE_SCHEMA_VERSION, STORE_TABLES, StoreError, StoreFormat, StoreKey, apply_key,
-    retention_cutoff, store_uri, verify_key,
+    DaemonMode, DaemonState, LockedReason, STORE_TABLES, StoreError, StoreFormat, StoreKey,
+    apply_key, retention_cutoff, store_uri, verify_key,
 };
+
+/// A parameterized event selection for destructive store operations.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PurgeFilter {
+    pub types: Vec<String>,
+    pub before: Option<String>,
+    pub app: Option<String>,
+    pub bundle_id: Option<String>,
+}
+
+impl PurgeFilter {
+    #[must_use]
+    pub fn all() -> Self {
+        Self {
+            types: vec!["*".to_owned()],
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn before_all(before: impl Into<String>) -> Self {
+        Self {
+            types: vec!["*".to_owned()],
+            before: Some(before.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Reports whether this filter selects every event without another bound.
+    #[must_use]
+    pub fn is_universal(&self) -> bool {
+        self.types.iter().any(|event_type| event_type == "*")
+            && self.before.is_none()
+            && self.app.is_none()
+            && self.bundle_id.is_none()
+    }
+
+    fn selection(&self) -> super::EventSelection {
+        super::EventSelection {
+            types: self.types.clone(),
+            before: self.before.clone(),
+            app: self.app.clone(),
+            bundle_id: self.bundle_id.clone(),
+        }
+    }
+}
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
 const STORE_PRAGMAS: &str = "
@@ -86,7 +130,7 @@ impl StoreWriter {
         };
         connection.execute_batch(STORE_PRAGMAS)?;
         connection.execute_batch(STORE_TABLES)?;
-        migrate_schema(&connection)?;
+        super::migration::migrate_schema(&connection)?;
         Ok(Self { connection, format })
     }
 
@@ -150,20 +194,15 @@ impl StoreWriter {
         Ok(prepared.len())
     }
 
-    pub fn purge_before(&mut self, cutoff: &str) -> Result<usize, StoreError> {
-        let cutoff = parse_timestamp("cutoff", cutoff)?;
-        let cutoff = crate::normalize::format_timestamp(cutoff);
+    pub fn purge(&mut self, filter: &PurgeFilter) -> Result<usize, StoreError> {
+        let mut conditions = Vec::new();
+        let mut parameters = Vec::new();
+        filter
+            .selection()
+            .append_predicate(&mut conditions, &mut parameters)?;
+        let sql = format!("DELETE FROM events WHERE {}", conditions.join(" AND "));
         let transaction = self.connection.transaction()?;
-        let deleted = transaction.execute("DELETE FROM events WHERE ts < ?1", [&cutoff])?;
-        transaction.commit()?;
-        self.connection
-            .execute_batch("PRAGMA incremental_vacuum;")?;
-        Ok(deleted)
-    }
-
-    pub fn purge_all(&mut self) -> Result<usize, StoreError> {
-        let transaction = self.connection.transaction()?;
-        let deleted = transaction.execute("DELETE FROM events", [])?;
+        let deleted = transaction.execute(&sql, params_from_iter(parameters.iter()))?;
         transaction.commit()?;
         self.connection
             .execute_batch("PRAGMA incremental_vacuum;")?;
@@ -176,7 +215,7 @@ impl StoreWriter {
         retention_hours: u64,
     ) -> Result<usize, StoreError> {
         let cutoff = retention_cutoff(now, retention_hours)?;
-        self.purge_before(&cutoff)
+        self.purge(&PurgeFilter::before_all(cutoff))
     }
 
     pub fn write_daemon_state(&self, state: &DaemonState) -> Result<(), StoreError> {
@@ -513,45 +552,4 @@ fn serialize_collector_failures(
 fn serialize_permissions(permissions: &super::DaemonPermissions) -> Result<String, StoreError> {
     serde_json::to_string(permissions)
         .map_err(|error| StoreError::invalid_json("permissions_json", error))
-}
-
-fn migrate_schema(connection: &Connection) -> Result<(), StoreError> {
-    let version = connection.query_row("SELECT schema_version FROM meta", [], |row| row.get(0))?;
-    let prior_statements = match version {
-        STORE_SCHEMA_VERSION => return Ok(()),
-        LEGACY_STORE_SCHEMA_VERSION => {
-            "ALTER TABLE daemon_state ADD COLUMN instance_id TEXT; \
-             ALTER TABLE daemon_state ADD COLUMN mode TEXT; \
-             ALTER TABLE daemon_state ADD COLUMN retention_hours INTEGER \
-             CHECK (retention_hours > 0); \
-             ALTER TABLE daemon_state ADD COLUMN collector_failures_json TEXT NOT NULL \
-             DEFAULT '{}';"
-        }
-        DAEMON_IDENTITY_STORE_SCHEMA_VERSION => {
-            "ALTER TABLE daemon_state ADD COLUMN retention_hours INTEGER \
-             CHECK (retention_hours > 0); \
-             ALTER TABLE daemon_state ADD COLUMN collector_failures_json TEXT NOT NULL \
-             DEFAULT '{}';"
-        }
-        RETENTION_STORE_SCHEMA_VERSION => {
-            "ALTER TABLE daemon_state ADD COLUMN collector_failures_json TEXT NOT NULL \
-             DEFAULT '{}';"
-        }
-        COLLECTOR_FAILURES_STORE_SCHEMA_VERSION => "",
-        _ => return Err(StoreError::UnsupportedSchemaVersion(version)),
-    };
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute_batch(prior_statements)?;
-    transaction.execute_batch(
-        "ALTER TABLE daemon_state ADD COLUMN last_known_permissions_json TEXT; \
-         UPDATE daemon_state SET last_known_permissions_json = \
-             (SELECT snapshot_json FROM daemon_permissions WHERE id = 1) \
-         WHERE id = 1;",
-    )?;
-    transaction.execute(
-        "UPDATE meta SET schema_version = ?1",
-        [STORE_SCHEMA_VERSION],
-    )?;
-    transaction.commit()?;
-    Ok(())
 }

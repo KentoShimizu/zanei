@@ -3,7 +3,7 @@ title: フィルタ
 description: どのアプリ・サイトを記録するかを決める許可/不許可リスト。ストアに書き込まれる前に適用されます。
 ---
 
-フィルタは、どのアプリ・サイトを記録するかを決めます。除外アプリに帰属できたイベントは保存されません。帰属不能な clipboard 変化は除外アプリと照合できないため、`app.name: "Unknown"` かつ `bundle_id`・`pid`・`window`・本文が null の `clipboard.copy` として残り得ます。除外した Chrome サイトは URL イベントを生成せず、本文も記録しませんが、タイトルと操作メタデータは残り得ます。
+フィルタは、どのアプリ・サイトを記録するかを決めます。capture-time scope は、全 event、入力・clipboard 本文、content snapshot の 3 つです。帰属不能な clipboard 変化はアプリと照合できないため、`app.name: "Unknown"` かつ帰属と本文が null の `clipboard.copy` として残り得ます。
 
 ## capture-time と query-time
 
@@ -19,31 +19,76 @@ description: どのアプリ・サイトを記録するかを決める許可/不
 ## リストの管理
 
 ```bash
-zanei filter show                                      # 現在の全リストと有効モード
-zanei filter exclude-app add com.1password.1password   # 不許可リストに追加
-zanei filter exclude-app remove com.1password.1password
-zanei filter only-app add com.apple.Safari             # 許可のみリストに追加
-zanei filter exclude-site add example.com              # Chrome の URL host と本文を除外
-zanei filter only-site add github.com
+zanei filter show                                          # 3 scope と mode を表示
+zanei filter exclude-app add 1Password                     # 全 event
+zanei filter text-content exclude-app add Slack             # 本文のみ除外。事実は残る
+zanei filter text-content only-site add github.com           # Chrome の入力・clipboard 本文をこの site だけに限定
+zanei filter content-snapshot only-app add Terminal          # snapshot をこの app だけに限定
+zanei filter content-snapshot exclude-site add mail.google.com
 ```
 
-| サブコマンド | `config.toml` のキー | 意味 |
-| --- | --- | --- |
-| `exclude-app` | `exclude_apps` | 不許可リスト — それ以外は捕捉 |
-| `only-app` | `include_only_apps` | 許可リスト — 非空のとき列挙分のみ捕捉 |
-| `exclude-site` | `exclude_websites` | Chrome の URL イベントと本文の不許可リスト。URL host で照合 |
-| `only-site` | `include_only_websites` | Chrome の URL イベントと本文の許可リスト。URL host で照合 |
+コマンドの形は `zanei filter [<scope>] <list> add|remove [VALUE]` です。`<scope>` を省略すると `[filter]`、`text-content` は `[filter.text_content]`、`content-snapshot` は `[filter.content_snapshot]` を操作します。4 つの list はすべての scope で同じ意味です：
 
-`config.toml` を直接編集しても同じです。CLI はキーの検証と重複排除を行います。デーモンは設定ファイルを約2秒間隔で監視しており、変更は数秒以内に反映されます（再起動不要）。
+| list | config key suffix | 意味 |
+| --- | --- | --- |
+| `exclude-app` | `exclude_apps` | 指定 app を除外 |
+| `only-app` | `include_only_apps` | 非空なら指定 app だけを含める |
+| `exclude-site` | `exclude_websites` | 指定した Chrome URL host を除外 |
+| `only-site` | `include_only_websites` | 非空なら指定した Chrome URL host だけを含める |
+
+app / site の各軸で `include_only_*` が非空なら only mode、空なら exclude mode です。`exclude_*` はどちらの mode でも常に優先します。デーモンは 3 scope を約 2 秒間隔で reload するため、変更は数秒以内に再起動なしで反映されます。
 
 :::warning[許可リストモード]
-`only-app` にエントリをひとつでも追加すると、アプリ捕捉は許可リストモードに切り替わり、列挙したアプリしか記録されなくなります。`zanei filter show` が現在のモードを表示します。
+`only-app` に 1 entry を追加すると、その scope の app 軸が only mode に切り替わります。`capture.content_snapshot` を有効にする前に snapshot scope を設定してください。設定しない場合、既定の exclude mode では除外対象以外の全 app を記録します。
 :::
+
+## 各 scope が除外するもの
+
+評価順は固定です：
+
+1. 組み込みの app 除外。
+2. `[filter]` の app rule。対象外 app に帰属するすべての event を破棄。
+3. `[filter]` の website rule。一致する Chrome URL event を破棄し、その window の入力・clipboard 本文と snapshot を抑止。
+4. `[filter.text_content]` の app / website rule。scope 外では `input.key.text`・`ui.value.data.text`・clipboard の `text` / `size_bytes`・`element.value` を null にし、event と内容以外の事実は残す。その window だけ `capture.text_content = false` と同じ形。
+5. `[filter.content_snapshot]` の app / website rule。scope 外では `content.snapshot` event を生成しない。
+
+website rule は URL と private-window mode を取得できる Chrome だけに効きます。他の browser は app rule だけで制御します。
+
+filter reload で Chrome を対象に加えると、recorder の再起動なしで Chrome tracking が始まり、再び除外すると停止します。macOS の Automation prompt は Chrome を初めて対象に加え、その権限が初めて必要になった時点で表示されます。
+
+## アプリを選ぶ
+
+```bash
+zanei apps                 # installed / running / recent app
+zanei apps slack           # name または bundle ID を大文字小文字無視で検索
+zanei apps slack --json    # 機械可読の候補
+```
+
+全 app list の `add` は表示名または bundle ID を受け付け、同じ候補群に対して解決し、bundle ID があればそれを保存します。正常時は `Added com.apple.Terminal (Terminal)` のように正規化結果を表示します。解決できない値は保存せず code 2 で終了し、近い候補があれば提示します。まだ installed でない app を意図的に保存する場合だけ `--unverified` を使います。Zanei は検証できなかったことを warning します。
+
+値を省略した `add` は、recent 順の番号選択を開きます。非 TTY または `--quiet` では値が必須で、省略すると code 2 です。`remove` は現在の list 内で解決するため、uninstall 済みの entry も削除できます。`zanei filter show` は解決済み entry に表示名を付け、手編集した未解決値には `(not installed)` を付けます。
+
+`zanei apps [QUERY] [--json]` は TCC 権限が不要で、daemon 停止中も動きます。table は name・bundle ID・installed/running/recent source・last use を表示します。JSON は `{ "apps": [...], "recent_unavailable": null, "installed_unreadable": 0 }` です。store から recent app を取得できない場合も installed / running は残り、`recent_unavailable` に理由が入ります。`installed_unreadable` は metadata を読めなかった app bundle の件数です。
+
+## Browser の既定除外
+
+private window を確実に判定できないため、両 content scope は次の browser を既定で除外します：
+
+| browser | bundle ID |
+| --- | --- |
+| Safari | `com.apple.Safari` |
+| Firefox | `org.mozilla.firefox` |
+| Brave | `com.brave.Browser` |
+| Edge | `com.microsoft.edgemac` |
+| Vivaldi | `com.vivaldi.Vivaldi` |
+| Arc | `company.thebrowser.Browser` |
+
+これらを `only-app` に追加する場合、または `exclude-app` から外す場合は、`--quiet` 未指定なら warning を表示します。固定 block ではなく編集可能な既定値です。0.3.0 では既存の `capture.text_content = true` 利用者にも適用され、これらの browser の本文は既定で null になりますが、event と内容以外の事実は残ります。
 
 ## マッチング
 
 - **アプリ** — `bundle_id` で照合します（推奨。表示名は変わり得ます）。`bundle_id` を持つアプリは `bundle_id` だけで照合され、表示名のエントリは `bundle_id` を持たないイベントにのみ効きます。大文字小文字は区別しません。
-- **サイト** — URL host のドット境界サフィックス一致：`example.com` は `api.example.com` にも一致しますが、`evil-example.com` には一致しません。Public Suffix List は扱わないため、`com` のような指定は全 `.com` ホストに一致します。完全なドメイン名を指定してください。サイトルールは一致する Chrome URL イベントを落とし、その window の `ui.value.data.text`・`input.key.text`・clipboard text を null にします。タイトルと操作メタデータは残ります。
+- **サイト** — Chrome URL host のドット境界サフィックス一致：`example.com` は `api.example.com` にも一致しますが、`evil-example.com` には一致しません。Public Suffix List は扱わないため、`com` のような指定は全 `.com` ホストに一致します。完全なドメイン名を指定してください。
 - **優先順位** — `include_only_*` が非空なら「そのリストにあり、かつ `exclude_*` にない」ものだけ捕捉。空なら「`exclude_*` にない」ものすべてを捕捉します。
 - **帰属できたイベントに対するアプリ単位の除外は全面的** — そのアプリに帰属できたすべてのイベント型（`ui.*`・`input.*`・`window.*`・…）を落とします。帰属不能な clipboard 変化は `app.name: "Unknown"` として残り得ます。
 
@@ -52,6 +97,7 @@ zanei filter only-site add github.com
 リスト設定に関係なく：
 
 - **プライベートブラウジング** — Chrome incognito は URL イベントを生成せず、本文も null のままです。タイトルと操作メタデータは残り得ます。
+- **Secure Input** — Secure Input 中は content snapshot を取りません。
 - **組み込みの除外** — パスワードマネージャ・資格情報ストア（`1Password`・`Keychain Access` 等）は、`include_only_apps` でも解除できない固定の層で除外されます。`config.toml` の `exclude_apps` に見える既定エントリとは別の層で、そちらを編集しても影響しません。`filter show` は組み込み分をユーザー設定と分けて表示します。
 
 ## フィルタと MCP
