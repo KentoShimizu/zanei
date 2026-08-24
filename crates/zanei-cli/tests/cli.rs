@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::{Child, Command as ProcessCommand, Stdio};
@@ -209,6 +210,86 @@ fn status_human_output_shows_text_content_opt_in_state() {
     assert!(stdout.contains(
         "CONTENT SNAPSHOT  off (opt-in: zanei config set capture.content_snapshot true)"
     ));
+}
+
+#[test]
+fn status_and_doctor_share_control_text_rendering_without_changing_json() {
+    const COMPONENT: &str = "chrome\nforged\r\u{1b}[2J";
+    const REASON: &str = "failed\r\n\u{1b}[31m";
+    const VISIBLE_COMPONENT: &str = "chrome\\nforged\\r\\u{1b}[2J";
+    const VISIBLE_REASON: &str = "failed\\r\\n\\u{1b}[31m";
+
+    let fixture = Fixture::empty();
+    let mut recorder = spawn_foreground_daemon(&fixture.config, &fixture.store);
+    wait_for_daemon_ready(&mut recorder, &fixture.store);
+    signal_child(&mut recorder, "STOP");
+    let status = fixture
+        .open_reader()
+        .status()
+        .expect("running recorder status");
+    fixture
+        .open_writer()
+        .write_daemon_state(&DaemonState {
+            pid: status.pid,
+            started_at: status.started_at,
+            instance_id: status.instance_id,
+            mode: status.mode,
+            heartbeat_at: status.heartbeat_at,
+            retention_hours: status.retention_hours,
+            paused_until: status.paused_until,
+            events_captured: status.events_captured,
+            events_dropped: status.events_dropped,
+            last_event_ts: status.last_event_ts,
+            degraded: BTreeMap::from([(COMPONENT.to_owned(), REASON.to_owned())]),
+            collector_failures: BTreeMap::from([(COMPONENT.to_owned(), 3)]),
+            permissions: status.permissions,
+        })
+        .expect("control text health fixture");
+
+    let status_human = fixture
+        .command()
+        .arg("status")
+        .output()
+        .expect("status human output");
+    let doctor_human = fixture
+        .command()
+        .arg("doctor")
+        .output()
+        .expect("doctor human output");
+    let status_json = fixture
+        .command()
+        .args(["status", "--json"])
+        .output()
+        .expect("status JSON output");
+    let doctor_json = fixture
+        .command()
+        .args(["doctor", "--json"])
+        .output()
+        .expect("doctor JSON output");
+
+    signal_child(&mut recorder, "CONT");
+    signal_child(&mut recorder, "TERM");
+    assert!(wait_for_child(&mut recorder).success());
+    for output in [&status_human, &doctor_human, &status_json, &doctor_json] {
+        assert!(output.status.success());
+    }
+    for output in [&status_human, &doctor_human] {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(&format!("  {VISIBLE_COMPONENT}: 3")));
+        assert!(stdout.contains(&format!("  {VISIBLE_COMPONENT}: {VISIBLE_REASON}")));
+    }
+
+    let status: serde_json::Value =
+        serde_json::from_slice(&status_json.stdout).expect("status JSON");
+    let doctor: serde_json::Value =
+        serde_json::from_slice(&doctor_json.stdout).expect("doctor JSON");
+    assert_eq!(status["degraded"][COMPONENT], REASON);
+    assert_eq!(status["collector_failures"][COMPONENT], 3);
+    assert_eq!(doctor["health"]["degraded"], status["degraded"]);
+    assert_eq!(
+        doctor["health"]["collector_failures"],
+        status["collector_failures"]
+    );
 }
 
 #[test]
@@ -658,6 +739,12 @@ fn doctor_json_matches_the_real_permission_state() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     assert_eq!(value["capture_sources"], serde_json::json!(["input"]));
     assert_eq!(value["reported_by_recorder"], false);
+    assert_eq!(value["health"]["state"], "status_missing");
+    assert_eq!(value["health"]["degraded"], serde_json::Value::Null);
+    assert_eq!(
+        value["health"]["collector_failures"],
+        serde_json::Value::Null
+    );
     let accessibility_granted = value["permissions"]["accessibility"]["status"] == "granted";
     let input_granted = value["permissions"]["input_monitoring"]["status"] == "granted";
     if accessibility_granted && input_granted {
@@ -685,6 +772,91 @@ fn doctor_json_matches_the_real_permission_state() {
         };
         assert_eq!(value["settings_pane"], expected_pane);
     }
+
+    let human = command(&config, &store)
+        .arg("doctor")
+        .output()
+        .expect("doctor human output");
+    assert!(matches!(human.status.code(), Some(0 | 3)));
+    assert!(
+        String::from_utf8_lossy(&human.stdout)
+            .contains("COLLECTOR HEALTH  status_missing\nCOLLECTOR FAILURES -")
+    );
+}
+
+#[test]
+fn doctor_rejects_orphaned_heartbeat_as_stopped_without_changing_exit_or_fix() {
+    let fixture = Fixture::populated();
+
+    let stopped = fixture
+        .command()
+        .args(["doctor", "--fix", "--json"])
+        .output()
+        .expect("stopped doctor JSON");
+    assert_eq!(stopped.status.code(), Some(0));
+    let report: serde_json::Value =
+        serde_json::from_slice(&stopped.stdout).expect("stopped doctor report");
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["missing_required"], serde_json::json!([]));
+    assert_eq!(report["health"]["state"], "stopped");
+    assert_eq!(report["health"]["degraded"], serde_json::json!({}));
+    assert_eq!(
+        report["health"]["collector_failures"],
+        serde_json::json!({ "eventtap": 1 })
+    );
+
+    let stopped_human = fixture
+        .command()
+        .arg("doctor")
+        .output()
+        .expect("stopped doctor human output");
+    assert_eq!(stopped_human.status.code(), Some(0));
+    let stopped_human = String::from_utf8_lossy(&stopped_human.stdout);
+    assert!(stopped_human.contains("COLLECTOR HEALTH  stopped"));
+    assert!(stopped_human.contains("COLLECTOR FAILURES\n  eventtap: 1"));
+    assert!(
+        stopped_human
+            .trim_end()
+            .ends_with("Run `zanei start` to begin recording.")
+    );
+}
+
+#[test]
+fn doctor_reports_unreadable_collector_status_without_overwriting_the_store() {
+    let fixture = Fixture::empty();
+    let corrupt_header = b"not a sqlite store\n";
+    fs::write(&fixture.store, corrupt_header).expect("corrupt doctor fixture store header");
+
+    let json = fixture
+        .command()
+        .args(["doctor", "--json"])
+        .output()
+        .expect("unreadable doctor JSON");
+    assert_eq!(json.status.code(), Some(0));
+    let report: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("unreadable doctor report");
+    assert_eq!(report["health"]["state"], "status_unreadable");
+    assert_eq!(report["health"]["degraded"], serde_json::Value::Null);
+    assert_eq!(
+        report["health"]["collector_failures"],
+        serde_json::Value::Null
+    );
+    assert!(report["health"]["status_error"].as_str().is_some());
+
+    let human = fixture
+        .command()
+        .arg("doctor")
+        .output()
+        .expect("unreadable doctor human output");
+    assert_eq!(human.status.code(), Some(0));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("COLLECTOR HEALTH  status_unreadable"));
+    assert!(human.contains("  status:"));
+    assert!(human.contains("COLLECTOR FAILURES -"));
+    assert_eq!(
+        fs::read(&fixture.store).expect("preserved unreadable doctor store"),
+        corrupt_header
+    );
 }
 
 #[test]

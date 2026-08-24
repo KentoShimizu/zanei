@@ -58,6 +58,7 @@ pub(super) fn render_human(
         );
     }
     output.push_str(&format!("Store key: {}\n", report.store_key.describe()));
+    output.push_str(&report.health.render_human());
 
     let automation_pending = report
         .permissions

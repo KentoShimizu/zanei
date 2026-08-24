@@ -4,6 +4,8 @@ use serde::Serialize;
 use zanei_collector::Permission;
 use zanei_core::store::LockedReason;
 
+use super::health::HealthReport;
+
 #[derive(Debug, Serialize)]
 pub(super) struct DoctorReport {
     pub(super) ok: bool,
@@ -15,6 +17,21 @@ pub(super) struct DoctorReport {
     pub(super) missing_permissions: Vec<Permission>,
     pub(super) reported_by_recorder: bool,
     pub(super) store_key: StoreKeyReport,
+    pub(super) health: HealthReport,
+}
+
+impl DoctorReport {
+    pub(super) const fn exit_code(&self) -> u8 {
+        if self.ok {
+            super::EXIT_SUCCESS
+        } else {
+            super::EXIT_MISSING_PERMISSIONS
+        }
+    }
+
+    pub(super) fn permissions_to_fix(&self, fix: bool) -> Option<&[Permission]> {
+        (fix && !self.missing_permissions.is_empty()).then_some(&self.missing_permissions)
+    }
 }
 
 #[derive(Debug, Serialize)]

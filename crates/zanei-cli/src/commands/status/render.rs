@@ -1,6 +1,7 @@
 use std::fmt::Display;
 
 use super::model::{CaptureScopeReport, StatusReport, StoreWriteState};
+use crate::commands::human_text::sanitize_human_text;
 
 pub(super) fn print_human(report: &StatusReport) {
     print!("{}", render_human(report));
@@ -74,23 +75,22 @@ pub(super) fn render_human(report: &StatusReport) -> String {
         }
         Some(failures) => {
             lines.push("COLLECTOR FAILURES".to_owned());
-            lines.extend(
-                failures
-                    .iter()
-                    .map(|(component, count)| format!("  {component}: {count}")),
-            );
+            lines.extend(failures.iter().map(|(component, count)| {
+                format!("  {}: {count}", sanitize_human_text(component))
+            }));
         }
     }
     if report.degraded.is_empty() {
         lines.push("DEGRADED          false".to_owned());
     } else {
         lines.push("DEGRADED          true".to_owned());
-        lines.extend(
-            report
-                .degraded
-                .iter()
-                .map(|(component, reason)| format!("  {component}: {reason}")),
-        );
+        lines.extend(report.degraded.iter().map(|(component, reason)| {
+            format!(
+                "  {}: {}",
+                sanitize_human_text(component),
+                sanitize_human_text(reason)
+            )
+        }));
     }
     format!("{}\n", lines.join("\n"))
 }

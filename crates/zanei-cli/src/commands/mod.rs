@@ -3,6 +3,7 @@ mod config;
 mod control;
 mod doctor;
 mod filter;
+mod human_text;
 mod output;
 mod purge;
 mod read;

@@ -17,6 +17,9 @@ use crate::{
     paths::Paths,
 };
 
+const CONTROL_TEXT_COMPONENT: &str = "chrome\nforged\r\u{1b}[2J";
+const CONTROL_TEXT_REASON: &str = "failed\r\n\u{1b}[31m";
+
 #[test]
 fn lock_owner_is_required_for_running_and_healthy_store_writes() {
     assert_eq!(StatusState::Stopped.exit_code(), super::EXIT_NO_DAEMON);
@@ -321,6 +324,29 @@ COLLECTOR FAILURES
 DEGRADED          true
   chrome: state=unavailable phase=query kind=apple_event code=-1712
 "#,
+    );
+}
+
+#[test]
+fn control_text_is_escaped_in_human_output_and_preserved_in_json() {
+    let mut status = output_store_status();
+    status.collector_failures = BTreeMap::from([(CONTROL_TEXT_COMPONENT.to_owned(), 3)]);
+    status.degraded = BTreeMap::from([(
+        CONTROL_TEXT_COMPONENT.to_owned(),
+        CONTROL_TEXT_REASON.to_owned(),
+    )]);
+    let report = readable_output_report(status);
+
+    let human = render_human(&report);
+    assert!(human.contains(
+        "COLLECTOR FAILURES\n  chrome\\nforged\\r\\u{1b}[2J: 3\n\
+         DEGRADED          true\n  chrome\\nforged\\r\\u{1b}[2J: failed\\r\\n\\u{1b}[31m\n"
+    ));
+    let json = serde_json::to_value(&report).expect("serialize status report");
+    assert_eq!(json["collector_failures"][CONTROL_TEXT_COMPONENT], 3);
+    assert_eq!(
+        json["degraded"][CONTROL_TEXT_COMPONENT],
+        CONTROL_TEXT_REASON
     );
 }
 
