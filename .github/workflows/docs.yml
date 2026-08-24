@@ -1,8 +1,7 @@
 name: Deploy docs
 
-# Manual for now: the first run is the moment the site goes public.
-# After launch, add a push trigger on main (paths: docs/**) so docs
-# changes deploy automatically.
+# Deliberately manual: publishing is a decision, not a side effect of merging.
+# Run this workflow after merging docs changes you want live.
 on:
   workflow_dispatch:
 
@@ -22,11 +21,11 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: docs/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -35,8 +34,8 @@ jobs:
         run: |
           pnpm --dir docs install --frozen-lockfile
           pnpm --dir docs exec blume build
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/dist
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
