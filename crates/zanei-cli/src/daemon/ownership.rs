@@ -44,7 +44,7 @@ impl StoreOwner {
 }
 
 pub(crate) struct StoreOwnership {
-    _file: OwnedFd,
+    file: OwnedFd,
 }
 
 impl StoreOwnership {
@@ -59,8 +59,9 @@ impl StoreOwnership {
             }
             Err(error) => return Err(ownership_io_error("lock", &path, errno_io(error))),
         }
-        write_owner(&file, &path, &owner)?;
-        Ok(Self { _file: file })
+        let ownership = Self { file };
+        write_owner(&ownership.file, &path, &owner)?;
+        Ok(ownership)
     }
 
     pub(crate) fn probe(store_path: &Path) -> Result<Option<StoreOwner>, DaemonError> {
@@ -75,9 +76,23 @@ impl StoreOwnership {
             Err(error) => return Err(error),
         };
         match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(None),
+            Ok(()) => {
+                flock(&file, FlockOperation::Unlock)
+                    .map_err(|error| ownership_io_error("unlock probe", &path, errno_io(error)))?;
+                Ok(None)
+            }
             Err(Errno::WOULDBLOCK) => read_owner_with_retry(&file, &path).map(Some),
             Err(error) => Err(ownership_io_error("probe", &path, errno_io(error))),
+        }
+    }
+}
+
+impl Drop for StoreOwnership {
+    fn drop(&mut self) {
+        // CLOEXEC closes a fork-inherited descriptor only after exec. Unlock explicitly so a
+        // concurrent spawn cannot extend ownership beyond this guard's lifetime.
+        if let Err(error) = flock(&self.file, FlockOperation::Unlock) {
+            eprintln!("zanei: failed to release store ownership lock: {error}");
         }
     }
 }
@@ -243,6 +258,13 @@ mod tests {
 
     use super::{StoreOwner, StoreOwnership, lock_path};
 
+    fn test_owner() -> StoreOwner {
+        StoreOwner::new(
+            DaemonMode::Foreground,
+            "2026-08-17T10:00:00.000Z".to_owned(),
+        )
+    }
+
     #[test]
     fn lock_path_appends_suffix_to_complete_store_name() {
         assert_eq!(
@@ -255,10 +277,7 @@ mod tests {
     fn ownership_probe_reports_owner_only_while_lock_is_held() {
         let directory = TempDir::new().expect("temporary directory");
         let store = directory.path().join("store.sqlite");
-        let owner = StoreOwner::new(
-            DaemonMode::Foreground,
-            "2026-08-17T10:00:00.000Z".to_owned(),
-        );
+        let owner = test_owner();
         let ownership = StoreOwnership::acquire(&store, owner.clone()).expect("acquire ownership");
 
         assert_eq!(
@@ -270,5 +289,23 @@ mod tests {
             StoreOwnership::probe(&store).expect("probe released ownership"),
             None
         );
+    }
+
+    #[test]
+    fn ownership_drop_releases_lock_with_inherited_descriptor_open() {
+        let directory = TempDir::new().expect("temporary directory");
+        let store = directory.path().join("store.sqlite");
+        let owner = test_owner();
+        let ownership = StoreOwnership::acquire(&store, owner).expect("acquire ownership");
+        let inherited = rustix::io::fcntl_dupfd_cloexec(&ownership.file, 0)
+            .expect("duplicate ownership descriptor");
+
+        drop(ownership);
+
+        assert_eq!(
+            StoreOwnership::probe(&store).expect("probe released ownership"),
+            None
+        );
+        drop(inherited);
     }
 }
