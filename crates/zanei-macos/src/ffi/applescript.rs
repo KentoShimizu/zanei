@@ -511,6 +511,31 @@ mod tests {
     }
 
     #[test]
+    fn sources_keep_every_privacy_and_status_return_path() {
+        let application_path = "/Applications/Google Chrome.app";
+        let window_id = AppleScriptWindowId::for_test("window-4321");
+        let front = front_window_source(application_path);
+        let target = target_window_source(application_path, &window_id);
+
+        assert!(front.contains("if (count of windows) is 0 then return {\"no_window\"}"));
+        assert!(
+            target
+                .contains("if not (exists window id \"window-4321\") then return {\"no_window\"}")
+        );
+        for source in [&front, &target] {
+            assert!(
+                source.contains("if current_mode is \"incognito\" then return {\"incognito\"}")
+            );
+            assert!(source.contains(
+                "if current_mode is not \"normal\" then return {\"unsupported_mode\", current_mode}"
+            ));
+            assert!(source.contains(
+                "return {\"snapshot\", (id of current_window) as text, name of current_window, (id of current_tab) as text, URL of current_tab, title of current_tab}"
+            ));
+        }
+    }
+
+    #[test]
     fn targeted_source_reads_only_the_chrome_reported_window_identity() {
         let window_id = AppleScriptWindowId::for_test("window-4321");
 
