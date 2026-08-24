@@ -13,16 +13,16 @@
   </p>
 </div>
 
-Zanei (残映, *zan-ei*) records your computer activity as OS-level events — not screenshots —
-into a local SQLite store and turns it into session-structured, deduplicated timelines that
-AI agents read through the CLI or an MCP server. Zanei currently supports macOS only.
-Windows and Linux are planned.
+Zanei (残映, *zan-ei*) records your computer activity as OS-level events, not screenshots,
+into a local SQLite store. AI agents read it back through the CLI or an MCP server as
+timelines that are split into sessions and deduplicated. Zanei currently supports macOS
+only; Windows and Linux are planned.
 
 ## Privacy by default
 
 - No network egress path: recorded data never leaves the local store.
-- Typed and clipboard content is recorded only if you opt in; the first fully-granted
-  `start` asks once, and the default is no.
+- Typed and clipboard content is recorded only if you opt in; an interactive background
+  `start` asks once while the setting is unset, and the default is no.
 - Password fields are dropped at capture time. Chrome Incognito produces no URL events
   and no text bodies (window titles can remain).
 - Events are deleted after 48 hours by default.
