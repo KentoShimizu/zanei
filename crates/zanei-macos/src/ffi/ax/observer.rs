@@ -3,7 +3,6 @@
 mod activation;
 #[cfg(test)]
 mod test_support;
-pub(in crate::ffi::ax) use activation::internalize_focus;
 mod value_lifecycle;
 pub(in crate::ffi::ax) mod value_registration;
 

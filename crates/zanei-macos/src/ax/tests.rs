@@ -88,6 +88,16 @@ fn focused_field_observation(pid: i32, generation: u64, class: FieldClass) -> Na
     }
 }
 
+fn focused_event(pid: i32, generation: u64, role: &str) -> NativeAxEvent {
+    NativeAxEvent::UiFocused {
+        pid,
+        generation,
+        window: Some(window()),
+        element: Some(element(role, None)),
+        observed_at: time::OffsetDateTime::UNIX_EPOCH,
+    }
+}
+
 #[test]
 fn ui_events_derive_field_kind_from_the_ax_snapshot() {
     let mut builder = builder();
@@ -234,8 +244,8 @@ struct FakeAxApi {
     running_applications: Vec<ApplicationInfo>,
     frontmost_application: Option<ApplicationInfo>,
     attached_pids: Vec<i32>,
-    attach_observations: Vec<NativeAxObservation>,
-    attach_results: VecDeque<Result<Vec<NativeAxObservation>, ()>>,
+    attach_events: Vec<NativeAxEvent>,
+    attach_results: VecDeque<Result<Vec<NativeAxEvent>, ()>>,
     poll_observations: VecDeque<Vec<NativeAxObservation>>,
     current_degraded_observers: Option<Arc<AtomicU64>>,
     observed_degraded_observers: Option<u64>,
@@ -265,7 +275,7 @@ impl FakeAxApi {
                 id: Some(11),
             }),
             // Chromium sends no focused-window notification on activation.
-            attach_observations: Vec::new(),
+            attach_events: Vec::new(),
             ..Self::default()
         }
     }
@@ -287,12 +297,12 @@ impl AxApi for FakeAxApi {
         pid: i32,
         app: App,
         _manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxObservation>, Self::AttachError> {
+    ) -> Result<Vec<NativeAxEvent>, Self::AttachError> {
         self.attached_pids.push(pid);
         self.attached_apps.push(app);
         self.attach_results
             .pop_front()
-            .unwrap_or_else(|| Ok(std::mem::take(&mut self.attach_observations)))
+            .unwrap_or_else(|| Ok(std::mem::take(&mut self.attach_events)))
     }
 
     fn detach(&mut self, _pid: i32) -> Vec<NativeAxEvent> {
@@ -449,11 +459,7 @@ fn attach_known_field_syncs_frontmost_tracker_without_output() {
     let mut api = FakeAxApi {
         running_applications: vec![target.clone()],
         frontmost_application: Some(target),
-        attach_observations: vec![focused_field_observation(
-            7,
-            1,
-            FieldClass::KnownText(FieldKind::Text),
-        )],
+        attach_events: vec![focused_event(7, 1, "AXTextField")],
         ..FakeAxApi::default()
     };
     let (_lifecycle_sender, lifecycle_receiver) = sync_channel(1);
@@ -488,7 +494,7 @@ fn delayed_unknown_to_known_updates_tracker_without_output() {
     let mut api = FakeAxApi {
         running_applications: vec![target.clone()],
         frontmost_application: Some(target),
-        attach_observations: vec![focused_field_observation(7, 1, FieldClass::Unknown)],
+        attach_events: vec![focused_event(7, 1, "AXDocument")],
         poll_observations: VecDeque::from([vec![focused_field_observation(
             7,
             1,
@@ -531,8 +537,8 @@ fn background_reconcile_is_ignored_and_not_emitted() {
         running_applications: vec![frontmost.clone(), background],
         frontmost_application: Some(frontmost),
         attach_results: VecDeque::from([
-            Ok(vec![focused_field_observation(7, 1, FieldClass::Unknown)]),
-            Ok(vec![focused_field_observation(8, 1, FieldClass::Unknown)]),
+            Ok(vec![focused_event(7, 1, "AXDocument")]),
+            Ok(vec![focused_event(8, 1, "AXDocument")]),
         ]),
         poll_observations: VecDeque::from([vec![focused_field_observation(
             8,
@@ -574,7 +580,7 @@ fn real_focus_then_reconcile_preserves_latest_tracker_and_emits_real_ui_focus() 
     let mut api = FakeAxApi {
         running_applications: vec![target.clone()],
         frontmost_application: Some(target),
-        attach_observations: vec![focused_field_observation(7, 1, FieldClass::Unknown)],
+        attach_events: vec![focused_event(7, 1, "AXDocument")],
         poll_observations: VecDeque::from([vec![
             NativeAxObservation::Event(NativeAxEvent::UiFocused {
                 pid: 7,

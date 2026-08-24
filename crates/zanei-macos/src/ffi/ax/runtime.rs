@@ -26,7 +26,7 @@ use super::{
         window_snapshot,
     },
     native_error,
-    observer::{AppObserver, internalize_focus},
+    observer::AppObserver,
     types::{NativeAxError, NativeAxEvent, NativeAxObservation, NativeHitTest},
     value_context::{DeferredResolution, DeferredValueContext},
 };
@@ -77,7 +77,7 @@ impl NativeAx {
         pid: i32,
         app: App,
         manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxObservation>, NativeAxError> {
+    ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
         let secure_input = secure_input_active(
             self.capture_text_content,
             self.secure_input_probe.as_ref(),
@@ -86,16 +86,12 @@ impl NativeAx {
         );
         if let Some(observer) = self.observers.get_mut(&pid) {
             observer.update_attach(app, manual_accessibility);
-            return Ok(observer
-                .focused_element_or_clear(
-                    Instant::now(),
-                    OffsetDateTime::now_utc(),
-                    secure_input,
-                    &mut self.authorizations,
-                )
-                .into_iter()
-                .map(internalize_focus)
-                .collect());
+            return Ok(observer.focused_element_or_clear(
+                Instant::now(),
+                OffsetDateTime::now_utc(),
+                secure_input,
+                &mut self.authorizations,
+            ));
         }
 
         let application = create_application(pid)?;
@@ -165,7 +161,7 @@ impl NativeAx {
         // SAFETY: source remains owned by app_observer until it is detached.
         unsafe { add_current_run_loop_source(source) };
         self.observers.insert(pid, app_observer);
-        Ok(focused.into_iter().map(internalize_focus).collect())
+        Ok(focused)
     }
 
     pub(crate) fn detach(&mut self, pid: i32) -> Vec<NativeAxEvent> {

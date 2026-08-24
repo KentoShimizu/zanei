@@ -4,10 +4,7 @@ use std::time::Instant;
 
 use time::OffsetDateTime;
 
-use crate::{
-    focused_field::{FocusedField, field_class},
-    text_capture::InputAuthorizations,
-};
+use crate::text_capture::InputAuthorizations;
 
 use super::AppObserver;
 use crate::ffi::ax::{NativeAxEvent, NativeAxObservation, element::element_role};
@@ -38,26 +35,7 @@ impl AppObserver {
         }
         self.focused_element_or_clear(now, observed_at, secure_input, authorizations)
             .into_iter()
-            .map(internalize_focus)
+            .map(NativeAxEvent::internalize_focus)
             .collect()
-    }
-}
-
-pub(in crate::ffi::ax) fn internalize_focus(event: NativeAxEvent) -> NativeAxObservation {
-    let NativeAxEvent::UiFocused {
-        pid,
-        generation,
-        element,
-        ..
-    } = event
-    else {
-        return event.into();
-    };
-    NativeAxObservation::FocusedFieldObserved {
-        pid,
-        focused_field: element.as_ref().map(|element| FocusedField {
-            generation,
-            class: field_class(element.role.as_deref(), element.subrole.as_deref()),
-        }),
     }
 }

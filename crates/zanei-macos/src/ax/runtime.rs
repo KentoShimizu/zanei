@@ -28,7 +28,7 @@ pub(super) trait AxApi {
         pid: i32,
         app: App,
         manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxObservation>, Self::AttachError>;
+    ) -> Result<Vec<NativeAxEvent>, Self::AttachError>;
     fn focused_window(&mut self, pid: i32) -> Result<Option<NativeWindow>, Self::AttachError>;
     fn reconcile_manual_accessibility(&mut self, policy: &ManualAccessibilityPolicy);
     fn detach(&mut self, pid: i32) -> Vec<NativeAxEvent>;
@@ -86,7 +86,7 @@ impl AxApi for SystemAxApi {
         pid: i32,
         app: App,
         manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxObservation>, NativeAxError> {
+    ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
         self.native.attach(pid, app, manual_accessibility)
     }
 

@@ -20,7 +20,7 @@ use crate::{
     content_snapshot::SnapshotTriggerPublisher,
     ffi::ax::{ManualAccessibilityPolicy, NativeAxEvent, NativeAxObservation},
     focus_context::FocusContext,
-    focused_field::{FocusedField, field_class},
+    focused_field::FocusedField,
     workspace::{ApplicationActivationPolicy, ApplicationInfo, WorkspaceEvent},
 };
 
@@ -511,6 +511,7 @@ fn attach_app(
             observer_health.mark_available(app.pid);
             observations
                 .into_iter()
+                .map(NativeAxEvent::internalize_focus)
                 .fold(AttachResult::default(), |mut attached, observation| {
                     match observation {
                         NativeAxObservation::FocusedFieldObserved { pid, focused_field } => {
@@ -552,23 +553,8 @@ fn publish_attached_focus(focus_context: &FocusContext, attached: &AttachResult)
 }
 
 fn publish_focus_observation(focus_context: &FocusContext, observation: &NativeAxEvent) {
-    let (pid, focused_field) = match observation {
-        NativeAxEvent::UiFocused {
-            pid,
-            generation,
-            element,
-            ..
-        } => (
-            *pid,
-            element.as_ref().map(|element| FocusedField {
-                generation: *generation,
-                class: field_class(element.role.as_deref(), element.subrole.as_deref()),
-            }),
-        ),
-        NativeAxEvent::WindowFocused { .. }
-        | NativeAxEvent::WindowTitleChanged { .. }
-        | NativeAxEvent::UiValueChanged(_)
-        | NativeAxEvent::PageLoaded { .. } => return,
+    let Some((pid, focused_field)) = observation.focused_field_observation() else {
+        return;
     };
     focus_context.update_focused_field(pid, focused_field);
 }
