@@ -221,7 +221,7 @@ bootstrap 前は、永続化された recorder の last-known 権限報告を使
 
 `y` または `Y` のみが内容記録を有効にし、Enter、その他の回答、EOF、読取エラーは `false` を選びます。Zanei は `config set` と同じ経路で明示値を保存してファイルのその他の内容を維持し、`Text content will be recorded.` または `Text content stays off.` を表示します。bootstrap 後に確認した場合、`y` ではさらに `Restarting the recorder to apply text content capture...` と表示し、canonical な stop→start 経路で再起動します。`false` の回答は recorder の既定のオフ動作を維持するため、再起動しません。どちらの回答でもキーを書き込むため、確認は繰り返しません。
 
-この質問に回答した直後、`start` は別 opt-in の案内を次の英語どおりに表示します。content snapshot の y/N は確認しません：
+この質問に回答した直後、`start` は content snapshot の設定案内を次の英語どおりに表示します。content snapshot の y/N は確認しません：
 
 ```text
 Content snapshots (text shown in apps you choose) are a separate opt-in. Choose the apps first
