@@ -34,7 +34,7 @@ zanei config set capture.content_snapshot true
 [capture]
 sources = ["app", "window", "ui", "input", "browser"]
 text_content = false            # 内容の捕捉は明示的な opt-in
-content_snapshot = false        # 前面ウィンドウの Accessibility text は専用の opt-in
+content_snapshot = false        # 前面ウィンドウの Accessibility text を記録するか
 
 [filter]                        # capture-time フィルタ = プライバシー境界（ストア書込前に適用）
 exclude_apps = ["1Password", "Keychain Access"]   # 不許可リスト（bundle_id 推奨）。既定除外を同梱

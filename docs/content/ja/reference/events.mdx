@@ -74,7 +74,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `input.scroll` | `macos.eventtap` | スクロール | アクセシビリティ + 入力監視 |
 | `browser.navigate` | `macos.applescript` | URL / タブの変化。**現在は Chrome のみ**。incognito は常に除外 | アクセシビリティ + オートメーション |
 | `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | クリップボード操作。内容は opt-in | アクセシビリティ + 入力監視 |
-| `content.snapshot` | `macos.ax` | 前面ウィンドウの可視範囲に表示された Accessibility text。専用の opt-in | アクセシビリティ |
+| `content.snapshot` | `macos.ax` | 前面ウィンドウの可視範囲に表示された Accessibility text。既定では記録せず、設定で有効化 | アクセシビリティ |
 
 `--types` フィルタでは末尾ワイルドカードでファミリー全体を選べます：`browser.*`・`ui.*`・`content.*` など。
 
