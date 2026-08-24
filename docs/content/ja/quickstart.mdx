@@ -26,7 +26,7 @@ formula は署名・notarize 済みの `Zanei.app` をインストールし、`z
 zanei start
 ```
 
-macOS はまず**アクセシビリティ**を確認します。続けて**入力監視**のダイアログが出ることもありますが、出ない機体も少なくありません。その場合は `zanei doctor --fix` — ペインを開き、インストール済み `Zanei.app` の path をコピーし、Finder に表示するので「+」から追加できます。権限が不足している間、`start` は終了コード 3 を返しますが recorder は動いたままなので、そのまま付与できます。オートメーションは Zanei が初めて Chrome に問い合わせるときに別途確認されます。
+macOS はまず**アクセシビリティ**を確認します。続けて**入力監視**のダイアログが出ることもありますが、出ない環境もよくあります。その場合は `zanei doctor --fix` を実行してください。設定ペインを開き、インストール済み `Zanei.app` のパスをコピーして Finder に表示するので、「+」から追加できます。権限が不足している間、`start` は終了コード 3 を返しますが recorder は動いたままなので、そのまま付与できます。オートメーションは Zanei が初めて Chrome に問い合わせるときに別途確認されます。
 
 </Step>
 <Step title="再起動して内容記録を選ぶ">
@@ -37,7 +37,7 @@ macOS はまず**アクセシビリティ**を確認します。続けて**入�
 zanei stop && zanei start
 ```
 
-権限がすべて揃った最初の対話式 `start` が、入力テキストとクリップボードの内容を記録するか一度だけ確認します。オフのままなら Enter（既定）、有効にするなら `y`。回答は `config.toml` に保存され、後から `zanei config set capture.text_content <true|false>` で変更できます。最後に recorder 自身の報告を確認します — System Settings に行が見えなくてもこちらが正です（詳細は[権限ガイド](/ja/guides/permissions)）。
+権限がすべて揃った最初の対話式 `start` が、入力テキストとクリップボードの内容を記録するか一度だけ確認します。オフのままなら Enter（既定）、有効にするなら `y`。回答は `config.toml` に保存され、後から `zanei config set capture.text_content <true|false>` で変更できます。最後に recorder 自身の報告を確認します。System Settings に行が見えなくても、recorder 自身の報告のほうが正です（詳細は[権限ガイド](/ja/guides/permissions)）。
 
 ```bash
 zanei doctor

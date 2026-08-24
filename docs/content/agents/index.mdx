@@ -3,16 +3,16 @@ title: Agent integration
 description: How Zanei plugs into AI agents — the two surfaces, the skill instruction layer, which agents are covered, and what agents can (and cannot) do.
 ---
 
-Zanei gives agents the context you did not type: what you were reading, which PR you were reviewing, where you left off. Every integration surface is a wrapper over the same local store.
+With Zanei, an agent can look up what you were doing before the conversation started: the pages you were reading, the PR you were reviewing, where you left off.
 
-## Two surfaces, one instruction layer
+## Two surfaces and one instruction layer
 
-Zanei exposes your history through two surfaces — both thin wrappers over the same local store:
+Zanei exposes your history through two surfaces, both thin wrappers over the same local store:
 
 | Surface | What it is | Who uses it |
 | --- | --- | --- |
 | **CLI** | The `zanei` binary itself. Agents with a shell call it directly | Terminal agents (Claude Code, Codex CLI, opencode, pi, ...) |
-| **[MCP server](/reference/mcp)** | `zanei mcp`, a stdio JSON-RPC server exposing read-only tools | Shell-less clients (Claude Desktop, ChatGPT connectors) — for these, MCP is the only path. Terminal agents can use it too |
+| **[MCP server](/reference/mcp)** | `zanei mcp`, a stdio JSON-RPC server exposing read-only tools | Shell-less clients (Claude Desktop, ChatGPT connectors), for which MCP is the only path. Terminal agents can use it too |
 
 The skill is not a third surface; it is the instruction layer that tells the agent when to read your history and how to keep token usage low. How those instructions reach the agent differs by surface:
 
@@ -27,20 +27,20 @@ The skill is not a third surface; it is the instruction layer that tells the age
 | Codex CLI | ✅ `SKILL.md` (`~/.codex/skills/`) | ✅ `codex mcp add` |
 | opencode | ✅ user-placed `AGENTS.md` snippet derived from `SKILL.md` | ✅ `opencode.json` (manual JSON printed) |
 | Hermes Agent | ✅ `SKILL.md` (`~/.hermes/skills/`) | ✅ `hermes mcp add` |
-| pi | ✅ **recommended path** (CLI + user-placed README instructions derived from `SKILL.md`) | — (pi has no MCP by design; the CLI path covers it) |
-| Claude Desktop, ChatGPT connectors (no shell) | — | ✅ **only path** |
+| pi | ✅ recommended path (CLI + user-placed README instructions derived from `SKILL.md`) | — (pi has no MCP by design; the CLI path covers it) |
+| Claude Desktop, ChatGPT connectors (no shell) | — | ✅ only path |
 
-Setup installs skill files, prints the MCP registration command for your agent, and prints the manual instructions needed for opencode and pi — see [setup](/agents/setup).
+Setup installs skill files, prints the MCP registration command for your agent, and prints the manual instructions needed for opencode and pi; see [setup](/agents/setup).
 
 ## What agents can do
 
 Through MCP, agents get three read-only tools (details in the [MCP reference](/reference/mcp)):
 
-- **`get_timeline`** — the LLM-ready timeline; equivalent to `zanei timeline`. What agents call most.
+- **`get_timeline`** — the LLM-ready timeline; equivalent to `zanei timeline`. This is the tool agents call most.
 - **`query_events`** — raw event lookup; equivalent to `zanei query`.
-- **`get_status`** — is recording running, are permissions OK. When `running` is `false`, a well-behaved agent tells you that history isn't being recorded instead of answering from nothing.
+- **`get_status`** — is recording running, are permissions OK. When `running` is `false`, an agent can tell you that history isn't being recorded instead of answering from guesswork.
 
-Through the CLI, agents can use everything — including starting and stopping recording — subject to your approval flow. The shipped skill teaches the read paths, `status`/`doctor` diagnostics, and that recording settings change only on your explicit request.
+Through the CLI, agents can use everything, including starting and stopping recording, subject to your approval flow. The shipped skill teaches the read paths, `status`/`doctor` diagnostics, and that recording settings change only on your explicit request.
 
 ## What agents cannot do
 
@@ -51,4 +51,4 @@ The MCP server is a read-only view over the store, running as a separate process
 
 ## A note on data flow
 
-Zanei itself does not send data anywhere. An agent that reads your timeline will typically forward it to its LLM provider; that hop belongs to the agent. The shipped skill instructs agents to narrow the time range before sending (for example `--since 2h`, token budget 4000) rather than pulling days of history.
+Zanei itself does not send data anywhere. An agent that reads your timeline will typically forward it to its LLM provider; that transmission is the agent's responsibility. The shipped skill instructs agents to narrow the time range before sending (for example `--since 2h`, token budget 4000) rather than pulling days of history.

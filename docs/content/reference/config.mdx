@@ -36,7 +36,7 @@ sources = ["app", "window", "ui", "input", "browser"]
 text_content = false            # content capture is an explicit opt-in
 content_snapshot = false        # frontmost-window Accessibility text is a separate opt-in
 
-[filter]                        # capture-time filters — the privacy boundary (applied before the store)
+[filter]                        # capture-time filters: the privacy boundary (applied before the store)
 exclude_apps = ["1Password", "Keychain Access"]   # deny list (bundle_id recommended); defaults ship built-in
 include_only_apps = []          # non-empty switches to allow-list mode
 exclude_websites = []           # Chrome URL events/text bodies; dot-boundary host suffix match
@@ -62,7 +62,7 @@ batch_interval_s = 5
 retention_hours = 48            # short-lived retention by default
 ```
 
-There is no egress-related setting — external transmission does not exist as a feature.
+There is no egress-related setting; external transmission does not exist as a feature.
 
 ## Validation
 
@@ -101,7 +101,7 @@ The evaluation order is built-in exclusions, `[filter]` apps and Chrome websites
 | `include_only_websites` | `[]` | Allow list of URL hosts for Chrome URL events and text-content bodies |
 | `redactors` | `["email", "credit_card", "token"]` | Redaction rules applied to captured values |
 
-The nested scopes use the same four list names. Their defaults and behavior are shown above. The daemon watches all three filter scopes at roughly 2-second intervals, so changes apply within a few seconds — no daemon restart required.
+The nested scopes use the same four list names. Their defaults and behavior are shown above. The daemon watches all three filter scopes at roughly 2-second intervals, so changes apply within a few seconds with no daemon restart.
 
 :::warning[0.3.0 behavior change]
 The new default `[filter.text_content].exclude_apps` applies even when an existing 0.2.x configuration already has `capture.text_content = true`. Bodies from Safari, Firefox, Brave, Edge, Vivaldi, and Arc become null by default; events and non-content facts remain.
@@ -119,7 +119,7 @@ store; neither output behavior nor the store backend is configurable.
 
 ## Change propagation
 
-- `[filter]`, `[filter.text_content]`, and `[filter.content_snapshot]` changes are picked up by the daemon's config watch (roughly 2-second intervals) and apply within a few seconds — no restart needed.
+- `[filter]`, `[filter.text_content]`, and `[filter.content_snapshot]` changes are picked up by the daemon's config watch (roughly 2-second intervals) and apply within a few seconds; no restart is needed.
 - `output.retention_hours` is picked up by the daemon without a restart and immediately purges
   events outside the new window. Other changes (e.g. `capture.sources`, `capture.content_snapshot`, and
   `output.batch_interval_s`) take effect after a daemon restart:
@@ -132,4 +132,4 @@ store; neither output behavior nor the store backend is configurable.
 | `~/.config/zanei/config.toml` | Configuration | `--config <path>` |
 | `~/.local/state/zanei/store.sqlite` | Event store | `--store <path>` |
 
-The event store is encrypted. Its key is generated on the recorder's first start and kept in your login Keychain; there is no configuration key for encryption. `ZANEI_STORE_KEY_FILE=<path>` makes every Zanei process read the key from that file instead — a development override for builds from source, described in the [CLI reference](/reference/cli#environment).
+The event store is encrypted. Its key is generated on the recorder's first start and kept in your login Keychain; there is no configuration key for encryption. `ZANEI_STORE_KEY_FILE=<path>` makes every Zanei process read the key from that file instead. It is a development override for builds from source, described in the [CLI reference](/reference/cli#environment).

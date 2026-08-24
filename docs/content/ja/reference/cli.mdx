@@ -3,10 +3,10 @@ title: CLI リファレンス
 description: zanei の全コマンド・フラグ・共通規約・終了コード。
 ---
 
-すべての機能は単一バイナリ `zanei` に入っています — デーモン管理、権限診断、データ取得、フィルタ管理、agent セットアップ、MCP サーバまで。CLI と [MCP サーバ](/ja/reference/mcp)は同一コア・同一ストアの薄いラッパーであり、このページの規約を共有します。
+すべての機能は単一バイナリ `zanei` に入っています。デーモン管理、権限診断、データ取得、フィルタ管理、agent セットアップ、MCP サーバまでこの 1 つで完結します。CLI と [MCP サーバ](/ja/reference/mcp)は同一コア・同一ストアの薄いラッパーであり、このページの規約を共有します。
 
 - 署名・notarize 済みの単一 Rust バイナリ。外部ランタイム依存なし。
-- 完全ローカル：CLI はいかなる外部送信も行いません。
+- 完全ローカルで動作し、CLI はいかなる外部送信も行いません。
 - 破壊的操作（`purge`）以外は副作用が小さく、agent から安全に呼べます。
 
 ## コマンド一覧
@@ -52,7 +52,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 
 ### 時間表現
 
-`--since` / `--until` が受け取る値：
+`--since` / `--until` が受け取る値は次のとおりです。
 
 | 形式 | 例 | 意味 |
 | --- | --- | --- |
@@ -120,7 +120,7 @@ zanei doctor --json     # agent 向け機械可読
 - `input_monitoring` が「必須」になるのは `input.*` または `ui.click` を捕捉する設定です。
   `input` と `ui` のどちらも選択しない構成では、欠けていても `ok` です。
 
-`--json` の出力：
+`--json` の出力は次のとおりです。
 
 ```json
 {
@@ -145,7 +145,7 @@ zanei doctor --json     # agent 向け機械可読
 
 `status` の値：`granted` / `denied` / `not_determined`。`reported_by_recorder` は、新鮮な recorder heartbeat 由来なら `true` です。heartbeat がなければ `doctor` 自身のプロセスから probe して `false` とし、人間向け出力には recorder 自身の権限を見るには起動が必要という注記を加えます。
 
-`store_key` はストアの暗号化鍵の所在を報告します。`state` は `key_store`（鍵が見つかった。`detail` に所在 — ログインキーチェーン、または開発用上書き `ZANEI_STORE_KEY_FILE`）、`not_needed`（ストアがない・平文・認識できない）、`missing`（ストアは暗号化されているが鍵がない）、`mismatch`（鍵でこのストアを復号できない）、`key_store_locked` / `key_store_denied`（`detail` にプラットフォームの案内。例：ログインキーチェーンがロックされている）、`unavailable` のいずれかです。`detail` は補足がある場合だけ含まれます。人間向け出力では権限の表の後に `Store key: ...` の行が加わります。ストアがロックされていても `doctor` は失敗せず、鍵の状態を報告し、権限は自身のプロセスから probe します。
+`store_key` はストアの暗号化鍵の所在を報告します。`state` は `key_store`（鍵が見つかった。`detail` にログインキーチェーンか開発用上書き `ZANEI_STORE_KEY_FILE` かの所在が入る）、`not_needed`（ストアがない・平文・認識できない）、`missing`（ストアは暗号化されているが鍵がない）、`mismatch`（鍵でこのストアを復号できない）、`key_store_locked` / `key_store_denied`（`detail` にプラットフォームの案内。例：ログインキーチェーンがロックされている）、`unavailable` のいずれかです。`detail` は補足がある場合だけ含まれます。人間向け出力では権限の表の後に `Store key: ...` の行が加わります。ストアがロックされていても `doctor` は失敗せず、鍵の状態を報告し、権限は自身のプロセスから probe します。
 
 ### Recorder health
 
@@ -221,7 +221,7 @@ bootstrap 前は、永続化された recorder の last-known 権限報告を使
 
 `y` または `Y` のみが内容記録を有効にし、Enter、その他の回答、EOF、読取エラーは `false` を選びます。Zanei は `config set` と同じ経路で明示値を保存してファイルのその他の内容を維持し、`Text content will be recorded.` または `Text content stays off.` を表示します。bootstrap 後に確認した場合、`y` ではさらに `Restarting the recorder to apply text content capture...` と表示し、canonical な stop→start 経路で再起動します。`false` の回答は recorder の既定のオフ動作を維持するため、再起動しません。どちらの回答でもキーを書き込むため、確認は繰り返しません。
 
-この質問に回答した直後、`start` は content snapshot の設定案内を次の英語どおりに表示します。content snapshot の y/N は確認しません：
+この質問に回答した直後、`start` は content snapshot の設定案内を次の英語どおりに表示します。content snapshot の y/N は確認しません。
 
 ```text
 Content snapshots (text shown in apps you choose) are a separate opt-in. Choose the apps first
@@ -244,7 +244,7 @@ recorder は初回起動時にストアの暗号化鍵を生成し、「Zanei st
 ## `stop`
 
 選択したストアを所有する recorder instance を停止します。launchd recorder は登録解除し、
-foreground recorder には `SIGTERM` を送ります。**破壊的操作ではありません** — データは保持されます。
+foreground recorder には `SIGTERM` を送ります。**破壊的操作ではありません**。データは保持されます。
 対象 recorder がなければ**終了コード 4**。
 
 停止は 2 段階の bounded wait を順番に行います。まず選択した store owner の消失を最大 10 秒待ち、
@@ -381,7 +381,7 @@ zanei start
 
 ## `record`
 
-前面での捕捉：デーモン化せず、生イベントを NDJSON で stdout（またはファイル）へストリームします。パイプ実験・検証用 — 常用の記録は [`start`](#start) を使ってください。
+デーモン化せず、生イベントを NDJSON で stdout（またはファイル）へストリームします。パイプ実験・検証用です。常用の記録は [`start`](#start) を使ってください。
 
 ```bash
 zanei record --stream                 # NDJSON を stdout へ
@@ -411,13 +411,13 @@ zanei query --since 2h --app Safari --format json --limit 500
 | `--limit <N>` | 最大件数（既定 500） |
 | `--format` | `jsonl`（既定）/ `json` / `table` |
 
-これらは query-time フィルタです — 読み出しを絞るだけで、記録対象には影響しません（[フィルタ](/ja/guides/filters)参照）。
+これらは query-time フィルタで、読み出しを絞るだけです。記録対象には影響しません（[フィルタ](/ja/guides/filters)参照）。
 
 `--types` を省略すると `content.*` を除外します。snapshot 本文を読むときは `--types content.snapshot` または `--types content.*` を明示します。他の family と併記できます。`--format json` は event object の array のままです。store に未知の event type があれば skip し、件数を stderr に warning として出します。global `--quiet` で抑止できます。
 
 ## `timeline`
 
-生イベントをセッション分割・重複除去・coalesce し、token budget 内に収めた LLM 向け要約を返します。**agent が最もよく叩くコマンド**です。
+生イベントをセッション分割・重複除去・coalesce し、token budget 内に収めた LLM 向け要約を返します。agent が最もよく呼ぶコマンドです。
 
 ```bash
 zanei timeline --since 1h --format md --token-budget 4000
@@ -431,7 +431,7 @@ zanei timeline --since 30m --format json --granularity fine
 | `--token-budget <N>` | 概算トークン上限（既定 4000、下限 34）。超過分は粒度を粗くして収める |
 | `--granularity` | `coarse`（既定、セッション単位）/ `fine`（操作単位まで） |
 
-既定の `--format md` 出力（抜粋。activity の固定句と header は次のとおり出力されます）：
+既定の `--format md` 出力の抜粋です。activity の固定句と header は次のとおり出力されます。
 
 ```md
 # Zanei timeline
@@ -574,7 +574,7 @@ zanei config set capture.content_snapshot true
 Restart recording with `zanei stop && zanei start` for this to take effect.
 ```
 
-`config set capture.content_snapshot true` は、先に現在の app/site scope を表示し、既定 N の `[y/N]` を待ちます。有効な list に応じて summary を作り、削除までの時間には読み込んだ `output.retention_hours` を使います。既定値では次の英語を表示します：
+`config set capture.content_snapshot true` は、先に現在の app/site scope を表示し、既定 N の `[y/N]` を待ちます。有効な list に応じて summary を作り、削除までの時間には読み込んだ `output.retention_hours` を使います。既定値では次の英語を表示します。
 
 ```text
 Content snapshots record the text shown in the frontmost window, including messages and
@@ -597,7 +597,7 @@ Enable content snapshots with this scope? [y/N]
 
 ## `mcp`
 
-stdio MCP サーバを起動します — stdin/stdout 上の JSON-RPC で、ネットワーク面ゼロ。通常は MCP クライアント（Claude Code・Codex・opencode・Claude Desktop 等）から起動され、手で叩くものではありません。
+stdio MCP サーバを起動します。stdin/stdout 上の JSON-RPC で、ネットワークは一切使いません。通常は MCP クライアント（Claude Code・Codex・opencode・Claude Desktop 等）から起動され、手で叩くものではありません。
 
 ```bash
 zanei mcp [--store <PATH>]

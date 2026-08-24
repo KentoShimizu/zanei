@@ -3,7 +3,7 @@ title: Quickstart
 description: From install to your first timeline and agent integration. Takes about five minutes.
 ---
 
-Requires **macOS** (Apple Silicon or Intel) — currently the only supported platform.
+Requires **macOS** (Apple Silicon or Intel), currently the only supported platform.
 
 <Steps>
 <Step title="Install">
@@ -28,7 +28,7 @@ zanei start
 ```
 
 macOS asks for **Accessibility** first; an **Input Monitoring** dialog may follow, but on many
-systems it never appears. In that case run `zanei doctor --fix` — it opens the pane, copies the
+systems it never appears. In that case run `zanei doctor --fix`, which opens the pane, copies the
 installed `Zanei.app` path, and reveals the app in Finder so you can add it with `+`. While a
 permission is missing, `start` exits with code 3 and the recorder keeps running so you can grant
 it. Chrome Automation is a separate dialog that appears the first time Zanei contacts Chrome.
@@ -45,7 +45,7 @@ zanei stop && zanei start
 The first fully-granted interactive `start` asks once whether to record typed text and clipboard
 contents. Press Enter to keep it off (the default) or type `y`; the answer is saved to
 `config.toml`, and `zanei config set capture.text_content <true|false>` changes it later. Confirm
-with the recorder's own report — it is the source of truth even when a System Settings row is
+with the recorder's own report, which is authoritative even when a System Settings row is
 missing (details in the [permissions guide](/guides/permissions)):
 
 ```bash
@@ -66,7 +66,7 @@ Work normally for a bit, then pull up your recent history:
 zanei timeline --since 15m
 ```
 
-You get a session-structured, deduplicated Markdown timeline — the same form agents consume. For raw events, use `zanei query --since 15m` instead (see [retrieving data](/guides/timeline)).
+You get a Markdown timeline, split into sessions and deduplicated. This is the same form agents consume. For raw events, use `zanei query --since 15m` instead (see [retrieving data](/guides/timeline)).
 
 </Step>
 <Step title="Connect your agent (optional)">

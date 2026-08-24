@@ -3,13 +3,13 @@ title: 設定
 description: config.toml のスキーマ — 捕捉ソース・フィルタ・出力・保持期間。
 ---
 
-設定は単一の TOML ファイルにまとまっています：
+設定は単一の TOML ファイルにまとまっています。
 
 ```
 ~/.config/zanei/config.toml
 ```
 
-グローバルフラグ `--config <path>` で呼び出しごとに上書きできます。ヘルパーコマンド：
+グローバルフラグ `--config <path>` で呼び出しごとに上書きできます。ヘルパーコマンドは次のとおりです。
 
 ```bash
 zanei config init   # 設定パスに全項目のコメント付きテンプレートを生成
@@ -59,10 +59,10 @@ include_only_websites = []
 
 [output]
 batch_interval_s = 5
-retention_hours = 48            # 既定で短命保持
+retention_hours = 48            # 既定で短期保持
 ```
 
-egress に相当する設定は存在しません — 外部送信は機能として存在しないためです。
+egress に相当する設定はありません。外部送信という機能自体が存在しないためです。
 
 ## バリデーション
 
@@ -101,7 +101,7 @@ capture-time フィルタはストア書込**前に**適用されます。scope 
 | `include_only_websites` | `[]` | Chrome URL イベントと本文に対する URL host の許可リスト |
 | `redactors` | `["email", "credit_card", "token"]` | 捕捉値に適用する redaction ルール |
 
-nested scope も同じ 4 list 名を使います。既定値と挙動は上記のとおりです。デーモンは 3 scope すべてを約 2 秒間隔で監視しており、フィルタの変更は数秒以内に反映されます — デーモン再起動は不要です。
+nested scope も同じ 4 list 名を使います。既定値と挙動は上記のとおりです。デーモンは 3 scope すべてを約 2 秒間隔で監視しており、フィルタの変更はデーモン再起動なしで数秒以内に反映されます。
 
 :::warning[0.3.0 の挙動変更]
 新しい既定の `[filter.text_content].exclude_apps` は、既存の 0.2.x 設定ですでに `capture.text_content = true` でも適用されます。Safari・Firefox・Brave・Edge・Vivaldi・Arc の本文は既定で null になり、event と内容以外の事実は残ります。
@@ -119,11 +119,10 @@ nested scope も同じ 4 list 名を使います。既定値と挙動は上記�
 
 ## 変更の反映
 
-- `[filter]`・`[filter.text_content]`・`[filter.content_snapshot]` の変更はデーモンの設定監視（約 2 秒間隔）で検知され、数秒以内に反映されます — 再起動は不要です。
+- `[filter]`・`[filter.text_content]`・`[filter.content_snapshot]` の変更はデーモンの設定監視（約 2 秒間隔）で検知され、再起動なしで数秒以内に反映されます。
 - `output.retention_hours` は daemon 再起動なしで反映され、新しい保持期間の外にある
   event を即時 purge します。それ以外（`capture.sources`・`capture.content_snapshot`・`output.batch_interval_s` 等）は
-  デーモン再起動後に反映：
-  `zanei stop && zanei start`
+  `zanei stop && zanei start` でのデーモン再起動後に反映されます。
 
 ## 関連パス
 
@@ -132,4 +131,4 @@ nested scope も同じ 4 list 名を使います。既定値と挙動は上記�
 | `~/.config/zanei/config.toml` | 設定 | `--config <path>` |
 | `~/.local/state/zanei/store.sqlite` | イベントストア | `--store <path>` |
 
-イベントストアは暗号化されています。鍵は recorder の初回起動時に生成され、ログインキーチェーンに保存されます。暗号化に関する設定キーはありません。`ZANEI_STORE_KEY_FILE=<path>` を設定すると、すべての Zanei プロセスが代わりにそのファイルから鍵を読みます — ソースからのビルド向けの開発用上書きで、[CLI リファレンス](/ja/reference/cli#環境変数)に説明があります。
+イベントストアは暗号化されています。鍵は recorder の初回起動時に生成され、ログインキーチェーンに保存されます。暗号化に関する設定キーはありません。`ZANEI_STORE_KEY_FILE=<path>` を設定すると、すべての Zanei プロセスが代わりにそのファイルから鍵を読みます。これはソースからのビルド向けの開発用上書きで、[CLI リファレンス](/ja/reference/cli#環境変数)に説明があります。

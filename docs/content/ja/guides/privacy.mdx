@@ -27,9 +27,11 @@ Zanei は PC 上での操作を記録します。機微なデータなので既�
 
 ## 入力内容の記録は opt-in
 
-[設定](/ja/reference/config)で `capture.text_content = true` にすると、認可された打鍵文字（`input.key`）、フィールドに入力された差分（`ui.value.data.text`）、クリップボードの中身の記録が有効になります。自由入力フィールドで捕捉するのは、同じアプリ・同じフォーカス要素への打鍵またはペーストから 3 秒以内に増えた差分だけで、表示されている文書やフィールドの全体値ではありません。連続して入力している間は変更をまとめ、1 秒の間が空いたとき、または最長 5 秒ごとに記録します。コピー本文には、同じプロセスの Command-C と 500 ミリ秒以内に対応することも必要です。`element.value` は自由入力および不明な要素では null のままで、値を持つのは安全と分類した非テキスト要素（ボタン・チェックボックス・スライダー等）だけです。初回セットアップでは、`config.toml` に `capture.text_content` がまだ明示されていない場合、最初に成功した対話式のバックグラウンド `start` が選択を求めます。既定の回答は `N` なので、opt-in しなければ内容記録はオフのままです。回答は保存され、確認は繰り返しません。後から `zanei config set capture.text_content <true|false>` で変更できます。有効にした場合：
+[設定](/ja/reference/config)で `capture.text_content = true` にすると、認可された打鍵文字（`input.key`）、フィールドに入力された差分（`ui.value.data.text`）、クリップボードの中身の記録が有効になります。自由入力フィールドで捕捉するのは、同じアプリ・同じフォーカス要素への打鍵またはペーストから 3 秒以内に増えた差分だけで、表示されている文書やフィールドの全体値ではありません。連続して入力している間は変更をまとめ、1 秒の間が空いたとき、または最長 5 秒ごとに記録します。コピー本文には、同じプロセスの Command-C と 500 ミリ秒以内に対応することも必要です。`element.value` は自由入力および不明な要素では null のままで、値を持つのは安全と分類した非テキスト要素（ボタン・チェックボックス・スライダー等）だけです。初回セットアップでは、`capture.text_content` が `config.toml` に明示されていなければ、対話式のバックグラウンド `start` が記録するかどうかを一度だけ確認します（既定は記録しない。正確な条件は [CLI リファレンス](/ja/reference/cli#start)）。後から `zanei config set capture.text_content <true|false>` で変更できます。
 
 内容記録を有効にすると、Zanei は observer を attach するすべてのアプリにアクセシビリティツリーの構築を要求します。Electron アプリはこの要求を受けてツリーを構築し、未対応の native アプリは無視します。該当する Electron アプリでは、わずかな性能低下が生じる可能性があります。
+
+opt-in を有効にした場合の挙動は次のとおりです。
 
 - パスワード欄は引き続き除外されます（secure field は捕捉段階で破棄）。
 - Accessibility が既知の非 secure 入力欄を確認できない場合、`input.key.text` とペースト本文は null のままです。
@@ -53,7 +55,7 @@ Zanei は PC 上での操作を記録します。機微なデータなので既�
 
 Content snapshot は入力内容の捕捉とも `capture.sources` とも独立しています。secure field の subtree と単行入力欄の値は読みません。Secure Input 中は snapshot を取りません。ただし、入力したテキストがウィンドウ内の別の場所や複数行のテキスト領域に表示されると含まれ得ます。他人が書いた message・document・その他の表示テキストも含み得ます。
 
-有効化する前に scope を決めます：
+有効化する前に scope を決めます。
 
 ```bash
 zanei apps
@@ -74,16 +76,16 @@ recorder は 1 日の snapshot 本文が 128 MiB に達すると新しい snapsh
 
 ## Redaction
 
-捕捉された値についても、redactor が検出可能な機密情報 — メールアドレス・クレジットカード番号・トークン（`redactors = ["email", "credit_card", "token"]`）— をスクラブします。各イベントには `redaction` フィールドがあり、どのルールが適用されたかを判別できます。
+捕捉された値についても、redactor が検出可能な機密情報（メールアドレス・クレジットカード番号・トークン。`redactors = ["email", "credit_card", "token"]`）をスクラブします。各イベントには `redaction` フィールドがあり、どのルールが適用されたかを判別できます。
 
 ## 制限
 
-- **Chrome 以外の private window。** Safari・Firefox・Brave・Edge・Vivaldi・Arc には、Zanei が利用できる信頼できる private-window signal がありません。そのため両方の `[filter.text_content]` と `[filter.content_snapshot]` で既定除外します。この既定値は編集できますが、外すと private window の本文を記録し得ます。ウィンドウタイトルは全 event の `[filter]` scope で別に扱うため、タイトルも抑止するにはそこで browser を除外します。Safari の例：`zanei filter exclude-app add com.apple.Safari`。
+- **Chrome 以外の private window。** Safari・Firefox・Brave・Edge・Vivaldi・Arc には、Zanei が利用できる信頼できる private-window signal がありません。そのため `[filter.text_content]` と `[filter.content_snapshot]` の両方で既定除外します。この既定値は編集できますが、外すと private window の本文を記録し得ます。ウィンドウタイトルは全 event の `[filter]` scope で別に扱うため、タイトルも抑止するにはそこで browser を除外します。Safari の例：`zanei filter exclude-app add com.apple.Safari`。
 - **website scope は Chrome のみ。** Zanei が URL と window mode を取得できる browser は Chrome だけです。他の browser に website rule は効かず、app scope だけで制御します。
 - **Chrome incognito・除外サイトのウィンドウタイトル。** 本文は null のままですが、Accessibility はタイトルを `window.title` イベントとして記録し得ます。タイトルも抑止するには Chrome 自体を除外してください：`zanei filter exclude-app add com.google.Chrome`。
 - **シェルを持つ agent。** シェルアクセスを持つ agent は、host の承認ポリシーに従い、CLI 経由で記録設定・フィルタ・保存済み記録を変更できます。同梱の skill は、ユーザーの明示的な依頼なしにこれらを変更しないよう指示しています。
-- **あなたとして `zanei` を実行できるプロセス。** 暗号化が守るのはファイルのコピーであって、CLI ではありません。あなたのユーザーとして動くもの — `zanei export` を実行できる、シェルを持つ agent を含む — はデータを読めます。root や、プロセスメモリを読めるものも同様です。ディスク自体の盗難は Zanei ではなく FileVault が覆います。
-- **agent がデータを読んだ後。** MCP サーバも CLI も外部送信はしませんが、タイムラインを読んだ agent は通常それを LLM プロバイダに送ります。そのホップは agent の管轄です。同梱の skill には送信前に範囲を絞るよう書いています。
+- **あなたとして `zanei` を実行できるプロセス。** 暗号化が守るのはファイルのコピーであって、CLI ではありません。あなたのユーザーとして動くプロセスはデータを読めます。`zanei export` を実行できる、シェルを持つ agent もその一つです。root や、プロセスメモリを読めるものも同様です。ディスクごと盗まれた場合の保護は Zanei ではなく FileVault の役割です。
+- **agent がデータを読んだ後。** MCP サーバも CLI も外部送信はしませんが、タイムラインを読んだ agent は通常それを LLM プロバイダに送ります。その送信は agent 側の責任です。同梱の skill には送信前に範囲を絞るよう書いています。
 
 ## 想定用途
 

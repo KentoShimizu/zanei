@@ -5,11 +5,11 @@ description: プライバシー・ブラウザ対応・データアクセス・�
 
 ## これはキーロガーですか？
 
-いいえ。キー入力の内容は、opt-in（`text_content = true`）しない限り捕捉されません。既定で記録されるのは入力があった事実とフィールド種別だけです。判断がまだ保存されていなければ、最初に成功した対話式のバックグラウンド `start` が選択を求め、既定は `N` です。回答は保存されるため、確認は繰り返しません。後から `zanei config set capture.text_content <true|false>` で変更できます。opt-in してもパスワード欄は除外され、redactor が検出可能な機密をスクラブし、データはマシンの外に出ません。[プライバシーモデル](/ja/guides/privacy)参照。
+いいえ。キー入力の内容は、opt-in（`text_content = true`）しない限り捕捉されません。既定で記録されるのは入力があった事実とフィールド種別だけです。`capture.text_content` が未設定なら、対話式のバックグラウンド `start` が記録するかどうかを一度だけ確認します（既定は記録しない。正確な条件は [CLI リファレンス](/ja/reference/cli#start)）。`zanei config set capture.text_content <true|false>` でいつでも変更できます。opt-in してもパスワード欄は除外され、redactor が検出可能な機密をスクラブし、データはマシンの外に出ません。[プライバシーモデル](/ja/guides/privacy)参照。
 
 ## データはどこへ行きますか？
 
-ローカルの SQLite ファイル（`~/.local/state/zanei/store.sqlite`）ただ一つに入り、他のどこにも行きません。このファイルは暗号化されており、鍵はログインキーチェーンにあります。バイナリにはデータを送信する機能がありません — エンドポイントもテレメトリもアカウントも存在しません。既定では 48 時間で自動削除されます。
+ローカルの SQLite ファイル（`~/.local/state/zanei/store.sqlite`）だけに保存され、ほかの場所には置かれません。このファイルは暗号化されており、鍵はログインキーチェーンにあります。バイナリにはデータを送信する機能自体がなく、エンドポイントもテレメトリもアカウントもありません。既定では 48 時間で自動削除されます。
 
 ## スクリーンショットを取りますか？
 
@@ -21,7 +21,7 @@ macOS Accessibility で有用なテキストを公開する app だけです。�
 
 ## どのブラウザの URL が取れますか？Safari は？
 
-**現在は Chrome のみ**です。Chromium の AppleScript インターフェースが返す window mode を使い、incognito の URL イベントと本文を抑止します。Safari と Firefox には信頼できる同等の手段がないため、URL 捕捉は実装していません。詳細とブラウザ別の表は[イベントリファレンス](/ja/reference/events#ブラウザの-url-捕捉)へ。
+現在は Chrome のみです。Chromium の AppleScript インターフェースが返す window mode を使い、incognito の URL イベントと本文を抑止します。Safari と Firefox には信頼できる同等の手段がないため、URL 捕捉は実装していません。詳細とブラウザ別の表は[イベントリファレンス](/ja/reference/events#ブラウザの-url-捕捉)へ。
 
 ## 特定のアプリやサイトを記録から外すには？
 
@@ -30,7 +30,7 @@ zanei filter exclude-app add com.example.app
 zanei filter exclude-site add example.com
 ```
 
-これらは capture-time フィルタです：該当イベントはストアに書き込まれる前に破棄されるため、後から掃除する必要がありません。パスワードマネージャは既定で除外済みです。[フィルタ](/ja/guides/filters)参照。
+これらは capture-time フィルタで、該当イベントはストアに書き込まれる前に破棄されます。後から掃除する必要はありません。パスワードマネージャは既定で除外済みです。[フィルタ](/ja/guides/filters)参照。
 
 ## opt-in すれば Claude / Slack / VS Code などの Electron アプリでも本文は取れますか？
 
@@ -59,17 +59,17 @@ zanei filter exclude-site add example.com
 
 稼働中のストアは [SQLCipher](https://www.zetetic.net/sqlcipher/)（AES-256）で暗号化されています。鍵は「Zanei store key」としてログインキーチェーンにあり、この Mac の外には出ません。そのため、バックアップや同期フォルダ、別のマシンにあるファイルのコピーは、鍵なしでは読めません。
 
-自分のツールで中身を見るには、平文の SQLite スナップショットを書き出します：
+自分のツールで中身を見るには、平文の SQLite スナップショットを書き出します。
 
 ```bash
 zanei export --format sqlite --since 24h --out snapshot.sqlite
 ```
 
-稼働中のストアと同じテーブルを持ち、`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディングで開けます — `zanei query --store snapshot.sqlite` でも読めます。スナップショットは暗号化されていないので、他のエクスポートと同じように扱ってください。scope 内なら content-snapshot 本文も含みます。共有・外部処理から除くには、たとえば `--types app.*,window.*,ui.*,input.*,browser.*,clipboard.*` で他の family だけを選びます。多くの用途では引き続き `zanei query --format jsonl` のほうが簡単で、バージョン間で変わり得る内部テーブル構造ではなく、安定したイベントエンベロープの上に乗れます。
+稼働中のストアと同じテーブルを持ち、`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディングで開けます。`zanei query --store snapshot.sqlite` でも読めます。スナップショットは暗号化されていないので、他のエクスポートと同じように扱ってください。scope 内なら content-snapshot 本文も含みます。共有・外部処理から除くには、たとえば `--types app.*,window.*,ui.*,input.*,browser.*,clipboard.*` で他の family だけを選びます。多くの用途では引き続き `zanei query --format jsonl` のほうが簡単で、バージョン間で変わり得る内部テーブル構造ではなく、安定したイベントエンベロープの上に乗れます。
 
 ## ChatGPT の Computer History と何が違いますか？
 
-アイデアは同じ（あなたの行動を AI の文脈にする）で、アーキテクチャが違います：オープンソース、保存はローカルのみ、クラウド処理なし、特定のアシスタントに縛られない面（CLI / skill / MCP）。Zanei は構造化された LLM-ready データまでで止まり、解釈は接続した agent が行います。
+発想は同じで、どちらも自分の行動を AI の文脈にします。違うのはアーキテクチャです。Zanei はオープンソースで、保存はローカルのみ、クラウド処理はなく、接続先も特定のアシスタントに縛られません（CLI / skill / MCP）。構造化された LLM-ready データを返すところまでが Zanei の仕事で、解釈は接続した agent が行います。
 
 ## Windows や Linux では動きますか？
 
@@ -81,7 +81,7 @@ Zanei は自分のマシン上の自分の操作を記録するツールです�
 
 ## 権限を付与したのに `doctor` が `denied` のままです
 
-権限の切り替えは、対象プロセスの再起動後に正しく反映されることがあります。`zanei stop && zanei start` してから、もう一度 `zanei doctor` を実行してください。`tccutil reset` 後は tccd 側の抑制により、macOS を再起動するまで権限ダイアログが再表示されないことがあります（実機で確認済み）。ソースからビルドした場合は、権限が署名 ID に紐づく点にも注意 — ビルドし直したバイナリは再付与が必要になることがあります（[権限とコード署名](/ja/guides/permissions#権限とコード署名)）。
+権限の切り替えは、対象プロセスの再起動後に正しく反映されることがあります。`zanei stop && zanei start` してから、もう一度 `zanei doctor` を実行してください。`tccutil reset` 後は tccd 側の抑制により、macOS を再起動するまで権限ダイアログが再表示されないことがあります（実機で確認済み）。ソースからビルドした場合は、権限が署名 ID に紐づく点にも注意してください。ビルドし直したバイナリは再付与が必要になることがあります（[権限とコード署名](/ja/guides/permissions#権限とコード署名)）。
 
 ## `zanei start` が終了コード 3 を返しました。recorder は動いていますか？
 
@@ -144,7 +144,7 @@ Zanei 0.3.0 以降はストアを暗号化します。0.2.x 以前が書いた�
 
 ## タイムラインが空です
 
-次の順で確認してください：
+次の順で確認してください。
 
 1. `zanei status` — `running` ですか？違うなら `zanei start`。
 2. `zanei doctor` — 権限は揃っていますか？（権限不足は終了コード 3）
@@ -153,7 +153,7 @@ Zanei 0.3.0 以降はストアを暗号化します。0.2.x 以前が書いた�
 
 ## `status` が `store_corrupt` を返します
 
-記録を停止し、破損ファイルを別名で退避してから、新しいストアで開始します：
+記録を停止し、破損ファイルを別名で退避してから、新しいストアで開始します。
 
 ```bash
 zanei stop
@@ -167,7 +167,7 @@ zanei start
 
 ## テキスト本文が捕捉されません
 
-判断がまだ保存されていなければ、最初に成功した対話式のバックグラウンド `start` が内容記録を有効にするか確認し、Enter は既定の `N` を選びます。`zanei status` を確認し、`TEXT CONTENT` が off なら、明示的に有効化して記録を再起動します。
+テキスト本文が記録されるのは、opt-in が有効な間だけです。`zanei status` を確認し、`TEXT CONTENT` が off なら、明示的に有効化して記録を再起動します。
 
 ```bash
 zanei config set capture.text_content true
@@ -189,4 +189,4 @@ ZANEI_TRACE=1 zanei start --foreground 2> ~/zanei-trace.log
 
 ## その他の質問
 
-Issue を開いてください — インターフェースを確定させている今の段階では、バグ報告も設計議論も歓迎です。
+Issue を開いてください。インターフェースを確定させている今の段階では、バグ報告も設計議論も歓迎です。
