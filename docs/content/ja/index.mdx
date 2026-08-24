@@ -64,7 +64,7 @@ flowchart LR
 | インターフェース | 役割 |
 | --- | --- |
 | [CLI](/ja/reference/cli) | 操作の中核。記録の開始・停止、権限診断、タイムライン取得、フィルタ管理まですべて単一バイナリ `zanei` で行います。 |
-| [MCP サーバ](/ja/reference/mcp) | 同じストアへの read-only ビュー。シェルを持たない MCP クライアント（Claude Desktop 等）はこの経路で接続します。 |
+| [MCP サーバ](/ja/reference/mcp) | 同じストアへの read-only ビュー。シェルを持たない MCP クライアント（Claude Desktop 等）にとっては唯一の経路です。 |
 
 agent 向けには、[`zanei setup`](/ja/agents/setup) が skill（いつ Zanei を呼ぶかを agent に伝える指示）も提供します。skill 対応 agent には配置し、その他の CLI agent には導出した指示を表示します。MCP のツールは説明をプロトコル内に持っています。
 

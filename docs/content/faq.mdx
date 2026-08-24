@@ -5,7 +5,7 @@ description: Common questions about privacy, browser support, data access, platf
 
 ## Is this a keylogger?
 
-No. Keystroke content is not captured unless you opt in (`text_content = true`); by default only the fact of typing and the field type are recorded. The first fully-granted interactive `start` asks once whether to opt in, defaulting to no, and `zanei config set capture.text_content <true|false>` changes it later. Password fields are excluded even if you opt in, redactors scrub recognizable secrets, and data does not leave your machine. See the [privacy model](/guides/privacy).
+No. Keystroke content is not captured unless you opt in (`text_content = true`); by default only the fact of typing and the field type are recorded. If `capture.text_content` is not yet set, an interactive background `start` asks you once, defaulting to no (the exact conditions are in the [CLI reference](/reference/cli#start)), and `zanei config set capture.text_content <true|false>` changes it at any time. Password fields are excluded even if you opt in, redactors scrub recognizable secrets, and data does not leave your machine. See the [privacy model](/guides/privacy).
 
 ## Where does my data go?
 
@@ -167,7 +167,7 @@ Replace the path when using `--store`. This does not repair or delete the moved 
 
 ## Text content is not captured
 
-Text content stays off unless you opted in at first start. Check `zanei status`; if `TEXT CONTENT` is off, enable it explicitly and restart recording:
+Text content is recorded only while the opt-in is enabled. Check `zanei status`; if `TEXT CONTENT` is off, enable it explicitly and restart recording:
 
 ```bash
 zanei config set capture.text_content true
