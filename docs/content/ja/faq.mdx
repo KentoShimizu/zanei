@@ -42,6 +42,19 @@ zanei filter exclude-site add example.com
 記録しないため、パスワード欄は除外されたままです。`capture.text_content` を変更したら Zanei を
 再起動してください。
 
+## 一部の Chromium 系アプリで入力本文や content snapshot が捕捉されないのはなぜですか？
+
+一部の Chromium 系アプリは、外部クライアントにアクセシビリティの content tree を公開しません。
+2026 年 8 月の確認では、ChatGPT デスクトップがその一例でした。アプリがその tree を公開しない
+場合、その content の入力本文（`ui.value` / `data.text`）と content snapshot（`content.snapshot`）は
+欠落し、Zanei が代わりに画面画像を使うこともありません。キー入力があった事実（`input.key` の回数
+など）は引き続き記録されます。クリックは AX hit-testing が機能する範囲でのみ記録されます。クリップボード
+のコピー／ペーストイベントは、本文が省略される場合も記録されます。コピー本文は macOS pasteboard から
+直接取得し、`capture.text_content` が有効で、コピー元 window で text capture が許可されている場合にだけ
+記録できます。この経路に AX tree は不要です。ペースト本文には、貼り付け先 window で同じ text-capture 条件が
+適用され、さらに AX が貼り付け先を text field と分類できる必要があります。分類できなければ、ペーストイベント
+の本文は `null` になります。
+
 ## ストアを直接読んでもいいですか？
 
 稼働中のストアは [SQLCipher](https://www.zetetic.net/sqlcipher/)（AES-256）で暗号化されています。鍵は「Zanei store key」としてログインキーチェーンにあり、この Mac の外には出ません。そのため、バックアップや同期フォルダ、別のマシンにあるファイルのコピーは、鍵なしでは読めません。

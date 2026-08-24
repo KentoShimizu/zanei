@@ -42,6 +42,19 @@ typed text is not captured — but text you copy there, and the fact of typing, 
 Zanei never captures a field it cannot classify, which keeps password fields out. Restart Zanei
 after changing `capture.text_content`.
 
+## Why are typed text and content snapshots missing in some Chromium-based apps?
+
+Some Chromium-based apps do not expose an accessibility content tree to external clients; ChatGPT
+desktop was one observed example in August 2026 testing. If an app does not expose that tree,
+typed-text bodies (`ui.value` / `data.text`) and content snapshots (`content.snapshot`) for that
+content are missing, and Zanei does not use screen images as a substitute. Keystroke facts (such as
+`input.key` counts) are still recorded. Clicks are recorded only to the extent AX hit-testing works.
+Clipboard copy and paste events are still recorded when their bodies are omitted. For copy, the body
+comes directly from the macOS pasteboard and can be recorded only when `capture.text_content` is
+enabled and the source window is allowed for text capture; this path does not require an AX tree. For
+paste, those text-capture conditions apply to the destination window and AX must also classify the
+destination as a text field. If it cannot, the paste event is recorded with a `null` body.
+
 ## Can I read the store directly?
 
 The live store is encrypted with [SQLCipher](https://www.zetetic.net/sqlcipher/) (AES-256). The key lives in your login Keychain as "Zanei store key" and never leaves this Mac, so a copy of the file — in a backup, a sync folder, or on another machine — cannot be read without it.
