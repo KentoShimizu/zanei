@@ -4,6 +4,7 @@ use std::{
     ffi::{CStr, c_char, c_void},
     ptr::NonNull,
 };
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 
 #[cfg(target_arch = "x86_64")]
 type ObjcBool = i8;
@@ -11,11 +12,10 @@ type ObjcBool = i8;
 type ObjcBool = bool;
 
 const FRONT_WINDOW_SCRIPT_TEMPLATE: &str = r#"
-set chromeApp to path to application id "com.google.Chrome"
 using terms from application "{application_path}"
 with timeout of 1 second
-    if application chromeApp is not running then return {"not_running"}
-    tell application chromeApp
+    if not (running of application id "{bundle_id}") then return {"not_running"}
+    tell application id "{bundle_id}"
         if (count of windows) is 0 then return {"no_window"}
 
         set current_window to front window
@@ -31,21 +31,13 @@ end using terms from
 "#;
 
 const TARGET_WINDOW_SCRIPT_TEMPLATE: &str = r#"
-set chromeApp to path to application id "com.google.Chrome"
 using terms from application "{application_path}"
 with timeout of 1 second
-    if application chromeApp is not running then return {"not_running"}
-    tell application chromeApp
-        set target_window_id to "{window_id}"
-        set current_window to missing value
-        repeat with candidate_window in every window
-            if ((id of candidate_window) as text) is target_window_id then
-                set current_window to contents of candidate_window
-                exit repeat
-            end if
-        end repeat
-        if current_window is missing value then return {"no_window"}
+    if not (running of application id "{bundle_id}") then return {"not_running"}
+    tell application id "{bundle_id}"
+        if not (exists window id "{window_id}") then return {"no_window"}
 
+        set current_window to window id "{window_id}"
         set current_mode to (mode of current_window) as text
         if current_mode is "incognito" then return {"incognito"}
         if current_mode is not "normal" then return {"unsupported_mode", current_mode}
@@ -166,7 +158,7 @@ impl AppleScriptClient {
 fn chrome_application_path() -> Result<String, AppleScriptError> {
     let class = class(c"NSWorkspace", "NSWorkspace")?;
     let workspace = send_object(class, c"sharedWorkspace");
-    let bundle_id = autoreleased_string("com.google.Chrome")?;
+    let bundle_id = autoreleased_string(CHROME_BUNDLE_ID)?;
     let url = send_object_with_object(
         workspace,
         c"URLForApplicationWithBundleIdentifier:",
@@ -177,21 +169,23 @@ fn chrome_application_path() -> Result<String, AppleScriptError> {
 }
 
 fn front_window_source(application_path: &str) -> String {
-    substitute_application_path(FRONT_WINDOW_SCRIPT_TEMPLATE, application_path)
+    render_script_template(FRONT_WINDOW_SCRIPT_TEMPLATE, application_path)
 }
 
 fn target_window_source(application_path: &str, window_id: &AppleScriptWindowId) -> String {
     let escaped_window_id = escape_applescript_string(window_id.as_str());
     TARGET_WINDOW_SCRIPT_TEMPLATE
         .split("{window_id}")
-        .map(|segment| substitute_application_path(segment, application_path))
+        .map(|segment| render_script_template(segment, application_path))
         .collect::<Vec<_>>()
         .join(&escaped_window_id)
 }
 
-fn substitute_application_path(template: &str, application_path: &str) -> String {
+fn render_script_template(template: &str, application_path: &str) -> String {
     let escaped_path = escape_applescript_string(application_path);
-    template.replace("{application_path}", &escaped_path)
+    template
+        .replace("{bundle_id}", CHROME_BUNDLE_ID)
+        .replace("{application_path}", &escaped_path)
 }
 
 fn escape_applescript_string(value: &str) -> String {
@@ -499,15 +493,32 @@ mod tests {
     }
 
     #[test]
-    fn targeted_source_matches_only_the_chrome_reported_window_identity() {
+    fn sources_address_chrome_by_bundle_id_without_an_application_alias() {
+        let application_path = "/Applications/Google Chrome.app";
+        let window_id = AppleScriptWindowId::for_test("window-4321");
+
+        for source in [
+            front_window_source(application_path),
+            target_window_source(application_path, &window_id),
+        ] {
+            assert!(source.contains(
+                "if not (running of application id \"com.google.Chrome\") then return {\"not_running\"}"
+            ));
+            assert!(source.contains("tell application id \"com.google.Chrome\""));
+            assert!(!source.contains("path to application id"));
+            assert!(!source.contains("application chromeApp"));
+        }
+    }
+
+    #[test]
+    fn targeted_source_reads_only_the_chrome_reported_window_identity() {
         let window_id = AppleScriptWindowId::for_test("window-4321");
 
         let source = target_window_source("/Applications/Google Chrome.app", &window_id);
 
-        assert!(source.contains("set target_window_id to \"window-4321\""));
-        assert!(source.contains("((id of candidate_window) as text) is target_window_id"));
-        assert!(source.contains("if current_window is missing value then return {\"no_window\"}"));
-        assert!(!source.contains("window id"));
+        assert!(source.contains("if not (exists window id \"window-4321\")"));
+        assert!(source.contains("set current_window to window id \"window-4321\""));
+        assert!(!source.contains("every window"));
         assert!(!source.contains("front window"));
     }
 
@@ -518,8 +529,8 @@ mod tests {
         let source = target_window_source("/Applications/Google Chrome.app", &window_id);
 
         let escaped = "window-\\\\\\\" & return {\\\"private\\\"} & \\\"";
-        assert_eq!(source.matches(escaped).count(), 1);
-        assert!(!source.contains("set target_window_id to \"window-\" & return"));
+        assert_eq!(source.matches(escaped).count(), 2);
+        assert!(!source.contains("window id \"window-\" & return"));
     }
 
     #[test]
@@ -530,7 +541,7 @@ mod tests {
         let source = target_window_source(application_path, &window_id);
 
         assert_eq!(source.matches(application_path).count(), 1);
-        assert_eq!(source.matches(window_id.as_str()).count(), 1);
+        assert_eq!(source.matches(window_id.as_str()).count(), 2);
     }
 }
 
