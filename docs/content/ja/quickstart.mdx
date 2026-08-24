@@ -43,6 +43,8 @@ zanei stop && zanei start
 zanei doctor
 ```
 
+前面ウィンドウに表示された Accessibility text の記録は別の opt-in で、既定はオフです。先に `[filter.content_snapshot]` の `include_only_apps` / `include_only_websites` で scope を絞り（アプリ選択には `zanei apps`）、それから `zanei config set capture.content_snapshot true` を実行すると、現在の scope が表示され確認を求められます（詳細は[設定](/ja/reference/config)と[フィルタ](/ja/guides/filters)）。
+
 </Step>
 <Step title="タイムラインを取得する">
 
@@ -73,8 +75,9 @@ zanei setup --agent claude
 - データはローカルの SQLite（`~/.local/state/zanei/store.sqlite`）に保存され、外部には送信されません。
 - キー入力の内容は、初回 `start` で選んだ場合にのみ記録されます（既定はオフ。
   `zanei config set capture.text_content <true|false>` で変更可能）。
+- 前面ウィンドウに表示されたテキスト（content snapshot）は別の opt-in で、既定では記録されません。`zanei config set capture.content_snapshot true` で有効化できます。
 - 記録は既定 48 時間で自動削除されます（[設定](/ja/reference/config)で変更可能）。
-- 記録したくないアプリやサイトは、[フィルタ](/ja/guides/filters)で書き込まれる前に除外できます。
+- 記録したくないアプリやサイトは、[フィルタ](/ja/guides/filters)で書き込まれる前に除外できます。入力テキストの記録と content snapshot には、それぞれ専用のアプリ・サイト単位の scope もあります。
 
 :::note[止めたくなったら]
 `zanei pause --for 1h` で一時停止、`zanei stop` で完全停止（データは保持）、`zanei purge --all` で全データ削除です。
