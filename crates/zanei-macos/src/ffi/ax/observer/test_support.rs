@@ -8,11 +8,10 @@ use super::{
         cf::{CfRef, cf_string},
         value_context::FocusedValueContext,
     },
-    AppObserver, RegisteredFocusedTarget, ValueNotificationRegistration,
+    AppObserver, RegisteredFocusedTarget,
 };
 use crate::{
     capture_policy::CapturePolicy, chrome::chrome_eligibility_channel, focused_field::FieldClass,
-    text_capture::FocusedTarget,
 };
 
 impl AppObserver {
@@ -27,51 +26,47 @@ impl AppObserver {
             sender,
             dropped: Arc::new(AtomicU64::new(0)),
         });
-        let mut focused_target = FocusedTarget::new();
-        let generation = focused_target.next_generation();
-        let installed = focused_target.transition::<()>(Ok(Some(RegisteredFocusedTarget {
-            element,
-            context: FocusedValueContext::new(
-                None,
-                NativeElement {
-                    role: None,
-                    subrole: None,
-                    title: None,
-                    value: None,
-                    value_len: None,
-                },
-                false,
-                None,
-                generation,
-                FieldClass::Unknown,
-            ),
-            value_notification: ValueNotificationRegistration::default(),
-        })));
-        assert!(installed.is_ok(), "install fake focused target");
         let filter = FilterConfig::default();
         let (_, chrome) = chrome_eligibility_channel(filter.clone());
-
-        Self {
+        let mut observer = Self::new(
             application,
             observer,
             source,
             context,
-            window_target: None,
-            focused_target,
-            retired_contexts: Vec::new(),
-            stale_targets: Vec::new(),
-            degraded: Arc::new(AtomicU64::new(0)),
-            capture_text_content: false,
-            app: App {
+            Arc::new(AtomicU64::new(0)),
+            false,
+            App {
                 name: "Fake".to_owned(),
                 bundle_id: Some("dev.zanei.fake".to_owned()),
                 pid: Some(7),
             },
-            capture_policy: CapturePolicy::new(chrome, filter, None),
-            manual_accessibility: false,
-            accessibility_activation: Default::default(),
-            skip_native_cleanup: true,
-        }
+            CapturePolicy::new(chrome, filter, None),
+            false,
+        );
+        observer.skip_native_cleanup = true;
+        let generation = observer.focused_target.next_generation();
+        let installed =
+            observer
+                .focused_target
+                .transition::<()>(Ok(Some(RegisteredFocusedTarget {
+                    element,
+                    context: FocusedValueContext::new(
+                        None,
+                        NativeElement {
+                            role: None,
+                            subrole: None,
+                            title: None,
+                            value: None,
+                            value_len: None,
+                        },
+                        false,
+                        None,
+                        generation,
+                        FieldClass::Unknown,
+                    ),
+                })));
+        assert!(installed.is_ok(), "install fake focused target");
+        observer
     }
 
     pub(in crate::ffi::ax) fn fake_focused_element(&self) -> CfRef {

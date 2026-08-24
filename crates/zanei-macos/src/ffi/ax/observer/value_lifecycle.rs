@@ -53,7 +53,10 @@ impl AppObserver {
                 );
                 return Ok(Vec::new());
             };
-            if !target.value_notification.accepts_delivery() {
+            if !self
+                .notifications
+                .accepts_delivery(target.element.as_ptr(), "AXValueChanged")
+            {
                 crate::trace::trace!(
                     "component=ax phase=value action=observe pid={} target_generation={} result=registration_missing",
                     self.context.pid,
@@ -65,7 +68,8 @@ impl AppObserver {
             let previous_class = context.field_class;
             let snapshot =
                 value_snapshot(target.element.as_ptr(), capture_text_content, secure_input);
-            let registration_class = (!snapshot.degraded).then_some(snapshot.field_class);
+            let registration_class =
+                (!secure_input && !snapshot.degraded).then_some(snapshot.field_class);
             crate::trace::trace!(
                 "component=ax phase=value action=observe pid={} target_generation={} field_class={} value_len={} degraded={}",
                 self.context.pid,
@@ -113,9 +117,6 @@ impl AppObserver {
     ) -> Vec<NativeAxEvent> {
         let pid = self.context.pid;
         let mut events = Vec::new();
-        if secure_input {
-            self.reconcile_current_value_notification(FieldClass::SecureText);
-        }
         if let Some(context) = self
             .focused_target
             .current_mut()
@@ -152,9 +153,6 @@ impl AppObserver {
     ) -> Vec<NativeAxEvent> {
         let pid = self.context.pid;
         let mut events = Vec::new();
-        if secure_input {
-            self.reconcile_current_value_notification(FieldClass::SecureText);
-        }
         if let Some(context) = self
             .focused_target
             .current_mut()
@@ -231,7 +229,8 @@ impl AppObserver {
                     target.element.as_ptr(),
                     target.context.generation,
                     target.context.field_class,
-                    target.value_notification.accepts_delivery(),
+                    self.notifications
+                        .accepts_delivery(target.element.as_ptr(), "AXValueChanged"),
                 )
             })
         else {
@@ -262,7 +261,8 @@ impl AppObserver {
                 .map_or((previous_class, false), |target| {
                     (
                         target.context.field_class,
-                        target.value_notification.accepts_delivery(),
+                        self.notifications
+                            .accepts_delivery(target.element.as_ptr(), "AXValueChanged"),
                     )
                 });
         match registration {
@@ -305,19 +305,26 @@ impl AppObserver {
         previous_class != field_class
     }
 
-    pub(in crate::ffi::ax) fn refresh_current_field_class_with<E>(
+    pub(in crate::ffi::ax) fn refresh_current_field_class_with(
         &mut self,
         snapshot: ValueFieldSnapshot,
         authorizations: &mut InputAuthorizations,
-        register: impl FnOnce() -> Result<(), E>,
-        unregister: impl FnOnce() -> Result<(), E>,
-    ) -> Result<(), RegistrationError<E>> {
+        register: impl FnOnce() -> Result<(), NativeAxError>,
+        unregister: impl FnOnce() -> Result<(), NativeAxError>,
+    ) -> Result<(), RegistrationError> {
         let Some(snapshot) = classified_field_snapshot(snapshot) else {
             return Ok(());
         };
         let field_class = snapshot.field_class;
-        let registration =
-            self.reconcile_current_value_notification_with(field_class, register, unregister);
+        let registration = snapshot
+            .registration_class
+            .map_or(Ok(()), |registration_class| {
+                self.reconcile_current_value_notification_with(
+                    registration_class,
+                    register,
+                    unregister,
+                )
+            });
         if matches!(&registration, Err(RegistrationError::Register(_))) {
             return registration;
         }
@@ -347,7 +354,9 @@ impl AppObserver {
         let Some(target) = self.focused_target.current() else {
             return false;
         };
-        let was_active = target.value_notification.accepts_delivery();
+        let was_active = self
+            .notifications
+            .accepts_delivery(target.element.as_ptr(), "AXValueChanged");
         let element = target.element.as_ptr();
         let generation = target.context.generation;
         let registration = self.reconcile_current_value_notification_with(
@@ -355,10 +364,10 @@ impl AppObserver {
             || add_notification(observer, element, "AXValueChanged", context_pointer),
             || remove_notification(observer, element, "AXValueChanged"),
         );
-        let is_active = self
-            .focused_target
-            .current()
-            .is_some_and(|target| target.value_notification.accepts_delivery());
+        let is_active = self.focused_target.current().is_some_and(|target| {
+            self.notifications
+                .accepts_delivery(target.element.as_ptr(), "AXValueChanged")
+        });
         match registration {
             Err(RegistrationError::Register(error)) => {
                 crate::trace::trace!(
@@ -400,18 +409,22 @@ impl AppObserver {
         true
     }
 
-    pub(in crate::ffi::ax) fn reconcile_current_value_notification_with<E>(
+    pub(in crate::ffi::ax) fn reconcile_current_value_notification_with(
         &mut self,
         field_class: FieldClass,
-        register: impl FnOnce() -> Result<(), E>,
-        unregister: impl FnOnce() -> Result<(), E>,
-    ) -> Result<(), RegistrationError<E>> {
-        let Some(target) = self.focused_target.current_mut() else {
+        register: impl FnOnce() -> Result<(), NativeAxError>,
+        unregister: impl FnOnce() -> Result<(), NativeAxError>,
+    ) -> Result<(), RegistrationError> {
+        let Some(target) = self.focused_target.current() else {
             return Ok(());
         };
-        target
-            .value_notification
-            .reconcile(field_class, register, unregister)
+        self.notifications.reconcile(
+            &target.element,
+            "AXValueChanged",
+            field_class,
+            register,
+            unregister,
+        )
     }
 
     pub(super) fn resolve_focus_change(
@@ -431,7 +444,10 @@ impl AppObserver {
         let Some(target) = self.focused_target.current_mut() else {
             return FocusChangeResolution::Immediate(None);
         };
-        if !target.value_notification.accepts_delivery() {
+        if !self
+            .notifications
+            .accepts_delivery(target.element.as_ptr(), "AXValueChanged")
+        {
             return FocusChangeResolution::Immediate(None);
         }
         let context = &mut target.context;

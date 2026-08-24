@@ -49,6 +49,7 @@ pub(super) struct ValueFieldSnapshot {
     pub(super) role: Option<String>,
     pub(super) subrole: Option<String>,
     pub(super) field_class: FieldClass,
+    pub(super) registration_class: Option<FieldClass>,
     pub(super) degraded: bool,
 }
 
@@ -220,6 +221,7 @@ pub(super) fn value_field_snapshot(element: CfRef, secure_input: bool) -> ValueF
             role: None,
             subrole: None,
             field_class: FieldClass::SecureText,
+            registration_class: None,
             degraded: false,
         };
     }
@@ -234,6 +236,7 @@ pub(super) fn value_field_snapshot(element: CfRef, secure_input: bool) -> ValueF
     match (role, subrole) {
         (Ok(role), Ok(subrole)) => ValueFieldSnapshot {
             field_class: observed_field_class(role.as_deref(), subrole.as_deref(), false),
+            registration_class: Some(field_class(role.as_deref(), subrole.as_deref())),
             role,
             subrole,
             degraded: false,
@@ -242,6 +245,7 @@ pub(super) fn value_field_snapshot(element: CfRef, secure_input: bool) -> ValueF
             role: None,
             subrole: None,
             field_class: FieldClass::Unknown,
+            registration_class: None,
             degraded: true,
         },
     }

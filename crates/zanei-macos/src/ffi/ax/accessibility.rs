@@ -2,7 +2,6 @@ use std::sync::{
     Arc, RwLock,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant};
 
 use zanei_core::{
     config::FilterConfig,
@@ -13,34 +12,6 @@ use zanei_core::{
 use super::{cf::CfRef, element::set_boolean_attribute};
 
 const MANUAL_ACCESSIBILITY: &str = "AXManualAccessibility";
-const APPLICATION_ROLE_RECONCILE_DELAY: Duration = Duration::from_secs(1);
-
-#[derive(Default)]
-pub(super) struct AccessibilityActivation {
-    focused_reconcile_at: Option<Instant>,
-}
-
-impl AccessibilityActivation {
-    pub(in crate::ffi::ax) fn activate_with_role_query(
-        &mut self,
-        now: Instant,
-        query_application_role: impl FnOnce(),
-    ) {
-        query_application_role();
-        self.focused_reconcile_at = Some(now + APPLICATION_ROLE_RECONCILE_DELAY);
-    }
-
-    pub(in crate::ffi::ax) fn take_due(&mut self, now: Instant) -> bool {
-        let Some(deadline) = self.focused_reconcile_at else {
-            return false;
-        };
-        if now < deadline {
-            return false;
-        }
-        self.focused_reconcile_at = None;
-        true
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct ManualAccessibilityPolicy {
