@@ -8,7 +8,7 @@ use std::{
 use zanei_core::schema::FieldKind;
 
 use super::{
-    NativeAxError, NativeAxEvent, NativeElement, TargetKind,
+    NativeAxError, NativeAxEvent, NativeAxObservation, NativeElement, TargetKind,
     cf::cf_string,
     element::{
         VALUE_CHANGE_READ_SURFACE, ValueFieldSnapshot, focused_element_is_excluded, gated_value,
@@ -109,6 +109,49 @@ fn same_target_unknown_to_text_area_registers_value_notification_once() {
         FieldClass::KnownText(FieldKind::Text)
     );
     assert!(observer.is_current_target(TargetKind::Value, element));
+}
+
+#[test]
+fn application_role_query_failure_is_degraded_and_reconcile_remains_one_shot() {
+    let now = Instant::now();
+    let mut observer = AppObserver::fake_attached_with_unavailable_application(now);
+    let (_publisher, mut authorizations) = input_authorization_channel();
+
+    assert_eq!(observer.fake_degraded_operations(), 1);
+    assert!(
+        observer
+            .reconcile_accessibility_if_due(
+                now + Duration::from_millis(999),
+                time::OffsetDateTime::UNIX_EPOCH,
+                false,
+                &mut authorizations,
+            )
+            .is_empty()
+    );
+    assert!(matches!(
+        observer
+            .reconcile_accessibility_if_due(
+                now + Duration::from_secs(1),
+                time::OffsetDateTime::UNIX_EPOCH,
+                false,
+                &mut authorizations,
+            )
+            .as_slice(),
+        [NativeAxObservation::FocusedFieldObserved {
+            pid: 7,
+            focused_field: None,
+        }]
+    ));
+    assert!(
+        observer
+            .reconcile_accessibility_if_due(
+                now + Duration::from_secs(2),
+                time::OffsetDateTime::UNIX_EPOCH,
+                false,
+                &mut authorizations,
+            )
+            .is_empty()
+    );
 }
 
 #[test]

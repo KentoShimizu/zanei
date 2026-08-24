@@ -18,7 +18,7 @@ use crate::{
     CapturePolicy, InputAuthorizations, SecureInputProbe,
     chrome::ChromeObserver,
     content_snapshot::SnapshotTriggerPublisher,
-    ffi::ax::{ManualAccessibilityPolicy, NativeAxEvent},
+    ffi::ax::{ManualAccessibilityPolicy, NativeAxEvent, NativeAxObservation},
     focus_context::FocusContext,
     focused_field::{FocusedField, field_class},
     workspace::{ApplicationActivationPolicy, ApplicationInfo, WorkspaceEvent},
@@ -319,23 +319,32 @@ fn run_ax_loop(
     );
     let mut builder = AxEventBuilder::new(capture_policy);
     let mut observer_health = ObserverHealth::new(current_degraded_observers);
-    for app in api.running_applications() {
-        let pending = attach_app(
-            api,
-            &mut builder,
-            app,
-            &manual_accessibility_policy,
-            degraded_operations,
-            &mut observer_health,
-        );
-        output.send_all(pending);
-    }
+    let initial_attached: Vec<_> = api
+        .running_applications()
+        .into_iter()
+        .map(|app| {
+            attach_app(
+                api,
+                &mut builder,
+                app,
+                &manual_accessibility_policy,
+                degraded_operations,
+                &mut observer_health,
+            )
+        })
+        .collect();
     if let Some(app) = api.frontmost_application() {
         let window = focused_window(api, &app);
         publish_focus_transition(
             snapshot_trigger_publisher,
             focus_context.activate(app, window),
         );
+    }
+    for attached in &initial_attached {
+        publish_attached_focus(&focus_context, attached);
+    }
+    for attached in initial_attached {
+        output.send_all(attached.output);
     }
     let mut manual_accessibility_generation = manual_accessibility_policy.generation();
 
@@ -352,7 +361,7 @@ fn run_ax_loop(
             }
             match event {
                 WorkspaceEvent::Activated(app) => {
-                    let pending = attach_app(
+                    let attached = attach_app(
                         api,
                         &mut builder,
                         app.clone(),
@@ -360,15 +369,16 @@ fn run_ax_loop(
                         degraded_operations,
                         &mut observer_health,
                     );
-                    output.send_all(pending);
                     let window = focused_window(api, &app);
                     publish_focus_transition(
                         snapshot_trigger_publisher,
                         focus_context.activate(app, window),
                     );
+                    publish_attached_focus(&focus_context, &attached);
+                    output.send_all(attached.output);
                 }
                 WorkspaceEvent::Launched(app) => {
-                    let pending = attach_app(
+                    let attached = attach_app(
                         api,
                         &mut builder,
                         app,
@@ -376,7 +386,8 @@ fn run_ax_loop(
                         degraded_operations,
                         &mut observer_health,
                     );
-                    output.send_all(pending);
+                    publish_attached_focus(&focus_context, &attached);
+                    output.send_all(attached.output);
                 }
                 WorkspaceEvent::Terminated(app) => {
                     publish_focus_transition(
@@ -413,27 +424,34 @@ fn run_ax_loop(
             }
         }
         for observation in api.poll(AX_RUN_LOOP_SLICE) {
-            let transition = match &observation {
-                NativeAxEvent::WindowFocused { pid, window, .. }
-                | NativeAxEvent::WindowTitleChanged { pid, window, .. } => {
-                    focus_context.observe_window(*pid, window.clone())
+            match observation {
+                NativeAxObservation::FocusedFieldObserved { pid, focused_field } => {
+                    focus_context.update_focused_field(pid, focused_field);
                 }
-                NativeAxEvent::UiFocused { .. }
-                | NativeAxEvent::UiValueChanged(_)
-                | NativeAxEvent::PageLoaded { .. } => None,
-            };
-            publish_focus_transition(snapshot_trigger_publisher, transition);
-            publish_focus_observation(&focus_context, &observation);
-            if let NativeAxEvent::PageLoaded { pid } = &observation
-                && focus_context
-                    .current()
-                    .is_some_and(|focus| focus.app.pid == i64::from(*pid))
-                && let Some(observer) = chrome_observer.as_ref()
-            {
-                observer.page_loaded(i64::from(*pid));
-            }
-            if let Some(event) = builder.event(observation) {
-                output.send(event);
+                NativeAxObservation::Event(observation) => {
+                    let transition = match &observation {
+                        NativeAxEvent::WindowFocused { pid, window, .. }
+                        | NativeAxEvent::WindowTitleChanged { pid, window, .. } => {
+                            focus_context.observe_window(*pid, window.clone())
+                        }
+                        NativeAxEvent::UiFocused { .. }
+                        | NativeAxEvent::UiValueChanged(_)
+                        | NativeAxEvent::PageLoaded { .. } => None,
+                    };
+                    publish_focus_transition(snapshot_trigger_publisher, transition);
+                    publish_focus_observation(&focus_context, &observation);
+                    if let NativeAxEvent::PageLoaded { pid } = &observation
+                        && focus_context
+                            .current()
+                            .is_some_and(|focus| focus.app.pid == i64::from(*pid))
+                        && let Some(observer) = chrome_observer.as_ref()
+                    {
+                        observer.page_loaded(i64::from(*pid));
+                    }
+                    if let Some(event) = builder.event(observation) {
+                        output.send(event);
+                    }
+                }
             }
         }
         let native_drops = api.take_dropped_events();
@@ -477,14 +495,14 @@ fn attach_app(
     manual_accessibility_policy: &ManualAccessibilityPolicy,
     degraded_operations: &AtomicU64,
     observer_health: &mut ObserverHealth,
-) -> Vec<AxEvent> {
+) -> AttachResult {
     if app.activation_policy == ApplicationActivationPolicy::Prohibited {
-        return Vec::new();
+        return AttachResult::default();
     }
     let Ok(pid) = i32::try_from(app.pid) else {
         observer_health.mark_unavailable(app.pid);
         degraded_operations.fetch_add(1, Ordering::Relaxed);
-        return Vec::new();
+        return AttachResult::default();
     };
     builder.add_app(app.clone());
     let manual_accessibility = manual_accessibility_policy.allows(&app.raw_app());
@@ -493,36 +511,66 @@ fn attach_app(
             observer_health.mark_available(app.pid);
             observations
                 .into_iter()
-                .filter_map(|observation| {
-                    matches!(&observation, NativeAxEvent::UiValueChanged(_))
-                        .then(|| builder.event(observation))
-                        .flatten()
+                .fold(AttachResult::default(), |mut attached, observation| {
+                    match observation {
+                        NativeAxObservation::FocusedFieldObserved { pid, focused_field } => {
+                            attached.focused_field = Some((pid, focused_field));
+                        }
+                        NativeAxObservation::Event(NativeAxEvent::UiValueChanged(event)) => {
+                            attached
+                                .output
+                                .extend(builder.event(NativeAxEvent::UiValueChanged(event)));
+                        }
+                        NativeAxObservation::Event(
+                            NativeAxEvent::WindowFocused { .. }
+                            | NativeAxEvent::WindowTitleChanged { .. }
+                            | NativeAxEvent::UiFocused { .. }
+                            | NativeAxEvent::PageLoaded { .. },
+                        ) => {}
+                    }
+                    attached
                 })
-                .collect()
         }
         Err(_) => {
             observer_health.mark_unavailable(app.pid);
             degraded_operations.fetch_add(1, Ordering::Relaxed);
-            Vec::new()
+            AttachResult::default()
         }
     }
 }
 
+#[derive(Default)]
+struct AttachResult {
+    output: Vec<AxEvent>,
+    focused_field: Option<(i32, Option<FocusedField>)>,
+}
+
+fn publish_attached_focus(focus_context: &FocusContext, attached: &AttachResult) {
+    if let Some((pid, focused_field)) = attached.focused_field {
+        focus_context.update_focused_field(pid, focused_field);
+    }
+}
+
 fn publish_focus_observation(focus_context: &FocusContext, observation: &NativeAxEvent) {
-    let NativeAxEvent::UiFocused {
-        pid,
-        generation,
-        element,
-        ..
-    } = observation
-    else {
-        return;
+    let (pid, focused_field) = match observation {
+        NativeAxEvent::UiFocused {
+            pid,
+            generation,
+            element,
+            ..
+        } => (
+            *pid,
+            element.as_ref().map(|element| FocusedField {
+                generation: *generation,
+                class: field_class(element.role.as_deref(), element.subrole.as_deref()),
+            }),
+        ),
+        NativeAxEvent::WindowFocused { .. }
+        | NativeAxEvent::WindowTitleChanged { .. }
+        | NativeAxEvent::UiValueChanged(_)
+        | NativeAxEvent::PageLoaded { .. } => return,
     };
-    let focused_field = element.as_ref().map(|element| FocusedField {
-        generation: *generation,
-        class: field_class(element.role.as_deref(), element.subrole.as_deref()),
-    });
-    focus_context.update_focused_field(*pid, focused_field);
+    focus_context.update_focused_field(pid, focused_field);
 }
 
 #[cfg(test)]

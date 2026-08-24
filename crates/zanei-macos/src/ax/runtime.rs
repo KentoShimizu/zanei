@@ -8,8 +8,8 @@ use crate::{
     CapturePolicy, InputAuthorizations, SecureInputProbe,
     ffi::{
         ax::{
-            ManualAccessibilityPolicy, NativeAx, NativeAxError, NativeAxEvent, NativeHitTest,
-            NativeWindow,
+            ManualAccessibilityPolicy, NativeAx, NativeAxError, NativeAxEvent, NativeAxObservation,
+            NativeHitTest, NativeWindow,
         },
         workspace::{frontmost_application, running_applications},
     },
@@ -28,11 +28,11 @@ pub(super) trait AxApi {
         pid: i32,
         app: App,
         manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxEvent>, Self::AttachError>;
+    ) -> Result<Vec<NativeAxObservation>, Self::AttachError>;
     fn focused_window(&mut self, pid: i32) -> Result<Option<NativeWindow>, Self::AttachError>;
     fn reconcile_manual_accessibility(&mut self, policy: &ManualAccessibilityPolicy);
     fn detach(&mut self, pid: i32) -> Vec<NativeAxEvent>;
-    fn poll(&mut self, timeout: Duration) -> Vec<NativeAxEvent>;
+    fn poll(&mut self, timeout: Duration) -> Vec<NativeAxObservation>;
     fn flush_pending(&mut self) -> Vec<NativeAxEvent>;
     fn hit_test(&self, click: ClickObservation) -> Option<NativeHitTest>;
     fn take_dropped_events(&self) -> u64;
@@ -86,7 +86,7 @@ impl AxApi for SystemAxApi {
         pid: i32,
         app: App,
         manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
+    ) -> Result<Vec<NativeAxObservation>, NativeAxError> {
         self.native.attach(pid, app, manual_accessibility)
     }
 
@@ -102,7 +102,7 @@ impl AxApi for SystemAxApi {
         self.native.detach(pid)
     }
 
-    fn poll(&mut self, timeout: Duration) -> Vec<NativeAxEvent> {
+    fn poll(&mut self, timeout: Duration) -> Vec<NativeAxObservation> {
         self.native.poll(timeout)
     }
 

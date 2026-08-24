@@ -2,6 +2,7 @@ use std::sync::{
     Arc, RwLock,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use zanei_core::{
     config::FilterConfig,
@@ -12,6 +13,29 @@ use zanei_core::{
 use super::{cf::CfRef, element::set_boolean_attribute};
 
 const MANUAL_ACCESSIBILITY: &str = "AXManualAccessibility";
+const APPLICATION_ROLE_RECONCILE_DELAY: Duration = Duration::from_secs(1);
+
+#[derive(Default)]
+pub(super) struct AccessibilityActivation {
+    focused_reconcile_at: Option<Instant>,
+}
+
+impl AccessibilityActivation {
+    pub(super) fn schedule_reconcile(&mut self, now: Instant) {
+        self.focused_reconcile_at = Some(now + APPLICATION_ROLE_RECONCILE_DELAY);
+    }
+
+    pub(super) fn take_due(&mut self, now: Instant) -> bool {
+        let Some(deadline) = self.focused_reconcile_at else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.focused_reconcile_at = None;
+        true
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ManualAccessibilityPolicy {
@@ -89,14 +113,17 @@ const fn manual_accessibility_setting(enabled_for_app: bool, enabled: bool) -> O
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Instant};
 
     use zanei_core::{
         config::{FilterConfig, ScopedFilterConfig},
         schema::App,
     };
 
-    use super::{ManualAccessibilityPolicy, manual_accessibility_setting};
+    use super::{
+        APPLICATION_ROLE_RECONCILE_DELAY, AccessibilityActivation, ManualAccessibilityPolicy,
+        manual_accessibility_setting,
+    };
 
     fn app(bundle_id: &str) -> App {
         App {
@@ -112,6 +139,18 @@ mod tests {
         assert_eq!(manual_accessibility_setting(false, false), None);
         assert_eq!(manual_accessibility_setting(true, true), Some(true));
         assert_eq!(manual_accessibility_setting(true, false), Some(false));
+    }
+
+    #[test]
+    fn application_role_reconcile_deadline_is_consumed_once() {
+        let now = Instant::now();
+        let mut activation = AccessibilityActivation::default();
+
+        activation.schedule_reconcile(now);
+
+        assert!(!activation.take_due(now + APPLICATION_ROLE_RECONCILE_DELAY / 2));
+        assert!(activation.take_due(now + APPLICATION_ROLE_RECONCILE_DELAY));
+        assert!(!activation.take_due(now + APPLICATION_ROLE_RECONCILE_DELAY * 2));
     }
 
     #[test]

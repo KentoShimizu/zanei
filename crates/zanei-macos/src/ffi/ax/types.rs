@@ -10,6 +10,7 @@ use crate::{
         geometry::{AxPoint, AxSize},
         window_list::NativeWindow,
     },
+    focused_field::FocusedField,
 };
 
 pub(super) const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
@@ -74,6 +75,21 @@ pub(crate) enum NativeAxEvent {
     PageLoaded {
         pid: i32,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NativeAxObservation {
+    Event(NativeAxEvent),
+    FocusedFieldObserved {
+        pid: i32,
+        focused_field: Option<FocusedField>,
+    },
+}
+
+impl From<NativeAxEvent> for NativeAxObservation {
+    fn from(event: NativeAxEvent) -> Self {
+        Self::Event(event)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
