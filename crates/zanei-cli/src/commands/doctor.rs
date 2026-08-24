@@ -11,6 +11,7 @@ use crate::error::CliError;
 use crate::permissions::probe_permissions;
 use crate::store_access::{self, KeyAccess, KeyPrompt};
 
+mod health;
 mod model;
 mod render;
 mod requirements;
@@ -34,22 +35,15 @@ pub(crate) enum StartPermissionState {
 
 pub fn run(config_path: &Path, store_path: &Path, fix: bool, json: bool) -> Result<u8, CliError> {
     let config = Config::load(config_path)?;
-    // A locked store is a diagnosis, not a failure: report the key state and
-    // fall back to probing permissions from this process.
-    let (status, store_key) = match store_status(store_path) {
-        Ok(status) => (status, store_key_report(store_path)),
-        Err(CliError::Store(StoreError::Locked(reason))) => {
-            (None, StoreKeyReport::from_locked(&reason))
-        }
-        Err(error) => return Err(error),
-    };
-    let mut report = evaluate(&config, status.as_ref())?;
-    report.store_key = store_key;
+    let status_read = store_status(store_path);
+    let mut report = evaluate(&config, status_read.status())?;
+    report.store_key = store_key_report(store_path);
+    report.health = status_read.health_report();
     let executable = crate::executable::current().map_err(CliError::Input)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        let recording = status.is_some_and(|status| status.running);
+        let recording = status_read.status().is_some_and(|status| status.running);
         print_human(&report, &executable, true, recording);
     }
     if fix && !report.missing_permissions.is_empty() {
@@ -72,7 +66,7 @@ pub(crate) fn require_recorder_for_start(
     store_path: &Path,
     executable: &Path,
 ) -> Result<StartPermissionState, CliError> {
-    let status = store_status(store_path)?.ok_or_else(|| {
+    let status = store_status(store_path).into_status()?.ok_or_else(|| {
         CliError::InvalidValue("running recorder did not publish a heartbeat".to_owned())
     })?;
     evaluate_recorder_for_start(config, &status, executable)
@@ -92,7 +86,8 @@ fn evaluate_recorder_for_start(
         return Ok(StartPermissionState::PendingSnapshot);
     };
     let required = crate::daemon::required_permissions_for(config);
-    let report = build_report(config, &required, snapshot, true)?;
+    let mut report = build_report(config, &required, snapshot, true)?;
+    report.health = health::HealthReport::from_status(status);
     if !report.ok {
         println!("{STARTED_WITH_MISSING_PERMISSIONS}");
         print_human(&report, executable, false, true);
@@ -104,13 +99,17 @@ fn evaluate_recorder_for_start(
     })
 }
 
-fn store_status(store_path: &Path) -> Result<Option<StoreStatus>, CliError> {
-    if !store_path.exists() {
-        return Ok(None);
+fn store_status(store_path: &Path) -> health::StatusRead {
+    match store_path.try_exists() {
+        Ok(false) => health::StatusRead::missing(),
+        Err(error) => health::StatusRead::unreadable(CliError::io(store_path, error)),
+        Ok(true) => match store_access::open_reader(store_path, KeyPrompt::Allowed)
+            .and_then(|reader| reader.status())
+        {
+            Ok(status) => health::StatusRead::readable(status),
+            Err(error) => health::StatusRead::unreadable(error.into()),
+        },
     }
-    Ok(Some(
-        store_access::open_reader(store_path, KeyPrompt::Allowed)?.status()?,
-    ))
 }
 
 fn store_key_report(store_path: &Path) -> StoreKeyReport {
@@ -227,6 +226,7 @@ fn build_report(
         missing_permissions,
         reported_by_recorder,
         store_key: StoreKeyReport::default(),
+        health: health::HealthReport::status_missing(),
     })
 }
 
@@ -240,6 +240,7 @@ mod tests {
     use zanei_core::config::Config;
     use zanei_core::store::{DaemonPermissions, PermissionState, StoreStatus};
 
+    use super::health::HealthReport;
     use super::render::{output_indicates_non_persistent_signature, render_human};
     use super::{
         AutomationDetail, DoctorReport, PermissionReport, StatusDetail, build_report,
@@ -276,6 +277,7 @@ mod tests {
             settings_pane: Some("input-pane"),
             missing_permissions: vec![Permission::InputMonitoring],
             reported_by_recorder: false,
+            health: HealthReport::status_missing(),
         };
 
         let rendered = render_human(&report, Path::new("/tmp/zanei test"), false, false);
@@ -543,6 +545,7 @@ mod tests {
             settings_pane: None,
             missing_permissions: Vec::new(),
             reported_by_recorder: false,
+            health: HealthReport::status_missing(),
         }
     }
 

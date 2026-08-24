@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::{Child, Command as ProcessCommand, Stdio};
@@ -8,7 +9,7 @@ use assert_cmd::Command;
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use zanei_core::config::Config;
-use zanei_core::normalize::normalize;
+use zanei_core::normalize::{format_timestamp, normalize};
 use zanei_core::schema::{App, EmptyData, EventData, KNOWN_EVENT_TYPES, RawEvent};
 use zanei_core::store::{DaemonState, QueryFilter, StoreFormat, StoreReader, StoreWriter};
 use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
@@ -658,6 +659,12 @@ fn doctor_json_matches_the_real_permission_state() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     assert_eq!(value["capture_sources"], serde_json::json!(["input"]));
     assert_eq!(value["reported_by_recorder"], false);
+    assert_eq!(value["health"]["state"], "status_missing");
+    assert_eq!(value["health"]["degraded"], serde_json::Value::Null);
+    assert_eq!(
+        value["health"]["collector_failures"],
+        serde_json::Value::Null
+    );
     let accessibility_granted = value["permissions"]["accessibility"]["status"] == "granted";
     let input_granted = value["permissions"]["input_monitoring"]["status"] == "granted";
     if accessibility_granted && input_granted {
@@ -685,6 +692,154 @@ fn doctor_json_matches_the_real_permission_state() {
         };
         assert_eq!(value["settings_pane"], expected_pane);
     }
+
+    let human = command(&config, &store)
+        .arg("doctor")
+        .output()
+        .expect("doctor human output");
+    assert!(matches!(human.status.code(), Some(0 | 3)));
+    assert!(
+        String::from_utf8_lossy(&human.stdout)
+            .contains("COLLECTOR HEALTH  status_missing\nCOLLECTOR FAILURES -")
+    );
+}
+
+#[test]
+fn doctor_reports_healthy_and_degraded_collector_health_without_changing_exit_or_fix() {
+    let fixture = Fixture::populated();
+
+    let healthy = fixture
+        .command()
+        .args(["doctor", "--json"])
+        .output()
+        .expect("healthy doctor JSON");
+    assert_eq!(healthy.status.code(), Some(0));
+    let report: serde_json::Value =
+        serde_json::from_slice(&healthy.stdout).expect("healthy doctor report");
+    assert_eq!(report["health"]["state"], "healthy");
+    assert_eq!(report["health"]["degraded"], serde_json::json!({}));
+    assert_eq!(
+        report["health"]["collector_failures"],
+        serde_json::json!({ "eventtap": 1 })
+    );
+
+    let healthy_human = fixture
+        .command()
+        .arg("doctor")
+        .output()
+        .expect("healthy doctor human output");
+    assert_eq!(healthy_human.status.code(), Some(0));
+    let healthy_human = String::from_utf8_lossy(&healthy_human.stdout);
+    assert!(healthy_human.contains("COLLECTOR HEALTH  healthy"));
+    assert!(healthy_human.contains("COLLECTOR FAILURES\n  eventtap: 1"));
+
+    write_fixture_collector_health(
+        &fixture,
+        BTreeMap::from([(
+            "chrome".to_owned(),
+            "collector restart budget exhausted".to_owned(),
+        )]),
+        BTreeMap::from([("chrome".to_owned(), 4), ("eventtap".to_owned(), 1)]),
+    );
+
+    // --fix remains permission-only: collector degradation neither opens a pane nor returns 3.
+    let degraded = fixture
+        .command()
+        .args(["doctor", "--fix", "--json"])
+        .output()
+        .expect("degraded doctor JSON");
+    assert_eq!(degraded.status.code(), Some(0));
+    let report: serde_json::Value =
+        serde_json::from_slice(&degraded.stdout).expect("degraded doctor report");
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["missing_required"], serde_json::json!([]));
+    assert_eq!(report["health"]["state"], "degraded");
+    assert_eq!(
+        report["health"]["degraded"],
+        serde_json::json!({ "chrome": "collector restart budget exhausted" })
+    );
+    assert_eq!(
+        report["health"]["collector_failures"],
+        serde_json::json!({ "chrome": 4, "eventtap": 1 })
+    );
+
+    let degraded_human = fixture
+        .command()
+        .arg("doctor")
+        .output()
+        .expect("degraded doctor human output");
+    assert_eq!(degraded_human.status.code(), Some(0));
+    let degraded_human = String::from_utf8_lossy(&degraded_human.stdout);
+    assert!(degraded_human.contains("COLLECTOR HEALTH  degraded"));
+    assert!(degraded_human.contains("  chrome: collector restart budget exhausted"));
+    assert!(degraded_human.contains("COLLECTOR FAILURES\n  chrome: 4\n  eventtap: 1"));
+}
+
+#[test]
+fn doctor_reports_unreadable_collector_status_without_overwriting_the_store() {
+    let fixture = Fixture::empty();
+    let corrupt_header = b"not a sqlite store\n";
+    fs::write(&fixture.store, corrupt_header).expect("corrupt doctor fixture store header");
+
+    let json = fixture
+        .command()
+        .args(["doctor", "--json"])
+        .output()
+        .expect("unreadable doctor JSON");
+    assert_eq!(json.status.code(), Some(0));
+    let report: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("unreadable doctor report");
+    assert_eq!(report["health"]["state"], "status_unreadable");
+    assert_eq!(report["health"]["degraded"], serde_json::Value::Null);
+    assert_eq!(
+        report["health"]["collector_failures"],
+        serde_json::Value::Null
+    );
+    assert!(report["health"]["status_error"].as_str().is_some());
+
+    let human = fixture
+        .command()
+        .arg("doctor")
+        .output()
+        .expect("unreadable doctor human output");
+    assert_eq!(human.status.code(), Some(0));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("COLLECTOR HEALTH  status_unreadable"));
+    assert!(human.contains("  status:"));
+    assert!(human.contains("COLLECTOR FAILURES -"));
+    assert_eq!(
+        fs::read(&fixture.store).expect("preserved unreadable doctor store"),
+        corrupt_header
+    );
+}
+
+fn write_fixture_collector_health(
+    fixture: &Fixture,
+    degraded: BTreeMap<String, String>,
+    collector_failures: BTreeMap<String, u64>,
+) {
+    let status = fixture
+        .open_reader()
+        .status()
+        .expect("fixture daemon status");
+    fixture
+        .open_writer()
+        .write_daemon_state(&DaemonState {
+            pid: status.pid,
+            started_at: status.started_at,
+            instance_id: status.instance_id,
+            mode: status.mode,
+            heartbeat_at: Some(format_timestamp(OffsetDateTime::now_utc())),
+            retention_hours: status.retention_hours,
+            paused_until: status.paused_until,
+            events_captured: status.events_captured,
+            events_dropped: status.events_dropped,
+            last_event_ts: status.last_event_ts,
+            degraded,
+            collector_failures,
+            permissions: status.permissions,
+        })
+        .expect("write fixture collector health");
 }
 
 #[test]
