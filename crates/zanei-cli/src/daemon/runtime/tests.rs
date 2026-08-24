@@ -13,22 +13,23 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 use time::Duration;
 use zanei_core::{
-    config::Config,
+    config::{Config, ConfigWatcher},
     normalize::format_timestamp,
     store::{DaemonMode, DaemonState, StoreReader, StoreWriter},
 };
+use zanei_macos::chrome::{ChromeFailure, ChromeFailureState, ChromeQueryFailure};
 use zanei_macos::permission::{PermissionError, PermissionStatus};
 
 use super::{
-    CollectorSet, EXECUTABLE_REMOVED_MESSAGE, Pipeline, configure_eventtap_start_gate,
-    ensure_pipeline_running, executable_shutdown_requested,
+    ActiveDaemon, CollectorSet, EXECUTABLE_REMOVED_MESSAGE, Pipeline, StoreOwner,
+    configure_eventtap_start_gate, ensure_pipeline_running, executable_shutdown_requested,
     initialize_permission_dependent_runtime, merge_collector_failures, normalize_pause_request,
     queue_permission_expansion, service_permission_request_worker, shutdown_daemon,
 };
 use crate::daemon::{
     executable_guard::ExecutableGuard,
     permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
-    supervisor::EventTapStartGate,
+    supervisor::{EventTapStartGate, chrome_failure_reason},
 };
 use crate::permissions::PermissionRequestOutcome;
 use zanei_collector::Permission;
@@ -216,12 +217,79 @@ fn wait_for_permission_worker(
 #[test]
 fn collector_failures_accumulate_across_daemon_instances() {
     let base = BTreeMap::from([("eventtap".to_owned(), 2), ("ax".to_owned(), u64::MAX)]);
-    let current = BTreeMap::from([("eventtap".to_owned(), 3), ("ax".to_owned(), 1)]);
+    let first = BTreeMap::from([("eventtap".to_owned(), 3), ("ax".to_owned(), 1)]);
+    let next = BTreeMap::from([("eventtap".to_owned(), 4), ("ax".to_owned(), 2)]);
 
     assert_eq!(
-        merge_collector_failures(&base, &current),
+        merge_collector_failures(&base, &first),
         BTreeMap::from([("ax".to_owned(), u64::MAX), ("eventtap".to_owned(), 5),])
     );
+    assert_eq!(
+        merge_collector_failures(&base, &next),
+        BTreeMap::from([("ax".to_owned(), u64::MAX), ("eventtap".to_owned(), 6),])
+    );
+}
+
+#[test]
+fn collector_degraded_state_is_persisted_by_the_heartbeat() {
+    let directory = TempDir::new().expect("temporary directory");
+    let store_path = directory.path().join("store.sqlite");
+    let writer = Arc::new(Mutex::new(
+        StoreWriter::open(&store_path).expect("store writer"),
+    ));
+    let reader = StoreReader::open(&store_path).expect("store reader");
+    let config = Config::default();
+    let mut config_watcher =
+        ConfigWatcher::new(directory.path().join("config.toml")).expect("config watcher");
+    let mut pipeline = Pipeline::store(&config, Arc::clone(&writer)).expect("pipeline");
+    let mut collectors = CollectorSet::new(&config);
+    let chrome_reason = chrome_failure_reason(ChromeFailureState::Unavailable(
+        ChromeFailure::Query(ChromeQueryFailure::AppleEvent(-1712)),
+    ))
+    .expect("Chrome failure reason");
+    collectors
+        .start_errors
+        .insert("chrome".to_owned(), chrome_reason.clone());
+    let owner = StoreOwner::new(DaemonMode::Launchd, "2026-08-24T10:00:00.000Z".to_owned());
+    let base_collector_failures = BTreeMap::new();
+    let mut paused = false;
+    let mut degraded = BTreeMap::new();
+
+    ActiveDaemon {
+        store_path: &store_path,
+        config_watcher: &mut config_watcher,
+        active_retention_hours: config.output.retention_hours,
+        pending_retention_hours: None,
+        writer: &writer,
+        reader: &reader,
+        pipeline: &pipeline,
+        collectors: &mut collectors,
+        owner: &owner,
+        base_dropped: 0,
+        base_collector_failures: &base_collector_failures,
+        paused: &mut paused,
+        intake_suspended: false,
+        degraded: &mut degraded,
+        last_status: reader.status().expect("initial store status"),
+        last_permissions: None,
+        initial_input_monitoring_status: None,
+        permission_request_worker: None,
+        pending_permission_request: None,
+        executable_guard: ExecutableGuard::new(directory.path().join("zanei")),
+    }
+    .publish_heartbeat_with_permissions(None)
+    .expect("publish heartbeat");
+    pipeline.flush().expect("flush heartbeat");
+
+    assert_eq!(
+        reader
+            .status()
+            .expect("persisted heartbeat")
+            .degraded
+            .get("chrome"),
+        Some(&chrome_reason)
+    );
+    pipeline.shutdown().expect("pipeline shutdown");
 }
 
 #[test]

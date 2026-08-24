@@ -1,4 +1,22 @@
 use super::*;
+use crate::daemon::supervisor::chrome_failure_reason;
+use zanei_macos::chrome::{ChromeFailure, ChromeFailureState, ChromeQueryFailure};
+
+struct FakeClock {
+    now: Instant,
+}
+
+impl FakeClock {
+    fn new() -> Self {
+        Self {
+            now: Instant::now(),
+        }
+    }
+
+    fn advance(&mut self, duration: Duration) {
+        self.now += duration;
+    }
+}
 
 #[test]
 fn eventtap_gate_does_not_block_other_collectors() {
@@ -171,7 +189,7 @@ fn inactive_daemon_opens_gate_without_starting_eventtap() {
 }
 
 #[test]
-fn unexpected_collector_exit_is_degraded_and_restarted_after_backoff() {
+fn unexpected_exit_uses_capped_backoff_and_stays_degraded_after_restart() {
     let state = Arc::new(FakeState::default());
     let mut managed = Some(Managed::new(FakeCollector::new(
         Arc::clone(&state),
@@ -179,32 +197,119 @@ fn unexpected_collector_exit_is_degraded_and_restarted_after_backoff() {
     )));
     let (pipeline, _events) = mpsc::sync_channel(4);
     let mut errors = BTreeMap::new();
-    let started = Instant::now();
-    super::start_collector(&mut managed, &pipeline, &mut errors, started);
+    let mut clock = FakeClock::new();
+    start_collector(&mut managed, &pipeline, &mut errors, clock.now);
+
+    for (failure_index, delay_seconds) in [5, 10, 20, 40, 60, 60].into_iter().enumerate() {
+        state.finish();
+        wait_for_relay(&managed);
+        supervise_collector(
+            &mut managed,
+            &pipeline,
+            Some(&granted_permissions()),
+            &mut errors,
+            clock.now,
+        )
+        .expect("observe failed collector");
+        assert_eq!(state.starts.load(Ordering::Relaxed), failure_index + 1);
+        assert!(errors["fake"].contains("terminated unexpectedly"));
+
+        clock.advance(Duration::from_secs(delay_seconds - 1));
+        supervise_collector(
+            &mut managed,
+            &pipeline,
+            Some(&granted_permissions()),
+            &mut errors,
+            clock.now,
+        )
+        .expect("hold collector before restart deadline");
+        assert_eq!(state.starts.load(Ordering::Relaxed), failure_index + 1);
+
+        clock.advance(Duration::from_secs(1));
+        supervise_collector(
+            &mut managed,
+            &pipeline,
+            Some(&granted_permissions()),
+            &mut errors,
+            clock.now,
+        )
+        .expect("restart collector at deadline");
+        assert_eq!(state.starts.load(Ordering::Relaxed), failure_index + 2);
+        assert!(errors.contains_key("fake"));
+    }
+
     state.finish();
     wait_for_relay(&managed);
+}
 
+#[test]
+fn unexpected_exit_clears_after_sixty_seconds_of_stable_runtime() {
+    let state = Arc::new(FakeState::default());
+    let mut managed = Some(Managed::new(FakeCollector::new(
+        Arc::clone(&state),
+        BTreeSet::new(),
+    )));
+    let (pipeline, _events) = mpsc::sync_channel(4);
+    let mut errors = BTreeMap::new();
+    let mut clock = FakeClock::new();
+    start_collector(&mut managed, &pipeline, &mut errors, clock.now);
+    state.finish();
+    wait_for_relay(&managed);
     supervise_collector(
         &mut managed,
         &pipeline,
         Some(&granted_permissions()),
         &mut errors,
-        started,
+        clock.now,
     )
-    .expect("supervise failed collector");
-    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
-    assert!(errors["fake"].contains("terminated unexpectedly"));
+    .expect("observe failed collector");
 
+    clock.advance(Duration::from_secs(5));
     supervise_collector(
         &mut managed,
         &pipeline,
         Some(&granted_permissions()),
         &mut errors,
-        started + Duration::from_secs(5),
+        clock.now,
     )
     .expect("restart collector");
-    assert_eq!(state.starts.load(Ordering::Relaxed), 2);
+    assert!(errors.contains_key("fake"));
+
+    clock.advance(Duration::from_secs(59));
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("observe nearly stable collector");
+    assert!(errors.contains_key("fake"));
+
+    clock.advance(Duration::from_secs(1));
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("observe stable collector");
     assert!(!errors.contains_key("fake"));
+
+    state.finish();
+    wait_for_relay(&managed);
+}
+
+#[test]
+fn chrome_current_failure_clears_only_after_observed_recovery() {
+    let failure = ChromeFailure::Query(ChromeQueryFailure::AppleEvent(-1712));
+
+    assert_eq!(
+        chrome_failure_reason(ChromeFailureState::Unavailable(failure)).as_deref(),
+        Some("state=unavailable phase=query kind=apple_event code=-1712")
+    );
+    assert_eq!(chrome_failure_reason(ChromeFailureState::Available), None);
 }
 
 #[test]
@@ -349,5 +454,18 @@ fn permission_blocked_collector_waits_for_granted_transition() {
     )
     .expect("permission recovery");
     assert_eq!(state.starts.load(Ordering::Relaxed), 2);
+    assert!(errors.contains_key("fake"));
+
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        started + Duration::from_secs(121),
+    )
+    .expect("stable permission recovery");
     assert!(!errors.contains_key("fake"));
+
+    state.finish();
+    wait_for_relay(&managed);
 }
