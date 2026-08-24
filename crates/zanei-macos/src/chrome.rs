@@ -30,7 +30,7 @@ use zanei_core::schema::BrowserTransition;
 
 use crate::{
     ffi::applescript::{
-        AppleScriptClient, AppleScriptError, AppleScriptResponseError,
+        AppleScriptClient, AppleScriptError, AppleScriptResponseError, AppleScriptWindowId,
         Observation as NativeObservation, Snapshot as NativeSnapshot,
     },
     focus_context::{FocusContext, FocusTransition, FocusTransitionReceiver},
@@ -340,7 +340,7 @@ enum ChromeQuery {
     Window {
         pid: i64,
         window_id: i64,
-        applescript_window_id: String,
+        applescript_window_id: AppleScriptWindowId,
     },
 }
 
@@ -358,7 +358,7 @@ impl ChromeQuery {
         }
     }
 
-    fn applescript_window_id(&self) -> Option<&str> {
+    fn applescript_window_id(&self) -> Option<&AppleScriptWindowId> {
         match self {
             Self::Window {
                 applescript_window_id,
@@ -380,8 +380,7 @@ enum ChromeObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChromeSnapshot {
     window_id: Option<i64>,
-    applescript_window_id: String,
-    window_key: String,
+    applescript_window_id: AppleScriptWindowId,
     window_title: Option<String>,
     tab_key: String,
     url: String,
@@ -392,8 +391,7 @@ impl ChromeSnapshot {
     fn from_native(value: NativeSnapshot, window_id: Option<i64>) -> Self {
         Self {
             window_id,
-            applescript_window_id: value.window_key.clone(),
-            window_key: value.window_key,
+            applescript_window_id: value.window_id,
             window_title: value.window_title,
             tab_key: value.tab_key,
             url: value.url,

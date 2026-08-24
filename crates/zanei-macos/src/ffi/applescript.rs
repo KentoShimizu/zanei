@@ -36,9 +36,16 @@ using terms from application "{application_path}"
 with timeout of 1 second
     if application chromeApp is not running then return {"not_running"}
     tell application chromeApp
-        if not (exists window id "{window_id}") then return {"no_window"}
+        set target_window_id to "{window_id}"
+        set current_window to missing value
+        repeat with candidate_window in every window
+            if ((id of candidate_window) as text) is target_window_id then
+                set current_window to contents of candidate_window
+                exit repeat
+            end if
+        end repeat
+        if current_window is missing value then return {"no_window"}
 
-        set current_window to window id "{window_id}"
         set current_mode to (mode of current_window) as text
         if current_mode is "incognito" then return {"incognito"}
         if current_mode is not "normal" then return {"unsupported_mode", current_mode}
@@ -55,8 +62,26 @@ const STATUS_ITEM_COUNT: isize = 1;
 const UNSUPPORTED_MODE_ITEM_COUNT: isize = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AppleScriptWindowId(String);
+
+impl AppleScriptWindowId {
+    fn from_response(value: String) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Snapshot {
-    pub(crate) window_key: String,
+    pub(crate) window_id: AppleScriptWindowId,
     pub(crate) window_title: Option<String>,
     pub(crate) tab_key: String,
     pub(crate) url: String,
@@ -130,7 +155,7 @@ impl AppleScriptClient {
 
     pub(crate) fn query_window(
         &mut self,
-        window_id: &str,
+        window_id: &AppleScriptWindowId,
     ) -> Result<Observation, AppleScriptError> {
         let _pool = AutoreleasePool::new()?;
         let script = compile_script(&target_window_source(&self.application_path, window_id))?;
@@ -155,8 +180,8 @@ fn front_window_source(application_path: &str) -> String {
     substitute_application_path(FRONT_WINDOW_SCRIPT_TEMPLATE, application_path)
 }
 
-fn target_window_source(application_path: &str, window_id: &str) -> String {
-    let escaped_window_id = escape_applescript_string(window_id);
+fn target_window_source(application_path: &str, window_id: &AppleScriptWindowId) -> String {
+    let escaped_window_id = escape_applescript_string(window_id.as_str());
     TARGET_WINDOW_SCRIPT_TEMPLATE
         .split("{window_id}")
         .map(|segment| substitute_application_path(segment, application_path))
@@ -251,7 +276,7 @@ fn parse_snapshot(reply: Object, item_count: isize) -> Result<Snapshot, AppleScr
         ));
     }
     Ok(Snapshot {
-        window_key: required_item_string(reply, 2)?,
+        window_id: AppleScriptWindowId::from_response(required_item_string(reply, 2)?),
         window_title: item_string(reply, 3),
         tab_key: required_item_string(reply, 4)?,
         url: required_item_string(reply, 5)?,
@@ -474,34 +499,38 @@ mod tests {
     }
 
     #[test]
-    fn targeted_source_reads_only_the_requested_window() {
-        let source = target_window_source("/Applications/Google Chrome.app", "window-4321");
+    fn targeted_source_matches_only_the_chrome_reported_window_identity() {
+        let window_id = AppleScriptWindowId::for_test("window-4321");
 
-        assert!(source.contains("if not (exists window id \"window-4321\")"));
-        assert!(source.contains("set current_window to window id \"window-4321\""));
+        let source = target_window_source("/Applications/Google Chrome.app", &window_id);
+
+        assert!(source.contains("set target_window_id to \"window-4321\""));
+        assert!(source.contains("((id of candidate_window) as text) is target_window_id"));
+        assert!(source.contains("if current_window is missing value then return {\"no_window\"}"));
+        assert!(!source.contains("window id"));
         assert!(!source.contains("front window"));
     }
 
     #[test]
     fn targeted_source_escapes_opaque_window_identity_as_one_string_literal() {
-        let window_id = "window-\\\" & return {\"private\"} & \"";
+        let window_id = AppleScriptWindowId::for_test("window-\\\" & return {\"private\"} & \"");
 
-        let source = target_window_source("/Applications/Google Chrome.app", window_id);
+        let source = target_window_source("/Applications/Google Chrome.app", &window_id);
 
         let escaped = "window-\\\\\\\" & return {\\\"private\\\"} & \\\"";
-        assert_eq!(source.matches(escaped).count(), 2);
-        assert!(!source.contains("window id \"window-\" & return"));
+        assert_eq!(source.matches(escaped).count(), 1);
+        assert!(!source.contains("set target_window_id to \"window-\" & return"));
     }
 
     #[test]
     fn targeted_source_does_not_reinterpret_markers_in_values() {
         let application_path = "/Applications/{window_id}/Google Chrome.app";
-        let window_id = "window-{application_path}";
+        let window_id = AppleScriptWindowId::for_test("window-{application_path}");
 
-        let source = target_window_source(application_path, window_id);
+        let source = target_window_source(application_path, &window_id);
 
         assert_eq!(source.matches(application_path).count(), 1);
-        assert_eq!(source.matches(window_id).count(), 2);
+        assert_eq!(source.matches(window_id.as_str()).count(), 1);
     }
 }
 

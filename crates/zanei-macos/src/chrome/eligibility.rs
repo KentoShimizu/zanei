@@ -12,6 +12,8 @@ use zanei_core::{
     schema::CaptureContext,
 };
 
+use crate::ffi::applescript::AppleScriptWindowId;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ChromeWindowState {
     Normal { host: Option<String> },
@@ -30,7 +32,7 @@ struct WindowRecord {
     state: Option<ChromeWindowState>,
     version: u64,
     observed_at: Instant,
-    applescript_window_id: Option<String>,
+    applescript_window_id: Option<AppleScriptWindowId>,
 }
 
 struct EligibilityState {
@@ -83,7 +85,7 @@ impl ChromeEligibilityPublisher {
         &self,
         pid: i64,
         observation: ChromeEligibilityObservation,
-        applescript_window_id: Option<String>,
+        applescript_window_id: Option<AppleScriptWindowId>,
         observed_at: Instant,
     ) {
         let Ok(pid) = i32::try_from(pid) else {
@@ -161,7 +163,11 @@ impl ChromeEligibilityPublisher {
         }
     }
 
-    pub(crate) fn applescript_window_id(&self, pid: i64, window_id: i64) -> Option<String> {
+    pub(crate) fn applescript_window_id(
+        &self,
+        pid: i64,
+        window_id: i64,
+    ) -> Option<AppleScriptWindowId> {
         let pid = i32::try_from(pid).ok()?;
         self.state
             .read()
@@ -361,7 +367,7 @@ mod tests {
         publisher.observe_with_window_id_at(
             7,
             normal(11, "https://example.com"),
-            Some("window-a".to_owned()),
+            Some(AppleScriptWindowId::for_test("window-a")),
             first_observation,
         );
         let version = tracker.state_version(7, 11).expect("version");
@@ -375,7 +381,7 @@ mod tests {
         publisher.observe_with_window_id_at(
             7,
             normal(11, "https://example.com"),
-            Some("window-b".to_owned()),
+            Some(AppleScriptWindowId::for_test("window-b")),
             confirmation + std::time::Duration::from_millis(1),
         );
 

@@ -427,7 +427,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             eligibility.observe_with_window_id_at(
                 pid,
                 ChromeEligibilityObservation::Incognito { window_id },
-                query.applescript_window_id().map(str::to_owned),
+                query.applescript_window_id().cloned(),
                 observed_at,
             );
             if emit_navigation {

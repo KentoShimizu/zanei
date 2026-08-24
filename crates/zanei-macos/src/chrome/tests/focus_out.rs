@@ -87,7 +87,7 @@ fn focus_out_confirmation_targets_background_window_and_releases_body() {
         Some(&ChromeQuery::Window {
             pid: 42,
             window_id: 7,
-            applescript_window_id: "window-101".to_owned(),
+            applescript_window_id: AppleScriptWindowId::for_test("window-101"),
         })
     );
     assert!(
@@ -378,7 +378,7 @@ fn intra_app_focus_out_confirmation_targets_previous_window() {
         Some(&ChromeQuery::Window {
             pid: 42,
             window_id: 7,
-            applescript_window_id: "window-101".to_owned(),
+            applescript_window_id: AppleScriptWindowId::for_test("window-101"),
         })
     );
     assert!(
