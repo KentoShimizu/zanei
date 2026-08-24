@@ -15,6 +15,29 @@ use rustix::{
 use super::DaemonError;
 
 const ACL_INSPECTOR: &str = "/bin/ls";
+const ACL_PERMISSIONS: [&[u8]; 21] = [
+    b"delete",
+    b"readattr",
+    b"writeattr",
+    b"readextattr",
+    b"writeextattr",
+    b"readsecurity",
+    b"writesecurity",
+    b"chown",
+    b"list",
+    b"search",
+    b"add_file",
+    b"add_subdirectory",
+    b"delete_child",
+    b"read",
+    b"write",
+    b"append",
+    b"execute",
+    b"file_inherit",
+    b"directory_inherit",
+    b"limit_inherit",
+    b"only_inherit",
+];
 const GROUP_OR_WORLD_WRITE_MODE: u32 = 0o022;
 const STICKY_MODE: u32 = 0o1000;
 const ROOT_USER_ID: u32 = 0;
@@ -153,56 +176,96 @@ fn reject_extended_acl(path: &Path, operation: &'static str) -> Result<(), Daemo
             &reason,
         ));
     }
+    validate_acl_listing(&output.stdout)
+        .map_err(|rejection| acl_rejection_error(operation, path, rejection))
+}
+
+fn acl_rejection_error(
+    operation: &'static str,
+    path: &Path,
+    rejection: AclRejection,
+) -> DaemonError {
     let invalid = |kind, reason| invalid_directory(operation, path, kind, reason);
-    match validate_acl_listing(&output.stdout) {
-        Err(AclRejection::MissingListing) => Err(invalid(
+    match rejection {
+        AclRejection::MissingListing => invalid(
             std::io::ErrorKind::InvalidData,
             "could not inspect extended ACLs because /bin/ls returned no listing",
-        )),
-        Err(AclRejection::Allow(entry)) => Err(invalid(
+        ),
+        AclRejection::Allow(entry_number) => invalid(
             std::io::ErrorKind::PermissionDenied,
             &format!(
-                "extended ACL allow entry `{}` can grant access to another principal; remove this entry or run `chmod -N <dir>` on this directory",
-                String::from_utf8_lossy(entry).trim()
+                "extended ACL allow entry {entry_number} can grant access to another principal; remove this entry or run `chmod -N <dir>` on this directory"
             ),
-        )),
-        Err(AclRejection::Unrecognized(entry)) => Err(invalid(
+        ),
+        AclRejection::Unrecognized(Some(entry_number)) => invalid(
             std::io::ErrorKind::PermissionDenied,
             &format!(
-                "could not safely interpret extended ACL entry `{}`; remove this entry or run `chmod -N <dir>` on this directory",
-                String::from_utf8_lossy(entry).trim()
+                "could not safely interpret extended ACL entry {entry_number}; remove this entry or run `chmod -N <dir>` on this directory"
             ),
-        )),
-        Ok(()) => Ok(()),
+        ),
+        AclRejection::Unrecognized(None) => invalid(
+            std::io::ErrorKind::PermissionDenied,
+            "could not safely interpret an extended ACL entry without a valid entry number; remove this entry or run `chmod -N <dir>` on this directory",
+        ),
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum AclRejection<'a> {
+enum AclRejection {
     MissingListing,
-    Allow(&'a [u8]),
-    Unrecognized(&'a [u8]),
+    Allow(usize),
+    Unrecognized(Option<usize>),
 }
 
-fn validate_acl_listing(listing: &[u8]) -> Result<(), AclRejection<'_>> {
+fn validate_acl_listing(listing: &[u8]) -> Result<(), AclRejection> {
     let listing = listing.strip_suffix(b"\n").unwrap_or(listing);
     let mut lines = listing.split(|byte| *byte == b'\n');
     if lines.next().is_none_or(|line| line.is_empty()) {
         return Err(AclRejection::MissingListing);
     }
     for entry in lines {
-        let has_action = |action: &[u8]| {
-            entry
-                .split(|byte| byte.is_ascii_whitespace())
-                .any(|token| token == action)
-        };
-        match (has_action(b"allow"), has_action(b"deny")) {
-            (false, true) => {}
-            (true, false) => return Err(AclRejection::Allow(entry)),
-            _ => return Err(AclRejection::Unrecognized(entry)),
-        }
+        validate_acl_entry(entry)?;
     }
     Ok(())
+}
+
+fn validate_acl_entry(entry: &[u8]) -> Result<(), AclRejection> {
+    let tokens = entry
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let entry_number = tokens
+        .first()
+        .and_then(|token| parse_acl_entry_number(token));
+    let Some(entry_number) = entry_number else {
+        return Err(AclRejection::Unrecognized(None));
+    };
+
+    let [_, principal @ .., action, permission_list] = tokens.as_slice() else {
+        return Err(AclRejection::Unrecognized(Some(entry_number)));
+    };
+    if principal.is_empty() || !is_acl_permission_list(permission_list) {
+        return Err(AclRejection::Unrecognized(Some(entry_number)));
+    }
+
+    match *action {
+        b"deny" => Ok(()),
+        b"allow" => Err(AclRejection::Allow(entry_number)),
+        _ => Err(AclRejection::Unrecognized(Some(entry_number))),
+    }
+}
+
+fn parse_acl_entry_number(token: &[u8]) -> Option<usize> {
+    std::str::from_utf8(token.strip_suffix(b":")?)
+        .ok()?
+        .parse()
+        .ok()
+}
+
+fn is_acl_permission_list(token: &[u8]) -> bool {
+    token
+        .split(|byte| *byte == b',')
+        .all(|permission| ACL_PERMISSIONS.contains(&permission))
 }
 
 fn invalid_directory(
@@ -271,17 +334,110 @@ mod tests {
         let error = result.expect_err("allow ACL must be rejected");
         assert!(matches!(&error, DaemonError::File { path: actual, .. } if actual == path));
         let message = error.to_string();
-        assert!(message.contains("extended ACL allow entry"), "{message}");
+        assert!(message.contains("extended ACL allow entry 0"), "{message}");
         assert!(message.contains("chmod -N"));
+        assert!(!message.contains("write"), "{message}");
     }
 
     #[test]
-    fn rejects_unrecognized_acl_listing() {
-        let entry = b" 0: group:everyone audit delete";
+    fn rejects_unrecognized_action_when_principal_contains_deny() {
+        let entry = b" 0: Ops deny audit delete";
         let listing = [b"drwx------+ fixture".as_slice(), entry].join(&b'\n');
         assert_eq!(
             validate_acl_listing(&listing),
-            Err(AclRejection::Unrecognized(entry))
+            Err(AclRejection::Unrecognized(Some(0)))
+        );
+    }
+
+    #[test]
+    fn accepts_deny_action_when_principal_contains_allow() {
+        let entry = b" 0: Ops allow deny delete";
+        let listing = [b"drwx------+ fixture".as_slice(), entry].join(&b'\n');
+        assert_eq!(validate_acl_listing(&listing), Ok(()));
+    }
+
+    #[test]
+    fn rejects_space_separated_acl_permissions() {
+        assert_eq!(
+            validate_acl_entry(b" 0: group:everyone deny delete read"),
+            Err(AclRejection::Unrecognized(Some(0)))
+        );
+    }
+
+    #[test]
+    fn accepts_every_acl_permission() {
+        let permissions: [&[u8]; 21] = [
+            b"delete",
+            b"readattr",
+            b"writeattr",
+            b"readextattr",
+            b"writeextattr",
+            b"readsecurity",
+            b"writesecurity",
+            b"chown",
+            b"list",
+            b"search",
+            b"add_file",
+            b"add_subdirectory",
+            b"delete_child",
+            b"read",
+            b"write",
+            b"append",
+            b"execute",
+            b"file_inherit",
+            b"directory_inherit",
+            b"limit_inherit",
+            b"only_inherit",
+        ];
+        for permission in permissions {
+            let entry = [b" 0: group:everyone deny ".as_slice(), permission].concat();
+            assert_eq!(
+                validate_acl_entry(&entry),
+                Ok(()),
+                "permission: {}",
+                String::from_utf8_lossy(permission)
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_comma_separated_acl_permissions() {
+        assert_eq!(
+            validate_acl_entry(b" 0: group:everyone deny delete,read"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_acl_permission_lists() {
+        let permission_lists: [&[u8]; 5] = [b"unknown", b"", b"delete,,read", b",read", b"read,"];
+        for permission_list in permission_lists {
+            let entry = [b" 0: group:everyone deny ".as_slice(), permission_list].concat();
+            assert_eq!(
+                validate_acl_entry(&entry),
+                Err(AclRejection::Unrecognized(Some(0))),
+                "permission list: {}",
+                String::from_utf8_lossy(permission_list)
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_unrecognized_acl_entry_without_number() {
+        let entry = b"sensitive-principal deny delete";
+        let listing = [b"drwx------+ fixture".as_slice(), entry].join(&b'\n');
+        let rejection = validate_acl_listing(&listing).expect_err("entry must be rejected");
+        assert_eq!(rejection, AclRejection::Unrecognized(None));
+
+        let error = acl_rejection_error(OPERATION, Path::new("/private/tmp/fixture"), rejection);
+        let message = error.to_string();
+        assert!(
+            message.contains("without a valid entry number"),
+            "{message}"
+        );
+        assert!(
+            !message.contains(&*String::from_utf8_lossy(entry)),
+            "{message}"
         );
     }
 
