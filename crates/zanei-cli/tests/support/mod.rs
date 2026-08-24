@@ -88,6 +88,10 @@ impl Fixture {
     }
 
     /// Holds recorder ownership matching the daemon state already stored until the file is dropped.
+    ///
+    /// The private production ownership type is not reachable from integration tests, so this is
+    /// a minimal mirror of its lock-file contract whose behavior the CLI's own probe verifies;
+    /// open/Drop differences from production are acceptable inside the trusted TempDir.
     pub fn hold_store_owner(&self) -> File {
         let status = self.open_reader().status().expect("fixture daemon status");
         let owner = FixtureStoreOwner {
