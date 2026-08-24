@@ -8,10 +8,16 @@ use std::{
 use zanei_core::schema::FieldKind;
 
 use super::{
-    NativeAxEvent, NativeElement,
+    NativeAxError, NativeAxEvent, NativeElement, TargetKind,
+    cf::cf_string,
     element::{
         VALUE_CHANGE_READ_SURFACE, ValueFieldSnapshot, focused_element_is_excluded, gated_value,
         value_length,
+    },
+    native_error,
+    observer::{
+        AppObserver,
+        value_registration::{NotificationRegistry, RegistrationError},
     },
     runtime::secure_input_active,
     value_context::{
@@ -20,12 +26,60 @@ use super::{
     },
 };
 use crate::{
-    focused_field::FieldClass,
+    focused_field::{FieldClass, field_class},
     secure_input::secure_input_test_channel,
     text_capture::{
         FocusedTarget, VALUE_DEBOUNCE, ValueCapture, ValueObservation, input_authorization_channel,
     },
 };
+
+#[derive(Default)]
+struct FakeValueNotifications {
+    add_calls: Cell<usize>,
+    remove_calls: Cell<usize>,
+    add_error: Cell<Option<i32>>,
+    remove_error: Cell<Option<i32>>,
+}
+
+impl FakeValueNotifications {
+    fn add(&self) -> Result<(), NativeAxError> {
+        self.add_calls.set(self.add_calls.get() + 1);
+        self.add_error
+            .get()
+            .map_or(Ok(()), |code| Err(native_error("fake add", code)))
+    }
+
+    fn remove(&self) -> Result<(), NativeAxError> {
+        self.remove_calls.set(self.remove_calls.get() + 1);
+        self.remove_error
+            .get()
+            .map_or(Ok(()), |code| Err(native_error("fake remove", code)))
+    }
+}
+
+fn fake_field_snapshot(role: Option<&str>) -> ValueFieldSnapshot {
+    ValueFieldSnapshot {
+        role: role.map(str::to_owned),
+        subrole: None,
+        field_class: field_class(role, None),
+        registration_class: Some(field_class(role, None)),
+        degraded: false,
+    }
+}
+
+fn refresh_fake_target(
+    observer: &mut AppObserver,
+    role: Option<&str>,
+    authorizations: &mut crate::InputAuthorizations,
+    fake_ax: &FakeValueNotifications,
+) -> Result<(), RegistrationError> {
+    observer.refresh_current_field_class_with(
+        fake_field_snapshot(role),
+        authorizations,
+        || fake_ax.add(),
+        || fake_ax.remove(),
+    )
+}
 
 #[test]
 fn value_change_reclassifies_before_reading_value_and_character_count() {
@@ -33,6 +87,244 @@ fn value_change_reclassifies_before_reading_value_and_character_count() {
         VALUE_CHANGE_READ_SURFACE,
         ["AXRole", "AXSubrole", "AXValue", "AXNumberOfCharacters"]
     );
+}
+
+#[test]
+fn same_target_unknown_to_text_area_registers_value_notification_once() {
+    let fake_ax = FakeValueNotifications::default();
+    let mut observer = AppObserver::fake_with_unknown_focused_target();
+    let element = observer.fake_focused_element();
+    let (_publisher, mut authorizations) = input_authorization_channel();
+
+    for snapshot in [None, Some("AXTextArea"), Some("AXTextArea")] {
+        assert!(
+            refresh_fake_target(&mut observer, snapshot, &mut authorizations, &fake_ax).is_ok()
+        );
+    }
+
+    assert_eq!(fake_ax.add_calls.get(), 1);
+    assert_eq!(fake_ax.remove_calls.get(), 0);
+    assert_eq!(
+        observer.fake_focused_field_class(),
+        FieldClass::KnownText(FieldKind::Text)
+    );
+    assert!(observer.is_current_target(TargetKind::Value, element));
+}
+
+#[test]
+fn same_target_known_to_excluded_unregisters_and_blocks_stale_delivery() {
+    for excluded_role in [Some("AXSecureTextField"), None] {
+        let fake_ax = FakeValueNotifications::default();
+        let mut observer = AppObserver::fake_with_unknown_focused_target();
+        let element = observer.fake_focused_element();
+        let (_publisher, mut authorizations) = input_authorization_channel();
+        assert!(
+            refresh_fake_target(
+                &mut observer,
+                Some("AXTextArea"),
+                &mut authorizations,
+                &fake_ax,
+            )
+            .is_ok()
+        );
+
+        for _ in 0..2 {
+            assert!(
+                refresh_fake_target(&mut observer, excluded_role, &mut authorizations, &fake_ax,)
+                    .is_ok()
+            );
+        }
+
+        assert_eq!(fake_ax.add_calls.get(), 1);
+        assert_eq!(fake_ax.remove_calls.get(), 1);
+        assert!(!observer.is_current_target(TargetKind::Value, element));
+    }
+}
+
+#[test]
+fn notification_not_registered_is_readded_before_delivery_resumes() {
+    let fake_ax = FakeValueNotifications::default();
+    let mut observer = AppObserver::fake_with_unknown_focused_target();
+    let element = observer.fake_focused_element();
+    let (_publisher, mut authorizations) = input_authorization_channel();
+    assert!(
+        refresh_fake_target(
+            &mut observer,
+            Some("AXTextArea"),
+            &mut authorizations,
+            &fake_ax,
+        )
+        .is_ok()
+    );
+
+    fake_ax.remove_error.set(Some(-25_210));
+    assert!(
+        refresh_fake_target(
+            &mut observer,
+            Some("AXSecureTextField"),
+            &mut authorizations,
+            &fake_ax,
+        )
+        .is_ok()
+    );
+    assert!(!observer.is_current_target(TargetKind::Value, element));
+    assert_eq!(observer.fake_focused_field_class(), FieldClass::SecureText);
+
+    fake_ax.remove_error.set(None);
+    assert!(
+        refresh_fake_target(
+            &mut observer,
+            Some("AXTextArea"),
+            &mut authorizations,
+            &fake_ax,
+        )
+        .is_ok()
+    );
+    assert_eq!(fake_ax.add_calls.get(), 2);
+    assert!(observer.is_current_target(TargetKind::Value, element));
+}
+
+#[test]
+fn stale_registration_requires_an_idempotent_add_before_delivery_resumes() {
+    let fake_ax = FakeValueNotifications::default();
+    let mut observer = AppObserver::fake_with_unknown_focused_target();
+    let element = observer.fake_focused_element();
+    let (_publisher, mut authorizations) = input_authorization_channel();
+    assert!(
+        refresh_fake_target(
+            &mut observer,
+            Some("AXTextArea"),
+            &mut authorizations,
+            &fake_ax,
+        )
+        .is_ok()
+    );
+
+    fake_ax.remove_error.set(Some(-1));
+    assert!(matches!(
+        refresh_fake_target(
+            &mut observer,
+            Some("AXSecureTextField"),
+            &mut authorizations,
+            &fake_ax,
+        ),
+        Err(RegistrationError::Unregister(_))
+    ));
+    assert!(!observer.is_current_target(TargetKind::Value, element));
+
+    fake_ax.add_error.set(Some(-25_209));
+    assert!(
+        refresh_fake_target(
+            &mut observer,
+            Some("AXTextArea"),
+            &mut authorizations,
+            &fake_ax,
+        )
+        .is_ok()
+    );
+    assert_eq!(fake_ax.add_calls.get(), 2);
+    assert!(observer.is_current_target(TargetKind::Value, element));
+}
+
+#[test]
+fn stale_target_is_reclaimed_when_focus_returns_from_another_target() {
+    let first_a = cf_string("target A").expect("target A");
+    let second_a = cf_string("target A").expect("equal target A");
+    let target_b = cf_string("target B").expect("target B");
+    let mut registry = NotificationRegistry::default();
+
+    assert!(
+        registry
+            .register(&first_a, "AXValueChanged", || Ok(()))
+            .is_ok()
+    );
+    assert!(matches!(
+        registry.unregister(first_a.as_ptr(), "AXValueChanged", || Err(native_error(
+            "fake remove",
+            -1,
+        ))),
+        Err(RegistrationError::Unregister(_))
+    ));
+    assert!(
+        registry
+            .register(&target_b, "AXValueChanged", || Ok(()))
+            .is_ok()
+    );
+    assert!(
+        registry
+            .register(&second_a, "AXValueChanged", || Err(native_error(
+                "fake add", -25_209,
+            )))
+            .is_ok()
+    );
+    assert!(
+        registry
+            .unregister(target_b.as_ptr(), "AXValueChanged", || Ok(()))
+            .is_ok()
+    );
+
+    assert!(registry.accepts_delivery(second_a.as_ptr(), "AXValueChanged"));
+    assert!(!registry.accepts_delivery(target_b.as_ptr(), "AXValueChanged"));
+}
+
+#[test]
+fn secure_input_suppression_preserves_registration_until_role_recovery() {
+    let fake_ax = FakeValueNotifications::default();
+    let mut observer = AppObserver::fake_with_unknown_focused_target();
+    let element = observer.fake_focused_element();
+    let (_publisher, mut authorizations) = input_authorization_channel();
+    assert!(
+        refresh_fake_target(
+            &mut observer,
+            Some("AXTextArea"),
+            &mut authorizations,
+            &fake_ax,
+        )
+        .is_ok()
+    );
+
+    assert!(
+        observer
+            .take_due_value_events(Instant::now(), true, &mut authorizations)
+            .is_empty()
+    );
+    assert!(observer.flush_pending(true, &mut authorizations).is_empty());
+    assert!(observer.is_current_target(TargetKind::Value, element));
+    assert_eq!(fake_ax.remove_calls.get(), 0);
+
+    assert!(
+        refresh_fake_target(
+            &mut observer,
+            Some("AXTextArea"),
+            &mut authorizations,
+            &fake_ax,
+        )
+        .is_ok()
+    );
+    assert_eq!(fake_ax.add_calls.get(), 1);
+    assert_eq!(
+        observer.fake_focused_field_class(),
+        FieldClass::KnownText(FieldKind::Text)
+    );
+}
+
+#[test]
+fn failed_registration_does_not_enable_value_delivery() {
+    let fake_ax = FakeValueNotifications::default();
+    fake_ax.add_error.set(Some(-1));
+    let mut observer = AppObserver::fake_with_unknown_focused_target();
+    let element = observer.fake_focused_element();
+    let (_publisher, mut authorizations) = input_authorization_channel();
+    let result = refresh_fake_target(
+        &mut observer,
+        Some("AXTextArea"),
+        &mut authorizations,
+        &fake_ax,
+    );
+
+    assert!(matches!(result, Err(RegistrationError::Register(_))));
+    assert_eq!(observer.fake_focused_field_class(), FieldClass::Unknown);
+    assert!(!observer.is_current_target(TargetKind::Value, element));
 }
 
 #[test]
@@ -264,6 +556,7 @@ fn degraded_same_target_classification_preserves_pending_value() {
         role: None,
         subrole: None,
         field_class: FieldClass::Unknown,
+        registration_class: None,
         degraded: true,
     };
 
@@ -280,6 +573,7 @@ fn degraded_same_target_classification_preserves_pending_value() {
         role: None,
         subrole: None,
         field_class: FieldClass::SecureText,
+        registration_class: None,
         degraded: false,
     };
     assert_eq!(
