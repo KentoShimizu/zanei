@@ -52,6 +52,11 @@ missing (details in the [permissions guide](/guides/permissions)):
 zanei doctor
 ```
 
+Recording the Accessibility text shown in the frontmost window is a separate opt-in and stays off
+by default. First narrow `[filter.content_snapshot]` with `include_only_apps` / `include_only_websites`
+(use `zanei apps` to choose apps), then run `zanei config set capture.content_snapshot true`; it shows
+the current scope and asks for confirmation (see [configuration](/reference/config) and [filters](/guides/filters)).
+
 </Step>
 <Step title="Get your first timeline">
 
@@ -82,8 +87,12 @@ From now on, telling your agent "check what I was just working on and continue" 
 - Data is stored in a local SQLite database (`~/.local/state/zanei/store.sqlite`) and is not sent anywhere.
 - Keystroke content is recorded only if you opted in at first start (default no;
   `zanei config set capture.text_content <true|false>` changes it).
+- Text shown in the frontmost window (content snapshots) is a separate opt-in and is not recorded by
+  default; enable it with `zanei config set capture.content_snapshot true`.
 - Events are deleted automatically after 48 hours by default (configurable in [settings](/reference/config)).
-- Apps and sites you don't want recorded can be excluded before they are written with [filters](/guides/filters).
+- Apps and sites you don't want recorded can be excluded before they are written with
+  [filters](/guides/filters); typed-text capture and content snapshots also accept their own
+  per-app and per-site scopes there.
 
 :::note[If you want to stop]
 `zanei pause --for 1h` pauses temporarily, `zanei stop` stops completely (data is kept), and `zanei purge --all` deletes all data.
