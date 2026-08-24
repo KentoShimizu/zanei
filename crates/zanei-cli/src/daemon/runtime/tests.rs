@@ -13,15 +13,16 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 use time::Duration;
 use zanei_core::{
-    config::Config,
+    config::{CaptureSource, Config, ConfigWatcher},
     normalize::format_timestamp,
     store::{DaemonMode, DaemonState, StoreReader, StoreWriter},
 };
+use zanei_macos::chrome::{ChromeFailure, ChromeFailureState, ChromeQueryFailure};
 use zanei_macos::permission::{PermissionError, PermissionStatus};
 
 use super::{
-    CollectorSet, EXECUTABLE_REMOVED_MESSAGE, Pipeline, configure_eventtap_start_gate,
-    ensure_pipeline_running, executable_shutdown_requested,
+    ActiveDaemon, CollectorSet, EXECUTABLE_REMOVED_MESSAGE, Pipeline, StoreOwner,
+    configure_eventtap_start_gate, ensure_pipeline_running, executable_shutdown_requested,
     initialize_permission_dependent_runtime, merge_collector_failures, normalize_pause_request,
     queue_permission_expansion, service_permission_request_worker, shutdown_daemon,
 };
@@ -216,12 +217,104 @@ fn wait_for_permission_worker(
 #[test]
 fn collector_failures_accumulate_across_daemon_instances() {
     let base = BTreeMap::from([("eventtap".to_owned(), 2), ("ax".to_owned(), u64::MAX)]);
-    let current = BTreeMap::from([("eventtap".to_owned(), 3), ("ax".to_owned(), 1)]);
+    let first = BTreeMap::from([("eventtap".to_owned(), 3), ("ax".to_owned(), 1)]);
+    let next = BTreeMap::from([("eventtap".to_owned(), 4), ("ax".to_owned(), 2)]);
 
     assert_eq!(
-        merge_collector_failures(&base, &current),
+        merge_collector_failures(&base, &first),
         BTreeMap::from([("ax".to_owned(), u64::MAX), ("eventtap".to_owned(), 5),])
     );
+    assert_eq!(
+        merge_collector_failures(&base, &next),
+        BTreeMap::from([("ax".to_owned(), u64::MAX), ("eventtap".to_owned(), 6),])
+    );
+}
+
+#[test]
+fn typed_collector_failure_and_recovery_are_persisted_by_the_heartbeat() {
+    let directory = TempDir::new().expect("temporary directory");
+    let store_path = directory.path().join("store.sqlite");
+    let writer = Arc::new(Mutex::new(
+        StoreWriter::open(&store_path).expect("store writer"),
+    ));
+    let reader = StoreReader::open(&store_path).expect("store reader");
+    let mut config = Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    let mut config_watcher =
+        ConfigWatcher::new(directory.path().join("config.toml")).expect("config watcher");
+    let mut pipeline = Pipeline::store(&config, Arc::clone(&writer)).expect("pipeline");
+    let mut collectors = CollectorSet::new(&config);
+    collectors
+        .chrome
+        .as_mut()
+        .expect("Chrome collector")
+        .set_health_for_test(
+            true,
+            ChromeFailureState::Unavailable(ChromeFailure::Query(ChromeQueryFailure::AppleEvent(
+                -1712,
+            ))),
+        );
+    let owner = StoreOwner::new(DaemonMode::Launchd, "2026-08-24T10:00:00.000Z".to_owned());
+    let base_collector_failures = BTreeMap::new();
+    let mut paused = false;
+    let mut degraded = BTreeMap::new();
+
+    let mut daemon = ActiveDaemon {
+        store_path: &store_path,
+        config_watcher: &mut config_watcher,
+        active_retention_hours: config.output.retention_hours,
+        pending_retention_hours: None,
+        writer: &writer,
+        reader: &reader,
+        pipeline: &pipeline,
+        collectors: &mut collectors,
+        owner: &owner,
+        base_dropped: 0,
+        base_collector_failures: &base_collector_failures,
+        paused: &mut paused,
+        intake_suspended: false,
+        degraded: &mut degraded,
+        last_status: reader.status().expect("initial store status"),
+        last_permissions: None,
+        initial_input_monitoring_status: None,
+        permission_request_worker: None,
+        pending_permission_request: None,
+        executable_guard: ExecutableGuard::new(directory.path().join("zanei")),
+    };
+    daemon
+        .publish_heartbeat_with_permissions(None)
+        .expect("publish heartbeat");
+    pipeline.flush().expect("flush heartbeat");
+
+    assert_eq!(
+        reader
+            .status()
+            .expect("persisted heartbeat")
+            .degraded
+            .get("chrome")
+            .map(String::as_str),
+        Some("state=unavailable phase=query kind=apple_event code=-1712")
+    );
+
+    daemon
+        .collectors
+        .chrome
+        .as_mut()
+        .expect("Chrome collector")
+        .set_health_for_test(true, ChromeFailureState::Available);
+    daemon
+        .publish_heartbeat_with_permissions(None)
+        .expect("publish recovery heartbeat");
+    pipeline.flush().expect("flush recovery heartbeat");
+    assert!(
+        !reader
+            .status()
+            .expect("persisted recovery heartbeat")
+            .degraded
+            .contains_key("chrome")
+    );
+    drop(daemon);
+    pipeline.shutdown().expect("pipeline shutdown");
 }
 
 #[test]

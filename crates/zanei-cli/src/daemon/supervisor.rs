@@ -1,11 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::mpsc::SyncSender,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use zanei_collector::{Collector, Permission, RawEvent};
 use zanei_core::store::{DaemonPermissions, PermissionState};
+use zanei_macos::chrome::ChromeCollector;
 
 use super::{
     DaemonError,
@@ -15,14 +16,9 @@ use super::{
     },
 };
 
-const RESTART_DELAYS: [Duration; 5] = [
-    Duration::from_secs(5),
-    Duration::from_secs(10),
-    Duration::from_secs(20),
-    Duration::from_secs(40),
-    Duration::from_secs(60),
-];
-const RESTART_STABLE_AFTER: Duration = Duration::from_secs(60);
+mod health;
+
+use health::{ChromeHealth, RESTART_STABLE_AFTER, RestartState};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct CollectorCounters {
@@ -194,6 +190,11 @@ impl CollectorSet {
             degraded: self.start_errors.clone(),
             ..CollectorHealth::default()
         };
+        add_restart_degradation(&mut health.degraded, self.content_snapshot.as_ref());
+        add_restart_degradation(&mut health.degraded, self.ax.as_ref());
+        add_restart_degradation(&mut health.degraded, self.chrome.as_ref());
+        add_restart_degradation(&mut health.degraded, self.workspace.as_ref());
+        add_restart_degradation(&mut health.degraded, self.eventtap.as_ref());
         for (name, counters) in &self.retained_collector_health {
             health.dropped = health.dropped.saturating_add(counters.dropped);
             add_failure_count(&mut health.collector_failures, name, counters.failures);
@@ -276,6 +277,12 @@ impl CollectorSet {
                 "chrome",
                 chrome.collector.degraded_operations(),
             );
+            if let Some(reason) = chrome
+                .health()
+                .degraded_reason(health.degraded.get("chrome").map(String::as_str))
+            {
+                health.degraded.insert("chrome".to_owned(), reason);
+            }
         }
         health
     }
@@ -304,6 +311,8 @@ pub(super) struct Managed<C> {
     restart: RestartState,
     started_at: Option<Instant>,
     pub(super) relay_dropped: u64,
+    #[cfg(test)]
+    chrome_health_override: Option<ChromeHealth>,
 }
 
 #[derive(Clone, Copy)]
@@ -338,53 +347,44 @@ impl<C> Managed<C> {
             restart: RestartState::new(),
             started_at: None,
             relay_dropped: 0,
+            #[cfg(test)]
+            chrome_health_override: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) const fn restart_degraded_reason(&self) -> Option<&'static str> {
+        self.restart.degraded_reason()
+    }
+
+    #[cfg(test)]
+    pub(super) const fn started_at_for_test(&self) -> Option<Instant> {
+        self.started_at
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_unexpected_exit_for_test(&mut self, now: Instant, reason: &'static str) {
+        self.restart = self.restart.exited_unexpectedly(now, true, reason);
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct RestartState {
-    next_attempt: Option<Instant>,
-    delay_index: usize,
-    waiting_for_permission: bool,
-}
-
-impl RestartState {
-    const fn new() -> Self {
-        Self {
-            next_attempt: None,
-            delay_index: 0,
-            waiting_for_permission: false,
+impl Managed<ChromeCollector> {
+    fn health(&self) -> ChromeHealth {
+        #[cfg(test)]
+        if let Some(health) = self.chrome_health_override {
+            return health;
         }
+        ChromeHealth::new(self.running, self.collector.failure_state())
     }
 
-    fn failed(&mut self, now: Instant, permissions_granted: bool) {
-        if permissions_granted {
-            let delay = RESTART_DELAYS[self.delay_index.min(RESTART_DELAYS.len() - 1)];
-            self.delay_index = self.delay_index.saturating_add(1);
-            self.next_attempt = Some(now + delay);
-            self.waiting_for_permission = false;
-        } else {
-            self.next_attempt = None;
-            self.waiting_for_permission = true;
-        }
-    }
-
-    fn ready(self, now: Instant, permissions_granted: bool) -> bool {
-        (!self.waiting_for_permission && self.next_attempt.is_none())
-            || (self.waiting_for_permission && permissions_granted)
-            || self
-                .next_attempt
-                .is_some_and(|next_attempt| now >= next_attempt)
-    }
-
-    fn restarted(&mut self) {
-        self.next_attempt = None;
-        self.waiting_for_permission = false;
-    }
-
-    fn stable(&mut self) {
-        *self = Self::new();
+    #[cfg(test)]
+    // Intentional test limit until zanei-macos exposes a real producer injection API.
+    pub(super) fn set_health_for_test(
+        &mut self,
+        running: bool,
+        failure_state: zanei_macos::chrome::ChromeFailureState,
+    ) {
+        self.chrome_health_override = Some(ChromeHealth::new(running, failure_state));
     }
 }
 
@@ -455,7 +455,7 @@ fn start_managed<C: ManagedCollector>(
         Ok(relay) => relay,
         Err(error) => {
             errors.insert(name, error.to_string());
-            managed.restart.failed(now, permissions_granted);
+            managed.restart = managed.restart.start_failed(now, permissions_granted);
             return;
         }
     };
@@ -464,13 +464,13 @@ fn start_managed<C: ManagedCollector>(
             managed.running = true;
             managed.relay = Some(relay);
             managed.started_at = Some(now);
-            managed.restart.restarted();
+            managed.restart = managed.restart.started();
             errors.remove(&name);
         }
         Err(error) => {
             let _ = relay.stop();
             errors.insert(name, error);
-            managed.restart.failed(now, permissions_granted);
+            managed.restart = managed.restart.start_failed(now, permissions_granted);
         }
     }
 }
@@ -511,7 +511,6 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
     let Some(managed) = managed.as_mut() else {
         return Ok(());
     };
-    let name = managed.collector.worker_name().to_owned();
     let required = managed.collector.worker_permissions();
     let granted = permissions.map_or(required.is_empty(), |permissions| {
         permissions_granted(&required, permissions)
@@ -537,8 +536,7 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
                 "collector relay stopped unexpectedly"
             }
         };
-        errors.insert(name.clone(), reason.to_owned());
-        managed.restart.failed(now, granted);
+        managed.restart = managed.restart.exited_unexpectedly(now, granted, reason);
     }
 
     if managed.running {
@@ -546,7 +544,8 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
             .started_at
             .is_some_and(|started_at| now.duration_since(started_at) >= RESTART_STABLE_AFTER)
         {
-            managed.restart.stable();
+            managed.restart = managed.restart.stable();
+            managed.started_at = None;
         }
         return Ok(());
     }
@@ -574,5 +573,19 @@ fn add_failure_count(failures: &mut BTreeMap<String, u64>, collector: &str, coun
     if count > 0 {
         let total = failures.entry(collector.to_owned()).or_default();
         *total = total.saturating_add(count);
+    }
+}
+
+pub(super) fn add_restart_degradation<C: ManagedCollector>(
+    degraded: &mut BTreeMap<String, String>,
+    managed: Option<&Managed<C>>,
+) {
+    let Some(managed) = managed else {
+        return;
+    };
+    if let Some(reason) = managed.restart.degraded_reason() {
+        degraded
+            .entry(managed.collector.worker_name().to_owned())
+            .or_insert_with(|| reason.to_owned());
     }
 }
