@@ -8,29 +8,12 @@ use std::{
 
 use zanei_core::store::{StoreError, StoreFormat, StoreKey, StoreStatus};
 
-use crate::store_access::{KeyAccess, KeyPrompt};
+use crate::store_access::KeyPrompt;
 
 use super::{
     DAEMON_CONTROL_POLL_INTERVAL, DAEMON_CONTROL_TIMEOUT, DaemonError, StoreOwner, StoreOwnership,
-    bootout, bootstrap, is_bootstrapped,
+    is_bootstrapped,
 };
-
-pub fn start_launch_agent(
-    executable: &Path,
-    config_path: &Path,
-    store_path: &Path,
-) -> Result<bool, DaemonError> {
-    let registered = is_bootstrapped()?;
-    start_launch_agent_with(
-        registered,
-        DAEMON_CONTROL_TIMEOUT,
-        bootout,
-        is_bootstrapped,
-        thread::sleep,
-        || bootstrap(executable, config_path, store_path),
-        || daemon_is_alive(store_path),
-    )
-}
 
 pub fn wait_for_launch_agent_removal() -> Result<(), DaemonError> {
     wait_for_launch_agent_removal_with(DAEMON_CONTROL_TIMEOUT, is_bootstrapped, thread::sleep)
@@ -57,12 +40,6 @@ pub(super) fn start_launch_agent_with(
         return Err(error);
     }
     Ok(registered)
-}
-
-fn daemon_is_alive(store_path: &Path) -> Result<bool, DaemonError> {
-    daemon_is_alive_with(store_path, || {
-        crate::store_access::load_store_key(KeyAccess::Existing, KeyPrompt::Suppressed)
-    })
 }
 
 pub(super) fn daemon_is_alive_with(

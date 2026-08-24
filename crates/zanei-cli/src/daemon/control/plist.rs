@@ -5,10 +5,7 @@ use std::{
     ffi::CString,
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
     path::{Path, PathBuf},
     process::{self, Command},
     sync::atomic::{AtomicU64, Ordering},
@@ -22,9 +19,6 @@ const STANDARD_OUT_LOG_SUFFIX: &str = ".daemon.stdout.log";
 const STANDARD_ERROR_LOG_SUFFIX: &str = ".daemon.stderr.log";
 const LOG_FILE_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
 const TEMPORARY_PLIST_MODE: u32 = 0o600;
-const GROUP_OR_WORLD_WRITE_MODE: u32 = 0o022;
-const STICKY_MODE: u32 = 0o1000;
-const ROOT_USER_ID: u32 = 0;
 static TEMPORARY_PLIST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // Design limit: logs are unbounded; add rotation when either file exceeds 100 MiB.
@@ -53,6 +47,7 @@ pub(super) struct PreparedLaunchAgent {
     plist_path: PathBuf,
     temporary_path: Option<PathBuf>,
     domain: String,
+    store_path: PathBuf,
 }
 
 pub fn launch_agent_path() -> Result<PathBuf, DaemonError> {
@@ -178,7 +173,11 @@ fn prepare_launch_agent_logs_for_user(
         path: parent.to_owned(),
         source,
     })?;
-    validate_log_directory(&canonical_parent, user_id)?;
+    super::logs::validate_owner_only_directory(
+        &canonical_parent,
+        user_id,
+        "use as a launchd log directory",
+    )?;
     let file_name = store_path.file_name().ok_or_else(|| DaemonError::File {
         operation: "use as a launchd store path",
         path: store_path.to_owned(),
@@ -193,7 +192,7 @@ fn prepare_launch_agent_logs_for_user(
     Ok(canonical)
 }
 
-fn user_id_from_domain(domain: &str) -> Result<u32, DaemonError> {
+pub(super) fn user_id_from_domain(domain: &str) -> Result<u32, DaemonError> {
     domain
         .strip_prefix("gui/")
         .and_then(|user_id| user_id.parse().ok())
@@ -201,74 +200,6 @@ fn user_id_from_domain(domain: &str) -> Result<u32, DaemonError> {
             program: ID,
             output: domain.to_owned(),
         })
-}
-
-fn validate_log_directory(path: &Path, user_id: u32) -> Result<(), DaemonError> {
-    let mut directories: Vec<_> = path.ancestors().collect();
-    directories.reverse();
-    for directory in directories {
-        let metadata = fs::symlink_metadata(directory).map_err(|source| DaemonError::File {
-            operation: "inspect the launchd log directory",
-            path: directory.to_owned(),
-            source,
-        })?;
-        if !metadata.file_type().is_dir() {
-            return Err(log_directory_error(
-                directory,
-                std::io::ErrorKind::InvalidInput,
-                "path component is not a directory; choose an owner-only store directory",
-            ));
-        }
-        let owner = metadata.uid();
-        let is_log_directory = directory == path;
-        if is_log_directory && owner != user_id {
-            return Err(log_directory_error(
-                directory,
-                std::io::ErrorKind::PermissionDenied,
-                &format!(
-                    "directory is owned by uid {owner}, but the launchd log directory must be owned by current uid {user_id}; change its owner or choose an owner-only store directory"
-                ),
-            ));
-        }
-        if !is_log_directory && owner != ROOT_USER_ID && owner != user_id {
-            return Err(log_directory_error(
-                directory,
-                std::io::ErrorKind::PermissionDenied,
-                &format!(
-                    "ancestor is owned by untrusted uid {owner}; move the store below a directory owned by root or current uid {user_id}"
-                ),
-            ));
-        }
-        let mode = metadata.mode() & 0o7777;
-        let writable_by_others = mode & GROUP_OR_WORLD_WRITE_MODE != 0;
-        if is_log_directory && writable_by_others {
-            return Err(log_directory_error(
-                directory,
-                std::io::ErrorKind::PermissionDenied,
-                &format!(
-                    "directory mode {mode:#06o} is group/world-writable; run `chmod go-w` on it or choose an owner-only store directory"
-                ),
-            ));
-        }
-        if !is_log_directory && writable_by_others && mode & STICKY_MODE == 0 {
-            return Err(log_directory_error(
-                directory,
-                std::io::ErrorKind::PermissionDenied,
-                &format!(
-                    "ancestor mode {mode:#06o} lets other users replace path components because the sticky bit is not set; run `chmod go-w` on it or choose an owner-only store directory"
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn log_directory_error(path: &Path, kind: std::io::ErrorKind, reason: &str) -> DaemonError {
-    DaemonError::File {
-        operation: "use as a launchd log directory",
-        path: path.to_owned(),
-        source: std::io::Error::new(kind, reason),
-    }
 }
 
 fn prepare_log_file(path: &Path) -> Result<(), DaemonError> {
@@ -284,6 +215,16 @@ fn prepare_log_file(path: &Path) -> Result<(), DaemonError> {
     let flags =
         OFlags::CREATE | OFlags::WRONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
     let file = open(path_argument.as_c_str(), flags, LOG_FILE_MODE).map_err(|source| {
+        if source == rustix::io::Errno::LOOP {
+            return DaemonError::File {
+                operation: "create",
+                path: path.to_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "path is a symbolic link; remove the symlink before starting Zanei",
+                ),
+            };
+        }
         DaemonError::File {
             operation: "create",
             path: path.to_owned(),
@@ -317,16 +258,45 @@ fn non_regular_log(path: &Path) -> DaemonError {
     }
 }
 
+fn create_temporary_plist(
+    parent: &Path,
+    process_id: u32,
+    sequence: &AtomicU64,
+) -> Result<(PathBuf, fs::File), DaemonError> {
+    loop {
+        let path = parent.join(format!(
+            ".{PLIST_FILE_NAME}.{process_id}.{}.tmp",
+            sequence.fetch_add(1, Ordering::Relaxed)
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(TEMPORARY_PLIST_MODE)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(DaemonError::File {
+                    operation: "create prepared launch agent plist",
+                    path,
+                    source,
+                });
+            }
+        }
+    }
+}
+
 pub(super) fn prepare_launch_agent(
     executable: &Path,
     config_path: &Path,
     store_path: &Path,
+    plist_path: PathBuf,
 ) -> Result<PreparedLaunchAgent, DaemonError> {
     let paths = launch_agent_paths(store_path)?;
     let domain = gui_domain()?;
     let paths = prepare_launch_agent_logs_for_user(&paths, user_id_from_domain(&domain)?)?;
     let plist = build_launch_agent_plist(executable, config_path, &paths)?;
-    let plist_path = launch_agent_path()?;
     let parent = plist_path.parent().ok_or_else(|| DaemonError::File {
         operation: "resolve parent directory for",
         path: plist_path.clone(),
@@ -337,25 +307,13 @@ pub(super) fn prepare_launch_agent(
         path: plist_path.clone(),
         source,
     })?;
-    let temporary_path = parent.join(format!(
-        ".{PLIST_FILE_NAME}.{}.{}.tmp",
-        process::id(),
-        TEMPORARY_PLIST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut temporary = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(TEMPORARY_PLIST_MODE)
-        .open(&temporary_path)
-        .map_err(|source| DaemonError::File {
-            operation: "create prepared launch agent plist",
-            path: temporary_path.clone(),
-            source,
-        })?;
+    let (temporary_path, mut temporary) =
+        create_temporary_plist(parent, process::id(), &TEMPORARY_PLIST_SEQUENCE)?;
     let prepared = PreparedLaunchAgent {
         plist_path,
         temporary_path: Some(temporary_path.clone()),
         domain,
+        store_path: paths.store_path().to_owned(),
     };
     temporary
         .write_all(plist.as_bytes())
@@ -369,6 +327,10 @@ pub(super) fn prepare_launch_agent(
 }
 
 impl PreparedLaunchAgent {
+    pub(super) fn store_path(&self) -> &Path {
+        &self.store_path
+    }
+
     pub(super) fn install_and_bootstrap(&mut self) -> Result<(), DaemonError> {
         let temporary_path = self
             .temporary_path
@@ -412,15 +374,6 @@ impl Drop for PreparedLaunchAgent {
             let _ = fs::remove_file(path);
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn bootstrap(
-    executable: &Path,
-    config_path: &Path,
-    store_path: &Path,
-) -> Result<(), DaemonError> {
-    prepare_launch_agent(executable, config_path, store_path)?.install_and_bootstrap()
 }
 
 fn xml_escape(value: &str) -> String {
@@ -485,7 +438,7 @@ mod tests {
             error,
             "create",
             &canonical_sibling(Path::new(&paths.standard_out)),
-            "",
+            "remove the symlink",
         );
         assert_eq!(
             fs::read(&target).expect("read target"),
@@ -539,6 +492,15 @@ mod tests {
             &canonical_sibling(Path::new(&paths.standard_out)),
             "path contains a NUL byte",
         );
+
+        let sequence = AtomicU64::new(0);
+        let stale = directory
+            .path()
+            .join(format!(".{PLIST_FILE_NAME}.42.0.tmp"));
+        fs::write(&stale, b"stale").expect("create stale plist");
+        let (fresh, _file) = create_temporary_plist(directory.path(), 42, &sequence)
+            .expect("skip stale plist identity");
+        assert_ne!(fresh, stale);
     }
 
     #[test]
@@ -583,7 +545,7 @@ mod tests {
         symlink(&target, &alias).expect("create alias");
         let raw = launch_agent_paths(&alias.join("store.sqlite")).expect("raw paths");
         let paths = prepare_launch_agent_logs(&raw).expect("canonical paths");
-        let expected = fs::canonicalize(target)
+        let expected = fs::canonicalize(&target)
             .expect("canonical target")
             .join("store.sqlite");
         assert_eq!(paths.store_path(), expected);
@@ -595,5 +557,15 @@ mod tests {
         );
         assert!(plist.contains(expected.to_str().expect("UTF-8 target")));
         assert!(!plist.contains(alias.to_str().expect("UTF-8 alias")));
+
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o777))
+            .expect("make symlink target unsafe");
+        let error = prepare_launch_agent_logs(&raw).expect_err("unsafe symlink target must fail");
+        assert_file_error(
+            error,
+            "use as a launchd log directory",
+            &fs::canonicalize(&target).expect("canonical target"),
+            "chmod go-w",
+        );
     }
 }

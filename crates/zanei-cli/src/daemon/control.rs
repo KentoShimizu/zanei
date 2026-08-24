@@ -1,21 +1,22 @@
-use std::{ffi::CString, fs, os::unix::ffi::OsStrExt, path::Path, thread, time::Duration};
-
-use rustix::{
-    fd::OwnedFd,
-    fs::{FileType, FlockOperation, Mode, OFlags, fchmod, flock, fstat, open},
-    io::Errno,
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
 };
+
+use rustix::fd::OwnedFd;
 
 use super::{DaemonError, StoreOwner, StoreOwnership};
 
 mod launchd;
+mod logs;
 mod plist;
-#[allow(dead_code)]
 mod wait;
 
 pub use launchd::{bootout, is_bootstrapped, terminate};
 use launchd::{command_succeeded, gui_domain};
-pub use plist::{bootstrap, launch_agent_path};
+pub use plist::launch_agent_path;
 #[cfg(test)]
 use plist::{
     build_launch_agent_plist, launch_agent_paths, prepare_launch_agent_logs,
@@ -32,23 +33,27 @@ const ID: &str = "/usr/bin/id";
 const KILL: &str = "/bin/kill";
 pub(crate) const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const DAEMON_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const START_LOCK_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
 
 pub fn start_launch_agent(
     executable: &Path,
     config_path: &Path,
     store_path: &Path,
 ) -> Result<bool, DaemonError> {
-    let _start_lock = acquire_start_lock()?;
+    let (_start_lock, plist_path) = acquire_start_lock()?;
     start_launch_agent_after_preparation_with(
         DAEMON_CONTROL_TIMEOUT,
-        || plist::prepare_launch_agent(executable, config_path, store_path),
+        || {
+            let prepared =
+                plist::prepare_launch_agent(executable, config_path, store_path, plist_path)?;
+            let store_path = prepared.store_path().to_owned();
+            Ok((prepared, store_path))
+        },
         bootout,
         is_bootstrapped,
         thread::sleep,
         |prepared| prepared.install_and_bootstrap(),
-        || {
-            wait::daemon_is_alive_with(store_path, || {
+        |readiness_store_path| {
+            wait::daemon_is_alive_with(readiness_store_path, || {
                 crate::store_access::load_store_key(
                     crate::store_access::KeyAccess::Existing,
                     crate::store_access::KeyPrompt::Suppressed,
@@ -58,82 +63,44 @@ pub fn start_launch_agent(
     )
 }
 
-fn acquire_start_lock() -> Result<OwnedFd, DaemonError> {
+fn acquire_start_lock() -> Result<(OwnedFd, PathBuf), DaemonError> {
     let plist_path = launch_agent_path()?;
-    let lock_path = plist_path.with_file_name(format!(".{PLIST_FILE_NAME}.start.lock"));
-    let parent = lock_path.parent().ok_or_else(|| DaemonError::File {
+    let parent = plist_path.parent().ok_or_else(|| DaemonError::File {
         operation: "resolve parent directory for",
-        path: lock_path.clone(),
+        path: plist_path.clone(),
         source: std::io::Error::other("launch agent start lock has no parent"),
     })?;
     fs::create_dir_all(parent).map_err(|source| DaemonError::File {
         operation: "create directory for",
-        path: lock_path.clone(),
+        path: plist_path.clone(),
         source,
     })?;
-    acquire_start_lock_at(&lock_path)
-}
-
-fn acquire_start_lock_at(path: &Path) -> Result<OwnedFd, DaemonError> {
-    let argument = CString::new(path.as_os_str().as_bytes()).map_err(|_| DaemonError::File {
-        operation: "open launch agent start lock at",
-        path: path.to_owned(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL byte"),
+    let canonical_parent = fs::canonicalize(parent).map_err(|source| DaemonError::File {
+        operation: "canonicalize the launch agent start lock directory",
+        path: parent.to_owned(),
+        source,
     })?;
-    let flags = OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW;
-    let file = open(argument.as_c_str(), flags, START_LOCK_MODE)
-        .map_err(|source| control_file_error("open launch agent start lock at", path, source))?;
-    let metadata = fstat(&file)
-        .map_err(|source| control_file_error("inspect launch agent start lock at", path, source))?;
-    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
-        return Err(DaemonError::File {
-            operation: "use as a launch agent start lock",
-            path: path.to_owned(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path is not a regular file; remove it before starting Zanei",
-            ),
-        });
-    }
-    fchmod(&file, START_LOCK_MODE).map_err(|source| {
-        control_file_error("restrict launch agent start lock at", path, source)
-    })?;
-    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(file),
-        Err(Errno::WOULDBLOCK) => Err(DaemonError::File {
-            operation: "lock launch agent start at",
-            path: path.to_owned(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "another Zanei start is in progress; wait for it to finish before starting again",
-            ),
-        }),
-        Err(source) => Err(control_file_error(
-            "lock launch agent start at",
-            path,
-            source,
-        )),
-    }
-}
-
-fn control_file_error(operation: &'static str, path: &Path, source: Errno) -> DaemonError {
-    DaemonError::File {
-        operation,
-        path: path.to_owned(),
-        source: std::io::Error::from_raw_os_error(source.raw_os_error()),
-    }
+    let user_id = plist::user_id_from_domain(&gui_domain()?)?;
+    logs::validate_owner_only_directory(
+        &canonical_parent,
+        user_id,
+        "use as a launch agent start lock directory",
+    )?;
+    let lock_path = canonical_parent.join(format!(".{PLIST_FILE_NAME}.start.lock"));
+    let lock = logs::open_start_lock(&lock_path, user_id)?;
+    Ok((lock, canonical_parent.join(PLIST_FILE_NAME)))
 }
 
 fn start_launch_agent_after_preparation_with<T>(
     timeout: Duration,
-    prepare: impl FnOnce() -> Result<T, DaemonError>,
+    prepare: impl FnOnce() -> Result<(T, PathBuf), DaemonError>,
     bootout: impl FnMut() -> Result<(), DaemonError>,
     mut is_registered: impl FnMut() -> Result<bool, DaemonError>,
     sleep: impl FnMut(Duration),
     mut install_and_bootstrap: impl FnMut(&mut T) -> Result<(), DaemonError>,
-    is_daemon_alive: impl FnMut() -> Result<bool, DaemonError>,
+    mut is_daemon_alive: impl FnMut(&Path) -> Result<bool, DaemonError>,
 ) -> Result<bool, DaemonError> {
-    let mut prepared = prepare()?;
+    let (mut prepared, readiness_store_path) = prepare()?;
     let registered = is_registered()?;
     wait::start_launch_agent_with(
         registered,
@@ -142,7 +109,7 @@ fn start_launch_agent_after_preparation_with<T>(
         is_registered,
         sleep,
         || install_and_bootstrap(&mut prepared),
-        is_daemon_alive,
+        || is_daemon_alive(&readiness_store_path),
     )
 }
 
@@ -152,7 +119,7 @@ mod tests {
         cell::{Cell, RefCell},
         collections::VecDeque,
         fs,
-        os::unix::fs::{PermissionsExt, symlink},
+        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         path::Path,
         process::Command,
         time::Duration,
@@ -232,12 +199,18 @@ mod tests {
     fn start_lock_rejects_concurrent_starts() {
         let directory = TempDir::new().expect("start lock fixture");
         let path = directory.path().join("start.lock");
-        let first = super::acquire_start_lock_at(&path).expect("first start lock");
-        let error = super::acquire_start_lock_at(&path).expect_err("second start must fail");
+        let user_id = fs::metadata(directory.path()).expect("lock parent").uid();
+        let wrong_owner = super::logs::open_start_lock(&path, user_id ^ 1)
+            .expect_err("wrong-owner lock must fail");
+        assert!(matches!(wrong_owner, DaemonError::File { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied));
+        let first = super::logs::open_start_lock(&path, user_id).expect("first start lock");
+        let error =
+            super::logs::open_start_lock(&path, user_id).expect_err("second start must fail");
         assert!(matches!(error, DaemonError::File { source, .. }
             if source.kind() == std::io::ErrorKind::WouldBlock));
         drop(first);
-        super::acquire_start_lock_at(&path).expect("released start lock");
+        super::logs::open_start_lock(&path, user_id).expect("released start lock");
     }
 
     #[test]
@@ -416,7 +389,7 @@ mod tests {
             Duration::from_secs(1),
             || {
                 events.borrow_mut().push("prepare");
-                Ok(())
+                Ok(((), Path::new("/canonical/store.sqlite").to_owned()))
             },
             || {
                 events.borrow_mut().push("bootout");
@@ -434,7 +407,8 @@ mod tests {
                 events.borrow_mut().push("bootstrap");
                 Ok(())
             },
-            || {
+            |store_path| {
+                assert_eq!(store_path, Path::new("/canonical/store.sqlite"));
                 events.borrow_mut().push("alive");
                 Ok(true)
             },
@@ -450,7 +424,7 @@ mod tests {
         let error = start_launch_agent_after_preparation_with(
             Duration::ZERO,
             || {
-                Err::<(), _>(DaemonError::Store(StoreError::Locked(
+                Err::<((), std::path::PathBuf), _>(DaemonError::Store(StoreError::Locked(
                     LockedReason::KeyMissing,
                 )))
             },
@@ -458,7 +432,7 @@ mod tests {
             || panic!("registration must not be inspected after preparation fails"),
             |_| {},
             |_| panic!("failed preparation must not be installed"),
-            || panic!("failed preparation must not reach readiness checks"),
+            |_| panic!("failed preparation must not reach readiness checks"),
         )
         .expect_err("preparation failure must be returned");
         assert!(matches!(error, DaemonError::Store(StoreError::Locked(_))));
