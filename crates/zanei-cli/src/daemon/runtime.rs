@@ -371,6 +371,9 @@ impl ActiveDaemon<'_> {
                 let retention_promoted = match self.config_watcher.reload_if_changed() {
                     Ok(Some(config)) => {
                         let previous_permissions = self.collectors.required_permissions();
+                        // Replace the downstream privacy filter first: events admitted by the old
+                        // collector policy, including queued events, must use the new filter.
+                        self.pipeline.replace_filter(&config.filter)?;
                         self.collectors.replace_filter(config.filter.clone());
                         queue_permission_expansion(
                             &previous_permissions,
@@ -378,7 +381,6 @@ impl ActiveDaemon<'_> {
                             &mut self.pending_permission_request,
                         );
                         self.start_pending_permission_request();
-                        self.pipeline.replace_filter(&config.filter)?;
                         self.degraded.remove("config");
                         self.request_retention_reload(config.output.retention_hours, now)?
                     }

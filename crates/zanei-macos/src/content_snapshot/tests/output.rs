@@ -55,14 +55,22 @@ fn v2_1_chrome_snapshot_without_version_is_dropped() {
     let health = SharedHealth::default();
     let (sender, events) = sync_channel(1);
     let mut quarantine = TextQuarantine::new(ChromeObserver::new());
+    let filter = FilterConfig::default();
+    let (_, tracker) = chrome_eligibility_channel(filter.clone());
+    let policy = CapturePolicy::new(tracker, filter, None);
+    let decision = policy.decision(
+        PrivacyScope::ContentSnapshot,
+        &candidate.target.app.raw_app(),
+        Some(11),
+    );
 
     emit(
         candidate,
         output,
         key,
         hash,
-        Default::default(),
-        None,
+        &policy,
+        &decision,
         time::OffsetDateTime::UNIX_EPOCH,
         now,
         &mut state,
@@ -129,8 +137,8 @@ fn snapshot_ts_quarantine_release_preserves_candidate_time_and_reservation() {
         output,
         key,
         hash,
-        decision.capture_context(),
-        decision.chrome_version(),
+        &policy,
+        &decision,
         time::OffsetDateTime::UNIX_EPOCH,
         now,
         &mut state,
@@ -228,8 +236,8 @@ fn dropped_snapshot_does_not_deduplicate_identical_settle_on_return() {
         output,
         key,
         hash,
-        decision.capture_context(),
-        decision.chrome_version(),
+        &policy,
+        &decision,
         time::OffsetDateTime::UNIX_EPOCH,
         now,
         &mut state,

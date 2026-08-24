@@ -6,7 +6,6 @@ use std::sync::{
 };
 
 use zanei_collector::RawEvent;
-use zanei_core::privacy::PrivacyScope;
 
 use crate::{
     capture_policy::CapturePolicy,
@@ -44,12 +43,7 @@ impl<'a> AxOutput<'a> {
     }
 
     pub(super) fn send(&mut self, event: RawEvent) {
-        let decision = self.capture_policy.decision(
-            PrivacyScope::TextContent,
-            &event.app,
-            event.window.as_ref().and_then(|window| window.id),
-        );
-        match route_text_body(event, Some(&decision)) {
+        match route_text_body(event, &self.capture_policy, None) {
             TextBodyRoute::Send(event) => self.send_now(event),
             TextBodyRoute::Quarantine {
                 event,

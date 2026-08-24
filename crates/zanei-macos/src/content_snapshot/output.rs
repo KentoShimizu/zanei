@@ -10,7 +10,7 @@ use std::{
 
 use time::OffsetDateTime;
 use zanei_collector::RawEvent;
-use zanei_core::privacy::CHROME_BUNDLE_ID;
+use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyScope};
 use zanei_core::schema::{
     CaptureContext, ContentSnapshotData, ContentSnapshotTrigger, EventData, Window,
 };
@@ -18,9 +18,12 @@ use zanei_core::schema::{
 use super::{
     SharedHealth, SnapshotCutoff, SnapshotWalkOutput,
     scheduler::ScheduledSnapshot,
-    state::{SnapshotState, SnapshotWindowKey},
+    state::{SaveBlock, SnapshotState, SnapshotWindowKey},
 };
-use crate::text_capture::{ChromeWindowKey, ReleasedEvent, TextQuarantine};
+use crate::{
+    capture_policy::{CaptureDecision, CapturePolicy},
+    text_capture::{ChromeWindowKey, ReleasedEvent, TextQuarantine},
+};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit(
@@ -28,8 +31,8 @@ pub(super) fn emit(
     output: SnapshotWalkOutput,
     key: SnapshotWindowKey,
     hash: u64,
-    capture_context: CaptureContext,
-    chrome_version: Option<u64>,
+    capture_policy: &CapturePolicy,
+    earlier_decision: &CaptureDecision,
     observed_at: OffsetDateTime,
     reserved_at: Instant,
     state: &mut SnapshotState,
@@ -39,10 +42,30 @@ pub(super) fn emit(
 ) {
     let bytes = output.text.len();
     let metrics = TraceMetrics::from(&output);
+    let decision = capture_policy.decision_at_send(
+        PrivacyScope::ContentSnapshot,
+        &candidate.target.app.raw_app(),
+        Some(key.window_id),
+        Some(earlier_decision),
+    );
+    if !decision.is_allowed() {
+        trace_metrics(&candidate, "app_scope", metrics);
+        return;
+    }
+    let chrome_version = decision.chrome_version();
     if candidate.target.app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID)
         && chrome_version.is_none()
     {
         trace_metrics(&candidate, "chrome_version", metrics);
+        return;
+    }
+    if let Err(block) = state.evaluate_save(key, hash, bytes, reserved_at) {
+        let gate = match block {
+            SaveBlock::Duplicate => "duplicate",
+            SaveBlock::GlobalInterval => "global_interval",
+            SaveBlock::DailyBudget => "daily_budget",
+        };
+        trace_metrics(&candidate, gate, metrics);
         return;
     }
     let event = build_raw_event(
@@ -50,7 +73,7 @@ pub(super) fn emit(
         key,
         output.text,
         output.complete,
-        capture_context,
+        decision.capture_context(),
         observed_at,
     );
     if let Some(version) = chrome_version {

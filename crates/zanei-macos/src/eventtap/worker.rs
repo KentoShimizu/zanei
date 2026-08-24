@@ -209,8 +209,14 @@ pub(super) fn run(
                     secure_input_before,
                     &capture_policy,
                 );
-                if !emit_clipboard(&event_sender, copy, &mut quarantine, &dropped_events)
-                    .continues()
+                if !emit_clipboard(
+                    &event_sender,
+                    copy,
+                    &capture_policy,
+                    &mut quarantine,
+                    &dropped_events,
+                )
+                .continues()
                 {
                     return;
                 }
@@ -280,7 +286,15 @@ pub(super) fn run(
                 secure_input_now,
                 &capture_policy,
             );
-            if !emit_clipboard(&event_sender, copy, &mut quarantine, &dropped_events).continues() {
+            if !emit_clipboard(
+                &event_sender,
+                copy,
+                &capture_policy,
+                &mut quarantine,
+                &dropped_events,
+            )
+            .continues()
+            {
                 return;
             }
         }
@@ -420,6 +434,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             let key_result = emit_or_quarantine(
                 sender,
                 key_event,
+                capture_policy,
                 Some(&input_decision),
                 quarantine,
                 dropped_events,
@@ -475,6 +490,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
                         capture_policy,
                         observed_at,
                     ),
+                    capture_policy,
                     Some(&input_decision),
                     quarantine,
                     dropped_events,

@@ -27,7 +27,7 @@ const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(super) enum Control {
     Flush(SyncSender<()>),
-    FlushAndReplaceFilter {
+    ReplaceFilterAndFlush {
         filter: PrivacyFilter,
         acknowledge: SyncSender<()>,
     },
@@ -133,13 +133,13 @@ impl Worker {
                     self.flush_waiters.push(acknowledge);
                 }
             }
-            Control::FlushAndReplaceFilter {
+            Control::ReplaceFilterAndFlush {
                 filter,
                 acknowledge,
             } => {
+                self.filter = filter;
                 self.drain_raw()?;
                 self.flush_all()?;
-                self.filter = filter;
                 let _ = acknowledge.send(());
             }
             Control::Heartbeat(state) => {

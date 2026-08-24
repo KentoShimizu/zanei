@@ -94,6 +94,7 @@ pub(super) fn emit(
 pub(super) fn emit_clipboard(
     sender: &SyncSender<RawEvent>,
     output: Option<ClipboardOutput>,
+    capture_policy: &CapturePolicy,
     quarantine: &mut TextQuarantine,
     dropped_events: &AtomicU64,
 ) -> EmitResult {
@@ -103,6 +104,7 @@ pub(super) fn emit_clipboard(
     emit_or_quarantine(
         sender,
         Some(output.event),
+        capture_policy,
         output.decision.as_ref(),
         quarantine,
         dropped_events,
@@ -112,14 +114,15 @@ pub(super) fn emit_clipboard(
 pub(super) fn emit_or_quarantine(
     sender: &SyncSender<RawEvent>,
     event: Option<RawEvent>,
-    decision: Option<&CaptureDecision>,
+    capture_policy: &CapturePolicy,
+    earlier_decision: Option<&CaptureDecision>,
     quarantine: &mut TextQuarantine,
     dropped_events: &AtomicU64,
 ) -> EmitResult {
     let Some(event) = event else {
         return EmitResult::Filtered;
     };
-    match route_text_body(event, decision) {
+    match route_text_body(event, capture_policy, earlier_decision) {
         TextBodyRoute::Send(event) => try_send_counted(sender, event, dropped_events),
         TextBodyRoute::Quarantine {
             event,

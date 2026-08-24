@@ -17,11 +17,14 @@ use zanei_core::{
 
 use super::{
     EventTapCollector, EventTapMode,
-    clipboard::ClipboardTracker,
+    clipboard::{ClipboardObservationTime, ClipboardTracker},
     logic::{
         KeyModifiers, KeyObservation, PasteboardContent, PasteboardKind, clipboard_paste, key_data,
     },
-    output::{EmitResult, emit, emit_or_quarantine, resolve_input_authorization, try_send_counted},
+    output::{
+        EmitResult, emit, emit_clipboard, emit_or_quarantine, raw_event,
+        resolve_input_authorization, try_send_counted,
+    },
     state::{Driver, EventTapApi, MonotonicTime},
     worker::{early_text_read_allowed, handle_native_event},
 };
@@ -344,6 +347,7 @@ fn eventtap_chrome_body_without_version_is_suppressed() {
         emit_or_quarantine(
             &sender,
             Some(event),
+            &policy,
             Some(&decision),
             &mut quarantine,
             &dropped,
@@ -356,6 +360,123 @@ fn eventtap_chrome_body_without_version_is_suppressed() {
         panic!("input.key");
     };
     assert_eq!(data.text, None);
+}
+
+#[test]
+fn v3_2_send_time_decision_overrides_stale_allow() {
+    let context = context(Some(window()));
+    let app = App {
+        name: context.app.name.clone(),
+        bundle_id: context.app.bundle_id.clone(),
+        pid: Some(context.app.pid),
+    };
+    let policy = capture_policy();
+    let earlier = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let event = raw_event(
+        "input.key",
+        &context,
+        EventData::InputKey(InputKeyData {
+            kind: InputKeyKind::Text,
+            modifiers: Vec::new(),
+            combo: None,
+            text: Some("private key".to_owned()),
+            field_kind: Some(FieldKind::Text),
+            count: 1,
+        }),
+        &policy,
+        time::OffsetDateTime::UNIX_EPOCH,
+    )
+    .expect("event built while allowed");
+    assert!(earlier.is_allowed());
+    deny_test_app_text(&policy);
+    let (sender, receiver) = sync_channel(2);
+    let dropped = AtomicU64::new(0);
+    let mut quarantine = TextQuarantine::new(ChromeObserver::new());
+
+    assert_eq!(
+        emit_or_quarantine(
+            &sender,
+            Some(event),
+            &policy,
+            Some(&earlier),
+            &mut quarantine,
+            &dropped,
+        ),
+        EmitResult::Sent
+    );
+    let event = receiver.try_recv().expect("denied key metadata event");
+    let EventData::InputKey(data) = event.data else {
+        panic!("input.key");
+    };
+    assert_eq!(data.text, None);
+
+    let clipboard_policy = capture_policy();
+    let clipboard_decision = clipboard_policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let mut clipboard = ClipboardTracker::new(1);
+    let observed_at = ClipboardObservationTime {
+        monotonic: Instant::now(),
+        wall: time::OffsetDateTime::UNIX_EPOCH,
+    };
+    clipboard.observe_copy(&context, observed_at, true, clipboard_decision.clone());
+    assert!(clipboard_decision.is_allowed());
+    deny_test_app_text(&clipboard_policy);
+    let output = clipboard.copy_event(
+        2,
+        Some(&context),
+        observed_at,
+        |include_content| PasteboardContent {
+            kind: PasteboardKind::Text,
+            size_bytes: include_content.then_some(7),
+            text: include_content.then(|| "private".to_owned()),
+        },
+        false,
+        &clipboard_policy,
+    );
+    let EventData::ClipboardCopy(data) = &output.as_ref().expect("copy output").event.data else {
+        panic!("clipboard.copy");
+    };
+    assert_eq!(data.text.as_deref(), Some("private"));
+
+    assert_eq!(
+        emit_clipboard(
+            &sender,
+            output,
+            &clipboard_policy,
+            &mut quarantine,
+            &dropped,
+        ),
+        EmitResult::Sent
+    );
+    let event = receiver.try_recv().expect("denied copy metadata event");
+    let EventData::ClipboardCopy(data) = event.data else {
+        panic!("clipboard.copy");
+    };
+    assert_eq!(data.text, None);
+    assert_eq!(data.size_bytes, None);
+
+    let deny_then_allow = capture_policy();
+    deny_test_app_text(&deny_then_allow);
+    let earlier_deny = deny_then_allow.decision(PrivacyScope::TextContent, &app, Some(11));
+    deny_then_allow.replace_filter(FilterConfig::default());
+    assert!(
+        !deny_then_allow
+            .decision_at_send(
+                PrivacyScope::TextContent,
+                &app,
+                Some(11),
+                Some(&earlier_deny),
+            )
+            .is_allowed()
+    );
+}
+
+fn deny_test_app_text(policy: &CapturePolicy) {
+    let mut filter = FilterConfig::default();
+    filter
+        .text_content
+        .exclude_apps
+        .push("dev.zanei.test".to_owned());
+    policy.replace_filter(filter);
 }
 
 #[test]

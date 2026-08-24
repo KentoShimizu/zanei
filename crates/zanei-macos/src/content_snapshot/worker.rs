@@ -19,7 +19,7 @@ use crate::{
         budget::WalkBudget,
         output::{emit, emit_released, trace_candidate, trace_output},
         scheduler::{ScheduledSnapshot, SnapshotScheduler},
-        state::{SaveBlock, SnapshotState},
+        state::SnapshotState,
         walker::{InstantWalkClock, WalkClock, walk_snapshot},
     },
     ffi::window_list::window_id_for_frame,
@@ -328,33 +328,15 @@ fn process_candidate<F>(
         trace_output(&candidate, "secure_input", &output);
         return;
     }
-    let final_decision = policy.decision(
-        PrivacyScope::ContentSnapshot,
-        &candidate.target.app.raw_app(),
-        Some(key.window_id),
-    );
-    if !final_decision.is_allowed() {
-        trace_output(&candidate, "app_scope", &output);
-        return;
-    }
     let hash = SnapshotState::text_hash(&output.text);
     let save_at = Instant::now();
-    if let Err(block) = state.evaluate_save(key, hash, output.text.len(), save_at) {
-        let gate = match block {
-            SaveBlock::Duplicate => "duplicate",
-            SaveBlock::GlobalInterval => "global_interval",
-            SaveBlock::DailyBudget => "daily_budget",
-        };
-        trace_output(&candidate, gate, &output);
-        return;
-    }
     emit(
         candidate,
         output,
         key,
         hash,
-        final_decision.capture_context(),
-        final_decision.chrome_version(),
+        policy,
+        &initial_decision,
         taken_at.wall,
         save_at,
         state,

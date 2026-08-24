@@ -152,7 +152,7 @@ impl Pipeline {
     pub(crate) fn replace_filter(&self, filter_config: &FilterConfig) -> Result<(), DaemonError> {
         let (acknowledge, acknowledged) = mpsc::sync_channel(0);
         self.control_sender
-            .send(Control::FlushAndReplaceFilter {
+            .send(Control::ReplaceFilterAndFlush {
                 filter: PrivacyFilter::new(filter_config.clone()),
                 acknowledge,
             })
@@ -275,13 +275,9 @@ mod tests {
     }
 
     #[test]
-    fn filter_reload_flushes_pending_events_with_the_previous_filter() {
+    fn filter_reload_applies_replacement_filter_to_pending_events() {
         let mut config = Config::default();
         config.capture.sources = vec![CaptureSource::Input];
-        config
-            .filter
-            .exclude_apps
-            .push("dev.example.App".to_owned());
         let output = NamedTempFile::new().expect("temporary output");
         let path = output.path().to_owned();
         let file = output.reopen().expect("reopen output");
@@ -290,19 +286,16 @@ mod tests {
 
         pipeline
             .sender()
-            .send(raw("input.key", input_text("old")))
+            .send(raw("input.key", input_text("private")))
             .expect("pre-reload input");
         let mut replacement = config.filter.clone();
         replacement
+            .text_content
             .exclude_apps
-            .retain(|value| value != "dev.example.App");
+            .push("dev.example.App".to_owned());
         pipeline
             .replace_filter(&replacement)
             .expect("replace filter");
-        pipeline
-            .sender()
-            .send(raw("input.key", input_text("new")))
-            .expect("post-reload input");
         pipeline.shutdown().expect("shutdown");
 
         let output = fs::read_to_string(path).expect("read output");
@@ -315,7 +308,7 @@ mod tests {
             panic!("expected input.key");
         };
         assert_eq!(data.count, 1);
-        assert_eq!(data.text.as_deref(), Some("new"));
+        assert_eq!(data.text, None);
     }
 
     #[test]
