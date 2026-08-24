@@ -13,7 +13,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 
 | コマンド | 概要 |
 | --- | --- |
-| [`doctor`](#doctor) | 必要な macOS 権限の診断と付与誘導 |
+| [`doctor`](#doctor) | macOS 権限と recorder health の診断、権限付与の誘導 |
 | [`start`](#start) | バックグラウンド記録の開始（launchd） |
 | [`stop`](#stop) | 記録停止と登録解除（データは保持） |
 | [`pause`](#pause) / [`resume`](#resume) | 記録の一時停止 / 再開 |
@@ -98,7 +98,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 
 ## `doctor`
 
-設定中の source と content opt-in に照らして、必要な TCC 権限（アクセシビリティ / 入力監視 / オートメーション）の付与状況を診断します。
+recorder health と、設定中の source・content opt-in に必要な TCC 権限（アクセシビリティ / 入力監視 / オートメーション）の付与状況を診断します。
 
 ```bash
 zanei doctor            # 人間可読。不足があれば付与手順と System Settings ペインを案内
@@ -134,13 +134,53 @@ zanei doctor --json     # agent 向け機械可読
   },
   "missing_required": ["input_monitoring"],
   "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-  "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" }
+  "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" },
+  "health": {
+    "state": "degraded",
+    "degraded": { "chrome": "state=unavailable phase=query kind=apple_event code=-1712" },
+    "collector_failures": { "chrome": 3 }
+  }
 }
 ```
 
 `status` の値：`granted` / `denied` / `not_determined`。`reported_by_recorder` は、新鮮な recorder heartbeat 由来なら `true` です。heartbeat がなければ `doctor` 自身のプロセスから probe して `false` とし、人間向け出力には recorder 自身の権限を見るには起動が必要という注記を加えます。
 
 `store_key` はストアの暗号化鍵の所在を報告します。`state` は `key_store`（鍵が見つかった。`detail` に所在 — ログインキーチェーン、または開発用上書き `ZANEI_STORE_KEY_FILE`）、`not_needed`（ストアがない・平文・認識できない）、`missing`（ストアは暗号化されているが鍵がない）、`mismatch`（鍵でこのストアを復号できない）、`key_store_locked` / `key_store_denied`（`detail` にプラットフォームの案内。例：ログインキーチェーンがロックされている）、`unavailable` のいずれかです。`detail` は補足がある場合だけ含まれます。人間向け出力では権限の表の後に `Store key: ...` の行が加わります。ストアがロックされていても `doctor` は失敗せず、鍵の状態を報告し、権限は自身のプロセスから probe します。
+
+### Recorder health
+
+`health.state` は store lock と永続化済み recorder status から得られる証拠だけを次のように分類します。
+
+| 状態 | 意味 |
+| --- | --- |
+| `healthy` | 現在の store owner と recorder status が一致し、status が running で、現在の degraded 理由がない |
+| `degraded` | 現在の store owner と running recorder status が一致し、現在の degraded 理由が 1 件以上ある |
+| `stopped` | recorder status は読めるが、現在の owner がいない |
+| `stale` | owner と永続化済み recorder instance は一致するが、その status は current と認められない（`status.running` が false） |
+| `suspected_unavailable` | store owner はいるが、永続化済み recorder instance と一致しない |
+| `status_unreadable` | 選択した store status の存在確認・open・読み取りに失敗する |
+| `status_missing` | 選択した store が存在しない |
+
+`health` object の field は次のとおりです。
+
+| フィールド | JSON 型 | 意味 |
+| --- | --- | --- |
+| `state` | string | 上記のいずれかの状態 |
+| `degraded` | `object<string, string>` \| null | 現在の component/reason map。読める証拠が現在の owner に属さない場合は空、status が missing または unreadable の場合は null |
+| `collector_failures` | `object<string, integer>` \| null | collector ごとの永続化済み累積失敗数。回復しても count は reset されない。status が missing または unreadable の場合は null |
+| `status_error` | string。通常は省略 | 選択した store の検査または status 読み取りの失敗詳細。`status_unreadable` の場合だけ存在する |
+
+人間向け出力では `Store key:` の後に次の固定行が加わります。
+
+| 行 | 値 |
+| --- | --- |
+| `COLLECTOR HEALTH` | `health.state`。現在の degraded entry ごとに indented `component: reason` 行が続く |
+| indented `status: detail` | `status_unreadable` の場合だけ表示 |
+| `COLLECTOR FAILURES none` | status を読み取れ、累積 map が空 |
+| `COLLECTOR FAILURES -` | status が missing または unreadable |
+| `COLLECTOR FAILURES` | 累積 entry ごとに indented `component: count` 行が続く |
+
+人間向けの component 名・reason・status error に含まれる制御文字は、見える escape として表示されます。recorder health は `doctor` の終了方針を変えません。終了コード 3 は引き続き必要権限の不足を意味し、health が `degraded` であるだけでは `doctor` は失敗しません。
 
 人間向け出力の最終行には、必ず次の操作が表示されます。必要な権限が denied の場合は、
 `zanei start` で recorder に権限を要求させ、ダイアログと System Settings の案内に従います。

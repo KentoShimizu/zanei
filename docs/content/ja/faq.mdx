@@ -163,6 +163,8 @@ zanei stop && zanei start
 
 0.3.0 では、upgrade 済みの config でも Safari・Firefox・Brave・Edge・Vivaldi・Arc は既定の text-content scope 外です。これらの本文 field は null のままですが、event と内容以外の事実は残ります。既定値を変える前に `zanei filter show` を確認してください。
 
+Chrome の本文 field が null のままで content capture が有効な場合は、`zanei doctor` を実行して `COLLECTOR HEALTH` を確認します。現在の `chrome` reason は collector で進行中の問題を示しますが、`COLLECTOR FAILURES` だけなら累積履歴です。永続 daemon log と回復条件は[recorder の不調を診断する](/ja/guides/recording#recorder-の不調を診断する)を参照してください。
+
 有効なのに本文が取れない場合は、プライバシーに配慮した診断を有効にして、短時間のフォアグラウンドセッションを実行します。
 
 ```bash
