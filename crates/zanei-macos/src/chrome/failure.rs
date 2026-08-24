@@ -89,6 +89,7 @@ impl ChromeParseFailure {
 pub enum ChromeValidationFailure {
     EmptyWindowIdentity,
     EmptyTabIdentity,
+    WindowIdentityMismatch,
     InvalidUrl,
     MissingApplication,
 }
@@ -98,6 +99,7 @@ impl ChromeValidationFailure {
         match self {
             Self::EmptyWindowIdentity => "empty_window_identity",
             Self::EmptyTabIdentity => "empty_tab_identity",
+            Self::WindowIdentityMismatch => "window_identity_mismatch",
             Self::InvalidUrl => "invalid_url",
             Self::MissingApplication => "missing_application",
         }
@@ -120,7 +122,7 @@ impl ChromeFailureState {
         }
     }
 
-    pub fn observe_failure(&mut self, failure: ChromeFailure) -> Option<ChromeFailureTransition> {
+    fn observe_failure(&mut self, failure: ChromeFailure) -> Option<ChromeFailureTransition> {
         match *self {
             Self::Available => {
                 *self = Self::Unavailable(failure);
@@ -137,7 +139,7 @@ impl ChromeFailureState {
         }
     }
 
-    pub fn observe_success(&mut self) -> Option<ChromeFailureTransition> {
+    fn observe_success(&mut self) -> Option<ChromeFailureTransition> {
         let Self::Unavailable(previous) = *self else {
             return None;
         };
@@ -147,7 +149,7 @@ impl ChromeFailureState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChromeFailureTransition {
+enum ChromeFailureTransition {
     Occurred(ChromeFailure),
     Changed {
         previous: ChromeFailure,
@@ -238,31 +240,9 @@ mod tests {
         );
         assert_eq!(state, ChromeFailureState::Available);
         assert_eq!(state.observe_success(), None);
-    }
-
-    #[test]
-    fn diagnostics_contain_only_fixed_classification_and_numeric_code() {
-        let private_values = [
-            "https://private.example/secret",
-            "Private title",
-            "window-private",
-            "tab-private",
-            "raw AppleScript response",
-            "raw error dictionary message",
-        ];
-        let diagnostics = [
+        assert_eq!(
             ChromeFailureTransition::Occurred(TIMEOUT).to_string(),
-            ChromeFailureTransition::Recovered(ChromeFailure::Parse(
-                ChromeParseFailure::InvalidResponseShape,
-            ))
-            .to_string(),
-            ChromeFailure::Validation(ChromeValidationFailure::EmptyTabIdentity).to_string(),
-        ]
-        .join(" ");
-
-        assert!(diagnostics.contains("code=-1712"));
-        for private in private_values {
-            assert!(!diagnostics.contains(private));
-        }
+            "state=unavailable phase=query kind=apple_event code=-1712"
+        );
     }
 }

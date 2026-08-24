@@ -10,8 +10,8 @@ pub use eligibility::{
     chrome_eligibility_channel,
 };
 pub use failure::{
-    ChromeFailure, ChromeFailurePhase, ChromeFailureState, ChromeFailureTransition,
-    ChromeParseFailure, ChromeQueryFailure, ChromeValidationFailure,
+    ChromeFailure, ChromeFailurePhase, ChromeFailureState, ChromeParseFailure, ChromeQueryFailure,
+    ChromeValidationFailure,
 };
 pub use observer::ChromeObserver;
 
@@ -152,7 +152,7 @@ impl Collector for ChromeCollector {
                 if panic_next_worker.swap(false, Ordering::AcqRel) {
                     panic!("injected Chrome worker panic");
                 }
-                let mut api = SystemChromeApi::default();
+                let mut api = SystemChromeApi { client: None };
                 let receivers = ChromeWorkerReceivers {
                     focus: &channels.focus_transitions,
                     observations: &channels.observation_triggers,
@@ -231,9 +231,8 @@ trait ChromeApi {
     fn query(&mut self, query: &ChromeQuery) -> Result<ChromeObservation, ChromeFailure>;
 }
 
-#[derive(Default)]
-struct SystemChromeApi {
-    client: Option<AppleScriptClient>,
+struct SystemChromeApi<C = AppleScriptClient> {
+    client: Option<C>,
 }
 
 impl ChromeApi for SystemChromeApi {
@@ -260,13 +259,44 @@ impl ChromeApi for SystemChromeApi {
 
 impl SystemChromeApi {
     fn client(&mut self) -> Result<&mut AppleScriptClient, ChromeFailure> {
+        self.get_or_initialize_client(AppleScriptClient::new)
+    }
+}
+
+impl<C> SystemChromeApi<C> {
+    fn get_or_initialize_client(
+        &mut self,
+        initialize: impl FnOnce() -> Result<C, AppleScriptError>,
+    ) -> Result<&mut C, ChromeFailure> {
         if self.client.is_none() {
-            self.client = Some(AppleScriptClient::new().map_err(ChromeFailure::from)?);
+            self.client = Some(initialize().map_err(ChromeFailure::from)?);
         }
         self.client
             .as_mut()
             .ok_or(ChromeFailure::Query(ChromeQueryFailure::RuntimeUnavailable))
     }
+
+    #[cfg(test)]
+    fn client_for_test(
+        &mut self,
+        result: Result<C, AppleScriptError>,
+    ) -> Result<&mut C, ChromeFailure> {
+        self.get_or_initialize_client(|| result)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn system_chrome_api_retries_failed_client_initialization() {
+    let mut api = SystemChromeApi::<()> { client: None };
+
+    assert!(matches!(
+        api.client_for_test(Err(AppleScriptError::ChromeUnavailable)),
+        Err(ChromeFailure::Query(ChromeQueryFailure::RuntimeUnavailable))
+    ));
+    assert!(api.client_for_test(Ok(())).is_ok());
+    let cached = api.client_for_test(Err(AppleScriptError::ChromeUnavailable));
+    assert!(cached.is_ok());
 }
 
 impl From<AppleScriptError> for ChromeFailure {

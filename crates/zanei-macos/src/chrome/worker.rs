@@ -362,7 +362,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
     }
     match observation {
         Ok(ChromeObservation::Snapshot(snapshot)) => {
-            if let Err(error) = validate_snapshot(&snapshot) {
+            if let Err(error) = validate_query_snapshot(&query, &snapshot) {
                 return record_failure(
                     tracker,
                     pid,
@@ -511,13 +511,14 @@ fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
 mod validation;
 
 pub(super) use validation::SnapshotError;
-use validation::validate_snapshot;
+use validation::{validate_query_snapshot, validate_snapshot};
 
 impl From<SnapshotError> for ChromeValidationFailure {
     fn from(error: SnapshotError) -> Self {
         match error {
             SnapshotError::EmptyWindowIdentity => Self::EmptyWindowIdentity,
             SnapshotError::EmptyTabIdentity => Self::EmptyTabIdentity,
+            SnapshotError::WindowIdentityMismatch => Self::WindowIdentityMismatch,
             SnapshotError::InvalidUrl => Self::InvalidUrl,
         }
     }

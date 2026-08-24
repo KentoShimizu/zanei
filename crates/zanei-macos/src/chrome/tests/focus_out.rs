@@ -100,7 +100,7 @@ fn focus_out_confirmation_targets_background_window_and_releases_body() {
 }
 
 #[test]
-fn targeted_confirmation_drops_snapshot_when_window_closed() {
+fn targeted_identity_mismatch_nulls_text_and_drops_snapshot() {
     let held_at = Instant::now() - Duration::from_secs(1);
     let mut api = FakeApi::new([
         Ok(ChromeObservation::Snapshot(snapshot_for_window(
@@ -110,7 +110,13 @@ fn targeted_confirmation_drops_snapshot_when_window_closed() {
             "https://first.example",
             "First",
         ))),
-        Ok(ChromeObservation::NoWindow),
+        Ok(ChromeObservation::Snapshot(snapshot_for_window(
+            7,
+            "window-202",
+            "tab-2",
+            "https://first.example",
+            "Reused",
+        ))),
     ]);
     let (sender, events) = sync_channel(2);
     let filter = FilterConfig::default();
@@ -128,6 +134,25 @@ fn targeted_confirmation_drops_snapshot_when_window_closed() {
     ));
     let _ = events.try_recv().expect("initial navigation");
     let version = tracker.state_version(42, 7).expect("Chrome version");
+    let mut text_event = snapshot_event(7, "reused text");
+    text_event.data = EventData::InputKey(zanei_core::schema::InputKeyData {
+        kind: zanei_core::schema::InputKeyKind::Text,
+        modifiers: Vec::new(),
+        combo: None,
+        text: Some("reused text".to_owned()),
+        field_kind: None,
+        count: 1,
+    });
+    let mut text_quarantine = TextQuarantine::new(ChromeObserver::new());
+    text_quarantine.hold_text(
+        text_event,
+        ChromeWindowKey {
+            pid: 42,
+            window_id: 7,
+        },
+        version,
+        time::OffsetDateTime::UNIX_EPOCH,
+    );
     let mut quarantine = TextQuarantine::new(ChromeObserver::new());
     quarantine.hold_snapshot(
         snapshot_event(7, "closed body"),
@@ -139,28 +164,41 @@ fn targeted_confirmation_drops_snapshot_when_window_closed() {
         88,
         held_at,
     );
+    let confirmation_at = Instant::now();
+    let metrics = ChromeMetrics::default();
     assert!(handle_observation_trigger(
         ObservationTrigger::OnDemand {
             pid: 42,
             window_id: 7,
         },
-        held_at,
+        confirmation_at,
         &mut api,
         &sender,
         &mut state,
-        &ChromeMetrics::default(),
+        &metrics,
         &eligibility,
     ));
 
     assert!(service_on_demand(
-        held_at + Duration::from_millis(200),
+        confirmation_at + Duration::from_millis(200),
         &mut api,
         &sender,
         &mut state,
-        &ChromeMetrics::default(),
+        &metrics,
         &eligibility,
     ));
     assert_eq!(tracker.state_version(42, 7), None);
+    assert_eq!(
+        metrics.failure.state(),
+        ChromeFailureState::Unavailable(ChromeFailure::Validation(
+            ChromeValidationFailure::WindowIdentityMismatch
+        ))
+    );
+    let released = text_quarantine.release(Instant::now(), &policy);
+    let EventData::InputKey(data) = &released[0].data else {
+        panic!("input.key");
+    };
+    assert_eq!(data.text, None);
     assert!(quarantine.release(Instant::now(), &policy).is_empty());
 }
 

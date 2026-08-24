@@ -156,8 +156,12 @@ fn front_window_source(application_path: &str) -> String {
 }
 
 fn target_window_source(application_path: &str, window_id: &str) -> String {
-    substitute_application_path(TARGET_WINDOW_SCRIPT_TEMPLATE, application_path)
-        .replace("{window_id}", &escape_applescript_string(window_id))
+    let escaped_window_id = escape_applescript_string(window_id);
+    TARGET_WINDOW_SCRIPT_TEMPLATE
+        .split("{window_id}")
+        .map(|segment| substitute_application_path(segment, application_path))
+        .collect::<Vec<_>>()
+        .join(&escaped_window_id)
 }
 
 fn substitute_application_path(template: &str, application_path: &str) -> String {
@@ -487,6 +491,17 @@ mod tests {
         let escaped = "window-\\\\\\\" & return {\\\"private\\\"} & \\\"";
         assert_eq!(source.matches(escaped).count(), 2);
         assert!(!source.contains("window id \"window-\" & return"));
+    }
+
+    #[test]
+    fn targeted_source_does_not_reinterpret_markers_in_values() {
+        let application_path = "/Applications/{window_id}/Google Chrome.app";
+        let window_id = "window-{application_path}";
+
+        let source = target_window_source(application_path, window_id);
+
+        assert_eq!(source.matches(application_path).count(), 1);
+        assert_eq!(source.matches(window_id).count(), 2);
     }
 }
 

@@ -122,6 +122,9 @@ impl ChromeEligibilityPublisher {
         };
         if let Some(record) = state.windows.get_mut(&key)
             && record.state.as_ref() == next_state.as_ref()
+            && applescript_window_id
+                .as_ref()
+                .is_none_or(|window_id| record.applescript_window_id.as_ref() == Some(window_id))
         {
             record.observed_at = observed_at;
             if let Some(applescript_window_id) = applescript_window_id {
@@ -352,10 +355,15 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_observation_preserves_version() {
+    fn unchanged_observation_preserves_version_but_window_identity_change_advances_it() {
         let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
         let first_observation = Instant::now();
-        publisher.observe_at(7, normal(11, "https://example.com"), first_observation);
+        publisher.observe_with_window_id_at(
+            7,
+            normal(11, "https://example.com"),
+            Some("window-a".to_owned()),
+            first_observation,
+        );
         let version = tracker.state_version(7, 11).expect("version");
 
         let confirmation = first_observation + std::time::Duration::from_millis(1);
@@ -363,6 +371,19 @@ mod tests {
 
         assert_eq!(tracker.state_version(7, 11), Some(version));
         assert_eq!(tracker.observed_at(7, 11), Some(confirmation));
+
+        publisher.observe_with_window_id_at(
+            7,
+            normal(11, "https://example.com"),
+            Some("window-b".to_owned()),
+            confirmation + std::time::Duration::from_millis(1),
+        );
+
+        assert!(
+            tracker
+                .state_version(7, 11)
+                .is_some_and(|next| next > version)
+        );
     }
 
     #[test]
