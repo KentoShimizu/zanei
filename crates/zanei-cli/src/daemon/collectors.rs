@@ -10,7 +10,7 @@ use zanei_core::config::{CaptureConfig, CaptureSource, Config, FilterConfig};
 use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyFilter, PrivacyScope, app_is_allowed_for};
 use zanei_core::schema::App;
 use zanei_macos::{
-    CapturePolicy, SecureInputMonitor,
+    CapturePolicy, SecureInputMonitor, SecureInputProbe,
     ax::{AxCollector, AxCollectorOptions, click_channel},
     chrome::{
         ChromeCollector, ChromeEligibilityPublisher, ChromeObserver, chrome_eligibility_channel,
@@ -47,39 +47,72 @@ pub(crate) struct CollectorSet {
     pub(super) producer_failures: ProducerFailures,
     pub(super) start_errors: BTreeMap<String, String>,
     pub(super) eventtap_start_gate: super::supervisor::EventTapStartGate,
+    #[cfg(test)]
+    pub(super) secure_input_runtime_override: Option<bool>,
+    #[cfg(test)]
+    pub(super) eventtap_runtime_override: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum ProducerFailureOrigin {
+    SecureInputStart,
+    WorkspaceMainThread,
+    EventTapMainThread,
+    ContentSnapshotFilter,
+}
+
+impl ProducerFailureOrigin {
+    const fn component(self) -> &'static str {
+        match self {
+            Self::SecureInputStart => "secure_input",
+            Self::WorkspaceMainThread => "workspace",
+            Self::EventTapMainThread => "eventtap",
+            Self::ContentSnapshotFilter => "content_snapshot",
+        }
+    }
 }
 
 #[derive(Default)]
 pub(super) struct ProducerFailures {
-    secure_input_start: Option<String>,
-    workspace_main_thread: Option<String>,
-    eventtap_main_thread: Option<String>,
-    content_snapshot_filter: Option<String>,
+    reasons: BTreeMap<ProducerFailureOrigin, String>,
 }
 
 impl ProducerFailures {
+    fn record(&mut self, origin: ProducerFailureOrigin, result: Result<(), String>) {
+        match result {
+            Ok(()) => self.clear(origin),
+            Err(reason) => {
+                self.reasons.insert(origin, reason);
+            }
+        }
+    }
+
+    pub(super) fn clear(&mut self, origin: ProducerFailureOrigin) {
+        self.reasons.remove(&origin);
+    }
+
+    pub(super) fn contains(&self, origin: ProducerFailureOrigin) -> bool {
+        self.reasons.contains_key(&origin)
+    }
+
     pub(super) fn reasons(&self) -> impl Iterator<Item = (&'static str, &str)> {
-        [
-            self.secure_input_start
-                .as_deref()
-                .map(|reason| ("secure_input", reason)),
-            self.workspace_main_thread
-                .as_deref()
-                .map(|reason| ("workspace", reason)),
-            self.eventtap_main_thread
-                .as_deref()
-                .map(|reason| ("eventtap", reason)),
-            self.content_snapshot_filter
-                .as_deref()
-                .map(|reason| ("content_snapshot", reason)),
-        ]
-        .into_iter()
-        .flatten()
+        self.reasons
+            .iter()
+            .map(|(origin, reason)| (origin.component(), reason.as_str()))
     }
 }
 
 impl CollectorSet {
     pub(crate) fn new(config: &Config) -> Self {
+        Self::new_with_secure_input_start(config, || {
+            SecureInputMonitor::start().map_err(|error| error.to_string())
+        })
+    }
+
+    fn new_with_secure_input_start(
+        config: &Config,
+        start_secure_input: impl FnOnce() -> Result<(SecureInputMonitor, SecureInputProbe), String>,
+    ) -> Self {
         let sources = &config.capture.sources;
         let capture_app = sources.contains(&CaptureSource::App);
         let capture_window = sources.contains(&CaptureSource::Window);
@@ -113,10 +146,10 @@ impl CollectorSet {
         let monitor_required = config.capture.text_content && capture_input || capture_content;
         let mut producer_failures = ProducerFailures::default();
         let (secure_input_monitor, secure_input_probe) = if monitor_required {
-            match SecureInputMonitor::start() {
+            match start_secure_input() {
                 Ok((monitor, probe)) => (Some(monitor), Some(probe)),
                 Err(error) => {
-                    producer_failures.secure_input_start = Some(error.to_string());
+                    producer_failures.record(ProducerFailureOrigin::SecureInputStart, Err(error));
                     (None, None)
                 }
             }
@@ -214,6 +247,10 @@ impl CollectorSet {
             producer_failures,
             start_errors: BTreeMap::new(),
             eventtap_start_gate: super::supervisor::EventTapStartGate::open(),
+            #[cfg(test)]
+            secure_input_runtime_override: None,
+            #[cfg(test)]
+            eventtap_runtime_override: None,
         }
     }
 
@@ -227,12 +264,18 @@ impl CollectorSet {
         if let Some(ax) = &self.ax {
             ax.collector.replace_filter(filter.clone());
         }
-        if let Some(content) = self.content_snapshot.as_mut() {
-            self.producer_failures.content_snapshot_filter = content
-                .collector
-                .filter_replaced()
-                .err()
-                .map(|error| error.to_string());
+        if let Some(content) = self
+            .content_snapshot
+            .as_mut()
+            .filter(|content| content.collector.is_running())
+        {
+            self.producer_failures.record(
+                ProducerFailureOrigin::ContentSnapshotFilter,
+                content
+                    .collector
+                    .filter_replaced()
+                    .map_err(|error| error.to_string()),
+            );
         }
         match (chrome_required, self.chrome.is_some()) {
             (true, false) => self.add_chrome_collector(),
@@ -265,11 +308,15 @@ impl CollectorSet {
         let workspace = self.workspace.as_mut().and_then(|managed| {
             match managed.collector.prepare_main_thread() {
                 Ok(observer) => {
-                    self.producer_failures.workspace_main_thread = None;
+                    self.producer_failures
+                        .clear(ProducerFailureOrigin::WorkspaceMainThread);
                     Some(observer)
                 }
                 Err(error) => {
-                    self.producer_failures.workspace_main_thread = Some(error.to_string());
+                    self.producer_failures.record(
+                        ProducerFailureOrigin::WorkspaceMainThread,
+                        Err(error.to_string()),
+                    );
                     None
                 }
             }
@@ -277,11 +324,15 @@ impl CollectorSet {
         let input_source = self.eventtap.as_mut().and_then(|managed| {
             match managed.collector.prepare_main_thread() {
                 Ok(observer) => {
-                    self.producer_failures.eventtap_main_thread = None;
+                    self.producer_failures
+                        .clear(ProducerFailureOrigin::EventTapMainThread);
                     observer
                 }
                 Err(error) => {
-                    self.producer_failures.eventtap_main_thread = Some(error.to_string());
+                    self.producer_failures.record(
+                        ProducerFailureOrigin::EventTapMainThread,
+                        Err(error.to_string()),
+                    );
                     None
                 }
             }
@@ -293,10 +344,25 @@ impl CollectorSet {
     }
 
     #[cfg(test)]
-    pub(super) fn set_secure_input_start_result_for_test(&mut self, result: Result<(), &str>) {
-        // Intentional test seam: zanei-macos owns the concrete monitor and probe, so unit tests
-        // inject only its producer result while exercising the real CollectorSet lifecycle.
-        self.producer_failures.secure_input_start = result.err().map(str::to_owned);
+    pub(super) fn set_producer_result_for_test(
+        &mut self,
+        origin: ProducerFailureOrigin,
+        result: Result<(), &str>,
+    ) {
+        // Intentional test seam: zanei-macos owns the concrete producers, so CLI tests inject
+        // only their result while exercising the real CollectorSet lifecycle and health path.
+        self.producer_failures
+            .record(origin, result.map_err(str::to_owned));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_secure_input_runtime_for_test(&mut self, enabled: bool) {
+        self.secure_input_runtime_override = Some(enabled);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_eventtap_runtime_for_test(&mut self, degraded: bool) {
+        self.eventtap_runtime_override = Some(degraded);
     }
 }
 

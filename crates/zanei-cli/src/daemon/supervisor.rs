@@ -11,7 +11,7 @@ use zanei_macos::chrome::ChromeCollector;
 use super::{
     DaemonError,
     collectors::{
-        CollectorSet,
+        CollectorSet, ProducerFailureOrigin,
         relay::{Relay, RelayExit},
     },
 };
@@ -67,12 +67,21 @@ impl CollectorSet {
         // trigger consumer before AX and the lifecycle consumers before workspace.
         for collector in START_ORDER {
             match collector {
-                CollectorKind::ContentSnapshot => start_collector(
-                    &mut self.content_snapshot,
-                    sender,
-                    &mut self.start_errors,
-                    now,
-                ),
+                CollectorKind::ContentSnapshot => {
+                    let was_running = self
+                        .content_snapshot
+                        .as_ref()
+                        .is_some_and(|content| content.running);
+                    start_collector(
+                        &mut self.content_snapshot,
+                        sender,
+                        &mut self.start_errors,
+                        now,
+                    );
+                    if !was_running {
+                        self.clear_content_filter_failure_after_start();
+                    }
+                }
                 CollectorKind::Ax => {
                     start_collector(&mut self.ax, sender, &mut self.start_errors, now);
                 }
@@ -80,7 +89,12 @@ impl CollectorSet {
                     start_collector(&mut self.chrome, sender, &mut self.start_errors, now);
                 }
                 CollectorKind::Workspace => {
-                    start_collector(&mut self.workspace, sender, &mut self.start_errors, now);
+                    if !self
+                        .producer_failures
+                        .contains(ProducerFailureOrigin::WorkspaceMainThread)
+                    {
+                        start_collector(&mut self.workspace, sender, &mut self.start_errors, now);
+                    }
                 }
                 CollectorKind::EventTap => self.start_eventtap(sender, now),
             }
@@ -88,6 +102,12 @@ impl CollectorSet {
     }
 
     pub(crate) fn start_eventtap(&mut self, sender: &SyncSender<RawEvent>, now: Instant) {
+        if self
+            .producer_failures
+            .contains(ProducerFailureOrigin::EventTapMainThread)
+        {
+            return;
+        }
         start_collector_if_allowed(
             &mut self.eventtap,
             sender,
@@ -145,6 +165,10 @@ impl CollectorSet {
     ) -> Result<(), DaemonError> {
         // Preserve startup ordering: content consumes AX triggers, AX/content consume
         // workspace lifecycle notifications, and Chrome consumes AX focus transitions.
+        let content_was_running = self
+            .content_snapshot
+            .as_ref()
+            .is_some_and(|content| content.running);
         supervise_collector(
             &mut self.content_snapshot,
             sender,
@@ -152,6 +176,9 @@ impl CollectorSet {
             &mut self.start_errors,
             now,
         )?;
+        if !content_was_running {
+            self.clear_content_filter_failure_after_start();
+        }
         supervise_collector(
             &mut self.ax,
             sender,
@@ -166,14 +193,23 @@ impl CollectorSet {
             &mut self.start_errors,
             now,
         )?;
-        supervise_collector(
-            &mut self.workspace,
-            sender,
-            permissions,
-            &mut self.start_errors,
-            now,
-        )?;
-        if self.eventtap_start_gate.allows_start() {
+        if !self
+            .producer_failures
+            .contains(ProducerFailureOrigin::WorkspaceMainThread)
+        {
+            supervise_collector(
+                &mut self.workspace,
+                sender,
+                permissions,
+                &mut self.start_errors,
+                now,
+            )?;
+        }
+        if self.eventtap_start_gate.allows_start()
+            && !self
+                .producer_failures
+                .contains(ProducerFailureOrigin::EventTapMainThread)
+        {
             supervise_collector(
                 &mut self.eventtap,
                 sender,
@@ -183,6 +219,17 @@ impl CollectorSet {
             )?;
         }
         Ok(())
+    }
+
+    fn clear_content_filter_failure_after_start(&mut self) {
+        if self
+            .content_snapshot
+            .as_ref()
+            .is_some_and(|content| content.running)
+        {
+            self.producer_failures
+                .clear(ProducerFailureOrigin::ContentSnapshotFilter);
+        }
     }
 }
 

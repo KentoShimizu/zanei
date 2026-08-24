@@ -121,11 +121,6 @@ fn chrome_failure_reason(state: ChromeFailureState) -> Option<String> {
 impl CollectorSet {
     pub(crate) fn health(&self) -> CollectorHealth {
         let mut health = CollectorHealth::default();
-        for (collector, reason) in self.producer_failures.reasons() {
-            health
-                .degraded
-                .insert(collector.to_owned(), reason.to_owned());
-        }
         health.degraded.extend(self.start_errors.clone());
         add_restart_degradation(&mut health.degraded, self.content_snapshot.as_ref());
         add_restart_degradation(&mut health.degraded, self.ax.as_ref());
@@ -175,13 +170,21 @@ impl CollectorSet {
                 "eventtap",
                 eventtap.collector.degraded_operations(),
             );
-            if eventtap.collector.is_degraded() {
+            let eventtap_degraded = eventtap.collector.is_degraded();
+            #[cfg(test)]
+            let eventtap_degraded = self.eventtap_runtime_override.unwrap_or(eventtap_degraded);
+            if eventtap_degraded {
                 health.degraded.insert(
                     "eventtap".to_owned(),
                     "event capture or wake recovery is unavailable".to_owned(),
                 );
             }
-            if eventtap.collector.secure_input_enabled() {
+            let secure_input_enabled = eventtap.collector.secure_input_enabled();
+            #[cfg(test)]
+            let secure_input_enabled = self
+                .secure_input_runtime_override
+                .unwrap_or(secure_input_enabled);
+            if secure_input_enabled {
                 health.degraded.insert(
                     "secure_input".to_owned(),
                     "macOS Secure Input is active; input.key delivery is suspended".to_owned(),
@@ -220,6 +223,11 @@ impl CollectorSet {
             {
                 health.degraded.insert("chrome".to_owned(), reason);
             }
+        }
+        for (collector, reason) in self.producer_failures.reasons() {
+            health
+                .degraded
+                .insert(collector.to_owned(), reason.to_owned());
         }
         health
     }
