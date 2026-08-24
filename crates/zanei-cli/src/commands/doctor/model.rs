@@ -20,6 +20,20 @@ pub(super) struct DoctorReport {
     pub(super) health: HealthReport,
 }
 
+impl DoctorReport {
+    pub(super) const fn exit_code(&self) -> u8 {
+        if self.ok {
+            super::EXIT_SUCCESS
+        } else {
+            super::EXIT_MISSING_PERMISSIONS
+        }
+    }
+
+    pub(super) fn permissions_to_fix(&self, fix: bool) -> Option<&[Permission]> {
+        (fix && !self.missing_permissions.is_empty()).then_some(&self.missing_permissions)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct StoreKeyReport {
     state: &'static str,

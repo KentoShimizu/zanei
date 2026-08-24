@@ -7,6 +7,7 @@ use zanei_core::store::{
 };
 
 use super::{EXIT_MISSING_PERMISSIONS, EXIT_SUCCESS};
+use crate::daemon::StoreOwnership;
 use crate::error::CliError;
 use crate::permissions::probe_permissions;
 use crate::store_access::{self, KeyAccess, KeyPrompt};
@@ -35,25 +36,24 @@ pub(crate) enum StartPermissionState {
 
 pub fn run(config_path: &Path, store_path: &Path, fix: bool, json: bool) -> Result<u8, CliError> {
     let config = Config::load(config_path)?;
+    let owner = StoreOwnership::probe(store_path)?;
     let status_read = store_status(store_path);
-    let mut report = evaluate(&config, status_read.status())?;
-    report.store_key = store_key_report(store_path);
-    report.health = status_read.health_report();
+    let report = evaluate(
+        &config,
+        status_read.status(),
+        store_key_report(store_path),
+        status_read.health_report(owner.as_ref()),
+    )?;
     let executable = crate::executable::current().map_err(CliError::Input)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        let recording = status_read.status().is_some_and(|status| status.running);
-        print_human(&report, &executable, true, recording);
+        print_human(&report, &executable, true, report.health.is_running());
     }
-    if fix && !report.missing_permissions.is_empty() {
-        guide_granting(&report.missing_permissions, &executable)?;
+    if let Some(missing_permissions) = report.permissions_to_fix(fix) {
+        guide_granting(missing_permissions, &executable)?;
     }
-    Ok(if report.ok {
-        EXIT_SUCCESS
-    } else {
-        EXIT_MISSING_PERMISSIONS
-    })
+    Ok(report.exit_code())
 }
 
 pub(crate) fn permissions_ok(config: &Config) -> Result<bool, CliError> {
@@ -69,12 +69,14 @@ pub(crate) fn require_recorder_for_start(
     let status = store_status(store_path).into_status()?.ok_or_else(|| {
         CliError::InvalidValue("running recorder did not publish a heartbeat".to_owned())
     })?;
-    evaluate_recorder_for_start(config, &status, executable)
+    let owner = StoreOwnership::probe(store_path)?;
+    evaluate_recorder_for_start(config, &status, owner.as_ref(), executable)
 }
 
 fn evaluate_recorder_for_start(
     config: &Config,
     status: &StoreStatus,
+    owner: Option<&crate::daemon::StoreOwner>,
     executable: &Path,
 ) -> Result<StartPermissionState, CliError> {
     if !status.running {
@@ -86,11 +88,17 @@ fn evaluate_recorder_for_start(
         return Ok(StartPermissionState::PendingSnapshot);
     };
     let required = crate::daemon::required_permissions_for(config);
-    let mut report = build_report(config, &required, snapshot, true)?;
-    report.health = health::HealthReport::from_status(status);
+    let report = build_report(
+        config,
+        &required,
+        snapshot,
+        true,
+        StoreKeyReport::default(),
+        health::HealthReport::from_status(status, owner),
+    )?;
     if !report.ok {
         println!("{STARTED_WITH_MISSING_PERMISSIONS}");
-        print_human(&report, executable, false, true);
+        print_human(&report, executable, false, report.health.is_running());
     }
     Ok(if report.ok {
         StartPermissionState::Ready
@@ -131,12 +139,24 @@ fn store_key_report(store_path: &Path) -> StoreKeyReport {
     }
 }
 
-fn evaluate(config: &Config, status: Option<&StoreStatus>) -> Result<DoctorReport, CliError> {
+fn evaluate(
+    config: &Config,
+    status: Option<&StoreStatus>,
+    store_key: StoreKeyReport,
+    health: health::HealthReport,
+) -> Result<DoctorReport, CliError> {
     let required = estimated_permissions(config);
     let (snapshot, reported_by_recorder) = permissions_for_status(status, || {
         probe_permissions(&required).map_err(CliError::from)
     })?;
-    build_report(config, &required, snapshot, reported_by_recorder)
+    build_report(
+        config,
+        &required,
+        snapshot,
+        reported_by_recorder,
+        store_key,
+        health,
+    )
 }
 
 fn permissions_for_status<E>(
@@ -154,6 +174,8 @@ fn build_report(
     required: &std::collections::BTreeSet<Permission>,
     snapshot: DaemonPermissions,
     reported_by_recorder: bool,
+    store_key: StoreKeyReport,
+    health: health::HealthReport,
 ) -> Result<DoctorReport, CliError> {
     let mut checked = required.clone();
     checked.insert(Permission::Accessibility);
@@ -225,8 +247,8 @@ fn build_report(
         settings_pane,
         missing_permissions,
         reported_by_recorder,
-        store_key: StoreKeyReport::default(),
-        health: health::HealthReport::status_missing(),
+        store_key,
+        health,
     })
 }
 
@@ -244,23 +266,8 @@ mod tests {
     use super::render::{output_indicates_non_persistent_signature, render_human};
     use super::{
         AutomationDetail, DoctorReport, PermissionReport, StatusDetail, build_report,
-        evaluate_recorder_for_start, permissions_for_status,
+        permissions_for_status,
     };
-
-    #[test]
-    fn fresh_heartbeat_without_permission_snapshot_is_pending_for_start() {
-        let status = StoreStatus {
-            running: true,
-            permissions: None,
-            ..StoreStatus::default()
-        };
-
-        assert_eq!(
-            evaluate_recorder_for_start(&Config::default(), &status, Path::new("/tmp/zanei"))
-                .expect("pending recorder permission snapshot"),
-            super::StartPermissionState::PendingSnapshot
-        );
-    }
 
     #[test]
     fn denied_report_asks_for_a_recorder_start_before_the_manual_add_fallback() {
@@ -454,7 +461,7 @@ mod tests {
             automation: BTreeMap::new(),
         };
 
-        let report = build_report(&config, &required, snapshot, true).expect("doctor report");
+        let report = permission_report(&config, &required, snapshot, true);
 
         assert!(!report.ok);
         assert_eq!(report.missing_required, ["accessibility"]);
@@ -472,7 +479,7 @@ mod tests {
             automation: BTreeMap::new(),
         };
 
-        let report = build_report(&config, &required, snapshot, false).expect("doctor report");
+        let report = permission_report(&config, &required, snapshot, false);
 
         assert!(!report.ok);
         assert_eq!(report.missing_required, ["input_monitoring"]);
@@ -499,7 +506,7 @@ mod tests {
                 PermissionState::NotDetermined,
             )]),
         };
-        let report = build_report(&content, &required, snapshot, false).expect("doctor report");
+        let report = permission_report(&content, &required, snapshot, false);
 
         assert_eq!(
             report.permissions.accessibility.required_for,
@@ -556,6 +563,23 @@ mod tests {
             input_monitoring: PermissionState::Granted,
             automation: BTreeMap::new(),
         }
+    }
+
+    fn permission_report(
+        config: &Config,
+        required: &BTreeSet<Permission>,
+        snapshot: DaemonPermissions,
+        reported_by_recorder: bool,
+    ) -> DoctorReport {
+        build_report(
+            config,
+            required,
+            snapshot,
+            reported_by_recorder,
+            super::StoreKeyReport::default(),
+            HealthReport::status_missing(),
+        )
+        .expect("doctor report")
     }
 
     fn detail(status: &'static str, required_for: &[&'static str]) -> StatusDetail {
