@@ -1,6 +1,7 @@
 //! Chrome URL collection and OS-independent navigation change detection.
 
 mod eligibility;
+mod failure;
 mod observer;
 mod worker;
 
@@ -8,14 +9,17 @@ pub use eligibility::{
     ChromeEligibilityObservation, ChromeEligibilityPublisher, ChromeEligibilityTracker,
     chrome_eligibility_channel,
 };
+pub use failure::{
+    ChromeFailure, ChromeFailurePhase, ChromeFailureState, ChromeParseFailure, ChromeQueryFailure,
+    ChromeValidationFailure,
+};
 pub use observer::ChromeObserver;
 
 use std::{
-    fmt::Display,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{Receiver, SyncSender, sync_channel},
+        mpsc::{Receiver, SyncSender},
     },
     thread::{self, JoinHandle},
 };
@@ -26,14 +30,15 @@ use zanei_core::schema::BrowserTransition;
 
 use crate::{
     ffi::applescript::{
-        AppleScriptClient, AppleScriptError, Observation as NativeObservation,
-        Snapshot as NativeSnapshot,
+        AppleScriptClient, AppleScriptError, AppleScriptResponseError,
+        Observation as NativeObservation, Snapshot as NativeSnapshot,
     },
     focus_context::{FocusContext, FocusTransition, FocusTransitionReceiver},
 };
 
 use zanei_core::privacy::CHROME_BUNDLE_ID;
 const COLLECTOR_NAME: &str = "chrome";
+use failure::ChromeFailurePublisher;
 use observer::ObservationTrigger;
 use worker::{ChromeWorkerReceivers, run_worker};
 
@@ -95,6 +100,11 @@ impl ChromeCollector {
         self.metrics.degraded.load(Ordering::Relaxed)
     }
 
+    #[must_use]
+    pub fn failure_state(&self) -> ChromeFailureState {
+        self.metrics.failure.state()
+    }
+
     fn stop_worker(&mut self) {
         let Some(runtime) = self.runtime.take() else {
             return;
@@ -131,7 +141,6 @@ impl Collector for ChromeCollector {
         let focus_context = self.focus_context.clone();
         let initial_focus = focus_context.current();
         let channels = Arc::clone(&self.channels);
-        let (startup_sender, startup_receiver) = sync_channel(1);
         #[cfg(test)]
         let panic_next_worker = Arc::clone(&self.panic_next_worker);
         let handle = thread::Builder::new()
@@ -141,20 +150,9 @@ impl Collector for ChromeCollector {
                 let _clear_eligibility = EligibilityClearGuard::new(&eligibility);
                 #[cfg(test)]
                 if panic_next_worker.swap(false, Ordering::AcqRel) {
-                    let _ = startup_sender.send(Ok(()));
                     panic!("injected Chrome worker panic");
                 }
-                let mut api = match AppleScriptClient::new() {
-                    Ok(client) => {
-                        let _ = startup_sender.send(Ok(()));
-                        SystemChromeApi { client }
-                    }
-                    Err(error) => {
-                        metrics.degraded.fetch_add(1, Ordering::Relaxed);
-                        let _ = startup_sender.send(Err(error.to_string()));
-                        return;
-                    }
-                };
+                let mut api = SystemChromeApi { client: None };
                 let receivers = ChromeWorkerReceivers {
                     focus: &channels.focus_transitions,
                     observations: &channels.observation_triggers,
@@ -178,27 +176,8 @@ impl Collector for ChromeCollector {
                 collector: COLLECTOR_NAME.to_owned(),
                 message: error.to_string(),
             })?;
-
-        match startup_receiver.recv() {
-            Ok(Ok(())) => {
-                self.runtime = Some(ChromeRuntime { stop, handle });
-                Ok(())
-            }
-            Ok(Err(message)) => {
-                let _ = handle.join();
-                Err(CollectorError::Start {
-                    collector: COLLECTOR_NAME.to_owned(),
-                    message,
-                })
-            }
-            Err(error) => {
-                let _ = handle.join();
-                Err(CollectorError::Start {
-                    collector: COLLECTOR_NAME.to_owned(),
-                    message: error.to_string(),
-                })
-            }
-        }
+        self.runtime = Some(ChromeRuntime { stop, handle });
+        Ok(())
     }
 
     fn stop(&mut self) {
@@ -245,33 +224,31 @@ fn lock_worker_channels(
 struct ChromeMetrics {
     dropped: Arc<AtomicU64>,
     degraded: Arc<AtomicU64>,
+    failure: ChromeFailurePublisher,
 }
 
 trait ChromeApi {
-    type Error: Display;
-
-    fn query(&mut self, query: ChromeQuery) -> Result<ChromeObservation, Self::Error>;
+    fn query(&mut self, query: &ChromeQuery) -> Result<ChromeObservation, ChromeFailure>;
 }
 
-struct SystemChromeApi {
-    client: AppleScriptClient,
+struct SystemChromeApi<C = AppleScriptClient> {
+    client: Option<C>,
 }
 
 impl ChromeApi for SystemChromeApi {
-    type Error = AppleScriptError;
-
-    fn query(&mut self, query: ChromeQuery) -> Result<ChromeObservation, Self::Error> {
+    fn query(&mut self, query: &ChromeQuery) -> Result<ChromeObservation, ChromeFailure> {
+        let client = self.client()?;
         let observation = match query {
-            ChromeQuery::FrontWindow { .. } => self.client.query()?,
+            ChromeQuery::FrontWindow { .. } => client.query()?,
             ChromeQuery::Window {
                 applescript_window_id,
                 ..
-            } => self.client.query_window(applescript_window_id)?,
+            } => client.query_window(applescript_window_id)?,
         };
         let window_id = query.window_id();
         Ok(match observation {
             NativeObservation::Snapshot(snapshot) => {
-                ChromeObservation::Snapshot(ChromeSnapshot::from_native(snapshot, window_id)?)
+                ChromeObservation::Snapshot(ChromeSnapshot::from_native(snapshot, window_id))
             }
             NativeObservation::Incognito => ChromeObservation::Incognito { window_id },
             NativeObservation::NoWindow => ChromeObservation::NoWindow,
@@ -280,7 +257,81 @@ impl ChromeApi for SystemChromeApi {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl SystemChromeApi {
+    fn client(&mut self) -> Result<&mut AppleScriptClient, ChromeFailure> {
+        self.get_or_initialize_client(AppleScriptClient::new)
+    }
+}
+
+impl<C> SystemChromeApi<C> {
+    fn get_or_initialize_client(
+        &mut self,
+        initialize: impl FnOnce() -> Result<C, AppleScriptError>,
+    ) -> Result<&mut C, ChromeFailure> {
+        if self.client.is_none() {
+            self.client = Some(initialize().map_err(ChromeFailure::from)?);
+        }
+        self.client
+            .as_mut()
+            .ok_or(ChromeFailure::Query(ChromeQueryFailure::RuntimeUnavailable))
+    }
+
+    #[cfg(test)]
+    fn client_for_test(
+        &mut self,
+        result: Result<C, AppleScriptError>,
+    ) -> Result<&mut C, ChromeFailure> {
+        self.get_or_initialize_client(|| result)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn system_chrome_api_retries_failed_client_initialization() {
+    let mut api = SystemChromeApi::<()> { client: None };
+
+    assert!(matches!(
+        api.client_for_test(Err(AppleScriptError::ChromeUnavailable)),
+        Err(ChromeFailure::Query(ChromeQueryFailure::RuntimeUnavailable))
+    ));
+    assert!(api.client_for_test(Ok(())).is_ok());
+    let cached = api.client_for_test(Err(AppleScriptError::ChromeUnavailable));
+    assert!(cached.is_ok());
+}
+
+impl From<AppleScriptError> for ChromeFailure {
+    fn from(error: AppleScriptError) -> Self {
+        match error {
+            AppleScriptError::Compile { code } | AppleScriptError::Execute { code } => {
+                Self::Query(code.map_or(
+                    ChromeQueryFailure::AppleEventCodeUnavailable,
+                    ChromeQueryFailure::AppleEvent,
+                ))
+            }
+            AppleScriptError::ClassUnavailable(_)
+            | AppleScriptError::Allocation(_)
+            | AppleScriptError::ChromeUnavailable => {
+                Self::Query(ChromeQueryFailure::RuntimeUnavailable)
+            }
+            AppleScriptError::InvalidResponse(error) => Self::Parse(match error {
+                AppleScriptResponseError::EmptyDescriptorList => ChromeParseFailure::EmptyResponse,
+                AppleScriptResponseError::UnsupportedModeLength
+                | AppleScriptResponseError::StatusLength
+                | AppleScriptResponseError::SnapshotLength => {
+                    ChromeParseFailure::InvalidResponseShape
+                }
+                AppleScriptResponseError::UnknownStatus => ChromeParseFailure::UnknownStatus,
+                AppleScriptResponseError::RequiredItemNotText => ChromeParseFailure::MissingText,
+                AppleScriptResponseError::StringContainsNul => ChromeParseFailure::InvalidString,
+            }),
+            AppleScriptError::UnsupportedMode => {
+                Self::Parse(ChromeParseFailure::UnsupportedWindowMode)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ChromeQuery {
     FrontWindow {
         pid: i64,
@@ -289,25 +340,25 @@ enum ChromeQuery {
     Window {
         pid: i64,
         window_id: i64,
-        applescript_window_id: i64,
+        applescript_window_id: String,
     },
 }
 
 impl ChromeQuery {
-    const fn pid(self) -> i64 {
+    const fn pid(&self) -> i64 {
         match self {
-            Self::FrontWindow { pid, .. } | Self::Window { pid, .. } => pid,
+            Self::FrontWindow { pid, .. } | Self::Window { pid, .. } => *pid,
         }
     }
 
-    const fn window_id(self) -> Option<i64> {
+    const fn window_id(&self) -> Option<i64> {
         match self {
-            Self::FrontWindow { window_id, .. } => window_id,
-            Self::Window { window_id, .. } => Some(window_id),
+            Self::FrontWindow { window_id, .. } => *window_id,
+            Self::Window { window_id, .. } => Some(*window_id),
         }
     }
 
-    const fn applescript_window_id(self) -> Option<i64> {
+    fn applescript_window_id(&self) -> Option<&str> {
         match self {
             Self::Window {
                 applescript_window_id,
@@ -329,7 +380,7 @@ enum ChromeObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChromeSnapshot {
     window_id: Option<i64>,
-    applescript_window_id: i64,
+    applescript_window_id: String,
     window_key: String,
     window_title: Option<String>,
     tab_key: String,
@@ -338,23 +389,16 @@ struct ChromeSnapshot {
 }
 
 impl ChromeSnapshot {
-    fn from_native(
-        value: NativeSnapshot,
-        window_id: Option<i64>,
-    ) -> Result<Self, AppleScriptError> {
-        let applescript_window_id = value
-            .window_key
-            .parse()
-            .map_err(|_| AppleScriptError::InvalidResponse("Chrome window id is not an integer"))?;
-        Ok(Self {
+    fn from_native(value: NativeSnapshot, window_id: Option<i64>) -> Self {
+        Self {
             window_id,
-            applescript_window_id,
+            applescript_window_id: value.window_key.clone(),
             window_key: value.window_key,
             window_title: value.window_title,
             tab_key: value.tab_key,
             url: value.url,
             tab_title: value.tab_title,
-        })
+        }
     }
 }
 

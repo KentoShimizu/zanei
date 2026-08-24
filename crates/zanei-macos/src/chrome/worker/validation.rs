@@ -1,6 +1,6 @@
 //! Validation for observations returned by Chrome's scripting boundary.
 
-use crate::chrome::ChromeSnapshot;
+use crate::chrome::{ChromeQuery, ChromeSnapshot};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SnapshotError {
@@ -8,8 +8,24 @@ pub(crate) enum SnapshotError {
     EmptyWindowIdentity,
     #[error("Chrome tab identity is empty")]
     EmptyTabIdentity,
+    #[error("Chrome returned a different window identity")]
+    WindowIdentityMismatch,
     #[error("Chrome returned a non-absolute URL")]
     InvalidUrl,
+}
+
+pub(super) fn validate_query_snapshot(
+    query: &ChromeQuery,
+    snapshot: &ChromeSnapshot,
+) -> Result<(), SnapshotError> {
+    validate_snapshot(snapshot)?;
+    if query
+        .applescript_window_id()
+        .is_some_and(|expected| expected != snapshot.applescript_window_id)
+    {
+        return Err(SnapshotError::WindowIdentityMismatch);
+    }
+    Ok(())
 }
 
 pub(super) fn validate_snapshot(snapshot: &ChromeSnapshot) -> Result<(), SnapshotError> {

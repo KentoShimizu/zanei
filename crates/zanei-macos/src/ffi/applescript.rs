@@ -36,9 +36,9 @@ using terms from application "{application_path}"
 with timeout of 1 second
     if application chromeApp is not running then return {"not_running"}
     tell application chromeApp
-        if not (exists window id {window_id}) then return {"no_window"}
+        if not (exists window id "{window_id}") then return {"no_window"}
 
-        set current_window to window id {window_id}
+        set current_window to window id "{window_id}"
         set current_mode to (mode of current_window) as text
         if current_mode is "incognito" then return {"incognito"}
         if current_mode is not "normal" then return {"unsupported_mode", current_mode}
@@ -84,9 +84,27 @@ pub(crate) enum AppleScriptError {
     #[error("AppleScript execution failed (code {code:?})")]
     Execute { code: Option<i64> },
     #[error("AppleScript returned an invalid Chrome response: {0}")]
-    InvalidResponse(&'static str),
-    #[error("Chrome returned unsupported window mode {0:?}")]
-    UnsupportedMode(String),
+    InvalidResponse(AppleScriptResponseError),
+    #[error("Chrome returned an unsupported window mode")]
+    UnsupportedMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum AppleScriptResponseError {
+    #[error("empty descriptor list")]
+    EmptyDescriptorList,
+    #[error("unsupported-mode response has the wrong length")]
+    UnsupportedModeLength,
+    #[error("unknown response status")]
+    UnknownStatus,
+    #[error("status response has the wrong length")]
+    StatusLength,
+    #[error("snapshot response has the wrong length")]
+    SnapshotLength,
+    #[error("required descriptor item is not text")]
+    RequiredItemNotText,
+    #[error("string contains a NUL byte")]
+    StringContainsNul,
 }
 
 pub(crate) struct AppleScriptClient {
@@ -110,7 +128,10 @@ impl AppleScriptClient {
         execute_script(&self.front_window_script)
     }
 
-    pub(crate) fn query_window(&mut self, window_id: i64) -> Result<Observation, AppleScriptError> {
+    pub(crate) fn query_window(
+        &mut self,
+        window_id: &str,
+    ) -> Result<Observation, AppleScriptError> {
         let _pool = AutoreleasePool::new()?;
         let script = compile_script(&target_window_source(&self.application_path, window_id))?;
         execute_script(&script)
@@ -134,14 +155,22 @@ fn front_window_source(application_path: &str) -> String {
     substitute_application_path(FRONT_WINDOW_SCRIPT_TEMPLATE, application_path)
 }
 
-fn target_window_source(application_path: &str, window_id: i64) -> String {
-    substitute_application_path(TARGET_WINDOW_SCRIPT_TEMPLATE, application_path)
-        .replace("{window_id}", &window_id.to_string())
+fn target_window_source(application_path: &str, window_id: &str) -> String {
+    let escaped_window_id = escape_applescript_string(window_id);
+    TARGET_WINDOW_SCRIPT_TEMPLATE
+        .split("{window_id}")
+        .map(|segment| substitute_application_path(segment, application_path))
+        .collect::<Vec<_>>()
+        .join(&escaped_window_id)
 }
 
 fn substitute_application_path(template: &str, application_path: &str) -> String {
-    let escaped_path = application_path.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped_path = escape_applescript_string(application_path);
     template.replace("{application_path}", &escaped_path)
+}
+
+fn escape_applescript_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn compile_script(source: &str) -> Result<RetainedObject, AppleScriptError> {
@@ -177,7 +206,9 @@ fn execute_script(script: &RetainedObject) -> Result<Observation, AppleScriptErr
 fn parse_reply(reply: Object) -> Result<Observation, AppleScriptError> {
     let item_count = send_isize(reply, c"numberOfItems");
     if item_count < STATUS_ITEM_COUNT {
-        return Err(AppleScriptError::InvalidResponse("empty descriptor list"));
+        return Err(AppleScriptError::InvalidResponse(
+            AppleScriptResponseError::EmptyDescriptorList,
+        ));
     }
     let status = required_item_string(reply, 1)?;
     match status.as_str() {
@@ -188,14 +219,15 @@ fn parse_reply(reply: Object) -> Result<Observation, AppleScriptError> {
         "unsupported_mode" => {
             if item_count != UNSUPPORTED_MODE_ITEM_COUNT {
                 return Err(AppleScriptError::InvalidResponse(
-                    "unsupported-mode response has the wrong length",
+                    AppleScriptResponseError::UnsupportedModeLength,
                 ));
             }
-            Err(AppleScriptError::UnsupportedMode(required_item_string(
-                reply, 2,
-            )?))
+            let _ = required_item_string(reply, 2)?;
+            Err(AppleScriptError::UnsupportedMode)
         }
-        _ => Err(AppleScriptError::InvalidResponse("unknown response status")),
+        _ => Err(AppleScriptError::InvalidResponse(
+            AppleScriptResponseError::UnknownStatus,
+        )),
     }
 }
 
@@ -207,7 +239,7 @@ fn parse_status(
         Ok(observation)
     } else {
         Err(AppleScriptError::InvalidResponse(
-            "status response has the wrong length",
+            AppleScriptResponseError::StatusLength,
         ))
     }
 }
@@ -215,7 +247,7 @@ fn parse_status(
 fn parse_snapshot(reply: Object, item_count: isize) -> Result<Snapshot, AppleScriptError> {
     if item_count != SNAPSHOT_ITEM_COUNT {
         return Err(AppleScriptError::InvalidResponse(
-            "snapshot response has the wrong length",
+            AppleScriptResponseError::SnapshotLength,
         ));
     }
     Ok(Snapshot {
@@ -229,7 +261,7 @@ fn parse_snapshot(reply: Object, item_count: isize) -> Result<Snapshot, AppleScr
 
 fn required_item_string(reply: Object, index: isize) -> Result<String, AppleScriptError> {
     item_string(reply, index).ok_or(AppleScriptError::InvalidResponse(
-        "required descriptor item is not text",
+        AppleScriptResponseError::RequiredItemNotText,
     ))
 }
 
@@ -269,8 +301,9 @@ fn object_string(value: Object) -> Option<String> {
 }
 
 fn autoreleased_string(value: &str) -> Result<Object, AppleScriptError> {
-    let value = std::ffi::CString::new(value)
-        .map_err(|_| AppleScriptError::InvalidResponse("string contains a NUL byte"))?;
+    let value = std::ffi::CString::new(value).map_err(|_| {
+        AppleScriptError::InvalidResponse(AppleScriptResponseError::StringContainsNul)
+    })?;
     let class = class(c"NSString", "NSString")?;
     let string = send_object_with_c_string(class, c"stringWithUTF8String:", value.as_ptr());
     if string.is_null() {
@@ -442,11 +475,33 @@ mod tests {
 
     #[test]
     fn targeted_source_reads_only_the_requested_window() {
-        let source = target_window_source("/Applications/Google Chrome.app", 4321);
+        let source = target_window_source("/Applications/Google Chrome.app", "window-4321");
 
-        assert!(source.contains("if not (exists window id 4321)"));
-        assert!(source.contains("set current_window to window id 4321"));
+        assert!(source.contains("if not (exists window id \"window-4321\")"));
+        assert!(source.contains("set current_window to window id \"window-4321\""));
         assert!(!source.contains("front window"));
+    }
+
+    #[test]
+    fn targeted_source_escapes_opaque_window_identity_as_one_string_literal() {
+        let window_id = "window-\\\" & return {\"private\"} & \"";
+
+        let source = target_window_source("/Applications/Google Chrome.app", window_id);
+
+        let escaped = "window-\\\\\\\" & return {\\\"private\\\"} & \\\"";
+        assert_eq!(source.matches(escaped).count(), 2);
+        assert!(!source.contains("window id \"window-\" & return"));
+    }
+
+    #[test]
+    fn targeted_source_does_not_reinterpret_markers_in_values() {
+        let application_path = "/Applications/{window_id}/Google Chrome.app";
+        let window_id = "window-{application_path}";
+
+        let source = target_window_source(application_path, window_id);
+
+        assert_eq!(source.matches(application_path).count(), 1);
+        assert_eq!(source.matches(window_id).count(), 2);
     }
 }
 
