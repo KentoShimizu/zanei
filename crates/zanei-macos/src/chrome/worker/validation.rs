@@ -21,7 +21,7 @@ pub(super) fn validate_query_snapshot(
     validate_snapshot(snapshot)?;
     if query
         .applescript_window_id()
-        .is_some_and(|expected| expected != snapshot.applescript_window_id)
+        .is_some_and(|expected| expected != &snapshot.applescript_window_id)
     {
         return Err(SnapshotError::WindowIdentityMismatch);
     }
@@ -29,7 +29,7 @@ pub(super) fn validate_query_snapshot(
 }
 
 pub(super) fn validate_snapshot(snapshot: &ChromeSnapshot) -> Result<(), SnapshotError> {
-    if snapshot.window_key.is_empty() {
+    if snapshot.applescript_window_id.as_str().is_empty() {
         return Err(SnapshotError::EmptyWindowIdentity);
     }
     if snapshot.tab_key.is_empty() {

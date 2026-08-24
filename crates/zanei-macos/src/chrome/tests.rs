@@ -496,9 +496,7 @@ fn tracker_with_initial_snapshot() -> NavigationTracker {
 }
 
 fn snapshot(window: &str, tab: &str, url: &str, title: &str) -> ChromeSnapshot {
-    let mut snapshot = snapshot_for_window(7, window, tab, url, title);
-    snapshot.window_key = window.to_owned();
-    snapshot
+    snapshot_for_window(7, window, tab, url, title)
 }
 
 fn snapshot_for_window(
@@ -510,8 +508,7 @@ fn snapshot_for_window(
 ) -> ChromeSnapshot {
     ChromeSnapshot {
         window_id: Some(window_id),
-        applescript_window_id: applescript_window_id.to_owned(),
-        window_key: applescript_window_id.to_owned(),
+        applescript_window_id: AppleScriptWindowId::for_test(applescript_window_id),
         window_title: Some(title.to_owned()),
         tab_key: tab.to_owned(),
         url: url.to_owned(),

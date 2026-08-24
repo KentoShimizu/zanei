@@ -3,6 +3,7 @@
 use zanei_core::schema::BrowserTransition;
 
 use super::{ChromeSnapshot, SnapshotError, validate_snapshot};
+use crate::ffi::applescript::AppleScriptWindowId;
 
 #[derive(Default)]
 pub(in crate::chrome) struct NavigationTracker {
@@ -16,14 +17,14 @@ impl NavigationTracker {
     ) -> Result<Option<Navigation>, SnapshotError> {
         validate_snapshot(&snapshot)?;
         let current = ObservedPage {
-            window_key: snapshot.window_key.clone(),
+            window_id: snapshot.applescript_window_id.clone(),
             tab_key: snapshot.tab_key.clone(),
             url: snapshot.url.clone(),
         };
         let transition = match self.previous.as_ref() {
             None => None,
             Some(previous)
-                if previous.window_key != current.window_key
+                if previous.window_id != current.window_id
                     || previous.tab_key != current.tab_key =>
             {
                 Some(BrowserTransition::TabSwitch)
@@ -51,7 +52,7 @@ impl NavigationTracker {
 }
 
 pub(in crate::chrome) struct ObservedPage {
-    window_key: String,
+    window_id: AppleScriptWindowId,
     tab_key: String,
     url: String,
 }

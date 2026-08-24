@@ -102,7 +102,7 @@ fn ownership_stop_discards_a_blocking_query_result() {
         ChromeQuery::Window {
             pid: 42,
             window_id: 7,
-            applescript_window_id: "window-101".to_owned(),
+            applescript_window_id: AppleScriptWindowId::for_test("window-101"),
         },
         false,
         observed_at,
@@ -115,12 +115,12 @@ fn ownership_stop_discards_a_blocking_query_result() {
 }
 
 #[test]
-fn ownership_as_id_survives_worker_state_restart() {
+fn front_response_identity_is_targeted_instead_of_cg_window_number() {
     let now = Instant::now();
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
     let snapshot = ChromeSnapshot::from_native(
         crate::ffi::applescript::Snapshot {
-            window_key: "window-alpha-001".to_owned(),
+            window_id: AppleScriptWindowId::for_test("101"),
             window_title: None,
             tab_key: "tab-alpha-001".to_owned(),
             url: "https://allowed.example".to_owned(),
@@ -128,7 +128,7 @@ fn ownership_as_id_survives_worker_state_restart() {
         },
         Some(7),
     );
-    assert_eq!(snapshot.applescript_window_id, "window-alpha-001");
+    assert_eq!(snapshot.applescript_window_id.as_str(), "101");
     assert_eq!(snapshot.tab_key, "tab-alpha-001");
     let mut initial_api = FakeApi::new([Ok(ChromeObservation::Snapshot(snapshot))]);
     let (initial_sender, _initial_events) = sync_channel(1);
@@ -144,8 +144,11 @@ fn ownership_as_id_survives_worker_state_restart() {
         ObservationOutcome::Continue
     ));
     assert_eq!(
-        eligibility.applescript_window_id(42, 7).as_deref(),
-        Some("window-alpha-001")
+        eligibility
+            .applescript_window_id(42, 7)
+            .as_ref()
+            .map(AppleScriptWindowId::as_str),
+        Some("101")
     );
 
     eligibility.clear_all();
@@ -179,8 +182,55 @@ fn ownership_as_id_survives_worker_state_restart() {
         [ChromeQuery::Window {
             pid: 42,
             window_id: 7,
-            applescript_window_id: "window-alpha-001".to_owned(),
+            applescript_window_id: AppleScriptWindowId::for_test("101"),
         }]
+    );
+}
+
+#[test]
+fn cg_window_number_used_as_applescript_identity_fails_closed() {
+    let (eligibility, tracker) = chrome_eligibility_channel(FilterConfig::default());
+    let (sender, _) = sync_channel(1);
+    let stop = AtomicBool::new(false);
+    let focus_context = FocusContext::new();
+    let metrics = ChromeMetrics::default();
+    let context = ObservationContext {
+        sender: &sender,
+        stop: &stop,
+        focus_context: &focus_context,
+        metrics: &metrics,
+        eligibility: &eligibility,
+    };
+    let mut api = FakeApi::new([Ok(ChromeObservation::Snapshot(snapshot_for_window(
+        7,
+        "101",
+        "tab-1",
+        "https://allowed.example",
+        "Allowed",
+    )))]);
+
+    let outcome = observe_query_once(
+        &mut api,
+        &mut NavigationTracker::default(),
+        None,
+        ChromeQuery::Window {
+            pid: 42,
+            window_id: 7,
+            applescript_window_id: AppleScriptWindowId::for_test("7"),
+        },
+        false,
+        Instant::now(),
+        &context,
+    );
+
+    assert!(matches!(outcome, ObservationOutcome::Continue));
+    assert_eq!(tracker.state_version(42, 7), None);
+    assert_eq!(metrics.degraded.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        metrics.failure.state(),
+        ChromeFailureState::Unavailable(ChromeFailure::Validation(
+            ChromeValidationFailure::WindowIdentityMismatch
+        ))
     );
 }
 
