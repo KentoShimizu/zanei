@@ -341,6 +341,83 @@ fn planned_stop_and_suspend_preserve_exit_until_resumed_worker_is_stable() {
 }
 
 #[test]
+fn secure_input_start_failure_survives_suspend_and_resume() {
+    let mut collectors = collector_set_with_secure_input_result(Err("monitor unavailable"));
+    let (pipeline, _events) = mpsc::sync_channel(4);
+
+    collectors.suspend();
+    collectors.start(&pipeline);
+
+    assert_secure_input_failure(&collectors, "monitor unavailable");
+}
+
+#[test]
+fn secure_input_start_failure_survives_pause_and_unpause() {
+    let mut collectors = collector_set_with_secure_input_result(Err("monitor unavailable"));
+    let (pipeline, _events) = mpsc::sync_channel(4);
+
+    collectors.stop();
+    collectors.start(&pipeline);
+
+    assert_secure_input_failure(&collectors, "monitor unavailable");
+}
+
+#[test]
+fn secure_input_start_failure_survives_filter_reload() {
+    let mut collectors = collector_set_with_secure_input_result(Err("monitor unavailable"));
+
+    collectors.replace_filter(zanei_core::config::FilterConfig::default());
+
+    assert_secure_input_failure(&collectors, "monitor unavailable");
+}
+
+#[test]
+fn filter_reload_does_not_clear_managed_content_start_failure() {
+    let config = secure_input_enabled_test_config();
+    let mut collectors = CollectorSet::new(&config);
+    collectors.start_errors.insert(
+        "content_snapshot".to_owned(),
+        "content worker failed to start".to_owned(),
+    );
+
+    collectors.replace_filter(config.filter);
+
+    assert_eq!(
+        collectors
+            .start_errors
+            .get("content_snapshot")
+            .map(String::as_str),
+        Some("content worker failed to start")
+    );
+}
+
+#[test]
+fn recreated_secure_input_owner_clears_recovered_start_failure() {
+    let config = secure_input_enabled_test_config();
+    let failed =
+        collector_set_with_config_and_secure_input_result(&config, Err("monitor unavailable"));
+    assert_secure_input_failure(&failed, "monitor unavailable");
+
+    let recovered = collector_set_with_config_and_secure_input_result(&config, Ok(()));
+
+    assert!(!recovered.health().degraded.contains_key("secure_input"));
+}
+
+#[test]
+fn disabling_secure_input_consumers_removes_the_owned_failure() {
+    let failed = collector_set_with_config_and_secure_input_result(
+        &secure_input_enabled_test_config(),
+        Err("monitor unavailable"),
+    );
+    assert_secure_input_failure(&failed, "monitor unavailable");
+
+    let config = collector_lifecycle_test_config();
+    let disabled = CollectorSet::new(&config);
+
+    assert!(!disabled.health().degraded.contains_key("secure_input"));
+}
+
+#[test]
 fn chrome_health_projects_failure_recovery_and_exit_priority() {
     let mut config = zanei_core::config::Config::default();
     config.capture.sources = vec![CaptureSource::Browser];
@@ -628,6 +705,42 @@ fn projected_degradation(
     let mut degraded = errors.clone();
     add_restart_degradation(&mut degraded, managed.as_ref());
     degraded.remove("fake")
+}
+
+fn collector_set_with_secure_input_result(result: Result<(), &str>) -> CollectorSet {
+    collector_set_with_config_and_secure_input_result(&secure_input_enabled_test_config(), result)
+}
+
+fn collector_set_with_config_and_secure_input_result(
+    config: &zanei_core::config::Config,
+    result: Result<(), &str>,
+) -> CollectorSet {
+    let mut collectors = CollectorSet::new(config);
+    collectors.set_secure_input_start_result_for_test(result);
+    collectors
+}
+
+fn collector_lifecycle_test_config() -> zanei_core::config::Config {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources.clear();
+    config
+}
+
+fn secure_input_enabled_test_config() -> zanei_core::config::Config {
+    let mut config = collector_lifecycle_test_config();
+    config.capture.content_snapshot = true;
+    config
+}
+
+fn assert_secure_input_failure(collectors: &CollectorSet, expected: &str) {
+    assert_eq!(
+        collectors
+            .health()
+            .degraded
+            .get("secure_input")
+            .map(String::as_str),
+        Some(expected)
+    );
 }
 
 fn assert_exit_survives_collector_set_resume(suspend: bool) {

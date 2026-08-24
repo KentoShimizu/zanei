@@ -44,8 +44,38 @@ pub(crate) struct CollectorSet {
     capture: CaptureConfig,
     _secure_input_monitor: Option<SecureInputMonitor>,
     pub(super) retained_collector_health: BTreeMap<String, CollectorCounters>,
+    pub(super) producer_failures: ProducerFailures,
     pub(super) start_errors: BTreeMap<String, String>,
     pub(super) eventtap_start_gate: super::supervisor::EventTapStartGate,
+}
+
+#[derive(Default)]
+pub(super) struct ProducerFailures {
+    secure_input_start: Option<String>,
+    workspace_main_thread: Option<String>,
+    eventtap_main_thread: Option<String>,
+    content_snapshot_filter: Option<String>,
+}
+
+impl ProducerFailures {
+    pub(super) fn reasons(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [
+            self.secure_input_start
+                .as_deref()
+                .map(|reason| ("secure_input", reason)),
+            self.workspace_main_thread
+                .as_deref()
+                .map(|reason| ("workspace", reason)),
+            self.eventtap_main_thread
+                .as_deref()
+                .map(|reason| ("eventtap", reason)),
+            self.content_snapshot_filter
+                .as_deref()
+                .map(|reason| ("content_snapshot", reason)),
+        ]
+        .into_iter()
+        .flatten()
+    }
 }
 
 impl CollectorSet {
@@ -81,12 +111,12 @@ impl CollectorSet {
         let authorization_publisher = (capture_ax && capture_input && config.capture.text_content)
             .then_some(authorization_publisher);
         let monitor_required = config.capture.text_content && capture_input || capture_content;
-        let mut start_errors = BTreeMap::new();
+        let mut producer_failures = ProducerFailures::default();
         let (secure_input_monitor, secure_input_probe) = if monitor_required {
             match SecureInputMonitor::start() {
                 Ok((monitor, probe)) => (Some(monitor), Some(probe)),
                 Err(error) => {
-                    start_errors.insert("secure_input".to_owned(), error.to_string());
+                    producer_failures.secure_input_start = Some(error.to_string());
                     (None, None)
                 }
             }
@@ -181,7 +211,8 @@ impl CollectorSet {
             capture: config.capture.clone(),
             _secure_input_monitor: secure_input_monitor,
             retained_collector_health: BTreeMap::new(),
-            start_errors,
+            producer_failures,
+            start_errors: BTreeMap::new(),
             eventtap_start_gate: super::supervisor::EventTapStartGate::open(),
         }
     }
@@ -197,15 +228,11 @@ impl CollectorSet {
             ax.collector.replace_filter(filter.clone());
         }
         if let Some(content) = self.content_snapshot.as_mut() {
-            match content.collector.filter_replaced() {
-                Ok(()) => {
-                    self.start_errors.remove("content_snapshot");
-                }
-                Err(error) => {
-                    self.start_errors
-                        .insert("content_snapshot".to_owned(), error.to_string());
-                }
-            }
+            self.producer_failures.content_snapshot_filter = content
+                .collector
+                .filter_replaced()
+                .err()
+                .map(|error| error.to_string());
         }
         match (chrome_required, self.chrome.is_some()) {
             (true, false) => self.add_chrome_collector(),
@@ -238,25 +265,23 @@ impl CollectorSet {
         let workspace = self.workspace.as_mut().and_then(|managed| {
             match managed.collector.prepare_main_thread() {
                 Ok(observer) => {
-                    self.start_errors.remove(managed.collector.name());
+                    self.producer_failures.workspace_main_thread = None;
                     Some(observer)
                 }
                 Err(error) => {
-                    self.start_errors
-                        .insert(managed.collector.name().to_owned(), error.to_string());
+                    self.producer_failures.workspace_main_thread = Some(error.to_string());
                     None
                 }
             }
         });
         let input_source = self.eventtap.as_mut().and_then(|managed| {
-            let collector_name = managed.collector.name().to_owned();
             match managed.collector.prepare_main_thread() {
                 Ok(observer) => {
-                    self.start_errors.remove(&collector_name);
+                    self.producer_failures.eventtap_main_thread = None;
                     observer
                 }
                 Err(error) => {
-                    self.start_errors.insert(collector_name, error.to_string());
+                    self.producer_failures.eventtap_main_thread = Some(error.to_string());
                     None
                 }
             }
@@ -265,6 +290,13 @@ impl CollectorSet {
             _workspace: workspace,
             _input_source: input_source,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_secure_input_start_result_for_test(&mut self, result: Result<(), &str>) {
+        // Intentional test seam: zanei-macos owns the concrete monitor and probe, so unit tests
+        // inject only its producer result while exercising the real CollectorSet lifecycle.
+        self.producer_failures.secure_input_start = result.err().map(str::to_owned);
     }
 }
 

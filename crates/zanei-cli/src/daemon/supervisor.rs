@@ -11,13 +11,15 @@ use zanei_macos::chrome::ChromeCollector;
 use super::{
     DaemonError,
     collectors::{
-        CollectorHealth, CollectorSet,
+        CollectorSet,
         relay::{Relay, RelayExit},
     },
 };
 
 mod health;
 
+#[cfg(test)]
+pub(super) use health::add_restart_degradation;
 use health::{ChromeHealth, RESTART_STABLE_AFTER, RestartState};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -97,12 +99,10 @@ impl CollectorSet {
 
     pub(crate) fn stop(&mut self) {
         self.stop_in_order(StopMode::Drain);
-        self.start_errors.clear();
     }
 
     pub(crate) fn suspend(&mut self) {
         self.stop_in_order(StopMode::Discard);
-        self.start_errors.clear();
     }
 
     pub(super) fn remove_chrome_collector(&mut self) {
@@ -183,108 +183,6 @@ impl CollectorSet {
             )?;
         }
         Ok(())
-    }
-
-    pub(crate) fn health(&self) -> CollectorHealth {
-        let mut health = CollectorHealth {
-            degraded: self.start_errors.clone(),
-            ..CollectorHealth::default()
-        };
-        add_restart_degradation(&mut health.degraded, self.content_snapshot.as_ref());
-        add_restart_degradation(&mut health.degraded, self.ax.as_ref());
-        add_restart_degradation(&mut health.degraded, self.chrome.as_ref());
-        add_restart_degradation(&mut health.degraded, self.workspace.as_ref());
-        add_restart_degradation(&mut health.degraded, self.eventtap.as_ref());
-        for (name, counters) in &self.retained_collector_health {
-            health.dropped = health.dropped.saturating_add(counters.dropped);
-            add_failure_count(&mut health.collector_failures, name, counters.failures);
-        }
-        if let Some(workspace) = self.workspace.as_ref() {
-            health.dropped = health
-                .dropped
-                .saturating_add(workspace.collector.dropped_events())
-                .saturating_add(workspace.relay_dropped);
-        }
-        if let Some(ax) = self.ax.as_ref() {
-            health.dropped = health.dropped.saturating_add(ax.collector.dropped_events());
-            health.dropped = health.dropped.saturating_add(ax.relay_dropped);
-            add_failure_count(
-                &mut health.collector_failures,
-                "ax",
-                ax.collector.degraded_operations(),
-            );
-            let degraded_observers = ax.collector.degraded_observers();
-            if degraded_observers > 0 {
-                let applications = if degraded_observers == 1 {
-                    "application"
-                } else {
-                    "applications"
-                };
-                health.degraded.insert(
-                    "ax".to_owned(),
-                    format!(
-                        "observer unavailable for {degraded_observers} {applications} you used (retried on activation)"
-                    ),
-                );
-            }
-        }
-        if let Some(eventtap) = self.eventtap.as_ref() {
-            health.dropped = health
-                .dropped
-                .saturating_add(eventtap.collector.dropped_events())
-                .saturating_add(eventtap.relay_dropped);
-            add_failure_count(
-                &mut health.collector_failures,
-                "eventtap",
-                eventtap.collector.degraded_operations(),
-            );
-            if eventtap.collector.is_degraded() {
-                health.degraded.insert(
-                    "eventtap".to_owned(),
-                    "event capture or wake recovery is unavailable".to_owned(),
-                );
-            }
-            if eventtap.collector.secure_input_enabled() {
-                health.degraded.insert(
-                    "secure_input".to_owned(),
-                    "macOS Secure Input is active; input.key delivery is suspended".to_owned(),
-                );
-            }
-        }
-        if let Some(content) = self.content_snapshot.as_ref() {
-            health.dropped = health
-                .dropped
-                .saturating_add(content.collector.dropped_events())
-                .saturating_add(content.relay_dropped);
-            add_failure_count(
-                &mut health.collector_failures,
-                "content_snapshot",
-                content.collector.collector_failures(),
-            );
-            if let Some(reason) = content.collector.degraded_reason() {
-                health
-                    .degraded
-                    .insert("content_snapshot".to_owned(), reason);
-            }
-        }
-        if let Some(chrome) = self.chrome.as_ref() {
-            health.dropped = health
-                .dropped
-                .saturating_add(chrome.collector.dropped_events())
-                .saturating_add(chrome.relay_dropped);
-            add_failure_count(
-                &mut health.collector_failures,
-                "chrome",
-                chrome.collector.degraded_operations(),
-            );
-            if let Some(reason) = chrome
-                .health()
-                .degraded_reason(health.degraded.get("chrome").map(String::as_str))
-            {
-                health.degraded.insert("chrome".to_owned(), reason);
-            }
-        }
-        health
     }
 }
 
@@ -567,25 +465,4 @@ fn permissions_granted(required: &BTreeSet<Permission>, permissions: &DaemonPerm
             permissions.automation.get(bundle_id) == Some(&PermissionState::Granted)
         }
     })
-}
-
-fn add_failure_count(failures: &mut BTreeMap<String, u64>, collector: &str, count: u64) {
-    if count > 0 {
-        let total = failures.entry(collector.to_owned()).or_default();
-        *total = total.saturating_add(count);
-    }
-}
-
-pub(super) fn add_restart_degradation<C: ManagedCollector>(
-    degraded: &mut BTreeMap<String, String>,
-    managed: Option<&Managed<C>>,
-) {
-    let Some(managed) = managed else {
-        return;
-    };
-    if let Some(reason) = managed.restart.degraded_reason() {
-        degraded
-            .entry(managed.collector.worker_name().to_owned())
-            .or_insert_with(|| reason.to_owned());
-    }
 }
