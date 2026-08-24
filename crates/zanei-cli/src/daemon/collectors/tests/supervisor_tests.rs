@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::supervisor::add_restart_degradation;
 use zanei_macos::chrome::{ChromeFailure, ChromeFailureState, ChromeQueryFailure};
 
 struct FakeClock {
@@ -245,6 +246,88 @@ fn unexpected_exit_uses_capped_backoff_and_stays_degraded_after_restart() {
                 .is_some()
         );
     }
+
+    state.finish();
+    wait_for_relay(&managed);
+}
+
+#[test]
+fn restart_start_failure_overrides_retained_exit_until_recovery_is_stable() {
+    let state = Arc::new(FakeState::default());
+    let mut managed = Some(Managed::new(FakeCollector::new(
+        Arc::clone(&state),
+        BTreeSet::new(),
+    )));
+    let (pipeline, _events) = mpsc::sync_channel(4);
+    let mut errors = BTreeMap::new();
+    let mut clock = FakeClock::new();
+    start_collector(&mut managed, &pipeline, &mut errors, clock.now);
+
+    state.finish();
+    wait_for_relay(&managed);
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("observe unexpected exit");
+    assert_eq!(
+        projected_degradation(&managed, &errors).as_deref(),
+        Some("collector worker terminated unexpectedly")
+    );
+
+    managed
+        .as_mut()
+        .expect("fake collector")
+        .collector
+        .fail_start = true;
+    clock.advance(Duration::from_secs(5));
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("record restart failure");
+    assert_eq!(state.starts.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        projected_degradation(&managed, &errors).as_deref(),
+        Some("missing permission")
+    );
+
+    managed
+        .as_mut()
+        .expect("fake collector")
+        .collector
+        .fail_start = false;
+    clock.advance(Duration::from_secs(10));
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("restart collector");
+    assert_eq!(state.starts.load(Ordering::Relaxed), 3);
+    assert_eq!(
+        projected_degradation(&managed, &errors).as_deref(),
+        Some("collector worker terminated unexpectedly")
+    );
+
+    clock.advance(Duration::from_secs(60));
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("observe stable restart");
+    assert_eq!(projected_degradation(&managed, &errors), None);
 
     state.finish();
     wait_for_relay(&managed);
@@ -536,6 +619,15 @@ fn backoff_deadline_rechecks_current_permission_before_restart() {
 
     state.finish();
     wait_for_relay(&managed);
+}
+
+fn projected_degradation(
+    managed: &Option<Managed<FakeCollector>>,
+    errors: &BTreeMap<String, String>,
+) -> Option<String> {
+    let mut degraded = errors.clone();
+    add_restart_degradation(&mut degraded, managed.as_ref());
+    degraded.remove("fake")
 }
 
 fn assert_exit_survives_collector_set_resume(suspend: bool) {

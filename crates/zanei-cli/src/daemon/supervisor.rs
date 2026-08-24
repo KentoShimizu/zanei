@@ -378,6 +378,7 @@ impl Managed<ChromeCollector> {
     }
 
     #[cfg(test)]
+    // Intentional test limit until zanei-macos exposes a real producer injection API.
     pub(super) fn set_health_for_test(
         &mut self,
         running: bool,
@@ -575,7 +576,7 @@ fn add_failure_count(failures: &mut BTreeMap<String, u64>, collector: &str, coun
     }
 }
 
-fn add_restart_degradation<C: ManagedCollector>(
+pub(super) fn add_restart_degradation<C: ManagedCollector>(
     degraded: &mut BTreeMap<String, String>,
     managed: Option<&Managed<C>>,
 ) {
@@ -583,9 +584,8 @@ fn add_restart_degradation<C: ManagedCollector>(
         return;
     };
     if let Some(reason) = managed.restart.degraded_reason() {
-        degraded.insert(
-            managed.collector.worker_name().to_owned(),
-            reason.to_owned(),
-        );
+        degraded
+            .entry(managed.collector.worker_name().to_owned())
+            .or_insert_with(|| reason.to_owned());
     }
 }
