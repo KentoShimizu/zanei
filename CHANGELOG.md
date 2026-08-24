@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.1 — 2026-08-24
+
+Chrome capture works again, and recorder problems are now diagnosable.
+
+- Fixed the Chrome collector crash loop. AppleScript queries addressed Chrome
+  through a path alias, which macOS rejects with error -1728, and every failed
+  query killed the collector worker; with the worker restarting and failing
+  forever, Chrome URLs and text bodies were never captured. Queries now address
+  Chrome by bundle id, and a transient failure no longer terminates the worker —
+  the collector reports itself unavailable and retries on the next observation.
+- Persistent collector failures are visible. `status` and `doctor` show the
+  current failure reason (a fixed vocabulary plus the underlying numeric error
+  code) next to cumulative per-collector failure counts, and `doctor` gained an
+  evidence-based `health` section that never reports `healthy` without fresh
+  evidence from the current recorder.
+- The launchd recorder writes diagnostic logs beside the store
+  (`<store>.daemon.stdout.log` / `<store>.daemon.stderr.log`, owner-only, never
+  containing captured content). The log directory must be safely owned; unsafe
+  permissions or granting ACL entries stop `start` with a precise fix.
+- Typed text in apps that build their accessibility tree lazily (Chromium,
+  Electron): value notifications are re-registered when a focused element later
+  becomes a known text field, and Zanei now activates the web accessibility
+  tree itself instead of relying on other assistive clients.
+- One-shot collector startup failures (for example the Secure Input monitor)
+  survive pause and resume instead of silently disappearing from `degraded`.
+- The store ownership lock is released explicitly, so a spawned child process
+  can no longer extend ownership past the recorder's lifetime.
 ## 0.3.0 — 2026-08-24
 
 The store is encrypted at rest.
