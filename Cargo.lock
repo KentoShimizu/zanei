@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-collector"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror",
  "zanei-core",
@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "getrandom",
  "jsonschema",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-macos"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tempfile",
  "thiserror",
@@ -1866,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "zanei-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rmcp",
  "serde",
