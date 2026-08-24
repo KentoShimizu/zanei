@@ -27,7 +27,7 @@ use super::{
     },
     native_error,
     observer::AppObserver,
-    types::{NativeAxError, NativeAxEvent, NativeHitTest},
+    types::{NativeAxError, NativeAxEvent, NativeAxObservation, NativeHitTest},
     value_context::{DeferredResolution, DeferredValueContext},
 };
 
@@ -139,7 +139,7 @@ impl NativeAx {
         if source.is_null() {
             return Err(native_error("AXObserverGetRunLoopSource", -1));
         }
-        let mut app_observer = AppObserver::new(
+        let mut app_observer = AppObserver::new_attached(
             application,
             observer,
             source,
@@ -149,8 +149,8 @@ impl NativeAx {
             app,
             self.capture_policy.clone(),
             manual_accessibility,
+            Instant::now(),
         );
-        app_observer.set_manual_accessibility(true);
         app_observer.refresh_window_target();
         let focused = app_observer.focused_element_or_clear(
             Instant::now(),
@@ -207,7 +207,7 @@ impl NativeAx {
         }
     }
 
-    pub(crate) fn poll(&mut self, timeout: Duration) -> Vec<NativeAxEvent> {
+    pub(crate) fn poll(&mut self, timeout: Duration) -> Vec<NativeAxObservation> {
         run_loop_tick(timeout);
         self.authorizations.receive_pending();
         let queued: Vec<_> = self
@@ -228,7 +228,7 @@ impl NativeAx {
                 drained
             );
             match self.decode(notification) {
-                Ok(decoded) => events.extend(decoded),
+                Ok(decoded) => events.extend(decoded.into_iter().map(NativeAxObservation::from)),
                 Err(error) => {
                     crate::trace::trace!(
                         "component=ax phase=decode action=error pid={} operation={} code={}",
@@ -248,17 +248,24 @@ impl NativeAx {
             "poll",
         );
         for observer in self.observers.values_mut() {
-            events.extend(observer.take_due_value_events(
+            events.extend(observer.reconcile_accessibility_if_due(
                 now,
+                OffsetDateTime::now_utc(),
                 secure_input,
                 &mut self.authorizations,
             ));
+            events.extend(
+                observer
+                    .take_due_value_events(now, secure_input, &mut self.authorizations)
+                    .into_iter()
+                    .map(NativeAxObservation::from),
+            );
         }
         let mut pending_detached = Vec::with_capacity(self.detached_contexts.len());
         for mut context in self.detached_contexts.drain(..) {
             match context.take_due(now, secure_input, &mut self.authorizations) {
                 DeferredResolution::Pending => pending_detached.push(context),
-                DeferredResolution::Complete(Some(event)) => events.push(event),
+                DeferredResolution::Complete(Some(event)) => events.push(event.into()),
                 DeferredResolution::Complete(None) => {}
             }
         }
@@ -372,14 +379,13 @@ impl NativeAx {
             "AXValueChanged" => {
                 let matched =
                     observer.is_current_target(TargetKind::Value, queued.element.as_ptr());
+                let role = element_role(queued.element.as_ptr()).ok();
                 crate::trace::trace!(
                     "component=ax phase=decode action=value_target pid={} notification={} target={} element_role={}",
                     queued.pid,
                     name,
                     if matched { "matched" } else { "mismatch" },
-                    element_role(queued.element.as_ptr())
-                        .as_deref()
-                        .unwrap_or("unavailable")
+                    role.as_deref().unwrap_or("unavailable")
                 );
                 if matched {
                     observer.value_changed_events(
@@ -438,5 +444,42 @@ const fn secure_input_error(error: SecureInputProbeError) -> &'static str {
     match error {
         SecureInputProbeError::Disconnected => "disconnected",
         SecureInputProbeError::Timeout => "timeout",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zanei_core::config::FilterConfig;
+
+    use super::*;
+    use crate::{chrome::chrome_eligibility_channel, text_capture::input_authorization_channel};
+
+    #[test]
+    fn poll_collects_due_accessibility_reconcile_once() {
+        let filter = FilterConfig::default();
+        let (_, chrome) = chrome_eligibility_channel(filter.clone());
+        let (_, authorizations) = input_authorization_channel();
+        let mut native = NativeAx::new(
+            false,
+            authorizations,
+            None,
+            CapturePolicy::new(chrome, filter, None),
+            false,
+        );
+        native.observers.insert(
+            7,
+            AppObserver::fake_attached_with_unavailable_application(
+                Instant::now() - Duration::from_secs(1),
+            ),
+        );
+
+        assert!(matches!(
+            native.poll(Duration::ZERO).as_slice(),
+            [NativeAxObservation::FocusedFieldObserved {
+                pid: 7,
+                focused_field: None,
+            }]
+        ));
+        assert!(native.poll(Duration::ZERO).is_empty());
     }
 }

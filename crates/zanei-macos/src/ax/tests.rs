@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use zanei_collector::RawEvent;
 use zanei_core::{
     config::FilterConfig,
     privacy::PrivacyScope,
@@ -27,7 +28,10 @@ use crate::{
     CapturePolicy,
     chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
     content_snapshot::{SnapshotTriggerMessage, snapshot_trigger_channel},
-    ffi::ax::{ManualAccessibilityPolicy, NativeElement, NativeUiValueEvent, NativeWindow},
+    ffi::ax::{
+        ManualAccessibilityPolicy, NativeAxObservation, NativeElement, NativeUiValueEvent,
+        NativeWindow,
+    },
     focus_context::FocusContext,
     focused_field::{FieldClass, FocusedField},
     text_capture::input_authorization_channel,
@@ -74,6 +78,23 @@ fn element(role: &str, subrole: Option<&str>) -> NativeElement {
         title: None,
         value: None,
         value_len: Some(3),
+    }
+}
+
+fn focused_field_observation(pid: i32, generation: u64, class: FieldClass) -> NativeAxObservation {
+    NativeAxObservation::FocusedFieldObserved {
+        pid,
+        focused_field: Some(FocusedField { generation, class }),
+    }
+}
+
+fn focused_event(pid: i32, generation: u64, role: &str) -> NativeAxEvent {
+    NativeAxEvent::UiFocused {
+        pid,
+        generation,
+        window: Some(window()),
+        element: Some(element(role, None)),
+        observed_at: time::OffsetDateTime::UNIX_EPOCH,
     }
 }
 
@@ -223,8 +244,9 @@ struct FakeAxApi {
     running_applications: Vec<ApplicationInfo>,
     frontmost_application: Option<ApplicationInfo>,
     attached_pids: Vec<i32>,
-    attach_observations: Vec<NativeAxEvent>,
+    attach_events: Vec<NativeAxEvent>,
     attach_results: VecDeque<Result<Vec<NativeAxEvent>, ()>>,
+    poll_observations: VecDeque<Vec<NativeAxObservation>>,
     current_degraded_observers: Option<Arc<AtomicU64>>,
     observed_degraded_observers: Option<u64>,
     stop_after_poll: Option<Arc<AtomicBool>>,
@@ -253,7 +275,7 @@ impl FakeAxApi {
                 id: Some(11),
             }),
             // Chromium sends no focused-window notification on activation.
-            attach_observations: Vec::new(),
+            attach_events: Vec::new(),
             ..Self::default()
         }
     }
@@ -280,7 +302,7 @@ impl AxApi for FakeAxApi {
         self.attached_apps.push(app);
         self.attach_results
             .pop_front()
-            .unwrap_or_else(|| Ok(std::mem::take(&mut self.attach_observations)))
+            .unwrap_or_else(|| Ok(std::mem::take(&mut self.attach_events)))
     }
 
     fn detach(&mut self, _pid: i32) -> Vec<NativeAxEvent> {
@@ -296,7 +318,7 @@ impl AxApi for FakeAxApi {
             .extend(self.attached_apps.iter().map(|app| policy.allows(app)));
     }
 
-    fn poll(&mut self, _timeout: Duration) -> Vec<NativeAxEvent> {
+    fn poll(&mut self, _timeout: Duration) -> Vec<NativeAxObservation> {
         self.polls = self.polls.saturating_add(1);
         if self.polls == 1
             && let Some((policy, filter)) = self.replacement_on_first_poll.take()
@@ -317,7 +339,7 @@ impl AxApi for FakeAxApi {
         {
             stop.store(true, Ordering::Release);
         }
-        Vec::new()
+        self.poll_observations.pop_front().unwrap_or_default()
     }
 
     fn flush_pending(&mut self) -> Vec<NativeAxEvent> {
@@ -362,8 +384,29 @@ fn run_fake_ax_loop_with_policy(
     current_degraded_observers: Arc<AtomicU64>,
     manual_policy: ManualAccessibilityPolicy,
 ) {
+    let _ = run_fake_ax_loop_with_context(
+        api,
+        stop,
+        lifecycle_receiver,
+        degraded_operations,
+        current_degraded_observers,
+        manual_policy,
+        FocusContext::new(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_fake_ax_loop_with_context(
+    api: &mut FakeAxApi,
+    stop: &AtomicBool,
+    lifecycle_receiver: &Receiver<WorkspaceEvent>,
+    degraded_operations: &AtomicU64,
+    current_degraded_observers: Arc<AtomicU64>,
+    manual_policy: ManualAccessibilityPolicy,
+    focus_context: FocusContext,
+) -> Vec<RawEvent> {
     let (_click_sender, click_receiver) = click_channel();
-    let (output_sender, _output_receiver) = sync_channel(1);
+    let (output_sender, output_receiver) = sync_channel(16);
     api.current_degraded_observers = Some(Arc::clone(&current_degraded_observers));
     run_ax_loop(
         api,
@@ -374,12 +417,13 @@ fn run_fake_ax_loop_with_policy(
         capture_policy(),
         None,
         manual_policy,
-        FocusContext::new(),
+        focus_context,
         None,
         &AtomicU64::new(0),
         degraded_operations,
         current_degraded_observers,
     );
+    output_receiver.try_iter().collect()
 }
 
 #[test]
@@ -407,6 +451,173 @@ fn initial_enumeration_attaches_regular_and_accessory_applications_only() {
     assert_eq!(api.attached_pids, vec![7, 8]);
     assert_eq!(degraded_operations.load(Ordering::Relaxed), 0);
     assert_eq!(current_degraded_observers.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn attach_known_field_syncs_frontmost_tracker_without_output() {
+    let target = app();
+    let mut api = FakeAxApi {
+        running_applications: vec![target.clone()],
+        frontmost_application: Some(target),
+        attach_events: vec![focused_event(7, 1, "AXTextField")],
+        ..FakeAxApi::default()
+    };
+    let (_lifecycle_sender, lifecycle_receiver) = sync_channel(1);
+    let focus_context = FocusContext::new();
+
+    let events = run_fake_ax_loop_with_context(
+        &mut api,
+        &AtomicBool::new(true),
+        &lifecycle_receiver,
+        &AtomicU64::new(0),
+        Arc::new(AtomicU64::new(0)),
+        manual_accessibility_policy(),
+        focus_context.clone(),
+    );
+
+    assert_eq!(
+        focus_context
+            .current()
+            .and_then(|focus| focus.focused_field),
+        Some(FocusedField {
+            generation: 1,
+            class: FieldClass::KnownText(FieldKind::Text),
+        })
+    );
+    assert!(events.is_empty());
+}
+
+#[test]
+fn delayed_unknown_to_known_updates_tracker_without_output() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let target = app();
+    let mut api = FakeAxApi {
+        running_applications: vec![target.clone()],
+        frontmost_application: Some(target),
+        attach_events: vec![focused_event(7, 1, "AXDocument")],
+        poll_observations: VecDeque::from([vec![focused_field_observation(
+            7,
+            1,
+            FieldClass::KnownText(FieldKind::Text),
+        )]]),
+        stop_after_poll: Some(Arc::clone(&stop)),
+        ..FakeAxApi::default()
+    };
+    let (_lifecycle_sender, lifecycle_receiver) = sync_channel(1);
+    let focus_context = FocusContext::new();
+
+    let events = run_fake_ax_loop_with_context(
+        &mut api,
+        stop.as_ref(),
+        &lifecycle_receiver,
+        &AtomicU64::new(0),
+        Arc::new(AtomicU64::new(0)),
+        manual_accessibility_policy(),
+        focus_context.clone(),
+    );
+
+    assert_eq!(
+        focus_context
+            .current()
+            .and_then(|focus| focus.focused_field),
+        Some(FocusedField {
+            generation: 1,
+            class: FieldClass::KnownText(FieldKind::Text),
+        })
+    );
+    assert!(events.is_empty());
+}
+
+#[test]
+fn background_reconcile_is_ignored_and_not_emitted() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let frontmost = app();
+    let background = app_with_policy(8, ApplicationActivationPolicy::Regular);
+    let mut api = FakeAxApi {
+        running_applications: vec![frontmost.clone(), background],
+        frontmost_application: Some(frontmost),
+        attach_results: VecDeque::from([
+            Ok(vec![focused_event(7, 1, "AXDocument")]),
+            Ok(vec![focused_event(8, 1, "AXDocument")]),
+        ]),
+        poll_observations: VecDeque::from([vec![focused_field_observation(
+            8,
+            1,
+            FieldClass::KnownText(FieldKind::Text),
+        )]]),
+        stop_after_poll: Some(Arc::clone(&stop)),
+        ..FakeAxApi::default()
+    };
+    let (_lifecycle_sender, lifecycle_receiver) = sync_channel(1);
+    let focus_context = FocusContext::new();
+
+    let events = run_fake_ax_loop_with_context(
+        &mut api,
+        stop.as_ref(),
+        &lifecycle_receiver,
+        &AtomicU64::new(0),
+        Arc::new(AtomicU64::new(0)),
+        manual_accessibility_policy(),
+        focus_context.clone(),
+    );
+
+    let current = focus_context.current().expect("frontmost focus");
+    assert_eq!(current.app.pid, 7);
+    assert_eq!(
+        current.focused_field,
+        Some(FocusedField {
+            generation: 1,
+            class: FieldClass::Unknown,
+        })
+    );
+    assert!(events.is_empty());
+}
+
+#[test]
+fn real_focus_then_reconcile_preserves_latest_tracker_and_emits_real_ui_focus() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let target = app();
+    let mut api = FakeAxApi {
+        running_applications: vec![target.clone()],
+        frontmost_application: Some(target),
+        attach_events: vec![focused_event(7, 1, "AXDocument")],
+        poll_observations: VecDeque::from([vec![
+            NativeAxObservation::Event(NativeAxEvent::UiFocused {
+                pid: 7,
+                generation: 2,
+                window: Some(window()),
+                element: Some(element("AXTextArea", None)),
+                observed_at: time::OffsetDateTime::UNIX_EPOCH,
+            }),
+            focused_field_observation(7, 3, FieldClass::KnownSafeNonText),
+        ]]),
+        stop_after_poll: Some(Arc::clone(&stop)),
+        ..FakeAxApi::default()
+    };
+    let (_lifecycle_sender, lifecycle_receiver) = sync_channel(1);
+    let focus_context = FocusContext::new();
+
+    let events = run_fake_ax_loop_with_context(
+        &mut api,
+        stop.as_ref(),
+        &lifecycle_receiver,
+        &AtomicU64::new(0),
+        Arc::new(AtomicU64::new(0)),
+        manual_accessibility_policy(),
+        focus_context.clone(),
+    );
+
+    assert_eq!(
+        focus_context
+            .current()
+            .and_then(|focus| focus.focused_field),
+        Some(FocusedField {
+            generation: 3,
+            class: FieldClass::KnownSafeNonText,
+        })
+    );
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "ui.focus");
 }
 
 #[test]
@@ -456,7 +667,8 @@ fn prohibited_application_is_skipped_before_pid_and_failure_accounting() {
         &mut observer_health,
     );
 
-    assert!(pending.is_empty());
+    assert!(pending.output.is_empty());
+    assert!(pending.focused_field.is_none());
     assert!(api.attached_pids.is_empty());
     assert_eq!(degraded_operations.load(Ordering::Relaxed), 0);
     assert_eq!(current_degraded_observers.load(Ordering::Relaxed), 0);

@@ -10,6 +10,7 @@ use crate::{
         geometry::{AxPoint, AxSize},
         window_list::NativeWindow,
     },
+    focused_field::{FocusedField, field_class},
 };
 
 pub(super) const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
@@ -74,6 +75,52 @@ pub(crate) enum NativeAxEvent {
     PageLoaded {
         pid: i32,
     },
+}
+
+impl NativeAxEvent {
+    #[must_use]
+    pub(crate) fn focused_field_observation(&self) -> Option<(i32, Option<FocusedField>)> {
+        match self {
+            Self::UiFocused {
+                pid,
+                generation,
+                element,
+                ..
+            } => Some((
+                *pid,
+                element.as_ref().map(|element| FocusedField {
+                    generation: *generation,
+                    class: field_class(element.role.as_deref(), element.subrole.as_deref()),
+                }),
+            )),
+            Self::WindowFocused { .. }
+            | Self::WindowTitleChanged { .. }
+            | Self::UiValueChanged(_)
+            | Self::PageLoaded { .. } => None,
+        }
+    }
+
+    pub(crate) fn internalize_focus(self) -> NativeAxObservation {
+        let Some((pid, focused_field)) = self.focused_field_observation() else {
+            return self.into();
+        };
+        NativeAxObservation::FocusedFieldObserved { pid, focused_field }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NativeAxObservation {
+    Event(NativeAxEvent),
+    FocusedFieldObserved {
+        pid: i32,
+        focused_field: Option<FocusedField>,
+    },
+}
+
+impl From<NativeAxEvent> for NativeAxObservation {
+    fn from(event: NativeAxEvent) -> Self {
+        Self::Event(event)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

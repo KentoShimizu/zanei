@@ -19,7 +19,8 @@ pub use snapshot::{
 };
 pub use types::AxTextRange;
 pub(crate) use types::{
-    NativeAxError, NativeAxEvent, NativeElement, NativeHitTest, NativeUiValueEvent,
+    NativeAxError, NativeAxEvent, NativeAxObservation, NativeElement, NativeHitTest,
+    NativeUiValueEvent,
 };
 
 use std::{

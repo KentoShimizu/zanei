@@ -1,11 +1,15 @@
-use std::sync::{Arc, atomic::AtomicU64, mpsc::sync_channel};
+use std::{
+    sync::{Arc, atomic::AtomicU64, mpsc::sync_channel},
+    time::Instant,
+};
 
 use zanei_core::{config::FilterConfig, schema::App};
 
 use super::{
     super::{
         NativeElement, ObserverContext,
-        cf::{CfRef, cf_string},
+        cf::{CfRef, OwnedCf, cf_string},
+        element::create_application,
         value_context::FocusedValueContext,
     },
     AppObserver, RegisteredFocusedTarget,
@@ -15,8 +19,23 @@ use crate::{
 };
 
 impl AppObserver {
+    pub(in crate::ffi::ax) fn fake_attached_with_unavailable_application(
+        attached_at: Instant,
+    ) -> Self {
+        Self::fake_with_application(
+            create_application(i32::MAX).expect("application AX element"),
+            Some(attached_at),
+        )
+    }
+
     pub(in crate::ffi::ax) fn fake_with_unknown_focused_target() -> Self {
-        let application = cf_string("fake application").expect("application CFString");
+        Self::fake_with_application(
+            cf_string("fake application").expect("application CFString"),
+            None,
+        )
+    }
+
+    fn fake_with_application(application: OwnedCf, attached_at: Option<Instant>) -> Self {
         let observer = cf_string("fake observer").expect("observer CFString");
         let source = application.as_ptr();
         let element = cf_string("fake focused element").expect("element CFString");
@@ -28,21 +47,38 @@ impl AppObserver {
         });
         let filter = FilterConfig::default();
         let (_, chrome) = chrome_eligibility_channel(filter.clone());
-        let mut observer = Self::new(
-            application,
-            observer,
-            source,
-            context,
-            Arc::new(AtomicU64::new(0)),
-            false,
-            App {
-                name: "Fake".to_owned(),
-                bundle_id: Some("dev.zanei.fake".to_owned()),
-                pid: Some(7),
-            },
-            CapturePolicy::new(chrome, filter, None),
-            false,
-        );
+        let degraded = Arc::new(AtomicU64::new(0));
+        let app = App {
+            name: "Fake".to_owned(),
+            bundle_id: Some("dev.zanei.fake".to_owned()),
+            pid: Some(7),
+        };
+        let capture_policy = CapturePolicy::new(chrome, filter, None);
+        let mut observer = match attached_at {
+            Some(attached_at) => Self::new_attached(
+                application,
+                observer,
+                source,
+                context,
+                degraded,
+                false,
+                app,
+                capture_policy,
+                false,
+                attached_at,
+            ),
+            None => Self::new(
+                application,
+                observer,
+                source,
+                context,
+                degraded,
+                false,
+                app,
+                capture_policy,
+                false,
+            ),
+        };
         observer.skip_native_cleanup = true;
         let generation = observer.focused_target.next_generation();
         let installed =
@@ -83,5 +119,9 @@ impl AppObserver {
             .expect("fake focused target")
             .context
             .field_class
+    }
+
+    pub(in crate::ffi::ax) fn fake_degraded_operations(&self) -> u64 {
+        self.degraded.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

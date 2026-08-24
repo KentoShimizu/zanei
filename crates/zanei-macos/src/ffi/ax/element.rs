@@ -381,8 +381,9 @@ pub(super) fn cf_equal(left: CfRef, right: CfRef) -> bool {
     unsafe { CFEqual(left, right) != 0 }
 }
 
-pub(super) fn element_role(element: CfRef) -> Option<String> {
-    copy_string(element, "AXRole").ok().flatten()
+pub(super) fn element_role(element: CfRef) -> Result<String, NativeAxError> {
+    let value = copy_required_attribute(element, "AXRole")?;
+    string_value(value.as_ptr()).ok_or_else(|| native_error("AXRole attribute type", -1))
 }
 
 pub(super) fn gated_value<E>(
@@ -412,19 +413,32 @@ pub(super) fn value_length(character_count: Option<i64>, value: Option<&str>) ->
 }
 
 fn copy_attribute(element: CfRef, attribute: &str) -> Result<Option<OwnedCf>, NativeAxError> {
+    match copy_required_attribute(element, attribute) {
+        Ok(value) => Ok(Some(value)),
+        Err(error)
+            if matches!(
+                error.code(),
+                AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn copy_required_attribute(element: CfRef, attribute: &str) -> Result<OwnedCf, NativeAxError> {
     set_timeout(element)?;
     let attribute =
         cf_string(attribute).ok_or_else(|| native_error("CFStringCreateWithCString", -1))?;
     let mut value = ptr::null();
     let status =
         unsafe { AXUIElementCopyAttributeValue(element, attribute.as_ptr(), &raw mut value) };
-    match status {
-        AX_ERROR_SUCCESS => unsafe { OwnedCf::from_create(value) }
-            .map(Some)
-            .ok_or_else(|| native_error("AXUIElementCopyAttributeValue", -1)),
-        AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(None),
-        code => Err(native_error("AXUIElementCopyAttributeValue", code)),
+    if status != AX_ERROR_SUCCESS {
+        return Err(native_error("AXUIElementCopyAttributeValue", status));
     }
+    unsafe { OwnedCf::from_create(value) }
+        .ok_or_else(|| native_error("AXUIElementCopyAttributeValue", -1))
 }
 
 fn copy_string(element: CfRef, attribute: &str) -> Result<Option<String>, NativeAxError> {

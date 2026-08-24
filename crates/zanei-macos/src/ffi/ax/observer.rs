@@ -1,5 +1,6 @@
 //! Per-application AX observer state and focused-value lifecycle.
 
+mod activation;
 #[cfg(test)]
 mod test_support;
 mod value_lifecycle;
@@ -23,7 +24,7 @@ use zanei_core::{privacy::PrivacyScope, schema::App};
 
 use super::{
     NativeAxError, NativeAxEvent, ObserverContext, TargetKind,
-    accessibility::set_manual_accessibility,
+    accessibility::{AccessibilityActivation, set_manual_accessibility},
     add_notification,
     cf::{CfRef, OwnedCf, remove_current_run_loop_source},
     element::{
@@ -48,6 +49,7 @@ pub(super) struct AppObserver {
     app: App,
     capture_policy: CapturePolicy,
     manual_accessibility: bool,
+    accessibility_activation: AccessibilityActivation,
     #[cfg(test)]
     skip_native_cleanup: bool,
 }
@@ -59,7 +61,36 @@ struct RegisteredFocusedTarget {
 
 impl AppObserver {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
+    pub(super) fn new_attached(
+        application: OwnedCf,
+        observer: OwnedCf,
+        source: CfRef,
+        context: Box<ObserverContext>,
+        degraded: Arc<AtomicU64>,
+        capture_text_content: bool,
+        app: App,
+        capture_policy: CapturePolicy,
+        manual_accessibility: bool,
+        attached_at: Instant,
+    ) -> Self {
+        let mut observer = Self::new(
+            application,
+            observer,
+            source,
+            context,
+            degraded,
+            capture_text_content,
+            app,
+            capture_policy,
+            manual_accessibility,
+        );
+        observer.set_manual_accessibility(true);
+        observer.activate_accessibility_tree(attached_at);
+        observer
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
         application: OwnedCf,
         observer: OwnedCf,
         source: CfRef,
@@ -84,6 +115,7 @@ impl AppObserver {
             app,
             capture_policy,
             manual_accessibility,
+            accessibility_activation: AccessibilityActivation::default(),
             #[cfg(test)]
             skip_native_cleanup: false,
         }
