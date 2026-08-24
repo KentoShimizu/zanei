@@ -11,13 +11,15 @@ use zanei_macos::chrome::ChromeCollector;
 use super::{
     DaemonError,
     collectors::{
-        CollectorHealth, CollectorSet,
+        CollectorSet, ProducerFailureOrigin,
         relay::{Relay, RelayExit},
     },
 };
 
 mod health;
 
+#[cfg(test)]
+pub(super) use health::add_restart_degradation;
 use health::{ChromeHealth, RESTART_STABLE_AFTER, RestartState};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -65,12 +67,21 @@ impl CollectorSet {
         // trigger consumer before AX and the lifecycle consumers before workspace.
         for collector in START_ORDER {
             match collector {
-                CollectorKind::ContentSnapshot => start_collector(
-                    &mut self.content_snapshot,
-                    sender,
-                    &mut self.start_errors,
-                    now,
-                ),
+                CollectorKind::ContentSnapshot => {
+                    let was_running = self
+                        .content_snapshot
+                        .as_ref()
+                        .is_some_and(|content| content.running);
+                    start_collector(
+                        &mut self.content_snapshot,
+                        sender,
+                        &mut self.start_errors,
+                        now,
+                    );
+                    if !was_running {
+                        self.clear_content_filter_failure_after_start();
+                    }
+                }
                 CollectorKind::Ax => {
                     start_collector(&mut self.ax, sender, &mut self.start_errors, now);
                 }
@@ -78,7 +89,12 @@ impl CollectorSet {
                     start_collector(&mut self.chrome, sender, &mut self.start_errors, now);
                 }
                 CollectorKind::Workspace => {
-                    start_collector(&mut self.workspace, sender, &mut self.start_errors, now);
+                    if !self
+                        .producer_failures
+                        .contains(ProducerFailureOrigin::WorkspaceMainThread)
+                    {
+                        start_collector(&mut self.workspace, sender, &mut self.start_errors, now);
+                    }
                 }
                 CollectorKind::EventTap => self.start_eventtap(sender, now),
             }
@@ -86,6 +102,12 @@ impl CollectorSet {
     }
 
     pub(crate) fn start_eventtap(&mut self, sender: &SyncSender<RawEvent>, now: Instant) {
+        if self
+            .producer_failures
+            .contains(ProducerFailureOrigin::EventTapMainThread)
+        {
+            return;
+        }
         start_collector_if_allowed(
             &mut self.eventtap,
             sender,
@@ -97,12 +119,10 @@ impl CollectorSet {
 
     pub(crate) fn stop(&mut self) {
         self.stop_in_order(StopMode::Drain);
-        self.start_errors.clear();
     }
 
     pub(crate) fn suspend(&mut self) {
         self.stop_in_order(StopMode::Discard);
-        self.start_errors.clear();
     }
 
     pub(super) fn remove_chrome_collector(&mut self) {
@@ -145,6 +165,10 @@ impl CollectorSet {
     ) -> Result<(), DaemonError> {
         // Preserve startup ordering: content consumes AX triggers, AX/content consume
         // workspace lifecycle notifications, and Chrome consumes AX focus transitions.
+        let content_was_running = self
+            .content_snapshot
+            .as_ref()
+            .is_some_and(|content| content.running);
         supervise_collector(
             &mut self.content_snapshot,
             sender,
@@ -152,6 +176,9 @@ impl CollectorSet {
             &mut self.start_errors,
             now,
         )?;
+        if !content_was_running {
+            self.clear_content_filter_failure_after_start();
+        }
         supervise_collector(
             &mut self.ax,
             sender,
@@ -166,14 +193,23 @@ impl CollectorSet {
             &mut self.start_errors,
             now,
         )?;
-        supervise_collector(
-            &mut self.workspace,
-            sender,
-            permissions,
-            &mut self.start_errors,
-            now,
-        )?;
-        if self.eventtap_start_gate.allows_start() {
+        if !self
+            .producer_failures
+            .contains(ProducerFailureOrigin::WorkspaceMainThread)
+        {
+            supervise_collector(
+                &mut self.workspace,
+                sender,
+                permissions,
+                &mut self.start_errors,
+                now,
+            )?;
+        }
+        if self.eventtap_start_gate.allows_start()
+            && !self
+                .producer_failures
+                .contains(ProducerFailureOrigin::EventTapMainThread)
+        {
             supervise_collector(
                 &mut self.eventtap,
                 sender,
@@ -185,106 +221,15 @@ impl CollectorSet {
         Ok(())
     }
 
-    pub(crate) fn health(&self) -> CollectorHealth {
-        let mut health = CollectorHealth {
-            degraded: self.start_errors.clone(),
-            ..CollectorHealth::default()
-        };
-        add_restart_degradation(&mut health.degraded, self.content_snapshot.as_ref());
-        add_restart_degradation(&mut health.degraded, self.ax.as_ref());
-        add_restart_degradation(&mut health.degraded, self.chrome.as_ref());
-        add_restart_degradation(&mut health.degraded, self.workspace.as_ref());
-        add_restart_degradation(&mut health.degraded, self.eventtap.as_ref());
-        for (name, counters) in &self.retained_collector_health {
-            health.dropped = health.dropped.saturating_add(counters.dropped);
-            add_failure_count(&mut health.collector_failures, name, counters.failures);
+    fn clear_content_filter_failure_after_start(&mut self) {
+        if self
+            .content_snapshot
+            .as_ref()
+            .is_some_and(|content| content.running)
+        {
+            self.producer_failures
+                .clear(ProducerFailureOrigin::ContentSnapshotFilter);
         }
-        if let Some(workspace) = self.workspace.as_ref() {
-            health.dropped = health
-                .dropped
-                .saturating_add(workspace.collector.dropped_events())
-                .saturating_add(workspace.relay_dropped);
-        }
-        if let Some(ax) = self.ax.as_ref() {
-            health.dropped = health.dropped.saturating_add(ax.collector.dropped_events());
-            health.dropped = health.dropped.saturating_add(ax.relay_dropped);
-            add_failure_count(
-                &mut health.collector_failures,
-                "ax",
-                ax.collector.degraded_operations(),
-            );
-            let degraded_observers = ax.collector.degraded_observers();
-            if degraded_observers > 0 {
-                let applications = if degraded_observers == 1 {
-                    "application"
-                } else {
-                    "applications"
-                };
-                health.degraded.insert(
-                    "ax".to_owned(),
-                    format!(
-                        "observer unavailable for {degraded_observers} {applications} you used (retried on activation)"
-                    ),
-                );
-            }
-        }
-        if let Some(eventtap) = self.eventtap.as_ref() {
-            health.dropped = health
-                .dropped
-                .saturating_add(eventtap.collector.dropped_events())
-                .saturating_add(eventtap.relay_dropped);
-            add_failure_count(
-                &mut health.collector_failures,
-                "eventtap",
-                eventtap.collector.degraded_operations(),
-            );
-            if eventtap.collector.is_degraded() {
-                health.degraded.insert(
-                    "eventtap".to_owned(),
-                    "event capture or wake recovery is unavailable".to_owned(),
-                );
-            }
-            if eventtap.collector.secure_input_enabled() {
-                health.degraded.insert(
-                    "secure_input".to_owned(),
-                    "macOS Secure Input is active; input.key delivery is suspended".to_owned(),
-                );
-            }
-        }
-        if let Some(content) = self.content_snapshot.as_ref() {
-            health.dropped = health
-                .dropped
-                .saturating_add(content.collector.dropped_events())
-                .saturating_add(content.relay_dropped);
-            add_failure_count(
-                &mut health.collector_failures,
-                "content_snapshot",
-                content.collector.collector_failures(),
-            );
-            if let Some(reason) = content.collector.degraded_reason() {
-                health
-                    .degraded
-                    .insert("content_snapshot".to_owned(), reason);
-            }
-        }
-        if let Some(chrome) = self.chrome.as_ref() {
-            health.dropped = health
-                .dropped
-                .saturating_add(chrome.collector.dropped_events())
-                .saturating_add(chrome.relay_dropped);
-            add_failure_count(
-                &mut health.collector_failures,
-                "chrome",
-                chrome.collector.degraded_operations(),
-            );
-            if let Some(reason) = chrome
-                .health()
-                .degraded_reason(health.degraded.get("chrome").map(String::as_str))
-            {
-                health.degraded.insert("chrome".to_owned(), reason);
-            }
-        }
-        health
     }
 }
 
@@ -567,25 +512,4 @@ fn permissions_granted(required: &BTreeSet<Permission>, permissions: &DaemonPerm
             permissions.automation.get(bundle_id) == Some(&PermissionState::Granted)
         }
     })
-}
-
-fn add_failure_count(failures: &mut BTreeMap<String, u64>, collector: &str, count: u64) {
-    if count > 0 {
-        let total = failures.entry(collector.to_owned()).or_default();
-        *total = total.saturating_add(count);
-    }
-}
-
-pub(super) fn add_restart_degradation<C: ManagedCollector>(
-    degraded: &mut BTreeMap<String, String>,
-    managed: Option<&Managed<C>>,
-) {
-    let Some(managed) = managed else {
-        return;
-    };
-    if let Some(reason) = managed.restart.degraded_reason() {
-        degraded
-            .entry(managed.collector.worker_name().to_owned())
-            .or_insert_with(|| reason.to_owned());
-    }
 }

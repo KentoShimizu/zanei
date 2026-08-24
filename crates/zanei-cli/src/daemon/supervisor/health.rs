@@ -1,6 +1,13 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use zanei_macos::chrome::ChromeFailureState;
+
+use crate::daemon::collectors::{CollectorHealth, CollectorSet};
+
+use super::{Managed, ManagedCollector};
 
 const RESTART_DELAYS: [Duration; 5] = [
     Duration::from_secs(5),
@@ -109,4 +116,140 @@ fn chrome_failure_reason(state: ChromeFailureState) -> Option<String> {
     state
         .current()
         .map(|failure| format!("state=unavailable {failure}"))
+}
+
+impl CollectorSet {
+    pub(crate) fn health(&self) -> CollectorHealth {
+        let mut health = CollectorHealth::default();
+        health.degraded.extend(self.start_errors.clone());
+        add_restart_degradation(&mut health.degraded, self.content_snapshot.as_ref());
+        add_restart_degradation(&mut health.degraded, self.ax.as_ref());
+        add_restart_degradation(&mut health.degraded, self.chrome.as_ref());
+        add_restart_degradation(&mut health.degraded, self.workspace.as_ref());
+        add_restart_degradation(&mut health.degraded, self.eventtap.as_ref());
+        for (name, counters) in &self.retained_collector_health {
+            health.dropped = health.dropped.saturating_add(counters.dropped);
+            add_failure_count(&mut health.collector_failures, name, counters.failures);
+        }
+        if let Some(workspace) = self.workspace.as_ref() {
+            health.dropped = health
+                .dropped
+                .saturating_add(workspace.collector.dropped_events())
+                .saturating_add(workspace.relay_dropped);
+        }
+        if let Some(ax) = self.ax.as_ref() {
+            health.dropped = health.dropped.saturating_add(ax.collector.dropped_events());
+            health.dropped = health.dropped.saturating_add(ax.relay_dropped);
+            add_failure_count(
+                &mut health.collector_failures,
+                "ax",
+                ax.collector.degraded_operations(),
+            );
+            let degraded_observers = ax.collector.degraded_observers();
+            if degraded_observers > 0 {
+                let applications = if degraded_observers == 1 {
+                    "application"
+                } else {
+                    "applications"
+                };
+                health.degraded.insert(
+                    "ax".to_owned(),
+                    format!(
+                        "observer unavailable for {degraded_observers} {applications} you used (retried on activation)"
+                    ),
+                );
+            }
+        }
+        if let Some(eventtap) = self.eventtap.as_ref() {
+            health.dropped = health
+                .dropped
+                .saturating_add(eventtap.collector.dropped_events())
+                .saturating_add(eventtap.relay_dropped);
+            add_failure_count(
+                &mut health.collector_failures,
+                "eventtap",
+                eventtap.collector.degraded_operations(),
+            );
+            let eventtap_degraded = eventtap.collector.is_degraded();
+            #[cfg(test)]
+            let eventtap_degraded = self.eventtap_runtime_override.unwrap_or(eventtap_degraded);
+            if eventtap_degraded {
+                health.degraded.insert(
+                    "eventtap".to_owned(),
+                    "event capture or wake recovery is unavailable".to_owned(),
+                );
+            }
+            let secure_input_enabled = eventtap.collector.secure_input_enabled();
+            #[cfg(test)]
+            let secure_input_enabled = self
+                .secure_input_runtime_override
+                .unwrap_or(secure_input_enabled);
+            if secure_input_enabled {
+                health.degraded.insert(
+                    "secure_input".to_owned(),
+                    "macOS Secure Input is active; input.key delivery is suspended".to_owned(),
+                );
+            }
+        }
+        if let Some(content) = self.content_snapshot.as_ref() {
+            health.dropped = health
+                .dropped
+                .saturating_add(content.collector.dropped_events())
+                .saturating_add(content.relay_dropped);
+            add_failure_count(
+                &mut health.collector_failures,
+                "content_snapshot",
+                content.collector.collector_failures(),
+            );
+            if let Some(reason) = content.collector.degraded_reason() {
+                health
+                    .degraded
+                    .insert("content_snapshot".to_owned(), reason);
+            }
+        }
+        if let Some(chrome) = self.chrome.as_ref() {
+            health.dropped = health
+                .dropped
+                .saturating_add(chrome.collector.dropped_events())
+                .saturating_add(chrome.relay_dropped);
+            add_failure_count(
+                &mut health.collector_failures,
+                "chrome",
+                chrome.collector.degraded_operations(),
+            );
+            if let Some(reason) = chrome
+                .health()
+                .degraded_reason(health.degraded.get("chrome").map(String::as_str))
+            {
+                health.degraded.insert("chrome".to_owned(), reason);
+            }
+        }
+        for (collector, reason) in self.producer_failures.reasons() {
+            health
+                .degraded
+                .insert(collector.to_owned(), reason.to_owned());
+        }
+        health
+    }
+}
+
+fn add_failure_count(failures: &mut BTreeMap<String, u64>, collector: &str, count: u64) {
+    if count > 0 {
+        let total = failures.entry(collector.to_owned()).or_default();
+        *total = total.saturating_add(count);
+    }
+}
+
+pub(in crate::daemon) fn add_restart_degradation<C: ManagedCollector>(
+    degraded: &mut BTreeMap<String, String>,
+    managed: Option<&Managed<C>>,
+) {
+    let Some(managed) = managed else {
+        return;
+    };
+    if let Some(reason) = managed.restart.degraded_reason() {
+        degraded
+            .entry(managed.collector.worker_name().to_owned())
+            .or_insert_with(|| reason.to_owned());
+    }
 }
