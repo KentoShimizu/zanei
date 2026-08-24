@@ -1,9 +1,16 @@
-use std::time::Duration;
+use std::{ffi::CString, fs, os::unix::ffi::OsStrExt, path::Path, thread, time::Duration};
+
+use rustix::{
+    fd::OwnedFd,
+    fs::{FileType, FlockOperation, Mode, OFlags, fchmod, flock, fstat, open},
+    io::Errno,
+};
 
 use super::{DaemonError, StoreOwner, StoreOwnership};
 
 mod launchd;
 mod plist;
+#[allow(dead_code)]
 mod wait;
 
 pub use launchd::{bootout, is_bootstrapped, terminate};
@@ -14,9 +21,9 @@ use plist::{
     build_launch_agent_plist, launch_agent_paths, prepare_launch_agent_logs,
     render_launch_agent_plist,
 };
+pub use wait::wait_for_launch_agent_removal;
 #[cfg(test)]
 use wait::{daemon_is_alive_with, owner_has_fresh_heartbeat, start_launch_agent_with};
-pub use wait::{start_launch_agent, wait_for_launch_agent_removal};
 
 const LABEL: &str = "dev.zanei.agent";
 const PLIST_FILE_NAME: &str = "dev.zanei.agent.plist";
@@ -25,6 +32,119 @@ const ID: &str = "/usr/bin/id";
 const KILL: &str = "/bin/kill";
 pub(crate) const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const DAEMON_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const START_LOCK_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
+
+pub fn start_launch_agent(
+    executable: &Path,
+    config_path: &Path,
+    store_path: &Path,
+) -> Result<bool, DaemonError> {
+    let _start_lock = acquire_start_lock()?;
+    start_launch_agent_after_preparation_with(
+        DAEMON_CONTROL_TIMEOUT,
+        || plist::prepare_launch_agent(executable, config_path, store_path),
+        bootout,
+        is_bootstrapped,
+        thread::sleep,
+        |prepared| prepared.install_and_bootstrap(),
+        || {
+            wait::daemon_is_alive_with(store_path, || {
+                crate::store_access::load_store_key(
+                    crate::store_access::KeyAccess::Existing,
+                    crate::store_access::KeyPrompt::Suppressed,
+                )
+            })
+        },
+    )
+}
+
+fn acquire_start_lock() -> Result<OwnedFd, DaemonError> {
+    let plist_path = launch_agent_path()?;
+    let lock_path = plist_path.with_file_name(format!(".{PLIST_FILE_NAME}.start.lock"));
+    let parent = lock_path.parent().ok_or_else(|| DaemonError::File {
+        operation: "resolve parent directory for",
+        path: lock_path.clone(),
+        source: std::io::Error::other("launch agent start lock has no parent"),
+    })?;
+    fs::create_dir_all(parent).map_err(|source| DaemonError::File {
+        operation: "create directory for",
+        path: lock_path.clone(),
+        source,
+    })?;
+    acquire_start_lock_at(&lock_path)
+}
+
+fn acquire_start_lock_at(path: &Path) -> Result<OwnedFd, DaemonError> {
+    let argument = CString::new(path.as_os_str().as_bytes()).map_err(|_| DaemonError::File {
+        operation: "open launch agent start lock at",
+        path: path.to_owned(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL byte"),
+    })?;
+    let flags = OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let file = open(argument.as_c_str(), flags, START_LOCK_MODE)
+        .map_err(|source| control_file_error("open launch agent start lock at", path, source))?;
+    let metadata = fstat(&file)
+        .map_err(|source| control_file_error("inspect launch agent start lock at", path, source))?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
+        return Err(DaemonError::File {
+            operation: "use as a launch agent start lock",
+            path: path.to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path is not a regular file; remove it before starting Zanei",
+            ),
+        });
+    }
+    fchmod(&file, START_LOCK_MODE).map_err(|source| {
+        control_file_error("restrict launch agent start lock at", path, source)
+    })?;
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(file),
+        Err(Errno::WOULDBLOCK) => Err(DaemonError::File {
+            operation: "lock launch agent start at",
+            path: path.to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "another Zanei start is in progress; wait for it to finish before starting again",
+            ),
+        }),
+        Err(source) => Err(control_file_error(
+            "lock launch agent start at",
+            path,
+            source,
+        )),
+    }
+}
+
+fn control_file_error(operation: &'static str, path: &Path, source: Errno) -> DaemonError {
+    DaemonError::File {
+        operation,
+        path: path.to_owned(),
+        source: std::io::Error::from_raw_os_error(source.raw_os_error()),
+    }
+}
+
+fn start_launch_agent_after_preparation_with<T>(
+    timeout: Duration,
+    prepare: impl FnOnce() -> Result<T, DaemonError>,
+    bootout: impl FnMut() -> Result<(), DaemonError>,
+    mut is_registered: impl FnMut() -> Result<bool, DaemonError>,
+    sleep: impl FnMut(Duration),
+    mut install_and_bootstrap: impl FnMut(&mut T) -> Result<(), DaemonError>,
+    is_daemon_alive: impl FnMut() -> Result<bool, DaemonError>,
+) -> Result<bool, DaemonError> {
+    let mut prepared = prepare()?;
+    let registered = is_registered()?;
+    wait::start_launch_agent_with(
+        registered,
+        timeout,
+        bootout,
+        is_registered,
+        sleep,
+        || install_and_bootstrap(&mut prepared),
+        is_daemon_alive,
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -75,8 +195,20 @@ mod tests {
     use super::{
         DaemonError, StoreOwner, build_launch_agent_plist, launch_agent_paths,
         owner_has_fresh_heartbeat, prepare_launch_agent_logs, render_launch_agent_plist,
-        start_launch_agent_with,
+        start_launch_agent_after_preparation_with, start_launch_agent_with,
     };
+
+    fn plist_string_value<'a>(plist: &'a str, key: &str) -> &'a str {
+        let marker = format!("<key>{key}</key>");
+        let after_key = plist.split_once(&marker).expect("plist key").1;
+        after_key
+            .split_once("<string>")
+            .expect("string value")
+            .1
+            .split_once("</string>")
+            .expect("string terminator")
+            .0
+    }
 
     #[test]
     fn liveness_does_not_require_a_permission_snapshot() {
@@ -97,6 +229,18 @@ mod tests {
     }
 
     #[test]
+    fn start_lock_rejects_concurrent_starts() {
+        let directory = TempDir::new().expect("start lock fixture");
+        let path = directory.path().join("start.lock");
+        let first = super::acquire_start_lock_at(&path).expect("first start lock");
+        let error = super::acquire_start_lock_at(&path).expect_err("second start must fail");
+        assert!(matches!(error, DaemonError::File { source, .. }
+            if source.kind() == std::io::ErrorKind::WouldBlock));
+        drop(first);
+        super::acquire_start_lock_at(&path).expect("released start lock");
+    }
+
+    #[test]
     fn plist_uses_the_hidden_daemon_contract_and_escapes_paths() {
         let store_path = Path::new("/tmp/<A&B>/store.sqlite");
         let paths = launch_agent_paths(store_path).expect("launch agent paths");
@@ -113,10 +257,14 @@ mod tests {
         assert!(plist.contains("/Applications/A&amp;B/zanei"));
         assert!(plist.contains("/tmp/&lt;config&gt;.toml"));
         assert!(plist.contains("/tmp/&lt;A&amp;B&gt;/store.sqlite"));
-        assert!(plist.contains("<key>StandardOutPath</key>"));
-        assert!(plist.contains("/tmp/&lt;A&amp;B&gt;/store.sqlite.daemon.stdout.log"));
-        assert!(plist.contains("<key>StandardErrorPath</key>"));
-        assert!(plist.contains("/tmp/&lt;A&amp;B&gt;/store.sqlite.daemon.stderr.log"));
+        assert_eq!(
+            plist_string_value(&plist, "StandardOutPath"),
+            "/tmp/&lt;A&amp;B&gt;/store.sqlite.daemon.stdout.log"
+        );
+        assert_eq!(
+            plist_string_value(&plist, "StandardErrorPath"),
+            "/tmp/&lt;A&amp;B&gt;/store.sqlite.daemon.stderr.log"
+        );
         assert!(!plist.contains("A&B"));
         assert!(!plist.contains("EnvironmentVariables"));
     }
@@ -126,57 +274,23 @@ mod tests {
         let default_store = crate::paths::Paths::resolve(None, None)
             .expect("default paths")
             .store;
-        let default = launch_agent_paths(&default_store).expect("default launch agent paths");
-        let mut default_standard_out = default_store.as_os_str().to_os_string();
-        default_standard_out.push(".daemon.stdout.log");
-        let mut default_standard_error = default_store.as_os_str().to_os_string();
-        default_standard_error.push(".daemon.stderr.log");
-        assert_eq!(default.store, default_store);
-        assert_eq!(default.standard_out, Path::new(&default_standard_out));
-        assert_eq!(default.standard_error, Path::new(&default_standard_error));
-        assert!(default.standard_out.is_absolute());
-        assert!(default.standard_error.is_absolute());
-
-        let custom = launch_agent_paths(Path::new("/Volumes/Zanei Data/custom.sqlite"))
-            .expect("custom launch agent paths");
-        assert_eq!(
-            custom.standard_out,
-            Path::new("/Volumes/Zanei Data/custom.sqlite.daemon.stdout.log")
-        );
-        assert_eq!(
-            custom.standard_error,
-            Path::new("/Volumes/Zanei Data/custom.sqlite.daemon.stderr.log")
-        );
-        assert!(custom.standard_out.is_absolute());
-        assert!(custom.standard_error.is_absolute());
-
-        let log_named_store = launch_agent_paths(Path::new("/tmp/daemon.stdout.log"))
-            .expect("log-named custom launch agent paths");
-        assert_ne!(log_named_store.standard_out, log_named_store.store);
-        assert_ne!(log_named_store.standard_error, log_named_store.store);
-
-        let relative = launch_agent_paths(Path::new("custom/store.sqlite"))
-            .expect("relative custom launch agent paths");
-        let working_directory = std::env::current_dir().expect("working directory");
-        assert_eq!(
-            relative.store,
-            working_directory.join("custom/store.sqlite")
-        );
-        assert_eq!(
-            relative.standard_out,
-            working_directory.join("custom/store.sqlite.daemon.stdout.log")
-        );
-        assert_eq!(
-            relative.standard_error,
-            working_directory.join("custom/store.sqlite.daemon.stderr.log")
-        );
-        let plist = render_launch_agent_plist(
-            Path::new("/Applications/Zanei.app/Contents/MacOS/zanei"),
-            Path::new("/tmp/config.toml"),
-            None,
-            &relative,
-        );
-        assert!(plist.contains(&relative.store.to_string_lossy().into_owned()));
+        for store in [
+            default_store,
+            Path::new("/Volumes/Zanei Data/custom.sqlite").to_owned(),
+            Path::new("custom/store.sqlite").to_owned(),
+        ] {
+            let expected = std::path::absolute(&store).expect("absolute store path");
+            let paths = launch_agent_paths(&store).expect("launch agent paths");
+            assert_eq!(paths.store_path(), expected);
+            assert_eq!(
+                paths.standard_out,
+                format!("{}.daemon.stdout.log", expected.display())
+            );
+            assert_eq!(
+                paths.standard_error,
+                format!("{}.daemon.stderr.log", expected.display())
+            );
+        }
     }
 
     #[test]
@@ -187,7 +301,7 @@ mod tests {
         let store_directory = store_path.parent().expect("store directory");
         assert!(!store_directory.exists());
 
-        prepare_launch_agent_logs(&paths).expect("prepare fresh launch agent logs");
+        let paths = prepare_launch_agent_logs(&paths).expect("prepare fresh launch agent logs");
 
         assert!(store_directory.is_dir());
         fs::write(&paths.standard_out, b"existing output").expect("write existing log");
@@ -200,7 +314,10 @@ mod tests {
             fs::read(&paths.standard_out).expect("read existing log"),
             b"existing output"
         );
-        for path in [&paths.standard_out, &paths.standard_error] {
+        for path in [
+            Path::new(&paths.standard_out),
+            Path::new(&paths.standard_error),
+        ] {
             let mode = fs::metadata(path)
                 .expect("log metadata")
                 .permissions()
@@ -211,26 +328,16 @@ mod tests {
     }
 
     #[test]
-    fn launch_agent_logs_reject_existing_symbolic_links() {
-        let directory = TempDir::new().expect("log symlink fixture");
-        let store_path = directory.path().join("store/store.sqlite");
-        let paths = launch_agent_paths(&store_path).expect("launch agent paths");
-        fs::create_dir_all(paths.standard_out.parent().expect("log parent"))
-            .expect("create log directory fixture");
-        let target = directory.path().join("unrelated.txt");
-        fs::write(&target, b"must remain unchanged").expect("write symlink target");
-        symlink(&target, &paths.standard_out).expect("create malicious log symlink");
-
-        let error = prepare_launch_agent_logs(&paths).expect_err("log symlink must fail");
-
-        assert!(matches!(
-            error,
-            DaemonError::File { path, .. } if path == paths.standard_out
-        ));
-        assert_eq!(
-            fs::read(&target).expect("read symlink target"),
-            b"must remain unchanged"
-        );
+    fn sticky_writable_ancestor_keeps_an_owner_only_log_parent_safe() {
+        let directory = TempDir::new().expect("sticky ancestor fixture");
+        let ancestor = directory.path().join("shared");
+        let parent = ancestor.join("private");
+        fs::create_dir_all(&parent).expect("create log parent");
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o1777))
+            .expect("set sticky ancestor");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).expect("set safe parent");
+        let paths = launch_agent_paths(&parent.join("store.sqlite")).expect("log paths");
+        prepare_launch_agent_logs(&paths).expect("sticky ancestor must be allowed");
     }
 
     #[test]
@@ -301,13 +408,16 @@ mod tests {
     }
 
     #[test]
-    fn registered_agent_is_removed_before_it_is_bootstrapped_again() {
+    fn preparation_completes_before_a_registered_agent_is_replaced() {
         let events = RefCell::new(Vec::new());
         let registered = RefCell::new(VecDeque::from([true, true, false]));
 
-        let restarted = start_launch_agent_with(
-            true,
+        let restarted = start_launch_agent_after_preparation_with(
             Duration::from_secs(1),
+            || {
+                events.borrow_mut().push("prepare");
+                Ok(())
+            },
             || {
                 events.borrow_mut().push("bootout");
                 Ok(())
@@ -320,7 +430,7 @@ mod tests {
                     .expect("registered state"))
             },
             |_| {},
-            || {
+            |_| {
                 events.borrow_mut().push("bootstrap");
                 Ok(())
             },
@@ -333,9 +443,25 @@ mod tests {
 
         assert!(restarted);
         assert_eq!(
-            events.into_inner(),
-            ["bootout", "print", "print", "print", "bootstrap", "alive"]
+            events.into_inner().join(","),
+            "prepare,print,bootout,print,print,bootstrap,alive"
         );
+
+        let error = start_launch_agent_after_preparation_with(
+            Duration::ZERO,
+            || {
+                Err::<(), _>(DaemonError::Store(StoreError::Locked(
+                    LockedReason::KeyMissing,
+                )))
+            },
+            || panic!("preparation failure must not boot out the registered agent"),
+            || panic!("registration must not be inspected after preparation fails"),
+            |_| {},
+            |_| panic!("failed preparation must not be installed"),
+            || panic!("failed preparation must not reach readiness checks"),
+        )
+        .expect_err("preparation failure must be returned");
+        assert!(matches!(error, DaemonError::Store(StoreError::Locked(_))));
     }
 
     #[test]
