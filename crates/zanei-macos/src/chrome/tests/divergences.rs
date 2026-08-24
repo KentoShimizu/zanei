@@ -102,7 +102,7 @@ fn ownership_stop_discards_a_blocking_query_result() {
         ChromeQuery::Window {
             pid: 42,
             window_id: 7,
-            applescript_window_id: 101,
+            applescript_window_id: "window-101".to_owned(),
         },
         false,
         observed_at,
@@ -118,15 +118,36 @@ fn ownership_stop_discards_a_blocking_query_result() {
 fn ownership_as_id_survives_worker_state_restart() {
     let now = Instant::now();
     let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
-    eligibility.observe_with_window_id_at(
-        42,
-        ChromeEligibilityObservation::Normal {
-            window_id: Some(7),
+    let snapshot = ChromeSnapshot::from_native(
+        crate::ffi::applescript::Snapshot {
+            window_key: "window-alpha-001".to_owned(),
+            window_title: None,
+            tab_key: "tab-alpha-001".to_owned(),
             url: "https://allowed.example".to_owned(),
+            tab_title: None,
         },
-        Some(101),
-        now,
+        Some(7),
     );
+    assert_eq!(snapshot.applescript_window_id, "window-alpha-001");
+    assert_eq!(snapshot.tab_key, "tab-alpha-001");
+    let mut initial_api = FakeApi::new([Ok(ChromeObservation::Snapshot(snapshot))]);
+    let (initial_sender, _initial_events) = sync_channel(1);
+    assert!(matches!(
+        observe_once(
+            &mut initial_api,
+            &mut NavigationTracker::default(),
+            &chrome_app(),
+            &initial_sender,
+            &ChromeMetrics::default(),
+            &eligibility,
+        ),
+        ObservationOutcome::Continue
+    ));
+    assert_eq!(
+        eligibility.applescript_window_id(42, 7).as_deref(),
+        Some("window-alpha-001")
+    );
+
     eligibility.clear_all();
     let mut state = ChromeWorkerState::default();
     let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
@@ -158,7 +179,7 @@ fn ownership_as_id_survives_worker_state_restart() {
         [ChromeQuery::Window {
             pid: 42,
             window_id: 7,
-            applescript_window_id: 101,
+            applescript_window_id: "window-alpha-001".to_owned(),
         }]
     );
 }
@@ -178,6 +199,8 @@ fn v2_5_worker_panic_clears_state_and_preserves_receivers_for_restart() {
         now,
     );
     let mut collector = ChromeCollector::new(eligibility, focus_context, observer);
+    let failure = ChromeFailure::Query(ChromeQueryFailure::AppleEvent(-1712));
+    collector.metrics.failure.observe_failure(failure);
     let (output, _events) = sync_channel(1);
     collector.panic_next_worker_for_test();
 
@@ -187,6 +210,10 @@ fn v2_5_worker_panic_clears_state_and_preserves_receivers_for_restart() {
     collector.stop();
 
     assert_eq!(tracker.state_version(42, 7), None);
+    assert_eq!(
+        collector.failure_state(),
+        ChromeFailureState::Unavailable(failure)
+    );
     collector.panic_next_worker_for_test();
     collector
         .start(output)
@@ -231,19 +258,177 @@ fn s23_startup_generation_is_observed_once() {
     assert_eq!(api.query_count, 1);
 }
 
+#[test]
+fn apple_event_failures_are_classified_fail_closed_without_stopping_the_worker() {
+    for code in [-1712, -1728, -1743] {
+        let (eligibility, capture) = chrome_eligibility_channel(FilterConfig::default());
+        eligibility.observe(
+            42,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(7),
+                url: "https://allowed.example".to_owned(),
+            },
+        );
+        let failure = ChromeFailure::from(crate::ffi::applescript::AppleScriptError::Execute {
+            code: Some(code),
+        });
+        let mut api = FakeApi::new([Err(failure)]);
+        let mut navigation = tracker_with_initial_snapshot();
+        let (sender, _) = sync_channel(1);
+        let metrics = ChromeMetrics::default();
+
+        let outcome = observe_once(
+            &mut api,
+            &mut navigation,
+            &chrome_app(),
+            &sender,
+            &metrics,
+            &eligibility,
+        );
+
+        assert!(matches!(outcome, ObservationOutcome::Continue));
+        assert_eq!(
+            metrics.failure.state(),
+            ChromeFailureState::Unavailable(ChromeFailure::Query(ChromeQueryFailure::AppleEvent(
+                code
+            )))
+        );
+        assert_eq!(metrics.degraded.load(Ordering::Relaxed), 1);
+        assert!(!capture.allows_text(42, Some(7)));
+        assert!(navigation.previous.is_none());
+    }
+}
+
+#[test]
+fn parse_and_validation_failures_recover_only_after_a_valid_snapshot() {
+    let (eligibility, capture) = chrome_eligibility_channel(FilterConfig::default());
+    eligibility.observe(
+        42,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(7),
+            url: "https://allowed.example/before".to_owned(),
+        },
+    );
+    let parse_failure =
+        ChromeFailure::from(crate::ffi::applescript::AppleScriptError::InvalidResponse(
+            crate::ffi::applescript::AppleScriptResponseError::UnknownStatus,
+        ));
+    let mut api = FakeApi::new([
+        Err(parse_failure),
+        Ok(ChromeObservation::Snapshot(snapshot(
+            "",
+            "tab-invalid",
+            "https://allowed.example/invalid",
+            "Invalid",
+        ))),
+        Ok(ChromeObservation::Snapshot(snapshot_for_window(
+            7,
+            "opaque-window-id",
+            "opaque-tab-id",
+            "https://allowed.example/recovered",
+            "Recovered",
+        ))),
+    ]);
+    let mut navigation = tracker_with_initial_snapshot();
+    let (sender, events) = sync_channel(3);
+    let metrics = ChromeMetrics::default();
+
+    assert!(matches!(
+        observe_once(
+            &mut api,
+            &mut navigation,
+            &chrome_app(),
+            &sender,
+            &metrics,
+            &eligibility,
+        ),
+        ObservationOutcome::Continue
+    ));
+    assert_eq!(
+        metrics.failure.state(),
+        ChromeFailureState::Unavailable(parse_failure)
+    );
+    assert!(!capture.allows_text(42, Some(7)));
+
+    assert!(matches!(
+        observe_once(
+            &mut api,
+            &mut navigation,
+            &chrome_app(),
+            &sender,
+            &metrics,
+            &eligibility,
+        ),
+        ObservationOutcome::Continue
+    ));
+    assert_eq!(
+        metrics.failure.state(),
+        ChromeFailureState::Unavailable(ChromeFailure::Validation(
+            ChromeValidationFailure::EmptyWindowIdentity
+        ))
+    );
+    assert!(!capture.allows_text(42, Some(7)));
+
+    assert!(matches!(
+        observe_once(
+            &mut api,
+            &mut navigation,
+            &chrome_app(),
+            &sender,
+            &metrics,
+            &eligibility,
+        ),
+        ObservationOutcome::Continue
+    ));
+    assert_eq!(metrics.failure.state(), ChromeFailureState::Available);
+    assert!(capture.allows_text(42, Some(7)));
+    assert_eq!(metrics.degraded.load(Ordering::Relaxed), 2);
+    let event = events.try_recv().expect("recovery navigation");
+    let EventData::BrowserNavigate(data) = event.data else {
+        panic!("browser navigation");
+    };
+    assert_eq!(data.transition, None);
+}
+
+#[test]
+fn output_disconnect_remains_a_structural_worker_stop() {
+    let mut api = FakeApi::new([Ok(ChromeObservation::Snapshot(snapshot_for_window(
+        7,
+        "window-7",
+        "tab-7",
+        "https://allowed.example",
+        "Allowed",
+    )))]);
+    let (sender, receiver) = sync_channel(1);
+    drop(receiver);
+    let metrics = ChromeMetrics::default();
+    let (eligibility, _) = chrome_eligibility_channel(FilterConfig::default());
+
+    let outcome = observe_once(
+        &mut api,
+        &mut NavigationTracker::default(),
+        &chrome_app(),
+        &sender,
+        &metrics,
+        &eligibility,
+    );
+
+    assert!(matches!(outcome, ObservationOutcome::Stop));
+    assert_eq!(metrics.failure.state(), ChromeFailureState::Available);
+    assert_eq!(metrics.degraded.load(Ordering::Relaxed), 1);
+}
+
 struct FocusChangingApi {
     focus_context: FocusContext,
 }
 
 impl ChromeApi for FocusChangingApi {
-    type Error = &'static str;
-
-    fn query(&mut self, _query: ChromeQuery) -> Result<ChromeObservation, Self::Error> {
+    fn query(&mut self, _query: &ChromeQuery) -> Result<ChromeObservation, ChromeFailure> {
         self.focus_context
             .activate(chrome_app(), Some(chrome_focus(8).window.expect("window")));
         Ok(ChromeObservation::Snapshot(snapshot_for_window(
             7,
-            202,
+            "window-202",
             "tab-2",
             "https://other.example",
             "Other",
@@ -256,13 +441,11 @@ struct StopDuringQuery<'a> {
 }
 
 impl ChromeApi for StopDuringQuery<'_> {
-    type Error = &'static str;
-
-    fn query(&mut self, _query: ChromeQuery) -> Result<ChromeObservation, Self::Error> {
+    fn query(&mut self, _query: &ChromeQuery) -> Result<ChromeObservation, ChromeFailure> {
         self.stop.store(true, Ordering::Release);
         Ok(ChromeObservation::Snapshot(snapshot_for_window(
             7,
-            101,
+            "window-101",
             "tab-1",
             "https://allowed.example/after",
             "After",

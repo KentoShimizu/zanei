@@ -30,7 +30,7 @@ struct WindowRecord {
     state: Option<ChromeWindowState>,
     version: u64,
     observed_at: Instant,
-    applescript_window_id: Option<i64>,
+    applescript_window_id: Option<String>,
 }
 
 struct EligibilityState {
@@ -83,7 +83,7 @@ impl ChromeEligibilityPublisher {
         &self,
         pid: i64,
         observation: ChromeEligibilityObservation,
-        applescript_window_id: Option<i64>,
+        applescript_window_id: Option<String>,
         observed_at: Instant,
     ) {
         let Ok(pid) = i32::try_from(pid) else {
@@ -124,8 +124,8 @@ impl ChromeEligibilityPublisher {
             && record.state.as_ref() == next_state.as_ref()
         {
             record.observed_at = observed_at;
-            if applescript_window_id.is_some() {
-                record.applescript_window_id = applescript_window_id;
+            if let Some(applescript_window_id) = applescript_window_id {
+                record.applescript_window_id = Some(applescript_window_id);
             }
             return;
         }
@@ -133,7 +133,7 @@ impl ChromeEligibilityPublisher {
             state
                 .windows
                 .get(&key)
-                .and_then(|record| record.applescript_window_id)
+                .and_then(|record| record.applescript_window_id.clone())
         });
         let version = next_version(&mut state);
         state.windows.insert(
@@ -158,14 +158,14 @@ impl ChromeEligibilityPublisher {
         }
     }
 
-    pub(crate) fn applescript_window_id(&self, pid: i64, window_id: i64) -> Option<i64> {
+    pub(crate) fn applescript_window_id(&self, pid: i64, window_id: i64) -> Option<String> {
         let pid = i32::try_from(pid).ok()?;
         self.state
             .read()
             .ok()?
             .windows
             .get(&(pid, window_id))
-            .and_then(|record| record.applescript_window_id)
+            .and_then(|record| record.applescript_window_id.clone())
     }
 }
 

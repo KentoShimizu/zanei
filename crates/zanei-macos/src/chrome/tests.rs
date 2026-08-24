@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    sync::mpsc::sync_channel,
     time::{Duration, Instant},
 };
 
@@ -495,26 +496,22 @@ fn tracker_with_initial_snapshot() -> NavigationTracker {
 }
 
 fn snapshot(window: &str, tab: &str, url: &str, title: &str) -> ChromeSnapshot {
-    let applescript_window_id = window
-        .rsplit_once('-')
-        .and_then(|(_, id)| id.parse().ok())
-        .unwrap_or(0);
-    let mut snapshot = snapshot_for_window(7, applescript_window_id, tab, url, title);
+    let mut snapshot = snapshot_for_window(7, window, tab, url, title);
     snapshot.window_key = window.to_owned();
     snapshot
 }
 
 fn snapshot_for_window(
     window_id: i64,
-    applescript_window_id: i64,
+    applescript_window_id: &str,
     tab: &str,
     url: &str,
     title: &str,
 ) -> ChromeSnapshot {
     ChromeSnapshot {
         window_id: Some(window_id),
-        applescript_window_id,
-        window_key: applescript_window_id.to_string(),
+        applescript_window_id: applescript_window_id.to_owned(),
+        window_key: applescript_window_id.to_owned(),
         window_title: Some(title.to_owned()),
         tab_key: tab.to_owned(),
         url: url.to_owned(),
@@ -555,14 +552,14 @@ fn chrome_app() -> ApplicationInfo {
 }
 
 struct FakeApi {
-    observations: VecDeque<Result<ChromeObservation, &'static str>>,
+    observations: VecDeque<Result<ChromeObservation, ChromeFailure>>,
     query_count: usize,
     queries: Vec<ChromeQuery>,
 }
 
 impl FakeApi {
     fn new(
-        observations: impl IntoIterator<Item = Result<ChromeObservation, &'static str>>,
+        observations: impl IntoIterator<Item = Result<ChromeObservation, ChromeFailure>>,
     ) -> Self {
         Self {
             observations: observations.into_iter().collect(),
@@ -573,11 +570,9 @@ impl FakeApi {
 }
 
 impl ChromeApi for FakeApi {
-    type Error = &'static str;
-
-    fn query(&mut self, query: ChromeQuery) -> Result<ChromeObservation, Self::Error> {
+    fn query(&mut self, query: &ChromeQuery) -> Result<ChromeObservation, ChromeFailure> {
         self.query_count += 1;
-        self.queries.push(query);
+        self.queries.push(query.clone());
         self.observations.pop_front().expect("fake observation")
     }
 }

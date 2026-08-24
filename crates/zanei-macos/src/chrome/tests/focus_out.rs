@@ -6,14 +6,14 @@ fn focus_out_confirmation_targets_background_window_and_releases_body() {
     let mut api = FakeApi::new([
         Ok(ChromeObservation::Snapshot(snapshot_for_window(
             7,
-            101,
+            "window-101",
             "tab-1",
             "https://first.example",
             "First",
         ))),
         Ok(ChromeObservation::Snapshot(snapshot_for_window(
             7,
-            101,
+            "window-101",
             "tab-1",
             "https://first.example",
             "First",
@@ -87,7 +87,7 @@ fn focus_out_confirmation_targets_background_window_and_releases_body() {
         Some(&ChromeQuery::Window {
             pid: 42,
             window_id: 7,
-            applescript_window_id: 101,
+            applescript_window_id: "window-101".to_owned(),
         })
     );
     assert!(
@@ -105,7 +105,7 @@ fn targeted_confirmation_drops_snapshot_when_window_closed() {
     let mut api = FakeApi::new([
         Ok(ChromeObservation::Snapshot(snapshot_for_window(
             7,
-            101,
+            "window-101",
             "tab-1",
             "https://first.example",
             "First",
@@ -170,21 +170,21 @@ fn intra_app_focus_out_confirmation_targets_previous_window() {
     let mut api = FakeApi::new([
         Ok(ChromeObservation::Snapshot(snapshot_for_window(
             7,
-            101,
+            "window-101",
             "tab-1",
             "https://first.example",
             "First",
         ))),
         Ok(ChromeObservation::Snapshot(snapshot_for_window(
             8,
-            202,
+            "window-202",
             "tab-2",
             "https://second.example",
             "Second",
         ))),
         Ok(ChromeObservation::Snapshot(snapshot_for_window(
             7,
-            101,
+            "window-101",
             "tab-1",
             "https://first.example",
             "First",
@@ -255,7 +255,7 @@ fn intra_app_focus_out_confirmation_targets_previous_window() {
         Some(&ChromeQuery::Window {
             pid: 42,
             window_id: 7,
-            applescript_window_id: 101,
+            applescript_window_id: "window-101".to_owned(),
         })
     );
     assert!(
