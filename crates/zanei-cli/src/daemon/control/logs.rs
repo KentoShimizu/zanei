@@ -153,23 +153,56 @@ fn reject_extended_acl(path: &Path, operation: &'static str) -> Result<(), Daemo
             &reason,
         ));
     }
-    let listings = output
-        .stdout
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .count();
     let invalid = |kind, reason| invalid_directory(operation, path, kind, reason);
-    match listings {
-        0 => Err(invalid(
+    match validate_acl_listing(&output.stdout) {
+        Err(AclRejection::MissingListing) => Err(invalid(
             std::io::ErrorKind::InvalidData,
             "could not inspect extended ACLs because /bin/ls returned no listing",
         )),
-        1 => Ok(()),
-        _ => Err(invalid(
+        Err(AclRejection::Allow(entry)) => Err(invalid(
             std::io::ErrorKind::PermissionDenied,
-            "an extended ACL entry exists; run `chmod -N <dir>` on this directory or choose an ACL-free owner-only directory",
+            &format!(
+                "extended ACL allow entry `{}` can grant access to another principal; remove this entry or run `chmod -N <dir>` on this directory",
+                String::from_utf8_lossy(entry).trim()
+            ),
         )),
+        Err(AclRejection::Unrecognized(entry)) => Err(invalid(
+            std::io::ErrorKind::PermissionDenied,
+            &format!(
+                "could not safely interpret extended ACL entry `{}`; remove this entry or run `chmod -N <dir>` on this directory",
+                String::from_utf8_lossy(entry).trim()
+            ),
+        )),
+        Ok(()) => Ok(()),
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AclRejection<'a> {
+    MissingListing,
+    Allow(&'a [u8]),
+    Unrecognized(&'a [u8]),
+}
+
+fn validate_acl_listing(listing: &[u8]) -> Result<(), AclRejection<'_>> {
+    let listing = listing.strip_suffix(b"\n").unwrap_or(listing);
+    let mut lines = listing.split(|byte| *byte == b'\n');
+    if lines.next().is_none_or(|line| line.is_empty()) {
+        return Err(AclRejection::MissingListing);
+    }
+    for entry in lines {
+        let has_action = |action: &[u8]| {
+            entry
+                .split(|byte| byte.is_ascii_whitespace())
+                .any(|token| token == action)
+        };
+        match (has_action(b"allow"), has_action(b"deny")) {
+            (false, true) => {}
+            (true, false) => return Err(AclRejection::Allow(entry)),
+            _ => return Err(AclRejection::Unrecognized(entry)),
+        }
+    }
+    Ok(())
 }
 
 fn invalid_directory(
@@ -217,15 +250,57 @@ mod tests {
     }
 
     #[test]
-    fn rejects_directory_with_extended_acl() {
+    fn accepts_directory_with_deny_acl() {
         let directory = tempfile::TempDir::new_in("/private/tmp").expect("directory fixture");
         let path = directory.path();
         let user_id = fs::metadata(path).expect("directory metadata").uid();
         chmod(path, &["+a", "everyone deny delete"]);
         let result = validate_owner_only_directory(path, user_id, OPERATION);
         chmod(path, &["-N"]);
-        let error = result.expect_err("ACL must be rejected");
+        result.expect("deny ACL must be accepted");
+    }
+
+    #[test]
+    fn rejects_directory_with_allow_acl() {
+        let directory = tempfile::TempDir::new_in("/private/tmp").expect("directory fixture");
+        let path = directory.path();
+        let user_id = fs::metadata(path).expect("directory metadata").uid();
+        chmod(path, &["+a", "user:nobody allow write"]);
+        let result = validate_owner_only_directory(path, user_id, OPERATION);
+        chmod(path, &["-N"]);
+        let error = result.expect_err("allow ACL must be rejected");
         assert!(matches!(&error, DaemonError::File { path: actual, .. } if actual == path));
-        assert!(error.to_string().contains("extended ACL entry exists"));
+        let message = error.to_string();
+        assert!(message.contains("extended ACL allow entry"), "{message}");
+        assert!(message.contains("chmod -N"));
+    }
+
+    #[test]
+    fn rejects_unrecognized_acl_listing() {
+        let entry = b" 0: group:everyone audit delete";
+        let listing = [b"drwx------+ fixture".as_slice(), entry].join(&b'\n');
+        assert_eq!(
+            validate_acl_listing(&listing),
+            Err(AclRejection::Unrecognized(entry))
+        );
+    }
+
+    #[test]
+    #[ignore = "checks the invoking macOS user's existing default directories"]
+    fn live_default_store_and_launch_agents_accept_standard_deny_acls() {
+        let home = std::env::var_os("HOME").expect("HOME");
+        let home = Path::new(&home);
+        let user_id = fs::metadata(home).expect("home metadata").uid();
+        let store = crate::paths::Paths::resolve(None, None)
+            .expect("default paths")
+            .store;
+        let directories = [
+            store.parent().expect("default store parent"),
+            &home.join("Library/LaunchAgents"),
+        ];
+        for directory in directories {
+            validate_owner_only_directory(directory, user_id, OPERATION)
+                .unwrap_or_else(|error| panic!("{}: {error}", directory.display()));
+        }
     }
 }
