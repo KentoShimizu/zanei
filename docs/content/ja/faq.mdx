@@ -44,7 +44,16 @@ zanei filter exclude-site add example.com
 
 ## 一部の Chromium 系アプリで入力本文や content snapshot が捕捉されないのはなぜですか？
 
-プラットフォームのアクセシビリティ有効化を無効にする Chromium 系アプリには、恒久的な捕捉制限があります。ChatGPT デスクトップはその一例です。この種類のアプリでも、Zanei はキー入力があった事実（`input.key` の回数など）、クリック、クリップボードイベントを記録します。一方、入力本文（`ui.value` / `data.text`）と content snapshot（`content.snapshot`）は記録できず、Zanei は画面画像も捕捉しません。アプリが外部クライアントからの OS レベルの有効化要求を無視するため、Zanei 側では修正できません。
+一部の Chromium 系アプリは、外部クライアントにアクセシビリティの content tree を公開しません。
+2026 年 8 月の確認では、ChatGPT デスクトップがその一例でした。アプリがその tree を公開しない
+場合、その content の入力本文（`ui.value` / `data.text`）と content snapshot（`content.snapshot`）は
+欠落し、Zanei が代わりに画面画像を使うこともありません。キー入力があった事実（`input.key` の回数
+など）は引き続き記録されます。クリックは AX hit-testing が機能する範囲でのみ記録されます。クリップボード
+のコピー／ペーストイベントは、本文が省略される場合も記録されます。コピー本文は macOS pasteboard から
+直接取得し、`capture.text_content` が有効で、コピー元 window で text capture が許可されている場合にだけ
+記録できます。この経路に AX tree は不要です。ペースト本文には、貼り付け先 window で同じ text-capture 条件が
+適用され、さらに AX が貼り付け先を text field と分類できる必要があります。分類できなければ、ペーストイベント
+の本文は `null` になります。
 
 ## ストアを直接読んでもいいですか？
 
