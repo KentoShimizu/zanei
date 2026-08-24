@@ -13,7 +13,7 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 use time::Duration;
 use zanei_core::{
-    config::{Config, ConfigWatcher},
+    config::{CaptureSource, Config, ConfigWatcher},
     normalize::format_timestamp,
     store::{DaemonMode, DaemonState, StoreReader, StoreWriter},
 };
@@ -29,7 +29,7 @@ use super::{
 use crate::daemon::{
     executable_guard::ExecutableGuard,
     permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
-    supervisor::{EventTapStartGate, chrome_failure_reason},
+    supervisor::EventTapStartGate,
 };
 use crate::permissions::PermissionRequestOutcome;
 use zanei_collector::Permission;
@@ -231,31 +231,35 @@ fn collector_failures_accumulate_across_daemon_instances() {
 }
 
 #[test]
-fn collector_degraded_state_is_persisted_by_the_heartbeat() {
+fn typed_collector_failure_and_recovery_are_persisted_by_the_heartbeat() {
     let directory = TempDir::new().expect("temporary directory");
     let store_path = directory.path().join("store.sqlite");
     let writer = Arc::new(Mutex::new(
         StoreWriter::open(&store_path).expect("store writer"),
     ));
     let reader = StoreReader::open(&store_path).expect("store reader");
-    let config = Config::default();
+    let mut config = Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
     let mut config_watcher =
         ConfigWatcher::new(directory.path().join("config.toml")).expect("config watcher");
     let mut pipeline = Pipeline::store(&config, Arc::clone(&writer)).expect("pipeline");
     let mut collectors = CollectorSet::new(&config);
-    let chrome_reason = chrome_failure_reason(ChromeFailureState::Unavailable(
-        ChromeFailure::Query(ChromeQueryFailure::AppleEvent(-1712)),
-    ))
-    .expect("Chrome failure reason");
     collectors
-        .start_errors
-        .insert("chrome".to_owned(), chrome_reason.clone());
+        .chrome
+        .as_mut()
+        .expect("Chrome collector")
+        .set_health_for_test(
+            true,
+            ChromeFailureState::Unavailable(ChromeFailure::Query(ChromeQueryFailure::AppleEvent(
+                -1712,
+            ))),
+        );
     let owner = StoreOwner::new(DaemonMode::Launchd, "2026-08-24T10:00:00.000Z".to_owned());
     let base_collector_failures = BTreeMap::new();
     let mut paused = false;
     let mut degraded = BTreeMap::new();
 
-    ActiveDaemon {
+    let mut daemon = ActiveDaemon {
         store_path: &store_path,
         config_watcher: &mut config_watcher,
         active_retention_hours: config.output.retention_hours,
@@ -276,9 +280,10 @@ fn collector_degraded_state_is_persisted_by_the_heartbeat() {
         permission_request_worker: None,
         pending_permission_request: None,
         executable_guard: ExecutableGuard::new(directory.path().join("zanei")),
-    }
-    .publish_heartbeat_with_permissions(None)
-    .expect("publish heartbeat");
+    };
+    daemon
+        .publish_heartbeat_with_permissions(None)
+        .expect("publish heartbeat");
     pipeline.flush().expect("flush heartbeat");
 
     assert_eq!(
@@ -286,9 +291,29 @@ fn collector_degraded_state_is_persisted_by_the_heartbeat() {
             .status()
             .expect("persisted heartbeat")
             .degraded
-            .get("chrome"),
-        Some(&chrome_reason)
+            .get("chrome")
+            .map(String::as_str),
+        Some("state=unavailable phase=query kind=apple_event code=-1712")
     );
+
+    daemon
+        .collectors
+        .chrome
+        .as_mut()
+        .expect("Chrome collector")
+        .set_health_for_test(true, ChromeFailureState::Available);
+    daemon
+        .publish_heartbeat_with_permissions(None)
+        .expect("publish recovery heartbeat");
+    pipeline.flush().expect("flush recovery heartbeat");
+    assert!(
+        !reader
+            .status()
+            .expect("persisted recovery heartbeat")
+            .degraded
+            .contains_key("chrome")
+    );
+    drop(daemon);
     pipeline.shutdown().expect("pipeline shutdown");
 }
 

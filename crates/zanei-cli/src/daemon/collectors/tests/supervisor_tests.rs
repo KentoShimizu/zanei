@@ -1,5 +1,4 @@
 use super::*;
-use crate::daemon::supervisor::chrome_failure_reason;
 use zanei_macos::chrome::{ChromeFailure, ChromeFailureState, ChromeQueryFailure};
 
 struct FakeClock {
@@ -212,7 +211,10 @@ fn unexpected_exit_uses_capped_backoff_and_stays_degraded_after_restart() {
         )
         .expect("observe failed collector");
         assert_eq!(state.starts.load(Ordering::Relaxed), failure_index + 1);
-        assert!(errors["fake"].contains("terminated unexpectedly"));
+        assert_eq!(
+            managed.as_ref().and_then(Managed::restart_degraded_reason),
+            Some("collector worker terminated unexpectedly")
+        );
 
         clock.advance(Duration::from_secs(delay_seconds - 1));
         supervise_collector(
@@ -235,7 +237,13 @@ fn unexpected_exit_uses_capped_backoff_and_stays_degraded_after_restart() {
         )
         .expect("restart collector at deadline");
         assert_eq!(state.starts.load(Ordering::Relaxed), failure_index + 2);
-        assert!(errors.contains_key("fake"));
+        assert!(errors.is_empty());
+        assert!(
+            managed
+                .as_ref()
+                .and_then(Managed::restart_degraded_reason)
+                .is_some()
+        );
     }
 
     state.finish();
@@ -243,73 +251,62 @@ fn unexpected_exit_uses_capped_backoff_and_stays_degraded_after_restart() {
 }
 
 #[test]
-fn unexpected_exit_clears_after_sixty_seconds_of_stable_runtime() {
-    let state = Arc::new(FakeState::default());
-    let mut managed = Some(Managed::new(FakeCollector::new(
-        Arc::clone(&state),
-        BTreeSet::new(),
-    )));
-    let (pipeline, _events) = mpsc::sync_channel(4);
-    let mut errors = BTreeMap::new();
-    let mut clock = FakeClock::new();
-    start_collector(&mut managed, &pipeline, &mut errors, clock.now);
-    state.finish();
-    wait_for_relay(&managed);
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&granted_permissions()),
-        &mut errors,
-        clock.now,
-    )
-    .expect("observe failed collector");
-
-    clock.advance(Duration::from_secs(5));
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&granted_permissions()),
-        &mut errors,
-        clock.now,
-    )
-    .expect("restart collector");
-    assert!(errors.contains_key("fake"));
-
-    clock.advance(Duration::from_secs(59));
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&granted_permissions()),
-        &mut errors,
-        clock.now,
-    )
-    .expect("observe nearly stable collector");
-    assert!(errors.contains_key("fake"));
-
-    clock.advance(Duration::from_secs(1));
-    supervise_collector(
-        &mut managed,
-        &pipeline,
-        Some(&granted_permissions()),
-        &mut errors,
-        clock.now,
-    )
-    .expect("observe stable collector");
-    assert!(!errors.contains_key("fake"));
-
-    state.finish();
-    wait_for_relay(&managed);
+fn planned_stop_and_suspend_preserve_exit_until_resumed_worker_is_stable() {
+    for suspend in [false, true] {
+        assert_exit_survives_collector_set_resume(suspend);
+    }
 }
 
 #[test]
-fn chrome_current_failure_clears_only_after_observed_recovery() {
+fn chrome_health_projects_failure_recovery_and_exit_priority() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    let mut collectors = CollectorSet::new(&config);
     let failure = ChromeFailure::Query(ChromeQueryFailure::AppleEvent(-1712));
+    let chrome = collectors.chrome.as_mut().expect("Chrome collector");
 
+    chrome.set_health_for_test(true, ChromeFailureState::Unavailable(failure));
     assert_eq!(
-        chrome_failure_reason(ChromeFailureState::Unavailable(failure)).as_deref(),
+        collectors
+            .health()
+            .degraded
+            .get("chrome")
+            .map(String::as_str),
         Some("state=unavailable phase=query kind=apple_event code=-1712")
     );
-    assert_eq!(chrome_failure_reason(ChromeFailureState::Available), None);
+
+    collectors
+        .chrome
+        .as_mut()
+        .expect("Chrome collector")
+        .set_health_for_test(true, ChromeFailureState::Available);
+    assert!(!collectors.health().degraded.contains_key("chrome"));
+
+    let chrome = collectors.chrome.as_mut().expect("Chrome collector");
+    chrome.record_unexpected_exit_for_test(
+        Instant::now(),
+        "collector worker terminated unexpectedly",
+    );
+    chrome.set_health_for_test(true, ChromeFailureState::Unavailable(failure));
+    assert_eq!(
+        collectors
+            .health()
+            .degraded
+            .get("chrome")
+            .map(String::as_str),
+        Some("state=unavailable phase=query kind=apple_event code=-1712")
+    );
+
+    let chrome = collectors.chrome.as_mut().expect("Chrome collector");
+    chrome.set_health_for_test(true, ChromeFailureState::Available);
+    assert_eq!(
+        collectors
+            .health()
+            .degraded
+            .get("chrome")
+            .map(String::as_str),
+        Some("collector worker terminated unexpectedly")
+    );
 }
 
 #[test]
@@ -385,7 +382,12 @@ fn pending_snapshot_observes_permission_required_failure_without_restarting() {
     )
     .expect("hold restart while permissions are pending");
     assert_eq!(state.starts.load(Ordering::Relaxed), 1);
-    assert!(errors["fake"].contains("terminated unexpectedly"));
+    assert!(
+        managed
+            .as_ref()
+            .and_then(Managed::restart_degraded_reason)
+            .is_some()
+    );
 
     supervise_collector(
         &mut managed,
@@ -454,7 +456,12 @@ fn permission_blocked_collector_waits_for_granted_transition() {
     )
     .expect("permission recovery");
     assert_eq!(state.starts.load(Ordering::Relaxed), 2);
-    assert!(errors.contains_key("fake"));
+    assert!(
+        managed
+            .as_ref()
+            .and_then(Managed::restart_degraded_reason)
+            .is_some()
+    );
 
     supervise_collector(
         &mut managed,
@@ -464,8 +471,118 @@ fn permission_blocked_collector_waits_for_granted_transition() {
         started + Duration::from_secs(121),
     )
     .expect("stable permission recovery");
-    assert!(!errors.contains_key("fake"));
+    assert!(
+        managed
+            .as_ref()
+            .and_then(Managed::restart_degraded_reason)
+            .is_none()
+    );
 
     state.finish();
     wait_for_relay(&managed);
+}
+
+#[test]
+fn backoff_deadline_rechecks_current_permission_before_restart() {
+    let state = Arc::new(FakeState::default());
+    let mut managed = Some(Managed::new(FakeCollector::new(
+        Arc::clone(&state),
+        BTreeSet::from([Permission::Accessibility]),
+    )));
+    let (pipeline, _events) = mpsc::sync_channel(4);
+    let mut errors = BTreeMap::new();
+    let mut clock = FakeClock::new();
+    start_collector(&mut managed, &pipeline, &mut errors, clock.now);
+    state.finish();
+    wait_for_relay(&managed);
+
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("schedule restart while granted");
+    clock.advance(Duration::from_secs(5));
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&denied_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("hold restart at deadline while denied");
+    clock.advance(Duration::from_secs(60));
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&denied_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("hold overdue restart while denied");
+    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
+
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        clock.now,
+    )
+    .expect("restart immediately after regrant");
+    assert_eq!(state.starts.load(Ordering::Relaxed), 2);
+
+    state.finish();
+    wait_for_relay(&managed);
+}
+
+fn assert_exit_survives_collector_set_resume(suspend: bool) {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    let mut collectors = CollectorSet::new(&config);
+    let (pipeline, _events) = mpsc::sync_channel(4);
+    collectors
+        .chrome
+        .as_mut()
+        .expect("Chrome collector")
+        .record_unexpected_exit_for_test(
+            Instant::now(),
+            "collector worker terminated unexpectedly",
+        );
+
+    if suspend {
+        collectors.suspend();
+    } else {
+        collectors.stop();
+    }
+    assert_eq!(
+        collectors
+            .health()
+            .degraded
+            .get("chrome")
+            .map(String::as_str),
+        Some("collector worker terminated unexpectedly")
+    );
+    collectors.start(&pipeline);
+    let resumed_at = collectors
+        .chrome
+        .as_ref()
+        .and_then(Managed::started_at_for_test)
+        .expect("resumed Chrome collector start time");
+
+    collectors
+        .supervise(&pipeline, None, resumed_at + Duration::from_secs(59))
+        .expect("observe resumed collectors before stable threshold");
+    assert!(collectors.health().degraded.contains_key("chrome"));
+    collectors
+        .supervise(&pipeline, None, resumed_at + Duration::from_secs(60))
+        .expect("observe stable resumed collectors");
+    assert!(
+        !collectors.health().degraded.contains_key("chrome"),
+        "unexpected exit clears only after the resumed worker is stable"
+    );
+
+    collectors.suspend();
 }

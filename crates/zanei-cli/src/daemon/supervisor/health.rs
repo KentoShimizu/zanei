@@ -16,12 +16,7 @@ pub(super) struct RestartState {
     next_attempt: Option<Instant>,
     delay_index: usize,
     waiting_for_permission: bool,
-    unexpected_exit_pending: bool,
-}
-
-pub(super) struct RestartTransition {
-    pub(super) state: RestartState,
-    pub(super) clear_degraded: bool,
+    unexpected_exit_reason: Option<&'static str>,
 }
 
 impl RestartState {
@@ -30,7 +25,7 @@ impl RestartState {
             next_attempt: None,
             delay_index: 0,
             waiting_for_permission: false,
-            unexpected_exit_pending: false,
+            unexpected_exit_reason: None,
         }
     }
 
@@ -39,8 +34,13 @@ impl RestartState {
         self
     }
 
-    pub(super) fn exited_unexpectedly(mut self, now: Instant, permissions_granted: bool) -> Self {
-        self.unexpected_exit_pending = true;
+    pub(super) fn exited_unexpectedly(
+        mut self,
+        now: Instant,
+        permissions_granted: bool,
+        reason: &'static str,
+    ) -> Self {
+        self.unexpected_exit_reason = Some(reason);
         self.schedule(now, permissions_granted);
         self
     }
@@ -60,29 +60,52 @@ impl RestartState {
     pub(super) fn ready(self, now: Instant, permissions_granted: bool) -> bool {
         (!self.waiting_for_permission && self.next_attempt.is_none())
             || (self.waiting_for_permission && permissions_granted)
-            || self
-                .next_attempt
-                .is_some_and(|next_attempt| now >= next_attempt)
+            || (permissions_granted
+                && self
+                    .next_attempt
+                    .is_some_and(|next_attempt| now >= next_attempt))
     }
 
-    pub(super) fn started(mut self) -> RestartTransition {
+    pub(super) fn started(mut self) -> Self {
         self.next_attempt = None;
         self.waiting_for_permission = false;
-        RestartTransition {
-            state: self,
-            clear_degraded: !self.unexpected_exit_pending,
+        self
+    }
+
+    pub(super) const fn stable(self) -> Self {
+        Self::new()
+    }
+
+    pub(super) const fn degraded_reason(self) -> Option<&'static str> {
+        self.unexpected_exit_reason
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ChromeHealth {
+    running: bool,
+    failure_state: ChromeFailureState,
+}
+
+impl ChromeHealth {
+    pub(super) const fn new(running: bool, failure_state: ChromeFailureState) -> Self {
+        Self {
+            running,
+            failure_state,
         }
     }
 
-    pub(super) fn stable(self) -> RestartTransition {
-        RestartTransition {
-            state: Self::new(),
-            clear_degraded: self.unexpected_exit_pending,
+    pub(super) fn degraded_reason(self, lifecycle_reason: Option<&str>) -> Option<String> {
+        if self.running {
+            chrome_failure_reason(self.failure_state)
+                .or_else(|| lifecycle_reason.map(str::to_owned))
+        } else {
+            lifecycle_reason.map(str::to_owned)
         }
     }
 }
 
-pub(in crate::daemon) fn chrome_failure_reason(state: ChromeFailureState) -> Option<String> {
+fn chrome_failure_reason(state: ChromeFailureState) -> Option<String> {
     state
         .current()
         .map(|failure| format!("state=unavailable {failure}"))
