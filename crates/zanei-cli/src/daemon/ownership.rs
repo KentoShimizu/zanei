@@ -1,6 +1,6 @@
 use std::{
     ffi::CString,
-    io,
+    io::{self, Write},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     thread,
@@ -92,7 +92,12 @@ impl Drop for StoreOwnership {
         // CLOEXEC closes a fork-inherited descriptor only after exec. Unlock explicitly so a
         // concurrent spawn cannot extend ownership beyond this guard's lifetime.
         if let Err(error) = flock(&self.file, FlockOperation::Unlock) {
-            eprintln!("zanei: failed to release store ownership lock: {error}");
+            // Best-effort diagnostics: Drop may run during unwinding, where a panicking
+            // eprintln! would abort, so a failed stderr write is deliberately discarded.
+            let _ = writeln!(
+                io::stderr().lock(),
+                "zanei: failed to release store ownership lock: {error}"
+            );
         }
     }
 }
