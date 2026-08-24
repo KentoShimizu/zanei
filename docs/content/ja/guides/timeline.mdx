@@ -13,7 +13,7 @@ description: 記録した行動を読み出す 3 つの方法 — timeline・que
 
 ## 時間表現
 
-`--since` / `--until` が受け取る値：
+`--since` / `--until` が受け取る値は次のとおりです。
 
 | 形式 | 例 | 意味 |
 | --- | --- | --- |
@@ -40,7 +40,7 @@ zanei timeline --since 1d --token-budget 8000
 | `--token-budget <N>` | 概算トークン上限（既定 4000）。超過分は粒度を粗くして収めます |
 | `--granularity` | `coarse`（既定、セッション単位）/ `fine`（操作単位まで） |
 
-既定の Markdown 出力（抜粋。header と activity の固定句は次のとおり出力されます）：
+既定の Markdown 出力の抜粋です。header と activity の固定句は次のとおり出力されます。
 
 ```md
 # Zanei timeline
@@ -56,7 +56,7 @@ Title: PR #42 のレビュー
 - Edited text in "PR #42 のレビュー"
 ```
 
-`--format json` では構造化された形が得られます：
+`--format json` では構造化された形が得られます。
 
 ```json
 {
@@ -93,7 +93,7 @@ zanei query --since 1d --bundle-id com.google.Chrome --types "browser.*"
 | `--limit <N>` | 最大件数（既定 500） |
 | `--format` | `jsonl`（既定）/ `json` / `table` |
 
-これらは **query-time フィルタ**です — 読み出しを絞るだけで、記録対象は変わりません。記録側の境界は[フィルタ](/ja/guides/filters)を参照。
+これらは **query-time フィルタ**で、読み出しを絞るだけです。記録対象は変わりません。記録側の境界は[フィルタ](/ja/guides/filters)を参照してください。
 
 ## `export` — 一括ダンプ
 
@@ -105,19 +105,19 @@ zanei export --since 24h --format jsonl --out dump.jsonl
 
 ## レシピ
 
-作業再開時の文脈復元（skill ファイルに同梱される一行。token budget は既定値の 4000 のまま）：
+作業再開時の文脈復元。skill ファイルに同梱される一行で、token budget は既定値の 4000 のままです。
 
 ```bash
 zanei timeline --since 2h --format md
 ```
 
-agent が記録の稼働を確認する：
+agent が記録の稼働を確認する。
 
 ```bash
 zanei status --json
 ```
 
-今日 Chrome で見ていたものだけを引く：
+今日 Chrome で見ていたものだけを引く。
 
 ```bash
 zanei query --since 1d --app "Google Chrome" --types browser.navigate --format json

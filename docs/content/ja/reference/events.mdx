@@ -3,11 +3,11 @@ title: イベントリファレンス
 description: イベント型タクソノミー、全イベント共通の JSON エンベロープ、ブラウザ別の URL 捕捉対応。
 ---
 
-Zanei が記録するすべてのイベントは、ソースによらず OS 非依存の JSON エンベロープを共有します。この安定スキーマがプロジェクトのコア資産です — 捕捉バックエンドは OS ごとに変わっても、ツールが消費する形は変わりません。
+Zanei が記録するすべてのイベントは、ソースによらず OS 非依存の JSON エンベロープを共有します。スキーマは安定させる方針です。捕捉バックエンドは OS ごとに変わっても、ツールが消費する形は変わりません。
 
 ## イベントエンベロープ
 
-生出力（`query --format jsonl`・`record`・`export`）では 1 行 1 イベント（NDJSON）：
+生出力（`query --format jsonl`・`record`・`export`）は 1 行 1 イベント（NDJSON）です。
 
 ```json
 {
@@ -31,7 +31,7 @@ Zanei が記録するすべてのイベントは、ソースによらず OS 非�
 | `v` | この event type を解釈するために必要な最小 envelope version。既存 type は `1`、`content.snapshot` は `2` |
 | `id` | ULID ベースのイベント ID。一意かつ時刻順ソート可能 |
 | `ts` | 実時刻タイムスタンプ（RFC3339、ミリ秒精度） |
-| `mono_ns` | 単調時計（ナノ秒）— 実時刻が変わっても順序が保証される |
+| `mono_ns` | 単調時計（ナノ秒）。実時刻が変わっても順序が保たれる |
 | `source` | 捕捉バックエンド。例：`macos.ax`・`macos.workspace`・`macos.eventtap`・`macos.applescript` |
 | `type` | イベント型（[タクソノミー](#イベント型タクソノミー)参照） |
 | `app` | アプリ名・バンドル ID・PID。帰属不能な `clipboard.copy` は `name: "Unknown"`、`bundle_id: null`、`pid: null` |
@@ -43,7 +43,7 @@ Zanei が記録するすべてのイベントは、ソースによらず OS 非�
 
 Chromium・Electron app など Accessibility の window number を公開しない app は、on-screen bounds により window ID と照合されます。
 
-このエンベロープは機械可読な JSON Schema としても公開されています：[`/schema/event.schema.json`](/schema/event.schema.json)。全露出面が共有する単一契約であり、Rust コアの型はこのファイルとの一致をテストで担保されます。
+このエンベロープは機械可読な JSON Schema として [`/schema/event.schema.json`](/schema/event.schema.json) にも公開されています。すべてのインターフェースが共有する単一の契約であり、Rust コアの型はこのファイルとの一致をテストで担保されます。
 
 ## field の byte 上限
 
@@ -76,7 +76,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | クリップボード操作。内容は opt-in | アクセシビリティ + 入力監視 |
 | `content.snapshot` | `macos.ax` | 前面ウィンドウの可視範囲に表示された Accessibility text。既定では記録せず、設定で有効化 | アクセシビリティ |
 
-`--types` フィルタでは末尾ワイルドカードでファミリー全体を選べます：`browser.*`・`ui.*`・`content.*` など。
+`--types` フィルタでは、`browser.*`・`ui.*`・`content.*` のように末尾ワイルドカードでファミリー全体を選べます。
 
 `type` は envelope version ごとの closed enum です。未知の型は拒否され、event type の追加には新しい `v` と対応する store migration が必要です。
 
@@ -89,12 +89,12 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `app.activate` | ✓ / — | — | 空。取得できた場合は window context を含む。遷移元は連続する activate イベントから導出 |
 | `app.launch` / `app.terminate` | — | — | 空 |
 | `window.focus` | ✓ | — | 空（フォーカス先はエンベロープ側） |
-| `window.title` | ✓ | — | `prev_title` — 変化後のタイトルはエンベロープ側 |
+| `window.title` | ✓ | — | `prev_title`（変化後のタイトルはエンベロープ側） |
 | `ui.focus` | ✓ | ✓ | `field_kind` |
 | `ui.click` | ✓ | ✓ | `button`（`left`/`right`/`other`）、`click_count` |
 | `ui.value` | ✓ | ✓ | `field_kind`、`value_len`、`text`。`text` は認可された入力によって増えた差分、または null。Chrome incognito・サイト除外中は null。自由入力・不明なフィールドでは `element.value` は記録されない |
 | `input.key` | ✓ | — | `kind`、`modifiers`、`count`、`combo`、`text`、`field_kind`（詳細は下記） |
-| `input.scroll` | ✓ | — | `direction`、`amount`、`count` — coalesce 済み合計 |
+| `input.scroll` | ✓ | — | `direction`、`amount`、`count`（coalesce 済みの合計） |
 | `browser.navigate` | ✓ | — | `url`（size limit 適用後のみ null）、`tab_title`、`mode`（常に `"normal"`）、`transition`（`navigate`/`tab_switch`/null） |
 | `clipboard.copy` | ✓ / — | — | `origin`（`copy_shortcut`/`unknown`）、`content_kind`（`text`/`image`/`file`/`other`）、`size_bytes`、`text`。unknown origin は app/window 帰属と本文を持たない |
 | `clipboard.paste` | ✓ | — | `content_kind`、`size_bytes`、`text`、ペースト先の `field_kind` |
@@ -112,7 +112,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 
 ### `input.key` の詳細
 
-「既定は入力の事実 + フィールド種別、内容は opt-in」の正確な形：
+「既定は入力の事実 + フィールド種別、内容は opt-in」の正確な形は次のとおりです。
 
 | `kind` | 意味 | `combo` | `text` | coalesce |
 | --- | --- | --- | --- | --- |
@@ -130,7 +130,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 
 ## coalesce の保証
 
-イベントはストアに届く前に coalesce されるため、consumer はキー連打やスクロールを生のまま受け取りません：
+イベントはストアに届く前に coalesce されるため、consumer はキー連打やスクロールを生のまま受け取りません。
 
 | 対象 | グループ化キー | 窓 | 結果 |
 | --- | --- | --- | --- |
@@ -149,7 +149,7 @@ pause・stop・処理対象の終了シグナル（`SIGTERM` / `SIGINT`）では
 
 ## `text_content` で変わるもの
 
-opt-in なのは「内容」（打った・コピーした文字列）だけです。「操作の事実」（ショートカット・クリック・URL・タイトル）は既定で記録されます：
+opt-in なのは「内容」（打った・コピーした文字列）だけです。「操作の事実」（ショートカット・クリック・URL・タイトル）は既定で記録されます。
 
 | フィールド | 既定（`false`） | opt-in（`true`） |
 | --- | --- | --- |

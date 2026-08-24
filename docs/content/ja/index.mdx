@@ -6,7 +6,7 @@ description: PC 操作履歴をローカルに記録し、LLM-ready なタイム
 **Zanei**（残映・ざんえい）は、あなたが PC で「何をしていたか」を OS のイベントから時系列に記録し、AI agent がそのまま読める形で取り出せるようにするツールです。
 
 :::note[対応プラットフォーム]
-Zanei は現在 **macOS のみ**対応です（Apple Silicon / Intel）。Windows・Linux はロードマップ上にあります。
+Zanei は現在 **macOS のみ**対応です（Apple Silicon / Intel）。
 :::
 
 ```bash
@@ -27,14 +27,14 @@ zanei timeline --since 2h
   <Card title="日報・スタンドアップ" icon="clipboard-list">
     1 日分のタイムラインを agent に要約させれば、作業ログの下書きが数秒でできます。
   </Card>
-  <Card title="agent の文脈強化" icon="bot">
-    CLI と MCP の 2 面 + 同梱 skill で主要 agent に接続。シェルを持たない Claude Desktop などの MCP クライアントからも使えます。
+  <Card title="agent に文脈を渡す" icon="bot">
+    CLI と MCP の 2 つの経路と同梱の skill で主要 agent につながります。シェルを持たない Claude Desktop などの MCP クライアントからも使えます。
   </Card>
 </CardGroup>
 
 ## 設計原則
 
-PC 操作履歴は機微なデータなので、既定値は保守的にしています：
+PC 操作履歴は機微なデータなので、既定値は保守的にしています。
 
 | 原則 | 実装 |
 | --- | --- |
@@ -42,7 +42,7 @@ PC 操作履歴は機微なデータなので、既定値は保守的にして�
 | **画面録画なし** | スクリーンショットも画面収録 API も使いません。OS のアクセシビリティ／イベント情報のみを扱います。 |
 | **キー入力の内容は既定で記録しない** | 記録するのは「入力があった事実とフィールド種別」まで。内容の記録は明示的な opt-in です。 |
 | **機微データの除外** | パスワード欄・Chrome シークレットウィンドウの URL・パスワードマネージャ等を既定で除外します。 |
-| **短命な保持** | 記録は既定 48 時間で自動削除されます。 |
+| **短期保持** | 記録は既定 48 時間で自動削除されます。 |
 
 詳細は[プライバシーモデル](/ja/guides/privacy)を参照してください。
 
@@ -61,10 +61,10 @@ flowchart LR
 
 ## 2 つのインターフェース
 
-| 面 | 役割 |
+| インターフェース | 役割 |
 | --- | --- |
 | [CLI](/ja/reference/cli) | 操作の中核。記録の開始・停止、権限診断、タイムライン取得、フィルタ管理まですべて単一バイナリ `zanei` で行います。 |
-| [MCP サーバ](/ja/reference/mcp) | 同じストアへの read-only ビュー。シェルを持たない MCP クライアント（Claude Desktop 等）への唯一の経路です。 |
+| [MCP サーバ](/ja/reference/mcp) | 同じストアへの read-only ビュー。シェルを持たない MCP クライアント（Claude Desktop 等）はこの経路で接続します。 |
 
 agent 向けには、[`zanei setup`](/ja/agents/setup) が skill（いつ Zanei を呼ぶかを agent に伝える指示）も提供します。skill 対応 agent には配置し、その他の CLI agent には導出した指示を表示します。MCP のツールは説明をプロトコル内に持っています。
 

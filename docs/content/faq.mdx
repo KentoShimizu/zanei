@@ -5,11 +5,11 @@ description: Common questions about privacy, browser support, data access, platf
 
 ## Is this a keylogger?
 
-No. Keystroke content is not captured unless you opt in (`text_content = true`); by default only the fact of typing and the field type are recorded. If no choice is already saved, the first successful interactive background `start` asks you to choose, with `N` as the default, and saves the answer so it does not ask again. You can change the decision later with `zanei config set capture.text_content <true|false>`. Password fields are excluded even if you opt in, redactors scrub recognizable secrets, and data does not leave your machine. See the [privacy model](/guides/privacy).
+No. Keystroke content is not captured unless you opt in (`text_content = true`); by default only the fact of typing and the field type are recorded. The first fully-granted interactive `start` asks once whether to opt in, defaulting to no, and `zanei config set capture.text_content <true|false>` changes it later. Password fields are excluded even if you opt in, redactors scrub recognizable secrets, and data does not leave your machine. See the [privacy model](/guides/privacy).
 
 ## Where does my data go?
 
-Into one local SQLite file (`~/.local/state/zanei/store.sqlite`) and nowhere else. The file is encrypted, and its key lives in your login Keychain. The binary has no feature that transmits data — there is no endpoint, no telemetry, no account. Data is deleted automatically after 48 hours by default.
+Into one local SQLite file (`~/.local/state/zanei/store.sqlite`) and nowhere else. The file is encrypted, and its key lives in your login Keychain. The binary has no feature that transmits data: no endpoint, no telemetry, no account. Data is deleted automatically after 48 hours by default.
 
 ## Does it take screenshots?
 
@@ -21,7 +21,7 @@ Only apps that expose useful text through macOS Accessibility. Coverage varies b
 
 ## Which browsers can it capture URLs from?
 
-**Chrome only, for now.** Chromium's AppleScript interface reports each window's mode. Zanei uses that state to omit Incognito URL events and text-content bodies. Safari and Firefox offer no reliable equivalent, so URL capture for them is not implemented. Details and the per-browser table: [event reference](/reference/events#browser-url-capture).
+Currently Chrome only. Chromium's AppleScript interface reports each window's mode. Zanei uses that state to omit Incognito URL events and text-content bodies. Safari and Firefox offer no reliable equivalent, so URL capture for them is not implemented. Details and the per-browser table: [event reference](/reference/events#browser-url-capture).
 
 ## How do I keep an app or site out of the record?
 
@@ -38,7 +38,7 @@ Usually yes. Electron and other Chromium apps build their accessibility tree laz
 fields would otherwise report as *unknown* to macOS Accessibility. With `capture.text_content`
 enabled, Zanei requests the tree when it attaches its observer, so eligible typed text is captured
 like anywhere else. A few non-standard apps still don't expose their fields even then, so their
-typed text is not captured — but text you copy there, and the fact of typing, are still recorded.
+typed text is not captured; text you copy there, and the fact of typing, are still recorded.
 Zanei never captures a field it cannot classify, which keeps password fields out. Restart Zanei
 after changing `capture.text_content`.
 
@@ -57,7 +57,7 @@ destination as a text field. If it cannot, the paste event is recorded with a `n
 
 ## Can I read the store directly?
 
-The live store is encrypted with [SQLCipher](https://www.zetetic.net/sqlcipher/) (AES-256). The key lives in your login Keychain as "Zanei store key" and never leaves this Mac, so a copy of the file — in a backup, a sync folder, or on another machine — cannot be read without it.
+The live store is encrypted with [SQLCipher](https://www.zetetic.net/sqlcipher/) (AES-256). The key lives in your login Keychain as "Zanei store key" and never leaves this Mac, so a copy of the file in a backup, a sync folder, or on another machine cannot be read without it.
 
 To look inside with your own tools, export a plain SQLite snapshot:
 
@@ -65,11 +65,11 @@ To look inside with your own tools, export a plain SQLite snapshot:
 zanei export --format sqlite --since 24h --out snapshot.sqlite
 ```
 
-It has the same tables as the live store and opens in `sqlite3`, DB Browser for SQLite, or any language's SQLite bindings — and in `zanei query --store snapshot.sqlite`. The snapshot is not encrypted; treat it like any other export. It includes content-snapshot bodies when those events are in scope. For sharing or external processing without them, select only the other families, for example `--types app.*,window.*,ui.*,input.*,browser.*,clipboard.*`. For most purposes `zanei query --format jsonl` is still easier and keeps you on the stable event envelope rather than internal table layouts, which may change between versions.
+It has the same tables as the live store and opens in `sqlite3`, DB Browser for SQLite, any language's SQLite bindings, and `zanei query --store snapshot.sqlite`. The snapshot is not encrypted; treat it like any other export. It includes content-snapshot bodies when those events are in scope. For sharing or external processing without them, select only the other families, for example `--types app.*,window.*,ui.*,input.*,browser.*,clipboard.*`. For most purposes `zanei query --format jsonl` is still easier and keeps you on the stable event envelope rather than internal table layouts, which may change between versions.
 
 ## How is this different from ChatGPT's Computer History?
 
-The same idea — your activity as context for an AI — with a different architecture: open source, local-only storage, no cloud processing, and agent-agnostic surfaces (CLI / skill / MCP) rather than one assistant. Zanei stops at structured, LLM-ready data; interpretation is done by whatever agent you connect.
+The idea is the same: your activity becomes context for an AI. The architecture is different. Zanei is open source, stores data locally only, does no cloud processing, and is not tied to one assistant (CLI / skill / MCP). It stops at structured, LLM-ready data and leaves interpretation to whatever agent you connect.
 
 ## Does it work on Windows or Linux?
 
@@ -81,7 +81,7 @@ Zanei records your own activity on your own machine. If the machine is employer-
 
 ## I granted a permission but `doctor` still says `denied`
 
-Toggling a permission sometimes requires the recorded process to restart before macOS reports it correctly. Run `zanei stop && zanei start`, then `zanei doctor` again. After `tccutil reset`, tccd may suppress permission dialogs until macOS is restarted; this behavior has been confirmed on physical hardware. If you built from source, remember that permissions bind to the signing identity — a rebuilt binary may need re-granting (see [permissions](/guides/permissions#permissions-and-code-signing)).
+Toggling a permission sometimes requires the recorded process to restart before macOS reports it correctly. Run `zanei stop && zanei start`, then `zanei doctor` again. After `tccutil reset`, tccd may suppress permission dialogs until macOS is restarted; this behavior has been confirmed on physical hardware. If you built from source, remember that permissions bind to the signing identity, so a rebuilt binary may need re-granting (see [permissions](/guides/permissions#permissions-and-code-signing)).
 
 ## `zanei start` exits with code 3. Is the recorder running?
 
@@ -132,7 +132,7 @@ After `brew upgrade`, run `zanei stop && zanei start` to switch the recorder to 
 
 ## What happens to my data after upgrading?
 
-Zanei 0.3.0 and later encrypt the store. A store written by 0.2.x or earlier is plaintext SQLite, and the recorder never rewrites such a file. On the first `zanei start` after upgrading it renames the old store to `store.sqlite.plaintext-<timestamp>` next to the new, encrypted `store.sqlite`, creates that new store at schema version 6, and logs `zanei: kept the previous plaintext store as …`. Every read — `zanei query`, `zanei timeline`, `zanei export`, and the MCP server — returns the events from both files as one history, so nothing recorded before the upgrade disappears from your timeline. `zanei status` lists the set-aside file under `store.retired_plaintext`.
+Zanei 0.3.0 and later encrypt the store. A store written by 0.2.x or earlier is plaintext SQLite, and the recorder never rewrites such a file. On the first `zanei start` after upgrading it renames the old store to `store.sqlite.plaintext-<timestamp>` next to the new, encrypted `store.sqlite`, creates that new store at schema version 6, and logs `zanei: kept the previous plaintext store as …`. Every read (`zanei query`, `zanei timeline`, `zanei export`, and the MCP server) returns the events from both files as one history, so nothing recorded before the upgrade disappears from your timeline. `zanei status` lists the set-aside file under `store.retired_plaintext`.
 
 The set-aside file stays plaintext. It only holds events older than the moment it was set aside, so the recorder deletes it as soon as that moment leaves the retention window (`output.retention_hours`, 48 hours by default); a longer retention keeps it longer, a shorter one removes it sooner. Until then, events inside it that leave the window are purged from it on the same schedule as the live store. An active `zanei pause` and the event counters carry over to the new store. `zanei purge --all` deletes it immediately, and so does deleting the file yourself.
 
@@ -167,7 +167,7 @@ Replace the path when using `--store`. This does not repair or delete the moved 
 
 ## Text content is not captured
 
-If no choice is already saved, the first successful interactive background `start` asks whether to enable content capture, and Enter accepts the default `N`. Check `zanei status`; if `TEXT CONTENT` is off, enable it explicitly and restart recording:
+Text content stays off unless you opted in at first start. Check `zanei status`; if `TEXT CONTENT` is off, enable it explicitly and restart recording:
 
 ```bash
 zanei config set capture.text_content true
@@ -189,4 +189,4 @@ Type for a few tens of seconds, press Ctrl-C, and inspect `~/zanei-trace.log`. T
 
 ## Something else?
 
-Open an issue — bug reports and design discussion are welcome while the interface is being finalized.
+Open an issue. Bug reports and design discussion are welcome while the interface is being finalized.

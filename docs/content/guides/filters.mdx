@@ -11,7 +11,7 @@ There are two ways to narrow by app, and they do different things:
 
 | | Capture-time filters (this page) | Query-time filters (`--app` etc.) |
 | --- | --- | --- |
-| Where it acts | Before the store — matching events are discarded | Only when reading data back |
+| Where it acts | Before the store: matching events are discarded | Only when reading data back |
 | Purpose | Keep sensitive apps out of the store | Narrow results |
 | Configured via | `zanei filter` commands / `[filter]` in `config.toml` | Per-command flags like `--app`, `--types` |
 | From MCP | Cannot be changed (read-only) | Usable as `query_events` arguments |

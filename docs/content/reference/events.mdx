@@ -3,7 +3,7 @@ title: Event reference
 description: The event taxonomy, the JSON envelope shared by all events, and per-browser URL capture support.
 ---
 
-Every event Zanei records — regardless of source — shares one OS-independent JSON envelope. The stable schema is the core asset of the project: capture backends may change per OS, but the shape your tools consume does not.
+Every event Zanei records, regardless of source, shares one OS-independent JSON envelope. The schema is stable by design: capture backends may change per OS, but the shape your tools consume does not.
 
 ## Event envelope
 
@@ -31,7 +31,7 @@ One event per line (NDJSON) in raw outputs (`query --format jsonl`, `record`, `e
 | `v` | Minimum envelope version required to interpret this event type. Existing event types use `1`; `content.snapshot` uses `2` |
 | `id` | ULID-based event ID, unique and time-sortable |
 | `ts` | Wall-clock timestamp (RFC3339, millisecond precision) |
-| `mono_ns` | Monotonic clock in nanoseconds — reliable ordering even across wall-clock changes |
+| `mono_ns` | Monotonic clock in nanoseconds, for reliable ordering even across wall-clock changes |
 | `source` | Capture backend, e.g. `macos.ax`, `macos.workspace`, `macos.eventtap`, `macos.applescript` |
 | `type` | Event type (see the [taxonomy](#event-taxonomy)) |
 | `app` | App name, bundle ID, and PID. An unattributed `clipboard.copy` uses `name: "Unknown"`, `bundle_id: null`, and `pid: null` |
@@ -43,7 +43,7 @@ One event per line (NDJSON) in raw outputs (`query --format jsonl`, `record`, `e
 
 Apps that do not expose an Accessibility window number, including Chromium and Electron apps, are matched to the window ID by on-screen bounds.
 
-This envelope is also published as a machine-readable JSON Schema at [`/schema/event.schema.json`](/schema/event.schema.json) — the single contract all surfaces share, and the file the Rust core's types are tested against.
+This envelope is also published as a machine-readable JSON Schema at [`/schema/event.schema.json`](/schema/event.schema.json). It is the single contract all surfaces share, and the file the Rust core's types are tested against.
 
 ## Field size limits
 
@@ -104,11 +104,11 @@ What each type carries in `data`, and whether the envelope's `window` / `element
 
 ### `ui.value` in detail
 
-For a free-text field, `data.text` contains only the difference added after an authorized input, and only when `text_content` is enabled. A keystroke or paste that Zanei recorded (`input.key`, `clipboard.paste`) authorizes value changes in the same app and focused element for the next 3 seconds; several value-change notifications may follow one input, and all of them are covered. Input that Zanei rejected — secure input, an excluded window, an unknown or unreadable field — authorizes nothing. The field's complete value is never stored in `element.value`.
+For a free-text field, `data.text` contains only the difference added after an authorized input, and only when `text_content` is enabled. A keystroke or paste that Zanei recorded (`input.key`, `clipboard.paste`) authorizes value changes in the same app and focused element for the next 3 seconds; several value-change notifications may follow one input, and all of them are covered. Input that Zanei rejected (secure input, an excluded window, an unknown or unreadable field) authorizes nothing. The field's complete value is never stored in `element.value`.
 
 Value changes are batched while typing continues and recorded after a 1-second pause or at most every 5 seconds, and when focus moves or the recorder stops. A batch can end in the middle of an IME composition, in which case part of the uncommitted reading appears in one event and the committed text in the next.
 
-A value change with no authorizing input — a different app, a different focused element, more than 3 seconds after the last input, or a Chrome window whose text bodies are suppressed — is not recorded as text: `data.text` is null and only `value_len` describes the resulting value. Deletion likewise has `text: null`. Voice input does not itself open an authorization window because it has no recorded keystroke or paste trigger. If voice text is inserted while a 3-second window opened by a preceding recorded keystroke or paste for the same app and focused-element generation is still active, that text can be included in the authorized difference.
+A value change with no authorizing input (a different app, a different focused element, more than 3 seconds after the last input, or a Chrome window whose text bodies are suppressed) is not recorded as text: `data.text` is null and only `value_len` describes the resulting value. Deletion likewise has `text: null`. Voice input does not itself open an authorization window because it has no recorded keystroke or paste trigger. If voice text is inserted while a 3-second window opened by a preceding recorded keystroke or paste for the same app and focused-element generation is still active, that text can be included in the authorized difference.
 
 ### `input.key` in detail
 
@@ -122,7 +122,7 @@ The exact shape of "fact of typing + field type by default, content opt-in":
 | `delete` | Backspace / Delete | null | null | yes |
 | `other` | Esc, F-keys, media keys | null | null | no |
 
-A shortcut is an *action*, not *content* — so `combo` is recorded without opt-in. It is a primary timeline ingredient (saves, commits, tab switches). `input.key.text` also requires inactive Secure Input, a known non-secure Accessibility field, and an eligible Chrome window when Chrome is active.
+A shortcut is an action rather than content, so `combo` is recorded without opt-in; shortcuts such as saves, commits, and tab switches are a primary input to the timeline. `input.key.text` also requires inactive Secure Input, a known non-secure Accessibility field, and an eligible Chrome window when Chrome is active.
 
 ### Clipboard attribution
 
@@ -149,7 +149,7 @@ Pause, stop, and handled termination signals (`SIGTERM` / `SIGINT`) drain the in
 
 ## What `text_content` changes
 
-Only *content* (what you typed or copied) is opt-in. *Facts of use* (shortcuts, clicks, URLs, titles) are recorded by default:
+Only content (what you typed or copied) is opt-in. Facts of use (shortcuts, clicks, URLs, titles) are recorded by default:
 
 | Field | Default (`false`) | Opt-in (`true`) |
 | --- | --- | --- |

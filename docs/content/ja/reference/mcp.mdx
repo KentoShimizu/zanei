@@ -3,19 +3,19 @@ title: MCP サーバ
 description: zanei mcp が公開する read-only な MCP（Model Context Protocol）サーバ — ツール・スキーマ・エラー・登録方法。
 ---
 
-`zanei mcp` は記録された行動履歴を MCP クライアントへ公開します — ターミナル型 agent（Claude Code・Codex・opencode・Hermes Agent）と、シェルを持たないクライアント（Claude Desktop・ChatGPT コネクタ）の接続経路です。
+`zanei mcp` は記録された行動履歴を MCP クライアントへ公開します。対象は、ターミナル型 agent（Claude Code・Codex・opencode・Hermes Agent）と、シェルを持たないクライアント（Claude Desktop・ChatGPT コネクタ）です。
 
 | | |
 | --- | --- |
 | サーバ名 | `zanei` |
 | サーババージョン | `initialize` 結果の `serverInfo.version` は Zanei の build に使われた package version。`zanei --version` が示す version 番号と同じ |
 | 起動コマンド | `zanei mcp` |
-| トランスポート | stdio のみ（stdin/stdout 上の JSON-RPC 2.0）— **ネットワーク面ゼロ** |
+| トランスポート | stdio のみ（stdin/stdout 上の JSON-RPC 2.0）。ネットワークは一切使わない |
 | capability | `tools` のみ。`resources` / `prompts` は未提供（[将来拡張](#将来拡張)参照） |
 
-**役割と境界。** サーバはローカルストアへの**read-only ビュー**です。記録デーモンとは独立プロセスで動き、記録の開始・停止も、設定変更も — 特に [capture-time フィルタ](/ja/guides/filters)の変更も — できません。`query_events` の `app` / `bundle_id` は保存済みデータへの query-time の絞り込みであり、プライバシー境界ではありません。
+サーバはローカルストアへの **read-only ビュー**です。記録デーモンとは独立プロセスで動き、記録の開始・停止も、[capture-time フィルタ](/ja/guides/filters)を含む設定の変更もできません。`query_events` の `app` / `bundle_id` は保存済みデータへの query-time の絞り込みであり、プライバシー境界ではありません。
 
-共有規約 — 時間表現・イベント型・イベントエンベロープ — は [CLI リファレンス](/ja/reference/cli#共通規約)と[イベントリファレンス](/ja/reference/events)に一致します。
+時間表現・イベント型・イベントエンベロープの共通規約は、[CLI リファレンス](/ja/reference/cli#共通規約)と[イベントリファレンス](/ja/reference/events)に一致します。
 
 ## ツール
 
@@ -87,7 +87,7 @@ description: zanei mcp が公開する read-only な MCP（Model Context Protoco
 }
 ```
 
-`limit` を超えた場合は `truncated: true`。`skipped_unknown_types` は、この binary が type を認識できず skip した store row の件数です。イベント内容は捕捉時点で既にプライバシー処理（secure field 除外・redaction）済みのものが格納されています — MCP 層で除外済みの情報が復元されることはありません。
+`limit` を超えた場合は `truncated: true`。`skipped_unknown_types` は、この binary が type を認識できず skip した store row の件数です。イベント内容は捕捉時点でプライバシー処理（secure field 除外・redaction）済みのものが格納されており、MCP 層で除外済みの情報が復元されることはありません。
 
 Content snapshot は 1 件 32 KiB までで、他人が書いた message や document を含み得ます。明示的な type、狭い `since` / `until`、小さい `limit` でだけ取得してください。ユーザーの明示要求なしに本文を現在の task 外へ送ってはいけません。
 
@@ -122,7 +122,7 @@ agent 向けの軽量チェック：記録は動いているか。`zanei status`
 | `capture.content_snapshot` | 前面ウィンドウの content snapshot が有効か。snapshot が存在するのは `true` のときだけ。scope 詳細は CLI の `zanei filter show` で確認 |
 | `permissions_ok` | heartbeat が新鮮な間は実行中 recorder 自身の権限判定。recorder 不在時はローカル probe の結果 |
 
-`running: false` を見た agent は、何もないところから答えるのではなく「PC 操作履歴は現在記録されていない」とユーザーに伝えられます。
+`running: false` を見た agent は、推測で答えるのではなく「PC 操作履歴は現在記録されていない」とユーザーに伝えられます。
 
 ## エラー
 
@@ -138,7 +138,7 @@ MCP サーバは記録の開始も権限付与も行いません。CLI で `zane
 
 ## 登録方法
 
-`zanei setup --agent <name>` が以下をすべて自動化します — クライアント別の手順は [agent セットアップ](/ja/agents/setup)を参照。stdio サーバ共通の JSON 形：
+`zanei setup --agent <name>` が以下をすべて自動化します。クライアント別の手順は [agent セットアップ](/ja/agents/setup)を参照してください。stdio サーバ共通の JSON の形は次のとおりです。
 
 ```json
 {
@@ -153,7 +153,7 @@ MCP サーバは記録の開始も権限付与も行いません。CLI で `zane
 
 ## 将来拡張
 
-現在は未提供です。いずれも同じ read-only ストアビューの上に増設され、記録デーモンへの書き込み権限は将来も追加されません：
+現在は未提供です。いずれも同じ read-only ストアビューの上に増設され、記録デーモンへの書き込み権限は将来も追加されません。
 
 - **resources** — 直近タイムラインや現在の設定を read-only リソースとして公開（resources を好むクライアント向け）。
 - **prompts** — 「作業を再開する」定型プロンプトのサーバ提供。

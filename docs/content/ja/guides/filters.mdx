@@ -7,11 +7,11 @@ description: どのアプリ・サイトを記録するかを決める許可/不
 
 ## capture-time と query-time
 
-「アプリで絞る」には2種類あり、役割が異なります：
+「アプリで絞る」方法は 2 種類あり、役割が異なります。
 
 | | capture-time フィルタ（このページ） | query-time フィルタ（`--app` 等） |
 | --- | --- | --- |
-| 効く場所 | ストアの手前 — 該当イベントは破棄 | 読み出し時のみ |
+| 効く場所 | ストアの手前。該当イベントは破棄 | 読み出し時のみ |
 | 目的 | 機微アプリをストアに入れない | 結果の絞り込み |
 | 設定手段 | `zanei filter` コマンド / `config.toml` の `[filter]` | 各コマンドの `--app` `--types` 等 |
 | MCP から | 変更不可（read-only） | `query_events` の引数として利用可 |
@@ -27,7 +27,7 @@ zanei filter content-snapshot only-app add Terminal          # snapshot をこ�
 zanei filter content-snapshot exclude-site add mail.google.com
 ```
 
-コマンドの形は `zanei filter [<scope>] <list> add|remove [VALUE]` です。`<scope>` を省略すると `[filter]`、`text-content` は `[filter.text_content]`、`content-snapshot` は `[filter.content_snapshot]` を操作します。4 つの list はすべての scope で同じ意味です：
+コマンドの形は `zanei filter [<scope>] <list> add|remove [VALUE]` です。`<scope>` を省略すると `[filter]`、`text-content` は `[filter.text_content]`、`content-snapshot` は `[filter.content_snapshot]` を操作します。4 つの list はすべての scope で同じ意味です。
 
 | list | config key suffix | 意味 |
 | --- | --- | --- |
@@ -44,7 +44,7 @@ app / site の各軸で `include_only_*` が非空なら only mode、空なら e
 
 ## 各 scope が除外するもの
 
-評価順は固定です：
+評価順は固定です。
 
 1. 組み込みの app 除外。
 2. `[filter]` の app rule。対象外 app に帰属するすべての event を破棄。
@@ -72,7 +72,7 @@ zanei apps slack --json    # 機械可読の候補
 
 ## Browser の既定除外
 
-private window を確実に判定できないため、両 content scope は次の browser を既定で除外します：
+private window を確実に判定できないため、両方の content scope は次の browser を既定で除外します。
 
 | browser | bundle ID |
 | --- | --- |
@@ -88,13 +88,13 @@ private window を確実に判定できないため、両 content scope は次�
 ## マッチング
 
 - **アプリ** — `bundle_id` で照合します（推奨。表示名は変わり得ます）。`bundle_id` を持つアプリは `bundle_id` だけで照合され、表示名のエントリは `bundle_id` を持たないイベントにのみ効きます。大文字小文字は区別しません。
-- **サイト** — Chrome URL host のドット境界サフィックス一致：`example.com` は `api.example.com` にも一致しますが、`evil-example.com` には一致しません。Public Suffix List は扱わないため、`com` のような指定は全 `.com` ホストに一致します。完全なドメイン名を指定してください。
+- **サイト** — Chrome URL host のドット境界サフィックスで一致します。`example.com` は `api.example.com` にも一致しますが、`evil-example.com` には一致しません。Public Suffix List は扱わないため、`com` のような指定は全 `.com` ホストに一致します。完全なドメイン名を指定してください。
 - **優先順位** — `include_only_*` が非空なら「そのリストにあり、かつ `exclude_*` にない」ものだけ捕捉。空なら「`exclude_*` にない」ものすべてを捕捉します。
 - **帰属できたイベントに対するアプリ単位の除外は全面的** — そのアプリに帰属できたすべてのイベント型（`ui.*`・`input.*`・`window.*`・…）を落とします。帰属不能な clipboard 変化は `app.name: "Unknown"` として残り得ます。
 
 ## 常時有効の除外
 
-リスト設定に関係なく：
+リスト設定に関係なく、次の除外は常に効きます。
 
 - **プライベートブラウジング** — Chrome incognito は URL イベントを生成せず、本文も null のままです。タイトルと操作メタデータは残り得ます。
 - **Secure Input** — Secure Input 中は content snapshot を取りません。

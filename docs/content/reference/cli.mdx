@@ -3,7 +3,7 @@ title: CLI reference
 description: Every zanei command, flag, shared convention, and exit code.
 ---
 
-All functionality lives in a single binary, `zanei` — daemon control, permission diagnostics, data retrieval, filter management, agent setup, and the MCP server. The CLI and the [MCP server](/reference/mcp) are thin wrappers over the same core and store, and share the conventions on this page.
+All functionality lives in a single binary, `zanei`: daemon control, permission diagnostics, data retrieval, filter management, agent setup, and the MCP server. The CLI and the [MCP server](/reference/mcp) are thin wrappers over the same core and store, and share the conventions on this page.
 
 - Signed, notarized single Rust binary; no external runtime.
 - Strictly local: the CLI performs no network egress of any kind.
@@ -145,7 +145,7 @@ required permission is missing. In that combination, stdout is therefore not JSO
 
 `status` values: `granted` / `denied` / `not_determined`. `reported_by_recorder` is `true` when the result came from a fresh recorder heartbeat. Without one, `doctor` probes from its own process, sets this field to `false`, and the human output notes that the recorder must be started to see its own permissions.
 
-`store_key` reports where the store's encryption key is. `state` is `key_store` (the key was found; `detail` names the place — the login Keychain, or the `ZANEI_STORE_KEY_FILE` development override), `not_needed` (the store is missing, plaintext, or not recognized), `missing` (the store is encrypted but there is no key), `mismatch` (the key does not decrypt this store), `key_store_locked` or `key_store_denied` (`detail` carries the platform's advice, for example that the login Keychain is locked), or `unavailable`; `detail` is present only when there is more to report. Human-readable output adds a `Store key: ...` line after the permission table. `doctor` does not fail when the store is locked: it reports the key state and probes permissions from its own process instead.
+`store_key` reports where the store's encryption key is. `state` is `key_store` (the key was found; `detail` names the place, either the login Keychain or the `ZANEI_STORE_KEY_FILE` development override), `not_needed` (the store is missing, plaintext, or not recognized), `missing` (the store is encrypted but there is no key), `mismatch` (the key does not decrypt this store), `key_store_locked` or `key_store_denied` (`detail` carries the platform's advice, for example that the login Keychain is locked), or `unavailable`; `detail` is present only when there is more to report. Human-readable output adds a `Store key: ...` line after the permission table. `doctor` does not fail when the store is locked: it reports the key state and probes permissions from its own process instead.
 
 ### Recorder health
 
@@ -186,7 +186,7 @@ Human-readable output always ends with the next action. When a required permissi
 walks through granting it: run `zanei start` so the recorder asks macOS for the permission, then
 follow the dialog and System Settings guidance. Accessibility adds the bundled app as `Zanei`, but
 Input Monitoring may omit the row even after the dialog grant takes effect. After restarting, the
-recorder-reported `doctor` result — not the list — is authoritative. The manual `+` walkthrough
+recorder-reported `doctor` result, not the list, is authoritative. The manual `+` walkthrough
 copies the `Zanei.app` root when running from a bundle and the executable path when running as a raw
 binary; use Command-Shift-G (or a single `~`) to select that path. A manually added bundle entry
 persists. See the [permissions guide](/guides/permissions) for the complete setup and removal flow.
@@ -246,7 +246,7 @@ expected behavior.
 ## `stop`
 
 Stops the recorder instance that owns the selected store. A launchd recorder is unregistered; a
-foreground recorder receives `SIGTERM`. **Not destructive** — stored data is kept. Exits with
+foreground recorder receives `SIGTERM`. **Not destructive**: stored data is kept. Exits with
 **code 4** if there is no recorder to stop.
 
 Stopping uses two bounded stages in order: it waits up to 10 seconds for the selected store owner
@@ -383,7 +383,7 @@ Use the configured store path instead of the default path when applicable. The m
 
 ## `record`
 
-Foreground capture: streams raw events as NDJSON to stdout (or a file) without daemonizing. Intended for piping and experiments — use [`start`](#start) for everyday recording.
+Foreground capture: streams raw events as NDJSON to stdout (or a file) without daemonizing. Intended for piping and experiments; use [`start`](#start) for everyday recording.
 
 ```bash
 zanei record --stream                 # NDJSON to stdout
@@ -413,13 +413,13 @@ zanei query --since 2h --app Safari --format json --limit 500
 | `--limit <N>` | Max events (default 500) |
 | `--format` | `jsonl` (default) / `json` / `table` |
 
-These are query-time filters — they narrow reads, not what gets recorded (see [filters](/guides/filters)).
+These are query-time filters: they narrow reads, not what gets recorded (see [filters](/guides/filters)).
 
 When `--types` is omitted, `content.*` is excluded. Request `--types content.snapshot` or `--types content.*` explicitly to read snapshot bodies; other families can be listed alongside it. `--format json` remains an array of event objects. If stored rows use unknown event types, Zanei skips them and warns with the count on stderr; global `--quiet` suppresses that warning.
 
 ## `timeline`
 
-Splits raw events into sessions, deduplicates, coalesces, and serializes an LLM-ready summary within a token budget. **The command agents call most.**
+Splits raw events into sessions, deduplicates, coalesces, and serializes an LLM-ready summary within a token budget. This is the command agents call most.
 
 ```bash
 zanei timeline --since 1h --format md --token-budget 4000
@@ -600,7 +600,7 @@ Schema: see the [configuration reference](/reference/config).
 
 ## `mcp`
 
-Runs the stdio MCP server — JSON-RPC on stdin/stdout, zero network surface. Started by MCP clients (Claude Code, Codex, opencode, Claude Desktop, ...), not usually by hand.
+Runs the stdio MCP server: JSON-RPC on stdin/stdout, with no network access. Started by MCP clients (Claude Code, Codex, opencode, Claude Desktop, ...), not usually by hand.
 
 ```bash
 zanei mcp [--store <PATH>]

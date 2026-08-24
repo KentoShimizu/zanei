@@ -3,7 +3,7 @@ title: Setup
 description: Set up Zanei with native integration or printed instructions for manual placement.
 ---
 
-Zanei ships one canonical `skills/SKILL.md`. `zanei setup` installs it unchanged for agents with native skill support. For opencode and pi, it derives an instruction snippet, prints it to stdout, and leaves placement to you. For MCP, setup prints the registration command to run — only Claude Desktop's config file is written directly; opencode's MCP JSON is likewise printed for manual configuration.
+Zanei ships one canonical `skills/SKILL.md`. `zanei setup` installs it unchanged for agents with native skill support. For opencode and pi, it derives an instruction snippet, prints it to stdout, and leaves placement to you. For MCP, setup prints the registration command to run; only Claude Desktop's config file is written directly, and opencode's MCP JSON is likewise printed for manual configuration.
 
 ```bash
 zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
@@ -98,7 +98,7 @@ mcp_servers:
     args: ["mcp"]
 ```
 
-Because Hermes Agent configuration is user-global, `--scope project` does not apply here — setup always targets `~/.hermes/`.
+Because Hermes Agent configuration is user-global, `--scope project` does not apply here; setup always targets `~/.hermes/`.
 
 </Tab>
 <Tab title="Claude Desktop">
@@ -132,7 +132,7 @@ pi ships without MCP and does not support native skills. This command does not m
 </Tab>
 </Tabs>
 
-Other MCP-capable agents not listed above: register `zanei mcp` as a stdio server using the client's standard MCP configuration — the JSON shape is the same as the Claude Desktop snippet.
+For MCP-capable agents not listed above, register `zanei mcp` as a stdio server using the client's standard MCP configuration; the JSON shape is the same as the Claude Desktop snippet.
 
 ## Verify it works
 

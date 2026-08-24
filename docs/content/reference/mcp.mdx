@@ -3,19 +3,19 @@ title: MCP server
 description: The read-only MCP (Model Context Protocol) server exposed by zanei mcp — tools, schemas, errors, and registration.
 ---
 
-`zanei mcp` exposes recorded activity to MCP clients — terminal agents (Claude Code, Codex, opencode, Hermes Agent) and shell-less clients (Claude Desktop, ChatGPT connectors), for which MCP is the integration path.
+`zanei mcp` exposes recorded activity to MCP clients: terminal agents (Claude Code, Codex, opencode, Hermes Agent) and shell-less clients (Claude Desktop, ChatGPT connectors), for which MCP is the integration path.
 
 | | |
 | --- | --- |
 | Server name | `zanei` |
 | Server version | `serverInfo.version` in the `initialize` result is the package version used to build Zanei, matching the version number shown by `zanei --version` |
 | Start command | `zanei mcp` |
-| Transport | stdio only (JSON-RPC 2.0 over stdin/stdout) — **zero network surface** |
+| Transport | stdio only (JSON-RPC 2.0 over stdin/stdout); no network access |
 | Capabilities | `tools` only; `resources` / `prompts` are not provided yet (see [future](#future-extensions)) |
 
-**Role and boundary.** The server is a **read-only view** over the local store. It runs as an independent process from the recording daemon and cannot start or stop recording, and cannot change configuration — including the [capture-time filters](/guides/filters). The `app` / `bundle_id` arguments of `query_events` are query-time narrowing over already-stored data, not a privacy boundary.
+**Role and boundary.** The server is a **read-only view** over the local store. It runs as an independent process from the recording daemon and cannot start or stop recording, and cannot change configuration, including the [capture-time filters](/guides/filters). The `app` / `bundle_id` arguments of `query_events` are query-time narrowing over already-stored data, not a privacy boundary.
 
-Shared conventions — time expressions, event types, the event envelope — match the [CLI reference](/reference/cli#shared-conventions) and [event reference](/reference/events).
+Shared conventions (time expressions, event types, the event envelope) match the [CLI reference](/reference/cli#shared-conventions) and [event reference](/reference/events).
 
 ## Tools
 
@@ -23,7 +23,7 @@ All three tools are read-only and side-effect free.
 
 ### `get_timeline`
 
-Returns the LLM-ready timeline for a range. Equivalent to `zanei timeline`. The tool agents call most.
+Returns the LLM-ready timeline for a range. Equivalent to `zanei timeline`, and the tool agents call most.
 
 **Input**
 
@@ -138,7 +138,7 @@ The MCP server does not start recording or grant permissions. Use the CLI's star
 
 ## Registration
 
-`zanei setup --agent <name>` automates all of the below — see [agent setup](/agents/setup) for per-client walkthroughs. The generic stdio-server JSON shape:
+`zanei setup --agent <name>` automates all of the below; see [agent setup](/agents/setup) for per-client walkthroughs. The generic stdio-server JSON shape:
 
 ```json
 {
@@ -161,6 +161,6 @@ Not provided today; all would sit on the same read-only store view, and write ac
 
 ## Security boundary
 
-- The server itself performs **no external transmission** (stdio only, no network surface).
+- The server itself performs no external transmission (stdio only, no network access).
 - Once an agent receives tool results, forwarding them to an LLM provider is the **agent's** responsibility. Given the sensitivity of activity history, the shipped skill files instruct agents to narrow the requested range before sending.
 - Stored content is privacy-processed at capture time. Typed content and content snapshots are separate opt-ins and both default to off.

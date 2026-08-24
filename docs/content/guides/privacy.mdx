@@ -12,7 +12,7 @@ Zanei records what you do on your computer. Because that data is sensitive, the 
 3. **No content by default.** Typing is recorded as "typing happened in this kind of field," not what was typed. Text shown in windows is not recorded. Typed content and content snapshots are separate opt-ins.
 4. **Capture-time filtering.** Events attributable to excluded apps are discarded before they reach the store. An unattributed clipboard change can still be stored with `app.name: "Unknown"` because it cannot be matched to the excluded app. Excluded Chrome sites produce no URL events or text-content bodies.
 5. **Read-only MCP exposure.** The [MCP server](/reference/mcp) is a read-only view. An agent connected only through MCP can read the timeline but cannot change what is recorded or edit filters.
-6. **Encrypted at rest.** The store file is encrypted. Its key is generated on the recorder's first start and kept in your login Keychain; it is not synced to iCloud Keychain. A copy of the file — in a backup, a sync folder, or on another machine — cannot be read without it, and deleting the key makes every copy unreadable.
+6. **Encrypted at rest.** The store file is encrypted. Its key is generated on the recorder's first start and kept in your login Keychain; it is not synced to iCloud Keychain. A copy of the file in a backup, a sync folder, or on another machine cannot be read without it, and deleting the key makes every copy unreadable.
 
 ## What is recorded with the default configuration
 
@@ -27,9 +27,11 @@ Zanei records what you do on your computer. Because that data is sensitive, the 
 
 ## Typed content is opt-in
 
-Setting `capture.text_content = true` in the [configuration](/reference/config) enables recording of authorized typed characters (`input.key`), text inserted into fields (`ui.value.data.text`), and clipboard contents. For free-text fields, Zanei captures only the difference inserted within 3 seconds after a keystroke or paste in the same app and focused element; it does not capture the displayed document or the field's full value. While you keep typing, changes are batched and recorded after a 1-second pause or at most every 5 seconds. Clipboard copy text requires a matching Command-C from the same process within 500 milliseconds. `element.value` stays null for free-text and unknown elements; only an allow-list of known-safe non-text controls (buttons, checkboxes, sliders) provides it. During first-time setup, if `capture.text_content` is not already explicit in `config.toml`, the first successful interactive background `start` asks you to choose. The default answer is `N`, so content capture stays off unless you opt in. Your answer is saved and the question is not repeated. You can change it later with `zanei config set capture.text_content <true|false>`. If you opt in:
+Setting `capture.text_content = true` in the [configuration](/reference/config) enables recording of authorized typed characters (`input.key`), text inserted into fields (`ui.value.data.text`), and clipboard contents. For free-text fields, Zanei captures only the difference inserted within 3 seconds after a keystroke or paste in the same app and focused element; it does not capture the displayed document or the field's full value. While you keep typing, changes are batched and recorded after a 1-second pause or at most every 5 seconds. Clipboard copy text requires a matching Command-C from the same process within 500 milliseconds. `element.value` stays null for free-text and unknown elements; only an allow-list of known-safe non-text controls (buttons, checkboxes, sliders) provides it. During first-time setup, the first fully-granted interactive `start` asks you to choose once; the default is no. You can change it later with `zanei config set capture.text_content <true|false>`.
 
 When content capture is enabled, Zanei requests accessibility tree construction from every observed app. Electron apps honor this request so macOS Accessibility can classify their input fields; unsupported native apps ignore it. Building the tree can add a small performance cost in affected Electron apps.
+
+If you opt in:
 
 - Password fields remain excluded; secure fields are dropped at capture time.
 - If Accessibility cannot confirm a known non-secure input field, `input.key.text` and pasted text remain null.
@@ -82,7 +84,7 @@ For values that are captured, redactors scrub recognizable sensitive content: em
 - **Website scopes are Chrome-only.** Chrome is the only browser for which Zanei can obtain a URL and window mode. Website rules do not apply to other browsers; those are controlled only by app scope.
 - **Window titles from Chrome Incognito and excluded-site windows.** Their text-content bodies remain null, but Accessibility can still record the title as a `window.title` event. To suppress titles too, exclude Chrome: `zanei filter exclude-app add com.google.Chrome`.
 - **Agents with shell access.** An agent with shell access can use the CLI to change recording settings, filters, and stored recordings, subject to the host's approval policy. The shipped skill instructs agents not to make these changes unless the user explicitly asks.
-- **Any process that can run `zanei` as you.** Encryption protects copies of the file, not the CLI. Anything running as your user — including an agent with shell access, which can run `zanei export` — can read the data, as can root or anything that reads process memory. Theft of the disk itself is covered by FileVault, not by Zanei.
+- **Any process that can run `zanei` as you.** Encryption protects copies of the file, not the CLI. Anything running as your user can read the data, including an agent with shell access that can run `zanei export`; so can root or anything that reads process memory. Theft of the disk itself is covered by FileVault, not by Zanei.
 - **After an agent reads your data.** The MCP server and CLI do not send anything anywhere, but an agent that reads your timeline will typically send it to its LLM provider. That handoff is governed by the agent. The shipped skill instructs agents to narrow the time range before sending.
 
 ## Intended use
