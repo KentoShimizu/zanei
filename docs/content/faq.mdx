@@ -42,6 +42,10 @@ typed text is not captured — but text you copy there, and the fact of typing, 
 Zanei never captures a field it cannot classify, which keeps password fields out. Restart Zanei
 after changing `capture.text_content`.
 
+## Why are typed text and content snapshots missing in some Chromium-based apps?
+
+Chromium-based apps that disable platform accessibility activation have a permanent capture limitation; ChatGPT desktop is one example. Zanei still records keystroke facts (such as `input.key` counts), clicks, and clipboard events in these apps. It cannot record typed text content (`ui.value` / `data.text`) or content snapshots (`content.snapshot`), and it never captures screen images. Zanei cannot fix this because the app ignores the OS-level activation request from external clients.
+
 ## Can I read the store directly?
 
 The live store is encrypted with [SQLCipher](https://www.zetetic.net/sqlcipher/) (AES-256). The key lives in your login Keychain as "Zanei store key" and never leaves this Mac, so a copy of the file — in a backup, a sync folder, or on another machine — cannot be read without it.

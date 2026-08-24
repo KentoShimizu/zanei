@@ -42,6 +42,10 @@ zanei filter exclude-site add example.com
 記録しないため、パスワード欄は除外されたままです。`capture.text_content` を変更したら Zanei を
 再起動してください。
 
+## 一部の Chromium 系アプリで入力本文や content snapshot が捕捉されないのはなぜですか？
+
+プラットフォームのアクセシビリティ有効化を無効にする Chromium 系アプリには、恒久的な捕捉制限があります。ChatGPT デスクトップはその一例です。この種類のアプリでも、Zanei はキー入力があった事実（`input.key` の回数など）、クリック、クリップボードイベントを記録します。一方、入力本文（`ui.value` / `data.text`）と content snapshot（`content.snapshot`）は記録できず、Zanei は画面画像も捕捉しません。アプリが外部クライアントからの OS レベルの有効化要求を無視するため、Zanei 側では修正できません。
+
 ## ストアを直接読んでもいいですか？
 
 稼働中のストアは [SQLCipher](https://www.zetetic.net/sqlcipher/)（AES-256）で暗号化されています。鍵は「Zanei store key」としてログインキーチェーンにあり、この Mac の外には出ません。そのため、バックアップや同期フォルダ、別のマシンにあるファイルのコピーは、鍵なしでは読めません。
