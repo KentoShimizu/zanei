@@ -163,6 +163,8 @@ zanei stop && zanei start
 
 In 0.3.0, Safari, Firefox, Brave, Edge, Vivaldi, and Arc are outside the default text-content scope even for upgraded configurations. Their body fields stay null while events and non-content facts remain. Run `zanei filter show` before changing those defaults.
 
+If Chrome body fields remain null while content capture is enabled, run `zanei doctor` and inspect `COLLECTOR HEALTH`. A current `chrome` reason identifies an active collector problem; `COLLECTOR FAILURES` alone is only cumulative history. See [diagnosing recorder problems](/guides/recording#diagnosing-recorder-problems) for the persistent daemon logs and recovery rules.
+
 If content is enabled but still missing, run a short foreground session with privacy-safe diagnostics enabled:
 
 ```bash

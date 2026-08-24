@@ -13,7 +13,7 @@ All functionality lives in a single binary, `zanei` — daemon control, permissi
 
 | Command | Summary |
 | --- | --- |
-| [`doctor`](#doctor) | Diagnose required macOS permissions; guide granting |
+| [`doctor`](#doctor) | Diagnose macOS permissions and recorder health; guide granting |
 | [`start`](#start) | Start background recording (launchd) |
 | [`stop`](#stop) | Stop recording and unregister (data kept) |
 | [`pause`](#pause) / [`resume`](#resume) | Temporarily suspend / resume recording |
@@ -98,7 +98,7 @@ Diagnostic/state commands use a separate fixed-output convention:
 
 ## `doctor`
 
-Diagnoses the granted state of required TCC permissions (Accessibility / Input Monitoring / Automation) against the configured sources and content opt-ins.
+Diagnoses recorder health and the granted state of required TCC permissions (Accessibility / Input Monitoring / Automation) against the configured sources and content opt-ins.
 
 ```bash
 zanei doctor            # human-readable; shows granting steps and the System Settings pane if anything is missing
@@ -134,13 +134,53 @@ required permission is missing. In that combination, stdout is therefore not JSO
   },
   "missing_required": ["input_monitoring"],
   "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-  "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" }
+  "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" },
+  "health": {
+    "state": "degraded",
+    "degraded": { "chrome": "state=unavailable phase=query kind=apple_event code=-1712" },
+    "collector_failures": { "chrome": 3 }
+  }
 }
 ```
 
 `status` values: `granted` / `denied` / `not_determined`. `reported_by_recorder` is `true` when the result came from a fresh recorder heartbeat. Without one, `doctor` probes from its own process, sets this field to `false`, and the human output notes that the recorder must be started to see its own permissions.
 
 `store_key` reports where the store's encryption key is. `state` is `key_store` (the key was found; `detail` names the place — the login Keychain, or the `ZANEI_STORE_KEY_FILE` development override), `not_needed` (the store is missing, plaintext, or not recognized), `missing` (the store is encrypted but there is no key), `mismatch` (the key does not decrypt this store), `key_store_locked` or `key_store_denied` (`detail` carries the platform's advice, for example that the login Keychain is locked), or `unavailable`; `detail` is present only when there is more to report. Human-readable output adds a `Store key: ...` line after the permission table. `doctor` does not fail when the store is locked: it reports the key state and probes permissions from its own process instead.
+
+### Recorder health
+
+`health.state` classifies only the evidence available from the store lock and persisted recorder status:
+
+| State | Meaning |
+| --- | --- |
+| `healthy` | The current store owner matches the recorder status, the status is running, and there are no current degraded reasons |
+| `degraded` | The current store owner matches the running recorder status, which contains one or more current degraded reasons |
+| `stopped` | The store has readable status but no current owner |
+| `stale` | The owner matches the persisted recorder instance, but its status is not accepted as current (`status.running` is false) |
+| `suspected_unavailable` | A store owner exists, but the persisted recorder instance does not match it |
+| `status_unreadable` | Checking, opening, or reading the selected store status fails |
+| `status_missing` | The selected store does not exist |
+
+The `health` object has these fields:
+
+| Field | JSON type | Meaning |
+| --- | --- | --- |
+| `state` | string | One of the states above |
+| `degraded` | `object<string, string>` \| null | Current component/reason map. It is empty when readable evidence does not belong to the current owner, and null when status is missing or unreadable |
+| `collector_failures` | `object<string, integer>` \| null | Persisted cumulative failures by collector. Recovery does not reset these counts. It is null when status is missing or unreadable |
+| `status_error` | string, omitted otherwise | Selected-store inspection or status-read failure detail; present only for `status_unreadable` |
+
+Human-readable output adds the following fixed lines after `Store key:`:
+
+| Line | Value |
+| --- | --- |
+| `COLLECTOR HEALTH` | `health.state`, followed by one indented `component: reason` line per current degraded entry |
+| indented `status: detail` | Present only for `status_unreadable` |
+| `COLLECTOR FAILURES none` | Status is readable and the cumulative map is empty |
+| `COLLECTOR FAILURES -` | Status is missing or unreadable |
+| `COLLECTOR FAILURES` | Followed by one indented `component: count` line per cumulative entry |
+
+Control characters in human-readable component names, reasons, and status errors are printed as visible escapes. Recorder health does not change `doctor`'s exit policy: code 3 still means that a required permission is missing. A `degraded` health state by itself does not make `doctor` fail.
 
 Human-readable output always ends with the next action. When a required permission is denied, it
 walks through granting it: run `zanei start` so the recorder asks macOS for the permission, then

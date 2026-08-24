@@ -57,6 +57,37 @@ zanei status --json   # agent・スクリプト向け
 
 対象デーモンが存在しない場合（`status` / `stop` など）は終了コード 4 を返します。
 
+## recorder の不調を診断する
+
+最初に `zanei doctor` を実行します。`COLLECTOR HEALTH` セクションは、現在得られる証拠に基づく状態を報告します。`zanei doctor --json` では同じ情報を `health` で取得できます。すべての状態と field は [CLI リファレンス](/ja/reference/cli#recorder-health)に定義しています。
+
+現在の degraded 状態と累積 failure は分けて読みます。
+
+- `doctor --json` の `health.degraded` と `status --json` の `degraded` は、現在発生している問題だけを示します。人間向け出力では `COLLECTOR HEALTH` または `DEGRADED` の下に同じ map を表示します。`state=unavailable phase=query kind=apple_event code=-1712` のような Chrome の診断 reason は、安定した用語と、取得できる場合は元の数値 error code で構成されます。他の component は component 固有の reason を使う場合があります。
+- `collector_failures` は collector ごとの失敗回数を永続化した単調増加の count です。人間向け出力では `COLLECTOR FAILURES` の下に表示します。0 より大きい値は過去に失敗があったことを意味し、それだけでは現在も不調とは判断できません。
+
+fresh かつ current owner に属する recorder status が得られている間、現在の reason は、collector が実際の回復を報告した場合だけ削除されます。collector の予期しない終了後に保持された reason は、再起動した collector が 60 秒間安定稼働した場合にも削除されます。recorder が停止した場合、status が stale になった場合、または永続化済み recorder instance が current owner と一致しなくなった場合、recorder 由来の診断は、回復したためではなく current な証拠が得られないため degraded map から削除されます。`retired_store` など store の読取時に合成されるエントリは、recorder が動作しているかどうかにかかわらず残ります。recorder 由来の診断がない状態は、正典である CLI の [recorder health 定義](/ja/reference/cli#recorder-health)と [`status` field 定義](/ja/reference/cli#status)に従い、状況に応じた `health.state`（`stopped` / `stale` / `suspected_unavailable`）と `store_write_state` を併せて解釈してください。回復しても `collector_failures` は reset されないため、recorder 由来の診断がなく、累積 count が 0 より大きい状態は正常です。
+
+バックグラウンド recorder では、launchd の永続的な診断出力を選択した store の隣に書き込みます。
+
+| ファイル | 既定 path |
+| --- | --- |
+| 標準出力 | `~/.local/state/zanei/store.sqlite.daemon.stdout.log` |
+| 標準エラー | `~/.local/state/zanei/store.sqlite.daemon.stderr.log` |
+
+store path を変更した場合のファイル名は `<store>.daemon.stdout.log` と `<store>.daemon.stderr.log` です。どちらも現在のユーザーだけが読み書きできる通常ファイル（`0600`）です。Zanei はこれらを自動ローテーションしません。含まれるのは recorder の診断情報だけで、捕捉した event payload や text 本文は含まれません。
+
+Zanei は存在しない store directory を mode `0700` で作成し、store と log の配置先 directory が安全でなければ launchd recorder の起動を拒否します。directory は現在のユーザーが所有し、group/world writable であってはなりません。祖先 directory の owner は root または現在のユーザーで、group/world writable な祖先には sticky bit も必要です。アクセスを許可する拡張 ACL entry と、安全に解釈できない ACL entry は拒否されます。
+
+起動 error には安全でない directory が表示されます。意図しない group/world write 権限は削除してください。error が拡張 ACL を示し、その ACL が不要なら、表示された directory から削除します。
+
+```bash
+chmod go-w /path/to/directory-reported-by-zanei
+chmod -N /path/to/directory-reported-by-zanei
+```
+
+その後、`zanei start` を再実行します。意図的に共有している directory の場合は、この検証を弱めず、owner だけが使用できる store directory を選択してください。
+
 ## 一時停止と再開
 
 会議や画面共有の間だけ記録を止めるには `pause` を使います。
@@ -73,7 +104,7 @@ zanei resume
 
 ## データのライフサイクル
 
-- 保存先はローカルの SQLite ストア `~/.local/state/zanei/store.sqlite` のみです（`--store` で変更可能）。
+- 捕捉した event の保存先は、ローカルの SQLite ストア `~/.local/state/zanei/store.sqlite` のみです（`--store` で変更可能）。
 - 既定で **48 時間**より古いイベントは起動時と定期実行で purge され、読み取り結果からも除外されます（`retention_hours`、[設定](/ja/reference/config)）。
 - 手動で削除する場合は `purge` を使います。
 
