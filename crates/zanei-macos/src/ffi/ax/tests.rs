@@ -174,6 +174,7 @@ fn detached_value_context_resolves_after_late_confirmation() {
             value: Some("Ax".to_owned()),
             value_len: Some(2),
             field_class: FieldClass::KnownText(FieldKind::Text),
+            capture_decision: None,
         },
         &mut authorizations,
     );
@@ -194,7 +195,7 @@ fn detached_value_context_resolves_after_late_confirmation() {
     let mut detached = DeferredValueContext::new(7, context);
 
     authorization.confirm();
-    let DeferredResolution::Complete(Some(NativeAxEvent::UiValueChanged { text, .. })) = detached
+    let DeferredResolution::Complete(Some(NativeAxEvent::UiValueChanged(event))) = detached
         .take_due(
             now + VALUE_DEBOUNCE + Duration::from_millis(10),
             false,
@@ -203,7 +204,7 @@ fn detached_value_context_resolves_after_late_confirmation() {
     else {
         panic!("detached value should resolve into a value event");
     };
-    assert_eq!(text.as_deref(), Some("x"));
+    assert_eq!(event.text.as_deref(), Some("x"));
 }
 
 #[test]
@@ -255,6 +256,7 @@ fn degraded_same_target_classification_preserves_pending_value() {
             value: Some("Ax".to_owned()),
             value_len: Some(2),
             field_class: FieldClass::KnownText(FieldKind::Text),
+            capture_decision: None,
         },
         &mut authorizations,
     );
@@ -306,6 +308,7 @@ fn failed_target_preparation_does_not_consume_previous_value() {
             value: Some("Ax".to_owned()),
             value_len: Some(2),
             field_class: FieldClass::KnownText(FieldKind::Text),
+            capture_decision: None,
         },
         &mut authorizations,
     );
@@ -355,6 +358,7 @@ fn failed_focus_clears_current_and_defers_previous_value() {
             value: Some("Ax".to_owned()),
             value_len: Some(2),
             field_class: FieldClass::KnownText(FieldKind::Text),
+            capture_decision: None,
         },
         &mut authorizations,
     );
@@ -389,10 +393,10 @@ fn failed_focus_clears_current_and_defers_previous_value() {
 
     let mut deferred = DeferredValueContext::new(7, previous);
     authorization.confirm();
-    let DeferredResolution::Complete(Some(NativeAxEvent::UiValueChanged { text, .. })) =
+    let DeferredResolution::Complete(Some(NativeAxEvent::UiValueChanged(event))) =
         deferred.take_due(now + VALUE_DEBOUNCE, false, &mut authorizations)
     else {
         panic!("deferred previous value should resolve after late confirmation");
     };
-    assert_eq!(text.as_deref(), Some("x"));
+    assert_eq!(event.text.as_deref(), Some("x"));
 }

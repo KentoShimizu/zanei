@@ -12,7 +12,7 @@ use std::{
 use time::OffsetDateTime;
 
 use crate::{
-    capture_policy::CapturePolicy,
+    capture_policy::{CaptureDecision, CapturePolicy},
     focused_field::{FieldClass, field_class},
     text_capture::{FocusedTarget, InputAuthorizations},
 };
@@ -461,15 +461,21 @@ impl AppObserver {
     }
 
     pub(super) fn text_content_allowed(&self, window: Option<&super::NativeWindow>) -> bool {
-        self.capture_text_content
-            && self
-                .capture_policy
-                .decision(
-                    PrivacyScope::TextContent,
-                    &self.app,
-                    window.and_then(|window| window.id),
-                )
-                .is_allowed()
+        self.text_content_decision(window)
+            .is_some_and(|decision| decision.is_allowed())
+    }
+
+    pub(super) fn text_content_decision(
+        &self,
+        window: Option<&super::NativeWindow>,
+    ) -> Option<CaptureDecision> {
+        self.capture_text_content.then(|| {
+            self.capture_policy.decision(
+                PrivacyScope::TextContent,
+                &self.app,
+                window.and_then(|window| window.id),
+            )
+        })
     }
 }
 

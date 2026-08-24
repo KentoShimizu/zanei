@@ -23,10 +23,13 @@ impl AppObserver {
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
-        let capture_text_content = self
+        let capture_decision = self
             .focused_target
             .current()
-            .is_some_and(|target| self.text_content_allowed(target.context.window.as_ref()));
+            .and_then(|target| self.text_content_decision(target.context.window.as_ref()));
+        let capture_text_content = capture_decision
+            .as_ref()
+            .is_some_and(crate::CaptureDecision::is_allowed);
         let (class_changed, value_event) = {
             let Some(target) = self.focused_target.current_mut() else {
                 crate::trace::trace!(
@@ -58,8 +61,13 @@ impl AppObserver {
             if snapshot.degraded {
                 self.degraded.fetch_add(1, Ordering::Relaxed);
             }
-            let observation =
-                context.observation(self.context.pid, notification_at, observed_at, snapshot);
+            let observation = context.observation(
+                self.context.pid,
+                notification_at,
+                observed_at,
+                snapshot,
+                capture_decision,
+            );
             let value_event = context
                 .capture
                 .observe(observation, authorizations)
@@ -226,10 +234,13 @@ impl AppObserver {
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> FocusChangeResolution {
-        let capture_text_content = self
+        let capture_decision = self
             .focused_target
             .current()
-            .is_some_and(|target| self.text_content_allowed(target.context.window.as_ref()));
+            .and_then(|target| self.text_content_decision(target.context.window.as_ref()));
+        let capture_text_content = capture_decision
+            .as_ref()
+            .is_some_and(crate::CaptureDecision::is_allowed);
         let Some(target) = self.focused_target.current_mut() else {
             return FocusChangeResolution::Immediate(None);
         };
@@ -257,8 +268,13 @@ impl AppObserver {
                 }
             };
         }
-        let observation =
-            context.observation(self.context.pid, notification_at, observed_at, snapshot);
+        let observation = context.observation(
+            self.context.pid,
+            notification_at,
+            observed_at,
+            snapshot,
+            capture_decision,
+        );
         match context
             .capture
             .resolve_focus_change(observation, authorizations)

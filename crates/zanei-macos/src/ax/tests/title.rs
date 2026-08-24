@@ -23,7 +23,9 @@ fn title_changes_include_the_previous_title() {
             window: second,
             observed_at: time::OffsetDateTime::UNIX_EPOCH,
         })
-        .expect("window title event");
+        .expect("window title event")
+        .into_parts()
+        .0;
 
     let EventData::WindowTitle(data) = event.data else {
         panic!("expected a window.title payload");

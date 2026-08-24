@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use zanei_core::text_delta::text_delta;
 
 use super::authorization::{AUTHORIZATION_QUEUE_CAPACITY, InputAuthorizations, InputWindowMatch};
-use crate::{focused_field::FieldClass, trace};
+use crate::{capture_policy::CaptureDecision, focused_field::FieldClass, trace};
 
 pub(crate) const VALUE_DEBOUNCE: Duration = Duration::from_secs(1);
 pub(crate) const VALUE_MAX_HOLD: Duration = Duration::from_secs(5);
@@ -15,6 +15,14 @@ pub(crate) struct ValueEmission {
     pub(crate) element_value: Option<String>,
     pub(crate) value_len: Option<u64>,
     pub(crate) text: Option<String>,
+    pub(crate) capture_decision: Option<CaptureDecision>,
+}
+
+impl ValueEmission {
+    #[cfg(test)]
+    pub(crate) fn capture_decision(&self) -> Option<&CaptureDecision> {
+        self.capture_decision.as_ref()
+    }
 }
 
 pub(crate) struct ValueObservation {
@@ -24,6 +32,7 @@ pub(crate) struct ValueObservation {
     pub(crate) value: Option<String>,
     pub(crate) value_len: Option<u64>,
     pub(crate) field_class: FieldClass,
+    pub(crate) capture_decision: Option<CaptureDecision>,
 }
 
 pub(crate) enum FocusChangeCapture {
@@ -44,6 +53,7 @@ struct PendingValue {
     value: Option<String>,
     value_len: Option<u64>,
     field_class: FieldClass,
+    capture_decision: Option<CaptureDecision>,
     text_steps: Vec<PendingTextStep>,
 }
 
@@ -133,7 +143,9 @@ impl ValueCapture {
     ) -> FocusChangeCapture {
         if observation.field_class.is_known_text()
             && self.pending.as_ref().is_some_and(|pending| {
-                pending.field_class.is_known_text() && pending.value == observation.value
+                pending.field_class.is_known_text()
+                    && pending.value == observation.value
+                    && pending.capture_boundary(&observation).is_none()
             })
         {
             return if self.pending_authorization_is_pending() {
@@ -268,16 +280,38 @@ impl ValueCapture {
                 )
             })
             .flatten();
-        if let Some(pending) = self
+        if self
             .pending
-            .as_mut()
-            .filter(|pending| pending.field_class.is_known_text())
+            .as_ref()
+            .is_some_and(|pending| pending.field_class.is_known_text())
         {
-            pending.coalesce(observation, window_match);
-            trace::trace!(
-                "component=text_capture event=stage pending=replaced observation_count={} baseline_advanced=false reason=debounce_coalesce",
-                pending.text_steps.len()
-            );
+            let boundary = self
+                .pending
+                .as_ref()
+                .and_then(|pending| pending.capture_boundary(&observation));
+            if let Some(reason) = boundary {
+                let previous = self.pending.take().expect("pending value remains present");
+                let discarded_observations = previous.text_steps.len();
+                self.baseline = previous.value;
+                let pending = PendingValue::new(observation, window_match);
+                trace::trace!(
+                    "component=text_capture event=stage pending=restarted discarded_observation_count={} observation_count={} baseline_advanced=true reason={}",
+                    discarded_observations,
+                    pending.text_steps.len(),
+                    reason
+                );
+                self.pending = Some(pending);
+            } else {
+                let pending = self
+                    .pending
+                    .as_mut()
+                    .expect("pending value remains present");
+                pending.coalesce(observation, window_match);
+                trace::trace!(
+                    "component=text_capture event=stage pending=replaced observation_count={} baseline_advanced=false reason=debounce_coalesce",
+                    pending.text_steps.len()
+                );
+            }
         } else {
             let pending = PendingValue::new(observation, window_match);
             trace::trace!(
@@ -319,11 +353,18 @@ impl ValueCapture {
                 authorized_suffix = false;
             }
         }
-        let text =
-            (self.capture_text_content && pending.field_class.is_known_text() && authorized_suffix)
-                .then(|| text_delta(authorized_baseline.as_deref()?, pending.value.as_deref()?))
-                .flatten();
+        let decision_allows = pending
+            .capture_decision
+            .as_ref()
+            .is_none_or(CaptureDecision::is_allowed);
+        let text = (self.capture_text_content
+            && decision_allows
+            && pending.field_class.is_known_text()
+            && authorized_suffix)
+            .then(|| text_delta(authorized_baseline.as_deref()?, pending.value.as_deref()?))
+            .flatten();
         let element_value = (self.capture_text_content
+            && decision_allows
             && pending.field_class == FieldClass::KnownSafeNonText)
             .then(|| pending.value.clone())
             .flatten();
@@ -336,6 +377,7 @@ impl ValueCapture {
                 element_value,
                 value_len: pending.value_len,
                 text,
+                capture_decision: pending.capture_decision,
             },
         )
     }
@@ -357,6 +399,7 @@ impl PendingValue {
             value: observation.value,
             value_len: observation.value_len,
             field_class: observation.field_class,
+            capture_decision: observation.capture_decision,
             text_steps,
         }
     }
@@ -381,6 +424,22 @@ impl PendingValue {
             value: observation.value,
             window_match,
         });
+    }
+
+    fn capture_boundary(&self, observation: &ValueObservation) -> Option<&'static str> {
+        match (
+            self.capture_decision.as_ref(),
+            observation.capture_decision.as_ref(),
+        ) {
+            (Some(_), Some(current)) if !current.is_allowed() => Some("capture_decision_denied"),
+            (Some(stored), Some(current))
+                if stored.chrome_version() != current.chrome_version() =>
+            {
+                Some("chrome_version_changed")
+            }
+            (None, None) | (Some(_), Some(_)) => None,
+            (None, Some(_)) | (Some(_), None) => Some("capture_decision_missing"),
+        }
     }
 
     fn due_reason(&self, now: Instant) -> Option<&'static str> {

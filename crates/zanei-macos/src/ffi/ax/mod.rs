@@ -18,7 +18,9 @@ pub use snapshot::{
     SnapshotAxElement, SnapshotAxError,
 };
 pub use types::AxTextRange;
-pub(crate) use types::{NativeAxError, NativeAxEvent, NativeElement, NativeHitTest};
+pub(crate) use types::{
+    NativeAxError, NativeAxEvent, NativeElement, NativeHitTest, NativeUiValueEvent,
+};
 
 use std::{
     ffi::c_void,

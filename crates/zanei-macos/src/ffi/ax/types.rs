@@ -4,9 +4,12 @@ use std::{ffi::c_void, fmt};
 use time::OffsetDateTime;
 
 use super::cf::CfRef;
-use crate::ffi::{
-    geometry::{AxPoint, AxSize},
-    window_list::NativeWindow,
+use crate::{
+    capture_policy::CaptureDecision,
+    ffi::{
+        geometry::{AxPoint, AxSize},
+        window_list::NativeWindow,
+    },
 };
 
 pub(super) const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25_205;
@@ -39,6 +42,16 @@ pub(crate) struct NativeElement {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeUiValueEvent {
+    pub(crate) pid: i32,
+    pub(crate) window: Option<NativeWindow>,
+    pub(crate) element: NativeElement,
+    pub(crate) text: Option<String>,
+    pub(crate) capture_decision: Option<CaptureDecision>,
+    pub(crate) observed_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum NativeAxEvent {
     WindowFocused {
         pid: i32,
@@ -57,13 +70,7 @@ pub(crate) enum NativeAxEvent {
         element: Option<NativeElement>,
         observed_at: OffsetDateTime,
     },
-    UiValueChanged {
-        pid: i32,
-        window: Option<NativeWindow>,
-        element: NativeElement,
-        text: Option<String>,
-        observed_at: OffsetDateTime,
-    },
+    UiValueChanged(Box<NativeUiValueEvent>),
     PageLoaded {
         pid: i32,
     },

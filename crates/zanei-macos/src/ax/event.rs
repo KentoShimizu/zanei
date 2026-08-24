@@ -12,13 +12,36 @@ use zanei_core::{
 };
 
 use crate::{
-    capture_policy::CapturePolicy,
-    ffi::ax::{NativeAxEvent, NativeElement, NativeHitTest, NativeWindow},
+    capture_policy::{CaptureDecision, CapturePolicy},
+    ffi::ax::{NativeAxEvent, NativeElement, NativeHitTest, NativeUiValueEvent, NativeWindow},
     focused_field::field_class,
     workspace::ApplicationInfo,
 };
 
 use super::ClickObservation;
+
+pub(super) struct AxEvent {
+    event: RawEvent,
+    read_decision: Option<CaptureDecision>,
+}
+
+impl AxEvent {
+    pub(super) fn new(event: RawEvent) -> Self {
+        Self {
+            event,
+            read_decision: None,
+        }
+    }
+
+    fn with_read_decision(mut self, read_decision: Option<CaptureDecision>) -> Self {
+        self.read_decision = read_decision;
+        self
+    }
+
+    pub(super) fn into_parts(self) -> (RawEvent, Option<CaptureDecision>) {
+        (self.event, self.read_decision)
+    }
+}
 
 pub(super) struct AxEventBuilder {
     apps: HashMap<i32, ApplicationInfo>,
@@ -47,7 +70,7 @@ impl AxEventBuilder {
             .retain(|(window_pid, _), _| *window_pid != pid);
     }
 
-    pub(super) fn event(&mut self, event: NativeAxEvent) -> Option<RawEvent> {
+    pub(super) fn event(&mut self, event: NativeAxEvent) -> Option<AxEvent> {
         match event {
             NativeAxEvent::WindowFocused {
                 pid,
@@ -110,28 +133,15 @@ impl AxEventBuilder {
                     observed_at,
                 )
             }
-            NativeAxEvent::UiValueChanged {
-                pid,
-                window,
-                element,
-                mut text,
-                observed_at,
-            } => {
-                let Some(app) = self.apps.get(&pid) else {
-                    crate::trace::trace!(
-                        "component=ax phase=builder action=drop pid={} event=ui.value reason=missing_app",
-                        pid
-                    );
-                    return None;
-                };
-                let window_id = window.as_ref().and_then(|window| window.id);
-                if !self
-                    .capture_policy
-                    .decision(PrivacyScope::TextContent, &app.raw_app(), window_id)
-                    .is_allowed()
-                {
-                    text = None;
-                }
+            NativeAxEvent::UiValueChanged(event) => {
+                let NativeUiValueEvent {
+                    pid,
+                    window,
+                    element,
+                    text,
+                    capture_decision,
+                    observed_at,
+                } = *event;
                 let value_len = element.value_len;
                 let kind =
                     field_class(element.role.as_deref(), element.subrole.as_deref()).field_kind();
@@ -147,6 +157,7 @@ impl AxEventBuilder {
                     }),
                     observed_at,
                 )
+                .map(|event| event.with_read_decision(capture_decision))
             }
             NativeAxEvent::PageLoaded { .. } => None,
         }
@@ -156,7 +167,7 @@ impl AxEventBuilder {
         &self,
         hit: NativeHitTest,
         click: ClickObservation,
-    ) -> Option<RawEvent> {
+    ) -> Option<AxEvent> {
         self.raw(
             hit.pid,
             "ui.click",
@@ -178,7 +189,7 @@ impl AxEventBuilder {
         element: Option<NativeElement>,
         data: EventData,
         observed_at: time::OffsetDateTime,
-    ) -> Option<RawEvent> {
+    ) -> Option<AxEvent> {
         let Some(app) = self.apps.get(&pid) else {
             crate::trace::trace!(
                 "component=ax phase=builder action=drop pid={} event={} reason=missing_app",
@@ -225,6 +236,6 @@ impl AxEventBuilder {
             pid,
             event_type
         );
-        Some(event)
+        Some(AxEvent::new(event))
     }
 }

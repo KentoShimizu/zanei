@@ -4,12 +4,13 @@ use std::time::Instant;
 use time::OffsetDateTime;
 
 use crate::{
+    capture_policy::CaptureDecision,
     focused_field::FieldClass,
     text_capture::{InputAuthorizations, ValueCapture, ValueEmission, ValueObservation},
 };
 
 use super::{
-    NativeAxEvent, NativeElement, NativeWindow,
+    NativeAxEvent, NativeElement, NativeUiValueEvent, NativeWindow,
     element::{ValueFieldSnapshot, ValueSnapshot},
 };
 
@@ -85,6 +86,7 @@ impl FocusedValueContext {
         notification_at: Instant,
         observed_at: OffsetDateTime,
         snapshot: ValueSnapshot,
+        capture_decision: Option<CaptureDecision>,
     ) -> ValueObservation {
         self.observed_at = Some(observed_at);
         self.element.role = snapshot.role;
@@ -101,6 +103,7 @@ impl FocusedValueContext {
             value: snapshot.value,
             value_len: snapshot.value_len,
             field_class: snapshot.field_class,
+            capture_decision,
         }
     }
 
@@ -108,13 +111,14 @@ impl FocusedValueContext {
         let mut element = self.element.clone();
         element.value = emission.element_value;
         element.value_len = emission.value_len;
-        NativeAxEvent::UiValueChanged {
+        NativeAxEvent::UiValueChanged(Box::new(NativeUiValueEvent {
             pid,
             window: self.window.clone(),
             element,
             text: emission.text,
+            capture_decision: emission.capture_decision,
             observed_at: self.observed_at.unwrap_or_else(OffsetDateTime::now_utc),
-        }
+        }))
     }
 }
 

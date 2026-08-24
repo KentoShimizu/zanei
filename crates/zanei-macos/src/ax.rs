@@ -24,7 +24,10 @@ use crate::{
     workspace::{ApplicationActivationPolicy, ApplicationInfo, WorkspaceEvent},
 };
 
-use self::{event::AxEventBuilder, health::ObserverHealth};
+use self::{
+    event::{AxEvent, AxEventBuilder},
+    health::ObserverHealth,
+};
 
 pub use crate::ffi::ax::NativeWindow;
 
@@ -416,7 +419,7 @@ fn run_ax_loop(
                     focus_context.observe_window(*pid, window.clone())
                 }
                 NativeAxEvent::UiFocused { .. }
-                | NativeAxEvent::UiValueChanged { .. }
+                | NativeAxEvent::UiValueChanged(_)
                 | NativeAxEvent::PageLoaded { .. } => None,
             };
             publish_focus_transition(snapshot_trigger_publisher, transition);
@@ -474,7 +477,7 @@ fn attach_app(
     manual_accessibility_policy: &ManualAccessibilityPolicy,
     degraded_operations: &AtomicU64,
     observer_health: &mut ObserverHealth,
-) -> Vec<RawEvent> {
+) -> Vec<AxEvent> {
     if app.activation_policy == ApplicationActivationPolicy::Prohibited {
         return Vec::new();
     }
@@ -491,7 +494,7 @@ fn attach_app(
             observations
                 .into_iter()
                 .filter_map(|observation| {
-                    matches!(&observation, NativeAxEvent::UiValueChanged { .. })
+                    matches!(&observation, NativeAxEvent::UiValueChanged(_))
                         .then(|| builder.event(observation))
                         .flatten()
                 })

@@ -10,6 +10,7 @@ use std::{
 
 use zanei_core::{
     config::FilterConfig,
+    privacy::PrivacyScope,
     schema::{App, EventData, FieldKind},
 };
 
@@ -26,7 +27,7 @@ use crate::{
     CapturePolicy,
     chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
     content_snapshot::{SnapshotTriggerMessage, snapshot_trigger_channel},
-    ffi::ax::{ManualAccessibilityPolicy, NativeElement, NativeWindow},
+    ffi::ax::{ManualAccessibilityPolicy, NativeElement, NativeUiValueEvent, NativeWindow},
     focus_context::FocusContext,
     focused_field::{FieldClass, FocusedField},
     text_capture::input_authorization_channel,
@@ -88,16 +89,23 @@ fn ui_events_derive_field_kind_from_the_ax_snapshot() {
             element: Some(element("AXTextField", Some("AXSearchField"))),
             observed_at: time::OffsetDateTime::UNIX_EPOCH,
         })
-        .expect("search field focus should emit");
+        .expect("search field focus should emit")
+        .into_parts()
+        .0;
     let value = builder
-        .event(NativeAxEvent::UiValueChanged {
-            pid: 7,
-            window: Some(window()),
-            element: element("AXIncrementor", None),
-            text: Some("1".to_owned()),
-            observed_at: time::OffsetDateTime::UNIX_EPOCH,
-        })
-        .expect("numeric value change should emit");
+        .event(NativeAxEvent::UiValueChanged(Box::new(
+            NativeUiValueEvent {
+                pid: 7,
+                window: Some(window()),
+                element: element("AXIncrementor", None),
+                text: Some("1".to_owned()),
+                capture_decision: None,
+                observed_at: time::OffsetDateTime::UNIX_EPOCH,
+            },
+        )))
+        .expect("numeric value change should emit")
+        .into_parts()
+        .0;
 
     let EventData::UiFocus(focus) = focus.data else {
         panic!("expected ui.focus");
@@ -111,34 +119,43 @@ fn ui_events_derive_field_kind_from_the_ax_snapshot() {
 }
 
 #[test]
-fn chrome_ui_value_text_follows_window_eligibility() {
+fn chrome_ui_value_keeps_its_read_decision_for_output() {
     let filter = FilterConfig::default();
     let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
-    let mut builder = AxEventBuilder::new(CapturePolicy::new(tracker, filter, None));
-    builder.add_app(ApplicationInfo {
+    let policy = CapturePolicy::new(tracker, filter, None);
+    let mut builder = AxEventBuilder::new(policy.clone());
+    let chrome_app = ApplicationInfo {
         name: "Google Chrome".to_owned(),
         bundle_id: Some("com.google.Chrome".to_owned()),
         pid: 7,
         activation_policy: ApplicationActivationPolicy::Regular,
-    });
+    };
+    builder.add_app(chrome_app.clone());
 
     publisher.observe(
         7,
         ChromeEligibilityObservation::Incognito { window_id: Some(1) },
     );
-    let incognito = builder
-        .event(NativeAxEvent::UiValueChanged {
-            pid: 7,
-            window: Some(window()),
-            element: element("AXTextField", None),
-            text: Some("private".to_owned()),
-            observed_at: time::OffsetDateTime::UNIX_EPOCH,
-        })
-        .expect("ui.value metadata remains available");
+    let incognito_decision =
+        policy.decision(PrivacyScope::TextContent, &chrome_app.raw_app(), Some(1));
+    let (incognito, bound_incognito_decision) = builder
+        .event(NativeAxEvent::UiValueChanged(Box::new(
+            NativeUiValueEvent {
+                pid: 7,
+                window: Some(window()),
+                element: element("AXTextField", None),
+                text: Some("private".to_owned()),
+                capture_decision: Some(incognito_decision.clone()),
+                observed_at: time::OffsetDateTime::UNIX_EPOCH,
+            },
+        )))
+        .expect("ui.value metadata remains available")
+        .into_parts();
     let EventData::UiValue(incognito) = incognito.data else {
         panic!("expected ui.value");
     };
-    assert_eq!(incognito.text, None);
+    assert_eq!(incognito.text.as_deref(), Some("private"));
+    assert_eq!(bound_incognito_decision, Some(incognito_decision));
 
     publisher.observe(
         7,
@@ -147,19 +164,26 @@ fn chrome_ui_value_text_follows_window_eligibility() {
             url: "https://example.com".to_owned(),
         },
     );
-    let normal = builder
-        .event(NativeAxEvent::UiValueChanged {
-            pid: 7,
-            window: Some(window()),
-            element: element("AXTextField", None),
-            text: Some("normal".to_owned()),
-            observed_at: time::OffsetDateTime::UNIX_EPOCH,
-        })
-        .expect("ui.value event");
+    let normal_decision =
+        policy.decision(PrivacyScope::TextContent, &chrome_app.raw_app(), Some(1));
+    let (normal, bound_normal_decision) = builder
+        .event(NativeAxEvent::UiValueChanged(Box::new(
+            NativeUiValueEvent {
+                pid: 7,
+                window: Some(window()),
+                element: element("AXTextField", None),
+                text: Some("normal".to_owned()),
+                capture_decision: Some(normal_decision.clone()),
+                observed_at: time::OffsetDateTime::UNIX_EPOCH,
+            },
+        )))
+        .expect("ui.value event")
+        .into_parts();
     let EventData::UiValue(normal) = normal.data else {
         panic!("expected ui.value");
     };
     assert_eq!(normal.text.as_deref(), Some("normal"));
+    assert_eq!(bound_normal_decision, Some(normal_decision));
 }
 
 #[test]

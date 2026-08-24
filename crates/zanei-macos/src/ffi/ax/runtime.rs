@@ -195,7 +195,7 @@ impl NativeAx {
                 NativeAxEvent::WindowFocused { window, .. } => window,
                 NativeAxEvent::WindowTitleChanged { .. }
                 | NativeAxEvent::UiFocused { .. }
-                | NativeAxEvent::UiValueChanged { .. }
+                | NativeAxEvent::UiValueChanged(_)
                 | NativeAxEvent::PageLoaded { .. } => unreachable!(),
             }))
     }

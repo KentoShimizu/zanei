@@ -13,6 +13,8 @@ use crate::{
     text_capture::{TextBodyRoute, TextQuarantine, route_text_body},
 };
 
+use super::event::AxEvent;
+
 pub(super) struct AxOutput<'a> {
     sender: &'a SyncSender<RawEvent>,
     dropped_events: &'a AtomicU64,
@@ -36,14 +38,15 @@ impl<'a> AxOutput<'a> {
         }
     }
 
-    pub(super) fn send_all(&mut self, events: Vec<RawEvent>) {
+    pub(super) fn send_all(&mut self, events: Vec<AxEvent>) {
         for event in events {
             self.send(event);
         }
     }
 
-    pub(super) fn send(&mut self, event: RawEvent) {
-        match route_text_body(event, &self.capture_policy, None) {
+    pub(super) fn send(&mut self, event: AxEvent) {
+        let (event, read_decision) = event.into_parts();
+        match route_text_body(event, &self.capture_policy, read_decision.as_ref()) {
             TextBodyRoute::Send(event) => self.send_now(event),
             TextBodyRoute::Quarantine {
                 event,
@@ -96,11 +99,17 @@ mod tests {
     use time::OffsetDateTime;
     use zanei_core::{
         config::FilterConfig,
+        privacy::{CHROME_BUNDLE_ID, PrivacyScope},
         schema::{App, Element, EventData, FieldKind, UiValueData, Window},
     };
 
     use super::*;
-    use crate::chrome::chrome_eligibility_channel;
+    use crate::{
+        ax::event::AxEventBuilder,
+        chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
+        ffi::ax::{NativeAxEvent, NativeElement, NativeUiValueEvent, NativeWindow},
+        workspace::{ApplicationActivationPolicy, ApplicationInfo},
+    };
 
     #[test]
     fn v2_2_final_deny_suppresses_built_ax_body() {
@@ -140,7 +149,7 @@ mod tests {
             ..FilterConfig::default()
         });
 
-        output.send(event);
+        output.send(AxEvent::new(event));
 
         let event = receiver.try_recv().expect("metadata event is retained");
         let EventData::UiValue(data) = event.data else {
@@ -148,5 +157,88 @@ mod tests {
         };
         assert_eq!(data.text, None);
         assert_eq!(event.element.and_then(|element| element.value), None);
+    }
+
+    #[test]
+    fn v4_1_ui_value_body_is_bound_to_its_read_time_version() {
+        let filter = FilterConfig::default();
+        let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
+        let policy = CapturePolicy::new(tracker, filter, None);
+        let app = ApplicationInfo {
+            name: "Google Chrome".to_owned(),
+            bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
+            pid: 7,
+            activation_policy: ApplicationActivationPolicy::Regular,
+        };
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: "https://v1.example/".to_owned(),
+            },
+        );
+        let read_decision = policy.decision(PrivacyScope::TextContent, &app.raw_app(), Some(11));
+        assert!(read_decision.is_allowed());
+
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: "https://v2.example/".to_owned(),
+            },
+        );
+        let send_decision = policy.decision(PrivacyScope::TextContent, &app.raw_app(), Some(11));
+        assert_ne!(
+            read_decision.chrome_version(),
+            send_decision.chrome_version()
+        );
+
+        let mut builder = AxEventBuilder::new(policy.clone());
+        builder.add_app(app);
+        let event = builder
+            .event(NativeAxEvent::UiValueChanged(Box::new(
+                NativeUiValueEvent {
+                    pid: 7,
+                    window: Some(NativeWindow {
+                        title: Some("Window".to_owned()),
+                        id: Some(11),
+                    }),
+                    element: NativeElement {
+                        role: Some("AXTextArea".to_owned()),
+                        subrole: None,
+                        title: None,
+                        value: None,
+                        value_len: Some(7),
+                    },
+                    text: Some("private".to_owned()),
+                    capture_decision: Some(read_decision),
+                    observed_at: OffsetDateTime::UNIX_EPOCH,
+                },
+            )))
+            .expect("ui.value event");
+        let (sender, receiver) = sync_channel(1);
+        let dropped = AtomicU64::new(0);
+        let mut output = AxOutput::new(&sender, &dropped, policy.clone(), ChromeObserver::new());
+
+        output.send(event);
+        assert!(receiver.try_recv().is_err(), "body remains quarantined");
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: "https://v2.example/".to_owned(),
+            },
+        );
+        output.release_due();
+
+        let event = receiver.try_recv().expect("metadata event is released");
+        let EventData::UiValue(data) = event.data else {
+            panic!("ui.value");
+        };
+        assert_eq!(data.text, None);
+        assert_eq!(
+            event.capture_context.website_host.as_deref(),
+            Some("v2.example")
+        );
     }
 }
