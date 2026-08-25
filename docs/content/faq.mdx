@@ -39,7 +39,9 @@ are not Electron. These apps build their accessibility tree only once an assisti
 it, so their input fields would otherwise report as *unknown* to macOS Accessibility. Zanei reads
 the application element's role when it attaches its observer, which is the signal Chromium builds
 its tree on, and reads the focused element again a second later because the tree appears
-asynchronously. For Electron apps it also sets `AXManualAccessibility` while a content opt-in is on.
+asynchronously. While a content opt-in is on, it also tries to set `AXManualAccessibility` on every
+app the filters allow for that opt-in; Electron apps build their tree in response, and apps that do
+not support the attribute report it as unsupported and are unaffected.
 Eligible typed text is then captured like anywhere else. Zanei never captures a field it cannot
 classify, which keeps password fields out. Restart Zanei after changing `capture.text_content`.
 
