@@ -16,7 +16,7 @@ use zanei_core::store::{QueryFilter, StoreReader, StoreWriter};
 
 mod support;
 
-use support::Fixture;
+use support::{Fixture, set_aside_store_path};
 
 const RETENTION_HOURS: u64 = 24 * 365 * 100;
 
@@ -966,10 +966,7 @@ impl AppDirectory for FakeAppDirectory {
 }
 
 fn retired_path(fixture: &Fixture) -> std::path::PathBuf {
-    fixture
-        .directory
-        .path()
-        .join("store.sqlite.plaintext-20260823T000000Z")
+    set_aside_store_path(&fixture.store, 1)
 }
 
 fn app_event(id: &str, app_name: &str, at: OffsetDateTime) -> Event {

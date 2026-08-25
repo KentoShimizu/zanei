@@ -16,7 +16,10 @@ use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
 
 mod support;
 
-use support::{Fixture, STORE_KEY_FILE_ENV, damaged_set_aside_store, read_key, write_key_file};
+use support::{
+    Fixture, STORE_KEY_FILE_ENV, damaged_set_aside_store, read_key, set_aside_store_path,
+    write_key_file,
+};
 
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1524,10 +1527,9 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
 #[test]
 fn purge_covers_set_aside_stores_even_without_a_live_store() {
     let fixture = Fixture::populated();
-    let directory = fixture.directory.path();
     // Simulate a crash between setting the plaintext store aside and creating
     // the encrypted replacement: only the set-aside file remains.
-    let retired = directory.join("store.sqlite.plaintext-20260823T000000Z");
+    let retired = set_aside_store_path(&fixture.store, 1);
     StoreWriter::open(&retired)
         .and_then(|mut writer| {
             writer.append(
@@ -1585,9 +1587,7 @@ fn recorder_retries_state_adoption_after_a_crash_before_it_completed() {
     let config = directory.path().join("config.toml");
     let store = directory.path().join("store.sqlite");
     fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
-    let retired = directory
-        .path()
-        .join("store.sqlite.plaintext-20260823T000000Z");
+    let retired = set_aside_store_path(&store, 1);
     StoreWriter::open(&retired)
         .and_then(|writer| {
             writer.write_daemon_state(&DaemonState {
