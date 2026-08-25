@@ -395,10 +395,11 @@ fn raw_event(event_type: &str, data: EventData) -> RawEvent {
     }
 }
 
-/// Writes a file next to `store` that looks like a set-aside plaintext store
-/// from `hours_ago` — a SQLite header over zeroed pages: classified as
-/// plaintext, unusable — and returns its path.
-pub fn damaged_set_aside_store(store: &Path, hours_ago: i64) -> PathBuf {
+/// The path a set-aside plaintext store from `hours_ago` would have next to
+/// `store`. Retention deletes a set-aside store once its timestamp leaves the
+/// window, so fixtures name themselves relative to now instead of using a fixed
+/// date that eventually ages out and fails on its own.
+pub fn set_aside_store_path(store: &Path, hours_ago: i64) -> PathBuf {
     let at = OffsetDateTime::now_utc() - Duration::hours(hours_ago);
     let mut name = store.as_os_str().to_os_string();
     name.push(format!(
@@ -410,7 +411,14 @@ pub fn damaged_set_aside_store(store: &Path, hours_ago: i64) -> PathBuf {
         at.minute(),
         at.second()
     ));
-    let path = PathBuf::from(name);
+    PathBuf::from(name)
+}
+
+/// Writes a file next to `store` that looks like a set-aside plaintext store
+/// from `hours_ago` — a SQLite header over zeroed pages: classified as
+/// plaintext, unusable — and returns its path.
+pub fn damaged_set_aside_store(store: &Path, hours_ago: i64) -> PathBuf {
+    let path = set_aside_store_path(store, hours_ago);
     let mut damaged = b"SQLite format 3\0".to_vec();
     damaged.resize(4096, 0);
     fs::write(&path, damaged).expect("damaged set-aside store");
