@@ -32,22 +32,23 @@ zanei filter exclude-site add example.com
 
 These are capture-time filters: matching events are discarded before being written, so there is nothing to clean up afterwards. Password managers are excluded by default. See [filters](/guides/filters).
 
-## I opted in — does typed text get captured in Electron apps like Claude, Slack, or VS Code?
+## I opted in — does typed text get captured in Electron and other Chromium apps?
 
-Usually yes. Electron and other Chromium apps build their accessibility tree lazily, so their input
-fields would otherwise report as *unknown* to macOS Accessibility. With `capture.text_content`
-enabled, Zanei requests the tree when it attaches its observer, so eligible typed text is captured
-like anywhere else. A few non-standard apps still don't expose their fields even then, so their
-typed text is not captured; text you copy there, and the fact of typing, are still recorded.
-Zanei never captures a field it cannot classify, which keeps password fields out. Restart Zanei
-after changing `capture.text_content`.
+Usually yes, in Electron apps such as Claude, Slack, and VS Code, and in Chromium-based apps that
+are not Electron. These apps build their accessibility tree only once an assistive client asks for
+it, so their input fields would otherwise report as *unknown* to macOS Accessibility. Zanei reads
+the application element's role when it attaches its observer, which is the signal Chromium builds
+its tree on, and reads the focused element again a second later because the tree appears
+asynchronously. For Electron apps it also sets `AXManualAccessibility` while a content opt-in is on.
+Eligible typed text is then captured like anywhere else. Zanei never captures a field it cannot
+classify, which keeps password fields out. Restart Zanei after changing `capture.text_content`.
 
 ## Why are typed text and content snapshots missing in some Chromium-based apps?
 
-Some Chromium-based apps do not expose an accessibility content tree to external clients; ChatGPT
-desktop was one observed example in August 2026 testing. If an app does not expose that tree,
-typed-text bodies (`ui.value` / `data.text`) and content snapshots (`content.snapshot`) for that
-content are missing, and Zanei does not use screen images as a substitute. Keystroke facts (such as
+A Chromium-based app can be built to ignore accessibility requests from external clients, and some
+apps disable the integration outright. If an app does not expose its content tree, typed-text bodies
+(`ui.value` / `data.text`) and content snapshots (`content.snapshot`) for that content are missing,
+and Zanei does not use screen images as a substitute. Keystroke facts (such as
 `input.key` counts) are still recorded. Clicks are recorded only to the extent AX hit-testing works.
 Clipboard copy and paste events are still recorded when their bodies are omitted. For copy, the body
 comes directly from the macOS pasteboard and can be recorded only when `capture.text_content` is

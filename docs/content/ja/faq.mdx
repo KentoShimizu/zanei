@@ -32,20 +32,22 @@ zanei filter exclude-site add example.com
 
 これらは capture-time フィルタで、該当イベントはストアに書き込まれる前に破棄されます。後から掃除する必要はありません。パスワードマネージャは既定で除外済みです。[フィルタ](/ja/guides/filters)参照。
 
-## opt-in すれば Claude / Slack / VS Code などの Electron アプリでも本文は取れますか？
+## opt-in すれば Electron や Chromium 系のアプリでも本文は取れますか？
 
-たいてい取れます。Electron などの Chromium 系アプリはアクセシビリティツリーを遅延構築するため、
-入力欄が macOS Accessibility からは「種類不明」に見えることがあります。`capture.text_content` を
-有効にすると、Zanei は observer を attach する際にツリーの構築を要求するので、対象の打鍵本文が
-他と同様に記録されます。ただし一部の非標準アプリはそれでも入力欄を公開せず、その場合は打鍵本文は
-残りません（コピーした本文と、入力したという事実は残ります）。Zanei は種類を確認できない欄の本文は
+たいてい取れます。Claude / Slack / VS Code などの Electron アプリでも、Electron ではない
+Chromium 系アプリでも同様です。これらのアプリは支援クライアントから要求があって初めて
+アクセシビリティツリーを構築するため、そうでなければ入力欄が macOS Accessibility からは
+「種類不明」に見えます。Zanei は observer を attach する際にアプリ要素の role を読み、これが
+Chromium にとってツリー構築の合図になります。ツリーは非同期に現れるため、1 秒後にフォーカス要素を
+読み直します。Electron アプリに対しては、内容記録の opt-in が有効な間 `AXManualAccessibility` も
+設定します。これにより対象の打鍵本文が他と同様に記録されます。Zanei は種類を確認できない欄の本文は
 記録しないため、パスワード欄は除外されたままです。`capture.text_content` を変更したら Zanei を
 再起動してください。
 
 ## 一部の Chromium 系アプリで入力本文や content snapshot が捕捉されないのはなぜですか？
 
-一部の Chromium 系アプリは、外部クライアントにアクセシビリティの content tree を公開しません。
-2026 年 8 月の確認では、ChatGPT デスクトップがその一例でした。アプリがその tree を公開しない
+Chromium 系アプリは、外部クライアントからのアクセシビリティ要求を無視するように作ることができ、
+統合自体を無効にしているアプリもあります。アプリが content tree を公開しない
 場合、その content の入力本文（`ui.value` / `data.text`）と content snapshot（`content.snapshot`）は
 欠落し、Zanei が代わりに画面画像を使うこともありません。キー入力があった事実（`input.key` の回数
 など）は引き続き記録されます。クリックは AX hit-testing が機能する範囲でのみ記録されます。クリップボード
