@@ -12,7 +12,7 @@ Zanei が履歴を公開する経路は 2 つあり、どちらも同じロー�
 | 経路 | 実体 | 使う相手 |
 | --- | --- | --- |
 | **CLI** | `zanei` バイナリそのもの。シェルを持つ agent が直接呼ぶ | ターミナル型 agent（Claude Code・Codex CLI・opencode・pi・…） |
-| **[MCP サーバ](/ja/reference/mcp)** | `zanei mcp`。read-only ツールを公開する stdio JSON-RPC サーバ | CLI を実行できない chat クライアント（Claude Desktop・ChatGPT コネクタ）にはこれが唯一の経路。ターミナル型 agent も利用可 |
+| **[MCP サーバ](/ja/reference/mcp)** | `zanei mcp`。read-only ツールを公開する stdio JSON-RPC サーバ | CLI を実行できない chat クライアント（Claude Desktop）にはこれが唯一の経路。ターミナル型 agent も利用可 |
 
 skill は 3 つ目の経路ではなく、「いつ履歴を見るか」「トークンを抑える呼び方」を agent に伝える指示レイヤーです。指示の届き方は経路ごとに異なります。
 
@@ -28,7 +28,7 @@ skill は 3 つ目の経路ではなく、「いつ履歴を見るか」「ト�
 | opencode | ✅ `SKILL.md`（`$XDG_CONFIG_HOME/opencode/skills/`、`--scope project` なら `.opencode/skills/`） | ✅ `opencode.json`（手動設定用 JSON を表示） |
 | Hermes Agent | ✅ `SKILL.md`（`~/.hermes/skills/`） | ✅ `hermes mcp add` |
 | pi | ✅ `SKILL.md`（`~/.pi/agent/skills/`、`--scope project` なら `.pi/skills/`） | —（pi は設計方針として MCP を持たない。skill 経路で対応） |
-| Claude Desktop の chat・ChatGPT コネクタ（CLI を実行できない） | — | ✅ 唯一の経路 |
+| Claude Desktop の chat（CLI を実行できない） | — | ✅ 唯一の経路 |
 
 Claude のデスクトップアプリは 2 つの面を併せ持ちます。chat は MCP で Zanei に届き、同じアプリ内で動く Claude Code はシェルを持つため、上の Claude Code 行の経路を使います。
 
