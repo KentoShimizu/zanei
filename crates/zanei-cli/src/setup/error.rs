@@ -9,8 +9,6 @@ pub enum SetupError {
     UnsupportedScope { value: String },
     #[error("HOME is required to resolve the requested setup destination")]
     HomeDirectoryMissing,
-    #[error("embedded skill asset is invalid: {0}")]
-    InvalidSkillAsset(#[from] super::assets::SkillAssetError),
     #[error("failed to read setup target {path}: {source}")]
     Read {
         path: PathBuf,

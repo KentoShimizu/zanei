@@ -384,12 +384,9 @@ pub struct SetupArgs {
         long,
         value_enum,
         default_value = "project",
-        help = "Configure the current project or user account; ignored by opencode"
+        help = "Configure the current project or user account; user-global agents ignore it"
     )]
     pub scope: Scope,
-    #[arg(
-        long,
-        help = "Preview planned file changes without writing; opencode is always write-free"
-    )]
+    #[arg(long, help = "Preview planned file changes without writing")]
     pub print: bool,
 }

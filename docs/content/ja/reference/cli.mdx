@@ -608,7 +608,7 @@ zanei mcp [--store <PATH>]
 
 ## `setup`
 
-対象 agent 向けの Zanei 指示と MCP 連携を設定します。native skill 対応 agent と Claude Desktop は従来どおりファイルへ設定し、opencode は手動設定用の指示を表示するだけで、ファイルは変更しません。
+対象 agent 向けの Zanei 指示と MCP 連携を設定します。CLI を実行する agent には skill ファイルを配置します。Claude Desktop の chat は MCP 登録のみ、opencode の MCP JSON は手動設定用に表示します。
 
 ```bash
 zanei setup --agent claude            # SKILL.md を Claude Code の skill 位置へ + MCP 登録
@@ -616,13 +616,13 @@ zanei setup --agent codex --scope user
 zanei setup --agent hermes            # skill を ~/.hermes/skills/ へ + ~/.hermes/config.yaml に MCP 登録
 zanei setup --agent pi                # skill を ~/.pi/agent/skills/ または .pi/skills/ へ。MCP なし
 zanei setup --agent claude-desktop    # claude_desktop_config.json へ MCP 登録
-zanei setup --agent opencode          # AGENTS.md スニペット + MCP JSON を表示。ファイル書き込みなし
+zanei setup --agent opencode          # skill を opencode の skill 位置へ + MCP JSON を表示
 ```
 
 | フラグ | 説明 |
 | --- | --- |
 | `--agent` | `claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
-| `--scope` | `project`（既定。カレントリポジトリ）/ `user`（ユーザー全体）。opencode の手動設定出力には影響しない |
-| `--print` | 書き込み予定のファイル変更を、実際には書き込まず表示する。opencode は、このフラグの有無にかかわらずファイルを書き込まない |
+| `--scope` | `project`（既定。カレントリポジトリ）/ `user`（ユーザー全体）。Codex・Hermes Agent・Claude Desktop は常にユーザーグローバルで、この指定を無視する |
+| `--print` | 書き込み予定のファイル変更を、実際には書き込まず表示する |
 
 agent 別の挙動とセットアップ出力は [agent セットアップ](/ja/agents/setup)を参照。
