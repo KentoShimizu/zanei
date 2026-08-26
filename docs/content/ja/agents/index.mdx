@@ -17,7 +17,7 @@ Zanei が履歴を公開する経路は 2 つあり、どちらも同じロー�
 skill は 3 つ目の経路ではなく、「いつ履歴を見るか」「トークンを抑える呼び方」を agent に伝える指示レイヤーです。指示の届き方は経路ごとに異なります。
 
 - MCP では指示がプロトコルに含まれています。ツール名・説明・既定値・スキーマは `tools/list` で配信されるため、MCP クライアントに追加の設定は不要です。Claude Desktop の [setup](/ja/agents/setup) がサーバ登録だけで済むのはこのためです。
-- CLI は agent に対して自己記述的でないため、Zanei は単一の `skills/SKILL.md` を指示の正本として持ちます。setup は下表のすべての agent にそのまま配置し、各 agent は固有の skill 探索方式でそれを読み込みます。
+- CLI は agent に対して自己記述的でないため、Zanei は単一の `skills/SKILL.md` を指示の正本として持ちます。setup は CLI を実行する agent すべてにそのまま配置し、各 agent は固有の skill 探索方式でそれを読み込みます。
 
 ## 対応 agent
 
@@ -32,7 +32,7 @@ skill は 3 つ目の経路ではなく、「いつ履歴を見るか」「ト�
 
 Claude のデスクトップアプリは 2 つの面を併せ持ちます。chat は MCP で Zanei に届き、同じアプリ内で動く Claude Code はシェルを持つため、上の Claude Code 行の経路を使います。
 
-setup は skill を配置し、agent 向けの MCP 登録コマンドと、opencode に必要な手動設定用の指示を表示します（[セットアップ](/ja/agents/setup)参照）。
+setup は skill を配置し、agent 向けの MCP 登録コマンドを表示します。opencode の MCP JSON は手動設定用に表示します（[セットアップ](/ja/agents/setup)参照）。
 
 ## agent にできること
 

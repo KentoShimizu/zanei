@@ -17,7 +17,7 @@ Zanei exposes your history through two surfaces, both thin wrappers over the sam
 The skill is not a third surface; it is the instruction layer that tells the agent when to read your history and how to keep token usage low. How those instructions reach the agent differs by surface:
 
 - Over MCP, they are built in: tool names, descriptions, defaults, and schemas travel inside the protocol (`tools/list`), so MCP clients need nothing else. This is why [setup](/agents/setup) for Claude Desktop only registers the server.
-- The CLI is not self-describing to an agent, so Zanei keeps one canonical `skills/SKILL.md`. Setup installs it unchanged for every agent listed below; each one reads it through its own skill discovery model.
+- The CLI is not self-describing to an agent, so Zanei keeps one canonical `skills/SKILL.md`. Setup installs it unchanged for every agent that runs the CLI; each one reads it through its own skill discovery model.
 
 ## Supported agents
 
@@ -32,7 +32,7 @@ The skill is not a third surface; it is the instruction layer that tells the age
 
 The Claude desktop app hosts both surfaces. Its chat reaches Zanei over MCP; Claude Code running inside the same app has a shell and uses the Claude Code row above.
 
-Setup installs skill files, prints the MCP registration command for your agent, and prints the manual instructions needed for opencode; see [setup](/agents/setup).
+Setup installs skill files and prints the MCP registration command for your agent; opencode's MCP JSON is printed for you to place. See [setup](/agents/setup).
 
 ## What agents can do
 

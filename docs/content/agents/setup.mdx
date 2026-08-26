@@ -3,7 +3,7 @@ title: Setup
 description: Set up Zanei with native integration or printed instructions for manual placement.
 ---
 
-Zanei ships one canonical `skills/SKILL.md`. `zanei setup` installs it unchanged for every supported agent. For MCP, setup prints the registration command to run; only Claude Desktop's config file is written directly, and opencode's MCP JSON is printed for manual configuration.
+Zanei ships one canonical `skills/SKILL.md`. `zanei setup` installs it unchanged for every agent that runs the CLI. For MCP, setup prints the registration command to run; only Claude Desktop's config file is written directly, and opencode's MCP JSON is printed for manual configuration.
 
 ```bash
 zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
@@ -12,11 +12,11 @@ zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope pr
 | Flag | Description |
 | --- | --- |
 | `--agent` | Target: `claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
-| `--scope` | `project` (default; current repository) or `user` (account-wide). It has no effect on the manual opencode output |
-| `--print` | Preview planned file changes without writing. opencode never writes files, with or without this flag |
+| `--scope` | `project` (default; current repository) or `user` (account-wide). Codex, Hermes Agent, and Claude Desktop are always user-global and ignore it |
+| `--print` | Preview planned file changes without writing |
 
 :::note
-For agents that write files, run with `--print` first to preview every file that would be created or modified.
+Every agent writes at least one file, so run with `--print` first to preview what would be created or modified.
 :::
 
 ## Per-agent setup

@@ -3,7 +3,7 @@ title: セットアップ
 description: native 連携または手動配置用に表示される指示で、agent に Zanei を設定する。
 ---
 
-Zanei が持つ agent 向け指示の単一ソースは、標準形式の `skills/SKILL.md` だけです。`zanei setup` は対応するすべての agent にそのまま配置します。MCP については各 agent 向けの登録コマンドを表示し、設定ファイルへ直接書き込むのは Claude Desktop のみです。opencode の MCP JSON は手動設定用に表示します。
+Zanei が持つ agent 向け指示の単一ソースは、標準形式の `skills/SKILL.md` だけです。`zanei setup` は CLI を実行する agent すべてにそのまま配置します。MCP については各 agent 向けの登録コマンドを表示し、設定ファイルへ直接書き込むのは Claude Desktop のみです。opencode の MCP JSON は手動設定用に表示します。
 
 ```bash
 zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
@@ -12,11 +12,11 @@ zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope pr
 | フラグ | 説明 |
 | --- | --- |
 | `--agent` | 対象：`claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
-| `--scope` | `project`（既定。カレントリポジトリ）/ `user`（ユーザー全体）。opencode の手動設定出力には影響しない |
-| `--print` | 書き込み予定のファイル変更を、実際には書き込まず表示する。opencode は、このフラグの有無にかかわらずファイルを書き込まない |
+| `--scope` | `project`（既定。カレントリポジトリ）/ `user`（ユーザー全体）。Codex・Hermes Agent・Claude Desktop は常にユーザーグローバルで、この指定を無視する |
+| `--print` | 書き込み予定のファイル変更を、実際には書き込まず表示する |
 
 :::note
-ファイルを書き込む agent では、まず `--print` を付けて実行すると、作成・変更されるファイルをすべて事前確認できます。
+どの agent でも最低 1 つのファイルを書き込むため、まず `--print` を付けて実行し、作成・変更されるファイルを事前確認してください。
 :::
 
 ## agent 別セットアップ
