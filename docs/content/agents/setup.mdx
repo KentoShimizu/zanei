@@ -107,7 +107,7 @@ Because Hermes Agent configuration is user-global, `--scope project` does not ap
 zanei setup --agent claude-desktop
 ```
 
-Claude Desktop has no shell, so MCP is the only surface. The command registers the server in `claude_desktop_config.json`:
+Claude Desktop's chat cannot run `zanei` on your Mac, so MCP is its surface. The command registers the server in `claude_desktop_config.json`:
 
 ```json claude_desktop_config.json
 {
@@ -119,6 +119,8 @@ Claude Desktop has no shell, so MCP is the only surface. The command registers t
   }
 }
 ```
+
+This covers the chat surface only. For Claude Code running inside the same app, run `zanei setup --agent claude`.
 
 </Tab>
 <Tab title="pi">

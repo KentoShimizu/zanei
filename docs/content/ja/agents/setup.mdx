@@ -107,7 +107,7 @@ Hermes Agent の設定はユーザーグローバルのため、`--scope project
 zanei setup --agent claude-desktop
 ```
 
-Claude Desktop はシェルを持たないため、MCP で接続します。`claude_desktop_config.json` にサーバを登録します。
+Claude Desktop の chat は Mac 上で `zanei` を実行できないため、MCP が接続経路です。`claude_desktop_config.json` にサーバを登録します。
 
 ```json claude_desktop_config.json
 {
@@ -119,6 +119,8 @@ Claude Desktop はシェルを持たないため、MCP で接続します。`cla
   }
 }
 ```
+
+対象は chat の面だけです。同じアプリ内で動く Claude Code には `zanei setup --agent claude` を実行してください。
 
 </Tab>
 <Tab title="pi">
