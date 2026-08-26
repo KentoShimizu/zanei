@@ -1,6 +1,7 @@
 use std::{
     ffi::CString,
     fs,
+    io::{self, Write},
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::Path,
     process::Command,
@@ -43,7 +44,26 @@ const STICKY_MODE: u32 = 0o1000;
 const ROOT_USER_ID: u32 = 0;
 const START_LOCK_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
 
-pub(super) fn open_start_lock(path: &Path, user_id: u32) -> Result<OwnedFd, DaemonError> {
+#[derive(Debug)]
+pub(super) struct StartLock {
+    file: OwnedFd,
+}
+
+impl Drop for StartLock {
+    fn drop(&mut self) {
+        // CLOEXEC closes a fork-inherited descriptor only after exec. Unlock explicitly so a
+        // concurrent spawn cannot extend the start operation beyond this guard's lifetime.
+        if let Err(error) = flock(&self.file, FlockOperation::Unlock) {
+            // Drop may run during unwinding, so diagnostics cannot become another failure.
+            let _ = writeln!(
+                io::stderr().lock(),
+                "zanei: failed to release launch agent start lock: {error}"
+            );
+        }
+    }
+}
+
+pub(super) fn open_start_lock(path: &Path, user_id: u32) -> Result<StartLock, DaemonError> {
     let argument = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         file_error(
             "open launch agent start lock at",
@@ -78,7 +98,7 @@ pub(super) fn open_start_lock(path: &Path, user_id: u32) -> Result<OwnedFd, Daem
     fchmod(&file, START_LOCK_MODE)
         .map_err(|source| errno_error("restrict launch agent start lock at", path, source))?;
     match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(StartLock { file }),
         Err(Errno::WOULDBLOCK) => Err(invalid_directory(
             "lock launch agent start at",
             path,
@@ -291,6 +311,29 @@ mod tests {
     use super::*;
 
     const OPERATION: &str = "use as a test directory";
+
+    #[test]
+    fn start_lock_rejects_concurrent_starts_and_unlocks_inherited_descriptors() {
+        let directory = tempfile::TempDir::new().expect("start lock fixture");
+        let path = directory.path().join("start.lock");
+        let user_id = fs::metadata(directory.path()).expect("lock parent").uid();
+        let wrong_owner =
+            open_start_lock(&path, user_id ^ 1).expect_err("wrong-owner lock must fail");
+        assert!(matches!(wrong_owner, DaemonError::File { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied));
+
+        let first = open_start_lock(&path, user_id).expect("first start lock");
+        let error = open_start_lock(&path, user_id).expect_err("second start must fail");
+        assert!(matches!(error, DaemonError::File { source, .. }
+            if source.kind() == std::io::ErrorKind::WouldBlock));
+        let inherited = rustix::io::fcntl_dupfd_cloexec(&first.file, 0)
+            .expect("duplicate start lock descriptor");
+
+        drop(first);
+        open_start_lock(&path, user_id).expect("released start lock");
+        drop(inherited);
+    }
+
     fn chmod(path: &Path, arguments: &[&str]) {
         let status = Command::new("/bin/chmod")
             .args(arguments)
