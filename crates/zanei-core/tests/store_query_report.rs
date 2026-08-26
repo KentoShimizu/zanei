@@ -7,7 +7,9 @@ use zanei_core::schema::{
     App, ContentSnapshotData, ContentSnapshotTrigger, EmptyData, Event, EventData, Redaction,
     Window,
 };
-use zanei_core::store::{MetadataFilter, QueryFilter, StoreError, StoreReader, StoreWriter};
+use zanei_core::store::{
+    MetadataFilter, QueryFilter, StoreError, StoreReader, StoreWriter, export_plain_sqlite,
+};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 const RETENTION_HOURS: u64 = 24 * 365 * 100;
@@ -191,7 +193,7 @@ fn content_selection_defaults_and_explicit_patterns_match_active_and_retired_sou
             explicit
                 .events
                 .iter()
-                .all(|event| event.event_type == "content.snapshot" && event.version == 2)
+                .all(|event| event.event_type == "content.snapshot" && event.version == 3)
         );
     }
 
@@ -223,6 +225,110 @@ fn content_selection_defaults_and_explicit_patterns_match_active_and_retired_sou
         .expect("content metadata across sources");
     assert_eq!(metadata.len(), 2);
     assert!(metadata.windows(2).all(|pair| pair[0].ts <= pair[1].ts));
+}
+
+#[test]
+fn v2_content_snapshots_remain_lossless_across_active_retired_and_export_reads() {
+    let directory = TestDirectory::new("content-v2-compatibility");
+    let store = directory.path().join("store.sqlite");
+    let retired = directory
+        .path()
+        .join("store.sqlite.plaintext-20260823T020000Z");
+    let snapshot = directory.path().join("snapshot.sqlite");
+    let now = OffsetDateTime::now_utc();
+    let current = content_event("evt_01K00000000000000000001013", now, 1);
+    let active_legacy = legacy_content_event(
+        "evt_01K00000000000000000001014",
+        now + time::Duration::milliseconds(1),
+        2,
+        true,
+    );
+    let retired_legacy = legacy_content_event(
+        "evt_01K00000000000000000001015",
+        now + time::Duration::milliseconds(2),
+        3,
+        false,
+    );
+    StoreWriter::open(&store)
+        .and_then(|mut writer| writer.append_batch(&[current, active_legacy.clone()]))
+        .expect("active v2/v3 fixtures");
+    StoreWriter::open(&retired)
+        .and_then(|mut writer| writer.append(&retired_legacy))
+        .expect("retired v2 fixture");
+    let retired_data_before = stored_data_json(&retired, &retired_legacy.id);
+
+    let reader = StoreReader::open(&store).expect("merged reader");
+    let result = reader
+        .query(
+            &QueryFilter {
+                types: vec!["content.snapshot".to_owned()],
+                ..QueryFilter::default()
+            },
+            RETENTION_HOURS,
+        )
+        .expect("v2/v3 merged query");
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .map(|event| event.version)
+            .collect::<Vec<_>>(),
+        [3, 2, 2]
+    );
+    assert_eq!(result.events[1], active_legacy);
+    assert_eq!(result.events[2], retired_legacy);
+    let retained_json = serde_json::to_value(&result.events[2]).expect("serialize retained v2");
+    assert_eq!(retained_json["v"], 2);
+    assert_eq!(retained_json["data"]["complete"], false);
+    assert!(retained_json["data"].get("cutoff").is_none());
+
+    let metadata = reader
+        .query_metadata(&MetadataFilter {
+            since: None,
+            until: None,
+            types: vec!["content.snapshot".to_owned()],
+            app: None,
+            bundle_id: None,
+            configured_retention_hours: RETENTION_HOURS,
+        })
+        .expect("v2/v3 metadata query");
+    assert_eq!(metadata.len(), 3);
+
+    export_plain_sqlite(
+        &store,
+        None,
+        &QueryFilter {
+            types: vec!["content.snapshot".to_owned()],
+            ..QueryFilter::default()
+        },
+        RETENTION_HOURS,
+        &snapshot,
+    )
+    .expect("v2/v3 SQLite export");
+    assert_eq!(
+        stored_data_json(&snapshot, &retired_legacy.id),
+        retired_data_before,
+        "SQLite export must copy the retained v2 payload verbatim"
+    );
+    let exported = StoreReader::open(&snapshot)
+        .and_then(|reader| {
+            reader.query(
+                &QueryFilter {
+                    types: vec!["content.snapshot".to_owned()],
+                    ..QueryFilter::default()
+                },
+                RETENTION_HOURS,
+            )
+        })
+        .expect("query SQLite export");
+    assert_eq!(
+        exported
+            .events
+            .iter()
+            .map(|event| event.version)
+            .collect::<Vec<_>>(),
+        [3, 2, 2]
+    );
 }
 
 #[test]
@@ -270,6 +376,15 @@ fn update_row(store: &Path, id: &str, assignment: &str) {
         .expect("modify fixture row");
 }
 
+fn stored_data_json(store: &Path, id: &str) -> String {
+    rusqlite::Connection::open(store)
+        .expect("open fixture database")
+        .query_row("SELECT data_json FROM events WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .expect("read fixture payload")
+}
+
 fn event(id: &str, at: OffsetDateTime, mono_ns: u64) -> Event {
     Event {
         version: 1,
@@ -296,7 +411,7 @@ fn event(id: &str, at: OffsetDateTime, mono_ns: u64) -> Event {
 fn content_event(id: &str, at: OffsetDateTime, mono_ns: u64) -> Event {
     let text = "Visible snapshot";
     Event {
-        version: 2,
+        version: 3,
         id: id.to_owned(),
         ts: format_timestamp(at),
         mono_ns,
@@ -312,17 +427,30 @@ fn content_event(id: &str, at: OffsetDateTime, mono_ns: u64) -> Event {
             id: Some(1),
         }),
         element: None,
-        data: EventData::ContentSnapshot(ContentSnapshotData {
-            text: Some(text.to_owned()),
-            chars: text.chars().count() as u64,
-            complete: true,
-            trigger: ContentSnapshotTrigger::Settle,
-        }),
+        data: EventData::ContentSnapshot(ContentSnapshotData::new(
+            Some(text.to_owned()),
+            text.chars().count() as u64,
+            None,
+            ContentSnapshotTrigger::Settle,
+        )),
         redaction: Redaction {
             applied: false,
             rules: Vec::new(),
         },
     }
+}
+
+fn legacy_content_event(id: &str, at: OffsetDateTime, mono_ns: u64, complete: bool) -> Event {
+    let mut value = serde_json::to_value(content_event(id, at, mono_ns))
+        .expect("serialize current content fixture");
+    value["v"] = serde_json::json!(2);
+    value["data"] = serde_json::json!({
+        "text": "Visible snapshot",
+        "chars": 16,
+        "complete": complete,
+        "trigger": "settle"
+    });
+    serde_json::from_value(value).expect("deserialize retained v2 content fixture")
 }
 
 struct TestDirectory(PathBuf);

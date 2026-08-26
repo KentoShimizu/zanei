@@ -10,12 +10,14 @@ use std::{
 };
 
 use zanei_collector::RawEvent;
-use zanei_core::{privacy::PrivacyScope, schema::ContentSnapshotTrigger};
+use zanei_core::{
+    privacy::PrivacyScope,
+    schema::{ContentSnapshotCutoff, ContentSnapshotTrigger},
+};
 
 use crate::{
     content_snapshot::{
-        SnapshotAxApplication, SnapshotAxError, SnapshotCutoff, SnapshotTriggerReceiver,
-        SnapshotWalkOutput,
+        SnapshotAxApplication, SnapshotAxError, SnapshotTriggerReceiver, SnapshotWalkOutput,
         budget::WalkBudget,
         output::{emit, emit_released, trace_candidate, trace_output},
         scheduler::{ScheduledSnapshot, SnapshotScheduler},
@@ -315,7 +317,7 @@ fn process_candidate<F>(
         u64::try_from(output.degraded_nodes).expect("degraded node count must fit u64"),
         Ordering::Relaxed,
     );
-    if stop.load(Ordering::Acquire) || output.cutoff == Some(SnapshotCutoff::Stopped) {
+    if stop.load(Ordering::Acquire) || output.cutoff == Some(ContentSnapshotCutoff::Stopped) {
         trace_output(&candidate, "stopped", &output);
         return;
     }
@@ -518,8 +520,7 @@ fn initial_time_cutoff(clock: &impl WalkClock, ax_calls: usize) -> Option<Snapsh
         nodes: 0,
         ax_calls,
         elapsed,
-        complete: false,
-        cutoff: Some(SnapshotCutoff::Time),
+        cutoff: Some(ContentSnapshotCutoff::Time),
         degraded_nodes: 0,
         frameless_nodes: 0,
     })

@@ -132,7 +132,7 @@ fn mcp_stdio_exposes_three_tools_and_contract_results() {
     );
     assert_eq!(content["count"], 1);
     assert_eq!(content["events"][0]["type"], "content.snapshot");
-    assert_eq!(content["events"][0]["v"], 2);
+    assert_eq!(content["events"][0]["v"], 3);
     assert_eq!(
         content["events"][0]["data"]["text"],
         "Visible fixture snapshot"

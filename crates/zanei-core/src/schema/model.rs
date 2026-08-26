@@ -5,7 +5,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use super::EventData;
 
 const LEGACY_EVENT_SCHEMA_VERSION: u8 = 1;
-const CONTENT_SNAPSHOT_SCHEMA_VERSION: u8 = 2;
+const LEGACY_CONTENT_SNAPSHOT_SCHEMA_VERSION: u8 = 2;
+const CONTENT_SNAPSHOT_SCHEMA_VERSION: u8 = 3;
 pub const KNOWN_EVENT_TYPES: [&str; 14] = [
     "app.activate",
     "app.launch",
@@ -33,6 +34,25 @@ pub fn event_schema_version(event_type: &str) -> Option<u8> {
         }
         "content.snapshot" => Some(CONTENT_SNAPSHOT_SCHEMA_VERSION),
         _ => None,
+    }
+}
+
+fn supports_event_schema_version(event_type: &str, version: u8) -> bool {
+    match event_type {
+        "content.snapshot" => matches!(
+            version,
+            LEGACY_CONTENT_SNAPSHOT_SCHEMA_VERSION | CONTENT_SNAPSHOT_SCHEMA_VERSION
+        ),
+        _ => event_schema_version(event_type) == Some(version),
+    }
+}
+
+pub(crate) fn event_schema_version_for_data(event_type: &str, data: &EventData) -> Option<u8> {
+    match (event_type, data) {
+        ("content.snapshot", EventData::ContentSnapshot(data)) if data.is_legacy() => {
+            Some(LEGACY_CONTENT_SNAPSHOT_SCHEMA_VERSION)
+        }
+        _ => event_schema_version(event_type),
     }
 }
 
@@ -119,7 +139,7 @@ impl<'de> Deserialize<'de> for Event {
         D: Deserializer<'de>,
     {
         let envelope = EventEnvelope::deserialize(deserializer)?;
-        if event_schema_version(&envelope.event_type) != Some(envelope.version) {
+        if !supports_event_schema_version(&envelope.event_type, envelope.version) {
             return Err(serde::de::Error::custom(format!(
                 "event type {} does not use schema version {}",
                 envelope.event_type, envelope.version
@@ -160,7 +180,7 @@ impl Serialize for Event {
     where
         S: Serializer,
     {
-        if event_schema_version(&self.event_type) != Some(self.version) {
+        if !supports_event_schema_version(&self.event_type, self.version) {
             return Err(serde::ser::Error::custom(format!(
                 "event type {} does not use schema version {}",
                 self.event_type, self.version
@@ -207,6 +227,9 @@ impl Event {
         }
         if !self.data.matches_event_type(&self.event_type) {
             return Err("event type does not match its typed payload");
+        }
+        if event_schema_version_for_data(&self.event_type, &self.data) != Some(self.version) {
+            return Err("event payload does not match its schema version");
         }
         self.validate_context()?;
         if let EventData::BrowserNavigate(data) = &self.data {

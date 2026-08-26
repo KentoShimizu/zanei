@@ -12,11 +12,12 @@ use time::OffsetDateTime;
 use zanei_collector::RawEvent;
 use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyScope};
 use zanei_core::schema::{
-    CaptureContext, ContentSnapshotData, ContentSnapshotTrigger, EventData, Window,
+    CaptureContext, ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotTrigger, EventData,
+    Window,
 };
 
 use super::{
-    SharedHealth, SnapshotCutoff, SnapshotWalkOutput,
+    SharedHealth, SnapshotWalkOutput,
     scheduler::ScheduledSnapshot,
     state::{SaveBlock, SnapshotState, SnapshotWindowKey},
 };
@@ -72,7 +73,7 @@ pub(super) fn emit(
         &candidate,
         key,
         output.text,
-        output.complete,
+        output.cutoff,
         decision.capture_context(),
         observed_at,
     );
@@ -142,7 +143,7 @@ pub(super) fn build_raw_event(
     candidate: &ScheduledSnapshot,
     key: SnapshotWindowKey,
     text: String,
-    complete: bool,
+    cutoff: Option<ContentSnapshotCutoff>,
     capture_context: CaptureContext,
     observed_at: OffsetDateTime,
 ) -> RawEvent {
@@ -158,12 +159,12 @@ pub(super) fn build_raw_event(
             id: Some(key.window_id),
         }),
         element: None,
-        data: EventData::ContentSnapshot(ContentSnapshotData {
-            text: Some(text),
+        data: EventData::ContentSnapshot(ContentSnapshotData::new(
+            Some(text),
             chars,
-            complete,
-            trigger: candidate.trigger,
-        }),
+            cutoff,
+            candidate.trigger,
+        )),
         capture_context,
     }
 }
@@ -183,7 +184,7 @@ pub(super) fn trace_candidate(
     elapsed: Duration,
     bytes: usize,
     complete: bool,
-    cutoff: Option<SnapshotCutoff>,
+    cutoff: Option<ContentSnapshotCutoff>,
 ) {
     crate::trace::trace!(
         "{}",
@@ -211,7 +212,7 @@ struct TraceMetrics {
     elapsed: Duration,
     bytes: usize,
     complete: bool,
-    cutoff: Option<SnapshotCutoff>,
+    cutoff: Option<ContentSnapshotCutoff>,
 }
 
 impl From<&SnapshotWalkOutput> for TraceMetrics {
@@ -222,7 +223,7 @@ impl From<&SnapshotWalkOutput> for TraceMetrics {
             frameless_nodes: output.frameless_nodes,
             elapsed: output.elapsed,
             bytes: output.text.len(),
-            complete: output.complete,
+            complete: output.cutoff.is_none(),
             cutoff: output.cutoff,
         }
     }
@@ -249,10 +250,19 @@ fn trace_summary(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetric
         metrics.elapsed.as_millis(),
         metrics.bytes,
         metrics.complete,
-        metrics.cutoff.map_or("none", SnapshotCutoff::trace_name),
+        metrics.cutoff.map_or("none", cutoff_trace_name),
         candidate.target.app.pid,
         window_id
     )
+}
+
+pub(super) const fn cutoff_trace_name(cutoff: ContentSnapshotCutoff) -> &'static str {
+    match cutoff {
+        ContentSnapshotCutoff::Time => "time",
+        ContentSnapshotCutoff::Nodes => "nodes",
+        ContentSnapshotCutoff::Bytes => "bytes",
+        ContentSnapshotCutoff::Stopped => "stopped",
+    }
 }
 
 fn trace_metrics(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetrics) {
@@ -260,18 +270,18 @@ fn trace_metrics(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetric
 }
 
 #[cfg(test)]
-pub(super) fn test_trace_summary(candidate: &ScheduledSnapshot) -> String {
-    trace_summary(
-        candidate,
-        "emit",
-        TraceMetrics {
-            nodes: 42,
-            degraded_nodes: 0,
-            frameless_nodes: 0,
-            elapsed: Duration::from_millis(17),
-            bytes: 512,
-            complete: true,
-            cutoff: None,
-        },
-    )
+pub(super) fn test_trace_summary(
+    candidate: &ScheduledSnapshot,
+    cutoff: Option<ContentSnapshotCutoff>,
+) -> String {
+    let output = SnapshotWalkOutput {
+        text: "x".repeat(512),
+        nodes: 42,
+        ax_calls: 0,
+        elapsed: Duration::from_millis(17),
+        cutoff,
+        degraded_nodes: 0,
+        frameless_nodes: 0,
+    };
+    trace_summary(candidate, "emit", TraceMetrics::from(&output))
 }

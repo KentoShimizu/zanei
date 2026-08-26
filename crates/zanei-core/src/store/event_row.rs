@@ -2,7 +2,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::schema::{
-    App, ClipboardOrigin, Event, EventData, Redaction, Window, event_schema_version,
+    App, ClipboardOrigin, Event, EventData, Redaction, Window, event_schema_version_for_data,
     is_known_event_type,
 };
 
@@ -42,9 +42,10 @@ pub(crate) fn decode(row: &rusqlite::Row<'_>) -> Result<DecodedEventRow, StoreEr
     OffsetDateTime::parse(&ts, &Rfc3339)
         .map_err(|_| StoreError::invalid_timestamp("event.ts", ts.clone()))?;
 
+    let version = event_schema_version_for_data(&event_type, &data)
+        .expect("known event types and matching payloads have a schema version");
     let event = Event {
-        version: event_schema_version(&event_type)
-            .expect("known event types have a schema version"),
+        version,
         id: row.get(0)?,
         ts,
         mono_ns: unsigned("mono_ns", row.get(2)?)?,

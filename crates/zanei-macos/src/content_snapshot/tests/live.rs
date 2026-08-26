@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use zanei_collector::Permission;
 
 use crate::{
-    content_snapshot::{SnapshotAxApplication, worker::test_live_scan},
+    content_snapshot::{SnapshotAxApplication, output::cutoff_trace_name, worker::test_live_scan},
     ffi::{
         window_list,
         workspace::{frontmost_application, running_applications},
@@ -54,8 +54,8 @@ fn live_frontmost_content_snapshot_metrics() {
         output.ax_calls,
         output.elapsed.as_millis(),
         output.text.len(),
-        output.complete,
-        output.cutoff.map_or("none", |cutoff| cutoff.trace_name())
+        output.cutoff.is_none(),
+        output.cutoff.map_or("none", cutoff_trace_name)
     );
 }
 

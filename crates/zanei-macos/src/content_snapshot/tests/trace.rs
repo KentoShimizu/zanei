@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use zanei_core::schema::ContentSnapshotTrigger;
+use zanei_core::schema::{ContentSnapshotCutoff, ContentSnapshotTrigger};
 
 use crate::content_snapshot::{
     SnapshotTriggerKind, output::test_trace_summary, scheduler::ScheduledSnapshot,
@@ -18,7 +18,7 @@ fn trace_contains_only_metrics_and_identifiers_never_content_context() {
         activity_window: None,
     };
 
-    let trace = test_trace_summary(&candidate);
+    let trace = test_trace_summary(&candidate, None);
     for required in [
         "component=content_snapshot",
         "trigger=settle",
@@ -40,4 +40,8 @@ fn trace_contains_only_metrics_and_identifiers_never_content_context() {
             "trace leaked {forbidden}: {trace}"
         );
     }
+
+    let cutoff_trace = test_trace_summary(&candidate, Some(ContentSnapshotCutoff::Time));
+    assert!(cutoff_trace.contains("complete=false"));
+    assert!(cutoff_trace.contains("cutoff=time"));
 }

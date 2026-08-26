@@ -5,6 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use zanei_core::schema::ContentSnapshotCutoff;
+
 use crate::ffi::ax::{AxFrame, AxTextRange, SnapshotAxError};
 
 use super::{
@@ -18,25 +20,6 @@ use text::TextAssembler;
 
 #[path = "walker/ax_node.rs"]
 mod ax_node;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SnapshotCutoff {
-    Time,
-    Nodes,
-    Bytes,
-    Stopped,
-}
-
-impl SnapshotCutoff {
-    pub(crate) const fn trace_name(self) -> &'static str {
-        match self {
-            Self::Time => "time",
-            Self::Nodes => "nodes",
-            Self::Bytes => "bytes",
-            Self::Stopped => "stopped",
-        }
-    }
-}
 
 #[derive(Debug)]
 pub enum SnapshotReadError {
@@ -148,8 +131,7 @@ pub struct SnapshotWalkOutput {
     pub nodes: usize,
     pub ax_calls: usize,
     pub elapsed: Duration,
-    pub complete: bool,
-    pub cutoff: Option<SnapshotCutoff>,
+    pub cutoff: Option<ContentSnapshotCutoff>,
     pub degraded_nodes: usize,
     pub frameless_nodes: usize,
 }
@@ -225,7 +207,6 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
         nodes: context.nodes,
         ax_calls: context.ax_calls,
         elapsed: clock.elapsed(),
-        complete: context.cutoff.is_none(),
         cutoff: context.cutoff,
         degraded_nodes: context.degraded_nodes,
         frameless_nodes: context.frameless_nodes,
@@ -240,7 +221,7 @@ fn visit_node<'a, N: SnapshotNode>(
     context: &mut WalkContext<'a>,
 ) -> Result<(), SnapshotWalkError> {
     if context.nodes >= context.budget.nodes {
-        context.cutoff = Some(SnapshotCutoff::Nodes);
+        context.cutoff = Some(ContentSnapshotCutoff::Nodes);
         return Ok(());
     }
     context.nodes += 1;
@@ -282,7 +263,7 @@ fn visit_node<'a, N: SnapshotNode>(
     }
     for fragment in fragments {
         if !context.text.push(&fragment) {
-            context.cutoff = Some(SnapshotCutoff::Bytes);
+            context.cutoff = Some(ContentSnapshotCutoff::Bytes);
             return Ok(());
         }
     }
@@ -442,7 +423,7 @@ struct WalkContext<'a> {
     nodes: usize,
     ax_calls: usize,
     text: TextAssembler,
-    cutoff: Option<SnapshotCutoff>,
+    cutoff: Option<ContentSnapshotCutoff>,
     degraded_nodes: usize,
     frameless_nodes: usize,
 }
@@ -458,11 +439,11 @@ impl WalkContext<'_> {
             return false;
         }
         if (self.stopped)() {
-            self.cutoff = Some(SnapshotCutoff::Stopped);
+            self.cutoff = Some(ContentSnapshotCutoff::Stopped);
             return false;
         }
         if self.clock.elapsed() >= self.budget.wall_time {
-            self.cutoff = Some(SnapshotCutoff::Time);
+            self.cutoff = Some(ContentSnapshotCutoff::Time);
             return false;
         }
         true
