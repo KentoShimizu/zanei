@@ -611,13 +611,13 @@ zanei mcp [--store <PATH>]
 
 ## `setup`
 
-Configures Zanei instructions and MCP integration for the target agent. Agents with native skill support and Claude Desktop retain their file-based setup; opencode and pi only print manual setup instructions and do not modify files.
+Configures Zanei instructions and MCP integration for the target agent. Agents with native skill support and Claude Desktop retain their file-based setup; opencode only prints manual setup instructions and does not modify files.
 
 ```bash
 zanei setup --agent claude            # SKILL.md into Claude Code's skill location + MCP registration
 zanei setup --agent codex --scope user
 zanei setup --agent hermes            # skill into ~/.hermes/skills/ + MCP in ~/.hermes/config.yaml
-zanei setup --agent pi                # print derived README instructions; no MCP or file writes
+zanei setup --agent pi                # skill into ~/.pi/agent/skills/ or .pi/skills/; no MCP
 zanei setup --agent claude-desktop    # MCP registration in claude_desktop_config.json
 zanei setup --agent opencode          # print AGENTS.md snippet + MCP JSON; no file writes
 ```
@@ -625,7 +625,7 @@ zanei setup --agent opencode          # print AGENTS.md snippet + MCP JSON; no f
 | Flag | Description |
 | --- | --- |
 | `--agent` | `claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
-| `--scope` | `project` (default; current repository) / `user` (account-wide). It has no effect on the manual opencode/pi output |
-| `--print` | Preview planned file changes without writing. opencode and pi do not write files, with or without this flag |
+| `--scope` | `project` (default; current repository) / `user` (account-wide). It has no effect on the manual opencode output |
+| `--print` | Preview planned file changes without writing. opencode does not write files, with or without this flag |
 
 Per-agent behavior and setup output: see [agent setup](/agents/setup).

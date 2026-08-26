@@ -12,8 +12,8 @@ zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope pr
 | フラグ | 説明 |
 | --- | --- |
 | `--agent` | 対象：`claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
-| `--scope` | `project`（既定。カレントリポジトリ）/ `user`（ユーザー全体）。opencode/pi の手動設定出力には影響しない |
-| `--print` | 書き込み予定のファイル変更を、実際には書き込まず表示する。opencode と pi は、このフラグの有無にかかわらずファイルを書き込まない |
+| `--scope` | `project`（既定。カレントリポジトリ）/ `user`（ユーザー全体）。opencode の手動設定出力には影響しない |
+| `--print` | 書き込み予定のファイル変更を、実際には書き込まず表示する。opencode は、このフラグの有無にかかわらずファイルを書き込まない |
 
 :::note
 ファイルを書き込む agent では、まず `--print` を付けて実行すると、作成・変更されるファイルをすべて事前確認できます。
