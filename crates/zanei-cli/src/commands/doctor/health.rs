@@ -305,7 +305,7 @@ mod tests {
         .expect("degraded permission report");
 
         assert!(!report.ok);
-        assert_eq!(report.missing_required, ["input_monitoring"]);
+        assert_eq!(report.missing_permissions, [Capability::ObserveInput]);
         assert_eq!(report.exit_code(), super::super::EXIT_MISSING_PERMISSIONS);
         assert_eq!(
             report.permissions_to_fix(true),

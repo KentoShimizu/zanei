@@ -849,18 +849,17 @@ fn doctor_reports_content_snapshot_accessibility_and_chrome_automation_requireme
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor report");
 
     assert_eq!(
-        report["permissions"]["accessibility"]["required_for"],
+        report["capabilities"]["read_accessibility_tree"]["required_for"],
         serde_json::json!(["content.snapshot"])
     );
     assert!(
-        report["permissions"]["input_monitoring"]
+        report["capabilities"]["observe_input"]
             .get("required_for")
             .is_none()
     );
-    assert!(
-        report["permissions"]["automation"]["per_app"]
-            .get("com.google.Chrome")
-            .is_some()
+    assert_eq!(
+        report["capabilities"]["automate_browser"]["detail"]["target_bundle_id"],
+        "com.google.Chrome"
     );
 }
 

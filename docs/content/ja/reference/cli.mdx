@@ -127,13 +127,22 @@ zanei doctor --json     # agent 向け機械可読
   "ok": false,
   "reported_by_recorder": true,
   "capture_sources": ["app", "window", "ui", "input", "browser"],
-  "permissions": {
-    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"] },
-    "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
-    "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
+  "capabilities": {
+    "read_accessibility_tree": {
+      "state": "available", "required": true,
+      "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"],
+      "detail": { "platform": "macos", "permission": "accessibility", "status": "granted", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" }
+    },
+    "observe_input": {
+      "state": "action_required", "required": true,
+      "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"],
+      "detail": { "platform": "macos", "permission": "input_monitoring", "status": "denied", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent" }
+    },
+    "automate_browser": {
+      "state": "deferred", "required": true,
+      "detail": { "platform": "macos", "permission": "automation", "status": "not_determined", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation", "target_bundle_id": "com.google.Chrome" }
+    }
   },
-  "missing_required": ["input_monitoring"],
-  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
   "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" },
   "health": {
     "state": "degraded",
@@ -143,7 +152,7 @@ zanei doctor --json     # agent 向け機械可読
 }
 ```
 
-`status` の値：`granted` / `denied` / `not_determined`。`reported_by_recorder` は、新鮮な recorder heartbeat 由来なら `true` です。heartbeat がなければ `doctor` 自身のプロセスから probe して `false` とし、人間向け出力には recorder 自身の権限を見るには起動が必要という注記を加えます。
+capability の `state` は `available` / `action_required` / `deferred` です。内側の macOS `detail` がネイティブな permission 名と `granted` / `denied` / `not_determined`、対応する System Settings URL、必要な場合は target bundle ID を所有します。`reported_by_recorder` は、新鮮な recorder heartbeat 由来なら `true` です。heartbeat がなければ `doctor` 自身のプロセスから probe して `false` とし、人間向け出力には recorder 自身の権限を見るには起動が必要という注記を加えます。
 
 `store_key` はストアの暗号化鍵の所在を報告します。`state` は `key_store`（鍵が見つかった。`detail` にログインキーチェーンか開発用上書き `ZANEI_STORE_KEY_FILE` かの所在が入る）、`not_needed`（ストアがない・平文・認識できない）、`missing`（ストアは暗号化されているが鍵がない）、`mismatch`（鍵でこのストアを復号できない）、`key_store_locked` / `key_store_denied`（`detail` にプラットフォームの案内。例：ログインキーチェーンがロックされている）、`unavailable` のいずれかです。`detail` は補足がある場合だけ含まれます。人間向け出力では権限の表の後に `Store key: ...` の行が加わります。ストアがロックされていても `doctor` は失敗せず、鍵の状態を報告し、権限は自身のプロセスから probe します。
 

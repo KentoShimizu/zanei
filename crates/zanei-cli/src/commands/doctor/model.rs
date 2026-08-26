@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
-
 use serde::Serialize;
 use zanei_collector::Capability;
+use zanei_core::CapabilityState;
 use zanei_core::store::LockedReason;
+use zanei_macos::permission::{MacOsCapabilityDetail, capability_detail};
 
 use super::health::HealthReport;
 
@@ -10,9 +10,7 @@ use super::health::HealthReport;
 pub(super) struct DoctorReport {
     pub(super) ok: bool,
     pub(super) capture_sources: Vec<&'static str>,
-    pub(super) permissions: PermissionReport,
-    pub(super) missing_required: Vec<&'static str>,
-    pub(super) settings_pane: Option<&'static str>,
+    pub(super) capabilities: CapabilityReport,
     #[serde(skip)]
     pub(super) missing_permissions: Vec<Capability>,
     pub(super) reported_by_recorder: bool,
@@ -84,21 +82,75 @@ impl StoreKeyReport {
     }
 }
 
-#[derive(Debug, Default, Serialize)]
-pub(super) struct PermissionReport {
-    pub(super) accessibility: StatusDetail,
-    pub(super) input_monitoring: StatusDetail,
-    pub(super) automation: AutomationDetail,
+#[derive(Debug, Serialize)]
+pub(super) struct CapabilityReport {
+    pub(super) read_accessibility_tree: CapabilityDetail,
+    pub(super) observe_input: CapabilityDetail,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) automate_browser: Option<CapabilityDetail>,
 }
 
-#[derive(Debug, Default, Serialize)]
-pub(super) struct StatusDetail {
-    pub(super) status: &'static str,
+impl CapabilityReport {
+    pub(super) const fn get(&self, capability: Capability) -> Option<&CapabilityDetail> {
+        match capability {
+            Capability::ReadAccessibilityTree => Some(&self.read_accessibility_tree),
+            Capability::ObserveInput => Some(&self.observe_input),
+            Capability::AutomateBrowser => self.automate_browser.as_ref(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct CapabilityDetail {
+    pub(super) state: &'static str,
+    pub(super) required: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) required_for: Vec<&'static str>,
+    pub(super) detail: PlatformDetail,
 }
 
-#[derive(Debug, Default, Serialize)]
-pub(super) struct AutomationDetail {
-    pub(super) per_app: BTreeMap<String, &'static str>,
+impl CapabilityDetail {
+    pub(super) fn new(
+        capability: Capability,
+        state: CapabilityState,
+        required: bool,
+        required_for: Vec<&'static str>,
+    ) -> Self {
+        Self {
+            state: capability_state_name(state),
+            required,
+            required_for,
+            detail: PlatformDetail::new(capability_detail(capability, state)),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct PlatformDetail {
+    platform: &'static str,
+    pub(super) permission: &'static str,
+    pub(super) status: &'static str,
+    pub(super) settings_url: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) target_bundle_id: Option<&'static str>,
+}
+
+impl PlatformDetail {
+    fn new(detail: MacOsCapabilityDetail) -> Self {
+        Self {
+            platform: detail.platform,
+            permission: detail.permission.as_str(),
+            status: detail.status.as_str(),
+            settings_url: detail.settings_url,
+            target_bundle_id: detail.target_bundle_id,
+        }
+    }
+}
+
+const fn capability_state_name(state: CapabilityState) -> &'static str {
+    match state {
+        CapabilityState::Available => "available",
+        CapabilityState::ActionRequired => "action_required",
+        CapabilityState::Deferred => "deferred",
+    }
 }

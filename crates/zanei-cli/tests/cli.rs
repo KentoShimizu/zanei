@@ -743,32 +743,39 @@ fn doctor_json_matches_the_real_permission_state() {
         value["health"]["collector_failures"],
         serde_json::Value::Null
     );
-    let accessibility_granted = value["permissions"]["accessibility"]["status"] == "granted";
-    let input_granted = value["permissions"]["input_monitoring"]["status"] == "granted";
+    let accessibility = &value["capabilities"]["read_accessibility_tree"];
+    let input = &value["capabilities"]["observe_input"];
+    let accessibility_granted = accessibility["detail"]["status"] == "granted";
+    let input_granted = input["detail"]["status"] == "granted";
+    assert_eq!(
+        accessibility["state"],
+        if accessibility_granted {
+            "available"
+        } else {
+            "action_required"
+        }
+    );
+    assert_eq!(
+        input["state"],
+        match input["detail"]["status"].as_str() {
+            Some("granted") => "available",
+            Some("denied") => "action_required",
+            Some("not_determined") => "deferred",
+            status => panic!("unexpected input monitoring status: {status:?}"),
+        }
+    );
+    assert_eq!(accessibility["required"], true);
+    assert_eq!(input["required"], true);
+    assert_eq!(accessibility["detail"]["platform"], "macos");
+    assert!(value.get("permissions").is_none());
+    assert!(value.get("missing_required").is_none());
+    assert!(value.get("settings_pane").is_none());
     if accessibility_granted && input_granted {
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(value["ok"], true);
-        assert_eq!(value["missing_required"], serde_json::json!([]));
     } else {
         assert_eq!(output.status.code(), Some(3));
         assert_eq!(value["ok"], false);
-        let expected_missing = [
-            (!accessibility_granted).then_some("accessibility"),
-            (!input_granted).then_some("input_monitoring"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-        assert_eq!(
-            value["missing_required"],
-            serde_json::to_value(expected_missing).expect("missing permissions JSON")
-        );
-        let expected_pane = if accessibility_granted {
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
-        } else {
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-        };
-        assert_eq!(value["settings_pane"], expected_pane);
     }
 
     let human = command(&config, &store)
@@ -795,7 +802,7 @@ fn doctor_rejects_orphaned_heartbeat_as_stopped_without_changing_exit_or_fix() {
     let report: serde_json::Value =
         serde_json::from_slice(&stopped.stdout).expect("stopped doctor report");
     assert_eq!(report["ok"], true);
-    assert_eq!(report["missing_required"], serde_json::json!([]));
+    assert!(report["capabilities"].is_object());
     assert_eq!(report["health"]["state"], "stopped");
     assert_eq!(report["health"]["degraded"], serde_json::json!({}));
     assert_eq!(

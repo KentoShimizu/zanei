@@ -68,17 +68,26 @@ zanei doctor --json
   "ok": false,
   "reported_by_recorder": true,
   "capture_sources": ["app", "window", "ui", "input", "browser"],
-  "permissions": {
-    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"] },
-    "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
-    "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
-  },
-  "missing_required": ["input_monitoring"],
-  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+  "capabilities": {
+    "read_accessibility_tree": {
+      "state": "available", "required": true,
+      "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"],
+      "detail": { "platform": "macos", "permission": "accessibility", "status": "granted", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" }
+    },
+    "observe_input": {
+      "state": "action_required", "required": true,
+      "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"],
+      "detail": { "platform": "macos", "permission": "input_monitoring", "status": "denied", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent" }
+    },
+    "automate_browser": {
+      "state": "deferred", "required": true,
+      "detail": { "platform": "macos", "permission": "automation", "status": "not_determined", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation", "target_bundle_id": "com.google.Chrome" }
+    }
+  }
 }
 ```
 
-`status` の値は `granted` / `denied` / `not_determined` の 3 値です。`reported_by_recorder` で recorder heartbeat とローカルプロセスの probe を区別できます。権限不足は専用の終了コード 3 で通知されるため、agent やスクリプトは出力を解析せずに権限の問題を判定できます（[終了コード](/ja/reference/cli#終了コード)）。
+capability の `state` は `available` / `action_required` / `deferred` です。内側の macOS `detail` がネイティブな permission 名と status、System Settings URL、必要な場合は target bundle ID を持ちます。`reported_by_recorder` で recorder heartbeat とローカルプロセスの probe を区別できます。権限不足は専用の終了コード 3 で通知されるため、agent やスクリプトは出力を解析せずに権限の問題を判定できます（[終了コード](/ja/reference/cli#終了コード)）。
 
 ## 権限を解除・リセットする
 

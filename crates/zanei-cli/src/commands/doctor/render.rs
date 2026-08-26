@@ -39,16 +39,27 @@ pub(super) fn render_human(
     let mut output = String::from("PERMISSION       STATUS          REQUIRED FOR\n");
     output.push_str(&format!(
         "accessibility    {:<15} {}\n",
-        report.permissions.accessibility.status,
-        report.permissions.accessibility.required_for.join(",")
+        report.capabilities.read_accessibility_tree.detail.status,
+        report
+            .capabilities
+            .read_accessibility_tree
+            .required_for
+            .join(",")
     ));
     output.push_str(&format!(
         "input_monitoring {:<15} {}\n",
-        report.permissions.input_monitoring.status,
-        report.permissions.input_monitoring.required_for.join(",")
+        report.capabilities.observe_input.detail.status,
+        report.capabilities.observe_input.required_for.join(",")
     ));
-    for (app, status) in &report.permissions.automation.per_app {
-        output.push_str(&format!("automation       {status:<15} {app}\n"));
+    if let Some(automation) = &report.capabilities.automate_browser {
+        output.push_str(&format!(
+            "automation       {:<15} {}\n",
+            automation.detail.status,
+            automation
+                .detail
+                .target_bundle_id
+                .expect("macOS automation detail has a target bundle ID")
+        ));
     }
     if report.reported_by_recorder {
         output.push_str("\nPermission status as reported by the running recorder.\n");
@@ -61,11 +72,10 @@ pub(super) fn render_human(
     output.push_str(&report.health.render_human());
 
     let automation_pending = report
-        .permissions
-        .automation
-        .per_app
-        .values()
-        .any(|status| *status == "not_determined");
+        .capabilities
+        .automate_browser
+        .as_ref()
+        .is_some_and(|capability| capability.detail.status == "not_determined");
     if automation_pending {
         output.push_str(
             "\nAutomation: macOS will show a permission dialog the first time Zanei contacts Chrome; no setup is needed in advance.\n",
@@ -76,7 +86,12 @@ pub(super) fn render_human(
         output.push('\n');
         output.push_str(permission_list_note(bundled));
     } else {
-        if let Some(pane) = report.settings_pane {
+        if let Some(pane) = report.missing_permissions.iter().find_map(|capability| {
+            report
+                .capabilities
+                .get(*capability)
+                .map(|report| report.detail.settings_url)
+        }) {
             output.push_str(&format!("\nSystem Settings pane: {pane}\n"));
         }
         output.push_str("\nTo grant a missing permission:\n");
