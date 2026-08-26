@@ -5,7 +5,7 @@ description: プライバシー・ブラウザ対応・データアクセス・�
 
 ## これはキーロガーですか？
 
-いいえ。キー入力の内容は、opt-in（`text_content = true`）しない限り捕捉されません。既定で記録されるのは入力があった事実とフィールド種別だけです。`capture.text_content` が未設定なら、対話式のバックグラウンド `start` が記録するかどうかを一度だけ確認します（既定は記録しない。正確な条件は [CLI リファレンス](/ja/reference/cli#start)）。`zanei config set capture.text_content <true|false>` でいつでも変更できます。opt-in してもパスワード欄は除外され、redactor が検出可能な機密をスクラブし、データはマシンの外に出ません。[プライバシーモデル](/ja/guides/privacy)参照。
+いいえ。キー入力の内容は、opt-in（`text_content = true`）しない限り捕捉されません。既定で記録されるのは入力があった事実とフィールド種別だけです。`capture.text_content` が未設定なら、対話式のバックグラウンド `start` が記録するかどうかを一度だけ確認します（既定は記録しない。正確な条件は [CLI リファレンス](/ja/reference/cli#start)）。`zanei config set capture.text_content <true|false>` でいつでも変更できます。opt-in してもパスワード欄は除外されます。有効な redactor が置換するのはルールに一致する値だけで、氏名・電話番号・FAX 番号・住所は削除しません。露出の制限には capture-time フィルタと保持期間を使ってください。データはマシンの外に出ません。[プライバシーモデル](/ja/guides/privacy)参照。
 
 ## データはどこへ行きますか？
 

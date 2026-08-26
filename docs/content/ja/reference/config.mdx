@@ -41,7 +41,7 @@ exclude_apps = ["1Password", "Keychain Access"]   # 不許可リスト（bundle_
 include_only_apps = []          # 非空で許可リストモードに切替
 exclude_websites = []           # Chrome URL event/本文。URL host のドット境界サフィックス一致
 include_only_websites = []      # Chrome URL event/本文の許可リスト
-redactors = ["email", "credit_card", "token"]     # 捕捉値のスクラブ（二次防御）
+redactors = ["credit_card", "token"]              # 限定的なパターンベースのスクラブ。email は opt-in
 
 [filter.text_content]           # 入力・clipboard 本文だけ。event と内容以外の事実は残る
 exclude_apps = ["com.apple.Safari", "org.mozilla.firefox", "com.brave.Browser",
@@ -77,7 +77,7 @@ egress に相当する設定はありません。外部送信という機能自�
 | `filter.exclude_websites`・`filter.include_only_websites` | ドメイン名。非空・whitespace・一意性のルールは上と同じ。末尾の `.` は 1 個まで。それを除いて全体 253 bytes 以下、dot 区切りの各 label は 1〜63 bytes の ASCII 英数字と `-` で、先頭と末尾は英数字。同梱の public suffix snapshot に含まれる値（`com` など）は受理するが、`filter ... add` は `--quiet` 未指定なら warning を表示 |
 | `filter.text_content.exclude_apps`・`filter.text_content.include_only_apps`・`filter.content_snapshot.exclude_apps`・`filter.content_snapshot.include_only_apps` | 同じ app list rule。両方の `exclude_apps` は全体例に示した Safari・Firefox・Brave・Edge・Vivaldi・Arc の bundle ID が既定値。他の app list は `[]` |
 | `filter.text_content.exclude_websites`・`filter.text_content.include_only_websites`・`filter.content_snapshot.exclude_websites`・`filter.content_snapshot.include_only_websites` | 同じ domain list rule。4 list とも既定値は `[]` |
-| `filter.redactors` | `email`・`credit_card`・`token` のうち 0 個以上。重複不可 |
+| `filter.redactors` | `email`・`credit_card`・`token` のうち 0 個以上。重複不可。`email` は選択可能だが既定では無効 |
 | `output.batch_interval_s`・`output.retention_hours` | 0 より大きい符号なし整数（`u64`） |
 ## `[capture]`
 
@@ -99,7 +99,7 @@ capture-time フィルタはストア書込**前に**適用されます。scope 
 | `include_only_apps` | `[]` | 許可リスト。非空で許可リストモードに切替 |
 | `exclude_websites` | `[]` | Chrome URL イベントと本文に対する URL host の不許可リスト。Public Suffix List 非対応のドット境界サフィックス一致：`example.com` は `api.example.com` に一致し、`evil-example.com` には一致しません。`com` を指定するとすべての `.com` ホストが除外されます |
 | `include_only_websites` | `[]` | Chrome URL イベントと本文に対する URL host の許可リスト |
-| `redactors` | `["email", "credit_card", "token"]` | 捕捉値に適用する redaction ルール |
+| `redactors` | `["credit_card", "token"]` | 捕捉値に適用するパターンベースの redaction ルール。`email` は opt-in ルールとして引き続き選択可能 |
 
 nested scope も同じ 4 list 名を使います。既定値と挙動は上記のとおりです。デーモンは 3 scope すべてを約 2 秒間隔で監視しており、フィルタの変更はデーモン再起動なしで数秒以内に反映されます。
 

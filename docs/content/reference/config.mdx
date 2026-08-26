@@ -41,7 +41,7 @@ exclude_apps = ["1Password", "Keychain Access"]   # deny list (bundle_id recomme
 include_only_apps = []          # non-empty switches to allow-list mode
 exclude_websites = []           # Chrome URL events/text bodies; dot-boundary host suffix match
 include_only_websites = []      # allow list for Chrome URL events/text bodies
-redactors = ["email", "credit_card", "token"]     # scrubbing of captured values (second line of defense)
+redactors = ["credit_card", "token"]              # limited pattern-based scrubbing; email is opt-in
 
 [filter.text_content]           # typed/copied bodies only; events and non-content facts remain
 exclude_apps = ["com.apple.Safari", "org.mozilla.firefox", "com.brave.Browser",
@@ -77,7 +77,7 @@ Validation runs after omitted settings are filled with their defaults. Only the 
 | `filter.exclude_websites`, `filter.include_only_websites` | Domain names, same non-empty / whitespace / uniqueness rules. At most one trailing dot; without it, at most 253 bytes total, each dot-separated label 1–63 bytes of ASCII letters, digits, or `-`, starting and ending with a letter or digit. A value that is itself a public suffix in the bundled snapshot (for example `com`) is accepted, but `filter ... add` prints a warning unless `--quiet` is set |
 | `filter.text_content.exclude_apps`, `filter.text_content.include_only_apps`, `filter.content_snapshot.exclude_apps`, `filter.content_snapshot.include_only_apps` | The same app-list rules. Both `exclude_apps` lists default to Safari, Firefox, Brave, Edge, Vivaldi, and Arc bundle IDs shown in the full example; the other app lists default to `[]` |
 | `filter.text_content.exclude_websites`, `filter.text_content.include_only_websites`, `filter.content_snapshot.exclude_websites`, `filter.content_snapshot.include_only_websites` | The same domain-list rules; all four default to `[]` |
-| `filter.redactors` | Zero or more of `email`, `credit_card`, `token`; no duplicates |
+| `filter.redactors` | Zero or more of `email`, `credit_card`, `token`; no duplicates. `email` is available but is not enabled by default |
 | `output.batch_interval_s`, `output.retention_hours` | Unsigned integer (`u64`) greater than zero |
 ## `[capture]`
 
@@ -99,7 +99,7 @@ The evaluation order is built-in exclusions, `[filter]` apps and Chrome websites
 | `include_only_apps` | `[]` | Allow list; non-empty switches to allow-list mode |
 | `exclude_websites` | `[]` | Deny list of URL hosts for Chrome URL events and text-content bodies. Dot-boundary suffix match with no Public Suffix List handling: `example.com` covers `api.example.com` but not `evil-example.com`; a bare `com` would match every `.com` host |
 | `include_only_websites` | `[]` | Allow list of URL hosts for Chrome URL events and text-content bodies |
-| `redactors` | `["email", "credit_card", "token"]` | Redaction rules applied to captured values |
+| `redactors` | `["credit_card", "token"]` | Pattern-based redaction rules applied to captured values. `email` remains available as an opt-in rule |
 
 The nested scopes use the same four list names. Their defaults and behavior are shown above. The daemon watches all three filter scopes at roughly 2-second intervals, so changes apply within a few seconds with no daemon restart.
 
