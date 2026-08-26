@@ -28,7 +28,7 @@ This returns the last two hours of your activity as a Markdown timeline, split i
     Feed a day's timeline to your agent and get a draft of your daily report in seconds.
   </Card>
   <Card title="Context for agents" icon="bot">
-    Zanei connects to major agents over the CLI and MCP, with shipped skill files. Shell-less MCP clients like Claude Desktop are covered too.
+    Zanei connects to major agents over the CLI and MCP, with shipped skill files. Chat clients that cannot run the CLI, such as Claude Desktop, are covered over MCP.
   </Card>
 </CardGroup>
 
@@ -64,7 +64,7 @@ Zanei captures OS events such as app switches, window focus, UI interactions, an
 | Interface | Role |
 | --- | --- |
 | [CLI](/reference/cli) | The core surface. A single `zanei` binary handles recording control, permission diagnostics, timeline retrieval, and filter management. |
-| [MCP server](/reference/mcp) | A read-only view over the same store. The only path for shell-less MCP clients such as Claude Desktop. |
+| [MCP server](/reference/mcp) | A read-only view over the same store. The only path for chat clients that cannot run the CLI, such as Claude Desktop. |
 
 For agents, [`zanei setup`](/agents/setup) also provides a skill: instructions telling the agent when to call Zanei. It installs the skill for agents with native support and prints derived instructions for other CLI agents. MCP tools carry their own descriptions inside the protocol.
 

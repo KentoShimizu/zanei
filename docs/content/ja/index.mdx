@@ -28,7 +28,7 @@ zanei timeline --since 2h
     1 日分のタイムラインを agent に要約させれば、作業ログの下書きが数秒でできます。
   </Card>
   <Card title="agent に文脈を渡す" icon="bot">
-    CLI と MCP の 2 つの経路と同梱の skill で主要 agent につながります。シェルを持たない Claude Desktop などの MCP クライアントからも使えます。
+    CLI と MCP の 2 つの経路と同梱の skill で主要 agent につながります。CLI を実行できない chat クライアント（Claude Desktop など）へは MCP で届きます。
   </Card>
 </CardGroup>
 
@@ -64,7 +64,7 @@ flowchart LR
 | インターフェース | 役割 |
 | --- | --- |
 | [CLI](/ja/reference/cli) | 操作の中核。記録の開始・停止、権限診断、タイムライン取得、フィルタ管理まですべて単一バイナリ `zanei` で行います。 |
-| [MCP サーバ](/ja/reference/mcp) | 同じストアへの read-only ビュー。シェルを持たない MCP クライアント（Claude Desktop 等）にとっては唯一の経路です。 |
+| [MCP サーバ](/ja/reference/mcp) | 同じストアへの read-only ビュー。CLI を実行できない chat クライアント（Claude Desktop 等）にとっては唯一の経路です。 |
 
 agent 向けには、[`zanei setup`](/ja/agents/setup) が skill（いつ Zanei を呼ぶかを agent に伝える指示）も提供します。skill 対応 agent には配置し、その他の CLI agent には導出した指示を表示します。MCP のツールは説明をプロトコル内に持っています。
 
