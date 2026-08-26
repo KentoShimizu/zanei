@@ -20,7 +20,7 @@ pub(crate) use control::{
     start_launch_agent, terminate, wait_for_launch_agent_removal,
 };
 pub(crate) use ownership::{StoreOwner, StoreOwnership, mode_name};
-pub use runtime::{RecordOutput, required_permissions_for, run_daemon, run_record};
+pub use runtime::{RecordOutput, required_capabilities_for, run_daemon, run_record};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use zanei_collector::Permission;
+use zanei_collector::Capability;
 
 use crate::{
     content_snapshot::{SnapshotAxApplication, output::cutoff_trace_name, worker::test_live_scan},
@@ -22,7 +22,7 @@ const WINDOW_LIST_COST_ITERATIONS: usize = 100;
 #[ignore = "requires author-granted Accessibility and a manually selected frontmost window"]
 fn live_frontmost_content_snapshot_metrics() {
     if !matches!(
-        permission_status(&Permission::Accessibility),
+        permission_status(&Capability::ReadAccessibilityTree),
         Ok(PermissionStatus::Granted)
     ) {
         println!(
@@ -138,7 +138,7 @@ fn live_window_list_cost() {
 
 fn accessibility_is_granted() -> bool {
     if matches!(
-        permission_status(&Permission::Accessibility),
+        permission_status(&Capability::ReadAccessibilityTree),
         Ok(PermissionStatus::Granted)
     ) {
         true

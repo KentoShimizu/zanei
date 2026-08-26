@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use zanei_collector::Permission;
+use zanei_collector::Capability;
 use zanei_core::config::Config;
 use zanei_core::store::{
     DaemonPermissions, LockedReason, PermissionState, StoreError, StoreFormat, StoreStatus,
@@ -57,7 +57,7 @@ pub fn run(config_path: &Path, store_path: &Path, fix: bool, json: bool) -> Resu
 }
 
 pub(crate) fn permissions_ok(config: &Config) -> Result<bool, CliError> {
-    let required = crate::daemon::required_permissions_for(config);
+    let required = crate::daemon::required_capabilities_for(config);
     Ok(probe_permissions(&required)?.permissions_ok)
 }
 
@@ -87,7 +87,7 @@ fn evaluate_recorder_for_start(
     let Some(snapshot) = status.reported_permissions().cloned() else {
         return Ok(StartPermissionState::PendingSnapshot);
     };
-    let required = crate::daemon::required_permissions_for(config);
+    let required = crate::daemon::required_capabilities_for(config);
     let report = build_report(
         config,
         &required,
@@ -171,15 +171,15 @@ fn permissions_for_status<E>(
 
 fn build_report(
     config: &Config,
-    required: &std::collections::BTreeSet<Permission>,
+    required: &std::collections::BTreeSet<Capability>,
     snapshot: DaemonPermissions,
     reported_by_recorder: bool,
     store_key: StoreKeyReport,
     health: health::HealthReport,
 ) -> Result<DoctorReport, CliError> {
     let mut checked = required.clone();
-    checked.insert(Permission::Accessibility);
-    checked.insert(Permission::InputMonitoring);
+    checked.insert(Capability::ReadAccessibilityTree);
+    checked.insert(Capability::ObserveInput);
     let mut permissions = PermissionReport::default();
     let mut missing_required = Vec::new();
     let mut missing_permissions = Vec::new();
@@ -194,7 +194,7 @@ fn build_report(
         })?;
         let is_required = required.contains(&permission);
         match &permission {
-            Permission::Accessibility => {
+            Capability::ReadAccessibilityTree => {
                 permissions.accessibility = StatusDetail {
                     status: status_name(status),
                     required_for: accessibility_events(
@@ -203,17 +203,17 @@ fn build_report(
                     ),
                 };
             }
-            Permission::InputMonitoring => {
+            Capability::ObserveInput => {
                 permissions.input_monitoring = StatusDetail {
                     status: status_name(status),
                     required_for: input_events(&config.capture.sources),
                 };
             }
-            Permission::Automation { bundle_id } => {
-                permissions
-                    .automation
-                    .per_app
-                    .insert(bundle_id.clone(), status_name(status));
+            Capability::AutomateBrowser => {
+                permissions.automation.per_app.insert(
+                    zanei_core::privacy::CHROME_BUNDLE_ID.to_owned(),
+                    status_name(status),
+                );
             }
         }
         // Automation can be indeterminate while the target app is not running. The public
@@ -221,10 +221,7 @@ fn build_report(
         let missing = status != PermissionState::Granted
             && !matches!(
                 (&permission, status),
-                (
-                    Permission::Automation { .. },
-                    PermissionState::NotDetermined
-                )
+                (Capability::AutomateBrowser, PermissionState::NotDetermined)
             );
         if is_required && missing {
             let (name, pane) = permission_name_and_pane(&permission);
@@ -258,7 +255,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
-    use zanei_collector::Permission;
+    use zanei_collector::Capability;
     use zanei_core::config::Config;
     use zanei_core::store::{DaemonPermissions, PermissionState, StoreStatus};
 
@@ -282,7 +279,7 @@ mod tests {
             },
             missing_required: vec!["input_monitoring"],
             settings_pane: Some("input-pane"),
-            missing_permissions: vec![Permission::InputMonitoring],
+            missing_permissions: vec![Capability::ObserveInput],
             reported_by_recorder: false,
             health: HealthReport::status_missing(),
         };
@@ -453,7 +450,7 @@ mod tests {
     fn doctor_recomputes_overall_result_for_the_current_capture_sources() {
         let config = Config::from_toml("[capture]\nsources = [\"window\"]\n")
             .expect("window capture config");
-        let required = BTreeSet::from([Permission::Accessibility]);
+        let required = BTreeSet::from([Capability::ReadAccessibilityTree]);
         let snapshot = DaemonPermissions {
             permissions_ok: true,
             accessibility: PermissionState::Denied,
@@ -471,7 +468,7 @@ mod tests {
     fn ui_capture_requires_input_monitoring_for_clicks() {
         let config =
             Config::from_toml("[capture]\nsources = [\"ui\"]\n").expect("ui capture config");
-        let required = crate::daemon::required_permissions_for(&config);
+        let required = crate::daemon::required_capabilities_for(&config);
         let snapshot = DaemonPermissions {
             permissions_ok: false,
             accessibility: PermissionState::Granted,
@@ -496,7 +493,7 @@ mod tests {
         let mut content = Config::default();
         content.capture.sources.clear();
         content.capture.content_snapshot = true;
-        let required = crate::daemon::required_permissions_for(&content);
+        let required = crate::daemon::required_capabilities_for(&content);
         let snapshot = DaemonPermissions {
             permissions_ok: false,
             accessibility: PermissionState::Denied,
@@ -567,7 +564,7 @@ mod tests {
 
     fn permission_report(
         config: &Config,
-        required: &BTreeSet<Permission>,
+        required: &BTreeSet<Capability>,
         snapshot: DaemonPermissions,
         reported_by_recorder: bool,
     ) -> DoctorReport {

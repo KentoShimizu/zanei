@@ -4,7 +4,7 @@ use std::{
     thread,
 };
 
-use zanei_collector::Permission;
+use zanei_collector::Capability;
 use zanei_macos::permission::PermissionError;
 
 use super::DaemonError;
@@ -23,7 +23,7 @@ pub(super) struct PermissionRequestWorker {
 }
 
 impl PermissionRequestWorker {
-    pub(super) fn start(required: BTreeSet<Permission>) -> Result<Self, DaemonError> {
+    pub(super) fn start(required: BTreeSet<Capability>) -> Result<Self, DaemonError> {
         Self::start_with(move || request_missing_permissions(&required))
     }
 

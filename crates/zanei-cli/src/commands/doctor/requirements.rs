@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use zanei_collector::Permission;
+use zanei_collector::Capability;
 use zanei_core::config::{CaptureSource, Config};
 use zanei_core::privacy::CHROME_BUNDLE_ID;
 use zanei_core::store::{DaemonPermissions, PermissionState};
@@ -12,7 +12,7 @@ const INPUT_MONITORING_PANE: &str =
 const AUTOMATION_PANE: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation";
 
-pub(super) fn estimated_permissions(config: &Config) -> BTreeSet<Permission> {
+pub(super) fn estimated_permissions(config: &Config) -> BTreeSet<Capability> {
     let sources = &config.capture.sources;
     let capture_ui = sources.contains(&CaptureSource::Ui);
     let capture_input = sources.contains(&CaptureSource::Input);
@@ -24,35 +24,33 @@ pub(super) fn estimated_permissions(config: &Config) -> BTreeSet<Permission> {
         || capture_browser
         || config.capture.content_snapshot
     {
-        permissions.insert(Permission::Accessibility);
+        permissions.insert(Capability::ReadAccessibilityTree);
     }
     if capture_input || capture_ui {
-        permissions.insert(Permission::InputMonitoring);
+        permissions.insert(Capability::ObserveInput);
     }
     if crate::daemon::chrome_tracking_required(&config.capture, &config.filter) {
-        permissions.insert(Permission::Automation {
-            bundle_id: CHROME_BUNDLE_ID.to_owned(),
-        });
+        permissions.insert(Capability::AutomateBrowser);
     }
     permissions
 }
 
 pub(super) fn snapshot_status(
     snapshot: &DaemonPermissions,
-    permission: &Permission,
+    capability: &Capability,
 ) -> Option<PermissionState> {
-    match permission {
-        Permission::Accessibility => Some(snapshot.accessibility),
-        Permission::InputMonitoring => Some(snapshot.input_monitoring),
-        Permission::Automation { bundle_id } => snapshot.automation.get(bundle_id).copied(),
+    match capability {
+        Capability::ReadAccessibilityTree => Some(snapshot.accessibility),
+        Capability::ObserveInput => Some(snapshot.input_monitoring),
+        Capability::AutomateBrowser => snapshot.automation.get(CHROME_BUNDLE_ID).copied(),
     }
 }
 
-pub(super) fn permission_name_and_pane(permission: &Permission) -> (&'static str, &'static str) {
-    match permission {
-        Permission::Accessibility => ("accessibility", ACCESSIBILITY_PANE),
-        Permission::InputMonitoring => ("input_monitoring", INPUT_MONITORING_PANE),
-        Permission::Automation { .. } => ("automation", AUTOMATION_PANE),
+pub(super) fn permission_name_and_pane(capability: &Capability) -> (&'static str, &'static str) {
+    match capability {
+        Capability::ReadAccessibilityTree => ("accessibility", ACCESSIBILITY_PANE),
+        Capability::ObserveInput => ("input_monitoring", INPUT_MONITORING_PANE),
+        Capability::AutomateBrowser => ("automation", AUTOMATION_PANE),
     }
 }
 
@@ -152,7 +150,7 @@ pub(super) fn assert_estimate_matches_collector_matrix() {
                             }
                             assert_eq!(
                                 estimated_permissions(&config),
-                                crate::daemon::required_permissions_for(&config),
+                                crate::daemon::required_capabilities_for(&config),
                                 "permission estimate drifted for {config:?}"
                             );
                         }

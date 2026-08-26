@@ -24,7 +24,9 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
+use zanei_collector::{Capability, Collector, CollectorError, RawEvent};
+#[cfg(test)]
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 #[cfg(test)]
 use zanei_core::schema::BrowserTransition;
 
@@ -36,8 +38,8 @@ use crate::{
     focus_context::{FocusContext, FocusTransition, FocusTransitionReceiver},
 };
 
-use zanei_core::privacy::CHROME_BUNDLE_ID;
 const COLLECTOR_NAME: &str = "chrome";
+const REQUIRED_CAPABILITIES: [Capability; 1] = [Capability::AutomateBrowser];
 use failure::ChromeFailurePublisher;
 use observer::ObservationTrigger;
 use worker::{ChromeWorkerReceivers, run_worker};
@@ -54,7 +56,6 @@ pub struct ChromeCollector {
     eligibility: ChromeEligibilityPublisher,
     focus_context: FocusContext,
     runtime: Option<ChromeRuntime>,
-    permissions: [Permission; 1],
     metrics: ChromeMetrics,
     #[cfg(test)]
     panic_next_worker: Arc<AtomicBool>,
@@ -81,9 +82,6 @@ impl ChromeCollector {
             eligibility,
             focus_context,
             runtime: None,
-            permissions: [Permission::Automation {
-                bundle_id: CHROME_BUNDLE_ID.to_owned(),
-            }],
             metrics: ChromeMetrics::default(),
             #[cfg(test)]
             panic_next_worker: Arc::new(AtomicBool::new(false)),
@@ -124,8 +122,8 @@ impl Collector for ChromeCollector {
         COLLECTOR_NAME
     }
 
-    fn required_permissions(&self) -> &[Permission] {
-        &self.permissions
+    fn required_capabilities(&self) -> &[Capability] {
+        &REQUIRED_CAPABILITIES
     }
 
     fn start(&mut self, sender: SyncSender<RawEvent>) -> Result<(), CollectorError> {

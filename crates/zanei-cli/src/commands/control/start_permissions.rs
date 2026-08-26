@@ -62,7 +62,7 @@ pub(super) fn after_bootstrap(
 }
 
 fn permission_state(config: &Config, status: Option<&StoreStatus>) -> StartPermissionState {
-    let required = crate::daemon::required_permissions_for(config);
+    let required = crate::daemon::required_capabilities_for(config);
     // Never fall back to a CLI-local probe here: the CLI inherits the terminal's TCC identity,
     // not the recorder's, so its result cannot authorize a recorder-specific opt-in prompt.
     let Some(snapshot) = status.and_then(StoreStatus::last_reported_permissions) else {

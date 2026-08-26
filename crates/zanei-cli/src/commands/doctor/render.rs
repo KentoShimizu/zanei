@@ -3,7 +3,7 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
-use zanei_collector::Permission;
+use zanei_collector::Capability;
 use zanei_macos::permission::PermissionChecker;
 
 use super::DoctorReport;
@@ -140,7 +140,7 @@ pub(super) fn render_human(
 // Interactive walkthrough for `doctor --fix`: one pane at a time, with the app
 // or executable path already on the clipboard and its target revealed in Finder,
 // so granting needs no outside knowledge of how macOS permission lists work.
-pub(super) fn guide_granting(missing: &[Permission], executable: &Path) -> Result<(), CliError> {
+pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Result<(), CliError> {
     use std::io::{BufRead, Write};
 
     let permission_target = permission_target_path(executable);
@@ -230,11 +230,13 @@ pub(super) fn permission_target_path(executable: &Path) -> &Path {
     }
 }
 
-fn pane_title(permission: &Permission) -> String {
-    match permission {
-        Permission::Accessibility => "Accessibility".to_owned(),
-        Permission::InputMonitoring => "Input Monitoring".to_owned(),
-        Permission::Automation { bundle_id } => format!("Automation ({bundle_id})"),
+fn pane_title(capability: &Capability) -> String {
+    match capability {
+        Capability::ReadAccessibilityTree => "Accessibility".to_owned(),
+        Capability::ObserveInput => "Input Monitoring".to_owned(),
+        Capability::AutomateBrowser => {
+            format!("Automation ({})", zanei_core::privacy::CHROME_BUNDLE_ID)
+        }
     }
 }
 

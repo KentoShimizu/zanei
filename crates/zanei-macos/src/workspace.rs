@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
+use zanei_collector::{Capability, Collector, CollectorError, RawEvent};
 use zanei_core::schema::{App, EmptyData, EventData, Window};
 
 use crate::ffi::workspace::{
@@ -20,7 +20,7 @@ use crate::ffi::workspace::{
 
 const WORKSPACE_CHANNEL_CAPACITY: usize = 256;
 const RUN_LOOP_SLICE: Duration = Duration::from_millis(100);
-const NO_PERMISSIONS: [Permission; 0] = [];
+const NO_CAPABILITIES: [Capability; 0] = [];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(isize)]
@@ -144,8 +144,8 @@ impl Collector for WorkspaceCollector {
         "workspace"
     }
 
-    fn required_permissions(&self) -> &[Permission] {
-        &NO_PERMISSIONS
+    fn required_capabilities(&self) -> &[Capability] {
+        &NO_CAPABILITIES
     }
 
     fn start(&mut self, sender: SyncSender<RawEvent>) -> Result<(), CollectorError> {

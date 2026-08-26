@@ -5,7 +5,7 @@ use std::{
     sync::mpsc::{Receiver, SyncSender},
 };
 
-use zanei_collector::{Collector, Permission, RawEvent};
+use zanei_collector::{Capability, Collector, RawEvent};
 use zanei_core::config::{CaptureConfig, CaptureSource, Config, FilterConfig};
 use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyFilter, PrivacyScope, app_is_allowed_for};
 use zanei_core::schema::App;
@@ -294,14 +294,14 @@ impl CollectorSet {
         )));
     }
 
-    pub(crate) fn required_permissions(&self) -> BTreeSet<Permission> {
-        let mut permissions = BTreeSet::new();
-        extend_permissions(&mut permissions, self.workspace.as_ref());
-        extend_permissions(&mut permissions, self.ax.as_ref());
-        extend_permissions(&mut permissions, self.content_snapshot.as_ref());
-        extend_permissions(&mut permissions, self.eventtap.as_ref());
-        extend_permissions(&mut permissions, self.chrome.as_ref());
-        permissions
+    pub(crate) fn required_capabilities(&self) -> BTreeSet<Capability> {
+        let mut capabilities = BTreeSet::new();
+        extend_capabilities(&mut capabilities, self.workspace.as_ref());
+        extend_capabilities(&mut capabilities, self.ax.as_ref());
+        extend_capabilities(&mut capabilities, self.content_snapshot.as_ref());
+        extend_capabilities(&mut capabilities, self.eventtap.as_ref());
+        extend_capabilities(&mut capabilities, self.chrome.as_ref());
+        capabilities
     }
 
     pub(crate) fn prepare_main_thread(&mut self) -> MainThreadObservers {
@@ -442,12 +442,12 @@ fn subscriber(subscribers: &mut Vec<SyncSender<WorkspaceEvent>>) -> Receiver<Wor
     receiver
 }
 
-fn extend_permissions<C: Collector>(
-    target: &mut BTreeSet<Permission>,
+fn extend_capabilities<C: Collector>(
+    target: &mut BTreeSet<Capability>,
     collector: Option<&Managed<C>>,
 ) {
     if let Some(collector) = collector {
-        target.extend(collector.collector.required_permissions().iter().cloned());
+        target.extend(collector.collector.required_capabilities().iter().copied());
     }
 }
 

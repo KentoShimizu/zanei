@@ -5,16 +5,9 @@ use std::sync::mpsc::SyncSender;
 mod app_directory;
 
 pub use app_directory::{AppDirectory, AppDirectoryError, AppInfo, InstalledApps};
-pub use zanei_core::RawEvent;
+pub use zanei_core::{Capability, RawEvent};
 
 pub const COLLECTOR_CHANNEL_CAPACITY: usize = 4_096;
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum Permission {
-    Accessibility,
-    InputMonitoring,
-    Automation { bundle_id: String },
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CollectorError {
@@ -27,7 +20,7 @@ pub enum CollectorError {
 pub trait Collector: Send {
     fn name(&self) -> &str;
 
-    fn required_permissions(&self) -> &[Permission];
+    fn required_capabilities(&self) -> &[Capability];
 
     fn start(&mut self, sender: SyncSender<RawEvent>) -> Result<(), CollectorError>;
 
