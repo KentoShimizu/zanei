@@ -4,38 +4,39 @@ use std::collections::BTreeMap;
 
 use time::OffsetDateTime;
 use zanei_core::{
+    DaemonCapabilities,
     normalize::format_timestamp,
-    store::{DaemonPermissions, DaemonState, StoreStatus},
+    store::{DaemonState, StoreStatus},
 };
 
 use super::{ActiveDaemon, DaemonError, StoreOwner, merge_collector_failures, probe_permissions};
 
 impl ActiveDaemon<'_> {
     pub(super) fn publish_heartbeat(&mut self) -> Result<(), DaemonError> {
-        let permissions = self.refresh_permissions();
-        self.publish_heartbeat_with_permissions(permissions)
+        let capabilities = self.refresh_capabilities();
+        self.publish_heartbeat_with_capabilities(capabilities)
     }
 
-    pub(super) fn refresh_permissions(&mut self) -> Option<DaemonPermissions> {
+    pub(super) fn refresh_capabilities(&mut self) -> Option<DaemonCapabilities> {
         if self.permission_request_worker.is_some() {
             return None;
         }
         match probe_permissions(&self.collectors.required_capabilities()) {
-            Ok(permissions) => {
+            Ok(capabilities) => {
                 self.degraded.remove("permissions");
-                self.last_permissions = Some(permissions.clone());
+                self.last_capabilities = Some(capabilities);
             }
             Err(error) => {
                 self.degraded
                     .insert("permissions".to_owned(), error.to_string());
             }
         }
-        self.last_permissions.clone()
+        self.last_capabilities.clone()
     }
 
-    pub(super) fn publish_heartbeat_with_permissions(
+    pub(super) fn publish_heartbeat_with_capabilities(
         &mut self,
-        permissions: Option<DaemonPermissions>,
+        capabilities: Option<DaemonCapabilities>,
     ) -> Result<(), DaemonError> {
         match self.reader.status() {
             Ok(status) => {
@@ -70,7 +71,7 @@ impl ActiveDaemon<'_> {
                 self.base_collector_failures,
                 &collector_health.collector_failures,
             ),
-            permissions,
+            capabilities,
         })
     }
 }
@@ -93,6 +94,6 @@ pub(super) fn initial_heartbeat(
         last_event_ts: status.last_event_ts.clone(),
         degraded: BTreeMap::new(),
         collector_failures: status.collector_failures.clone(),
-        permissions: None,
+        capabilities: None,
     }
 }

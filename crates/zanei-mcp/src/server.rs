@@ -230,8 +230,8 @@ impl ZaneiServer {
             None => (Default::default(), None),
         };
         let permissions_ok = status
-            .reported_permissions()
-            .map(|permissions| permissions.permissions_ok)
+            .reported_capabilities()
+            .map(|capabilities| capabilities.ready())
             .map_or_else(
                 || (self.permission_check)(&config).map_err(internal_error),
                 Ok,

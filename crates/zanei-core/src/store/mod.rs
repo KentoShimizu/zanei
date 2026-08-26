@@ -33,10 +33,7 @@ pub use reader::{SkippedRetired, StoreReader};
 pub use retired::{RetiredPlaintext, remove_retired, resolve_store_path, retired_plaintext_stores};
 pub use selection::EventSelection;
 pub use snapshot::{SnapshotReport, export_plain_sqlite};
-pub use types::{
-    DaemonMode, DaemonPermissions, DaemonState, HEARTBEAT_STALE_AFTER_SECONDS, PermissionState,
-    StoreStatus,
-};
+pub use types::{DaemonMode, DaemonState, HEARTBEAT_STALE_AFTER_SECONDS, StoreStatus};
 
 #[cfg(feature = "write")]
 pub use retired::{RetiredRetention, purge_retired_plaintext, set_aside_plaintext};
@@ -48,7 +45,8 @@ const DAEMON_IDENTITY_STORE_SCHEMA_VERSION: i64 = 2;
 const RETENTION_STORE_SCHEMA_VERSION: i64 = 3;
 const COLLECTOR_FAILURES_STORE_SCHEMA_VERSION: i64 = 4;
 const PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION: i64 = 5;
-const STORE_SCHEMA_VERSION: i64 = 6;
+const CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION: i64 = 6;
+const STORE_SCHEMA_VERSION: i64 = 7;
 
 /// SQLCipher file-format generation pinned so a future library default cannot
 /// silently make existing stores unreadable.
@@ -90,11 +88,11 @@ CREATE TABLE IF NOT EXISTS daemon_state (
     last_event_ts TEXT,
     degraded_json TEXT,
     collector_failures_json TEXT NOT NULL DEFAULT '{}',
-    last_known_permissions_json TEXT
+    last_known_capabilities_json TEXT
 );
 INSERT OR IGNORE INTO daemon_state(id) VALUES (1);
 
-CREATE TABLE IF NOT EXISTS daemon_permissions (
+CREATE TABLE IF NOT EXISTS daemon_capabilities (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     snapshot_json TEXT NOT NULL
 );
@@ -103,7 +101,7 @@ CREATE TABLE IF NOT EXISTS meta (
     schema_version INTEGER NOT NULL
 );
 INSERT INTO meta(schema_version)
-SELECT 6 WHERE NOT EXISTS (SELECT 1 FROM meta);
+SELECT 7 WHERE NOT EXISTS (SELECT 1 FROM meta);
 ";
 
 /// The instant before which events are outside a `retention_hours` window.

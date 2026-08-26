@@ -8,6 +8,7 @@ use rusqlite::{Connection, Transaction, params, params_from_iter};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::DaemonCapabilities;
 use crate::schema::Event;
 
 use super::{
@@ -238,7 +239,7 @@ impl StoreWriter {
     /// Carries the parts of the previous store's daemon state that outlive a
     /// store swap into this one: an active pause request (so an upgrade never
     /// silently resumes recording), the cumulative counters, the last event
-    /// time, collector failure history, and the last permission report. The
+    /// time, collector failure history, and the last capability report. The
     /// recorder identity and heartbeat are left to the next heartbeat.
     pub fn adopt_daemon_state(&self, previous: &super::StoreStatus) -> Result<(), StoreError> {
         validate_paused_until(previous.paused_until.as_deref())?;
@@ -246,22 +247,22 @@ impl StoreWriter {
         let events_captured = signed("events_captured", previous.events_captured)?;
         let events_dropped = signed("events_dropped", previous.events_dropped)?;
         let collector_failures_json = serialize_collector_failures(&previous.collector_failures)?;
-        let last_known_permissions_json = previous
-            .last_known_permissions
+        let last_known_capabilities_json = previous
+            .last_known_capabilities
             .as_ref()
-            .map(serialize_permissions)
+            .map(serialize_capabilities)
             .transpose()?;
         self.connection.execute(
             "UPDATE daemon_state SET paused_until = ?1, events_captured = ?2, \
              events_dropped = ?3, last_event_ts = ?4, collector_failures_json = ?5, \
-             last_known_permissions_json = ?6 WHERE id = 1",
+             last_known_capabilities_json = ?6 WHERE id = 1",
             params![
                 previous.paused_until,
                 events_captured,
                 events_dropped,
                 previous.last_event_ts,
                 collector_failures_json,
-                last_known_permissions_json,
+                last_known_capabilities_json,
             ],
         )?;
         Ok(())
@@ -444,27 +445,30 @@ fn write_daemon_snapshot(
             )?;
         }
     }
-    write_permissions(transaction, state)
+    write_capabilities(transaction, state)
 }
 
-fn write_permissions(transaction: &Transaction<'_>, state: &DaemonState) -> Result<(), StoreError> {
-    let permissions_json = state
-        .permissions
+fn write_capabilities(
+    transaction: &Transaction<'_>,
+    state: &DaemonState,
+) -> Result<(), StoreError> {
+    let capabilities_json = state
+        .capabilities
         .as_ref()
-        .map(serialize_permissions)
+        .map(serialize_capabilities)
         .transpose()?;
-    if let Some(permissions_json) = permissions_json {
+    if let Some(capabilities_json) = capabilities_json {
         transaction.execute(
-            "INSERT INTO daemon_permissions(id, snapshot_json) VALUES (1, ?1) \
+            "INSERT INTO daemon_capabilities(id, snapshot_json) VALUES (1, ?1) \
              ON CONFLICT(id) DO UPDATE SET snapshot_json = excluded.snapshot_json",
-            [&permissions_json],
+            [&capabilities_json],
         )?;
         transaction.execute(
-            "UPDATE daemon_state SET last_known_permissions_json = ?1 WHERE id = 1",
-            [&permissions_json],
+            "UPDATE daemon_state SET last_known_capabilities_json = ?1 WHERE id = 1",
+            [&capabilities_json],
         )?;
     } else {
-        transaction.execute("DELETE FROM daemon_permissions WHERE id = 1", [])?;
+        transaction.execute("DELETE FROM daemon_capabilities WHERE id = 1", [])?;
     }
     Ok(())
 }
@@ -549,7 +553,7 @@ fn serialize_collector_failures(
         .map_err(|error| StoreError::invalid_json("collector_failures_json", error))
 }
 
-fn serialize_permissions(permissions: &super::DaemonPermissions) -> Result<String, StoreError> {
-    serde_json::to_string(permissions)
-        .map_err(|error| StoreError::invalid_json("permissions_json", error))
+fn serialize_capabilities(capabilities: &DaemonCapabilities) -> Result<String, StoreError> {
+    serde_json::to_string(capabilities)
+        .map_err(|error| StoreError::invalid_json("capabilities_json", error))
 }

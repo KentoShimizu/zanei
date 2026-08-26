@@ -6,13 +6,15 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::DaemonCapabilities;
+
 use super::RetiredPlaintext;
 use super::{
-    COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
-    DaemonPermissions, HEARTBEAT_STALE_AFTER_SECONDS, LEGACY_STORE_SCHEMA_VERSION,
-    PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION, QueryFilter, QueryResult,
-    RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreFormat, StoreKey,
-    StoreStatus, file_uri, retention_cutoff, retired_plaintext_stores, store_uri, unlock,
+    COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION,
+    DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode, HEARTBEAT_STALE_AFTER_SECONDS,
+    LEGACY_STORE_SCHEMA_VERSION, PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION, QueryFilter,
+    QueryResult, RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreFormat,
+    StoreKey, StoreStatus, file_uri, retention_cutoff, retired_plaintext_stores, store_uri, unlock,
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
@@ -301,10 +303,16 @@ impl StoreReader {
                  collector_failures_json, NULL \
                  FROM daemon_state WHERE id = 1"
             }
-            PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION | STORE_SCHEMA_VERSION => {
+            PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION | CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION => {
                 "SELECT pid, started_at, instance_id, mode, heartbeat_at, retention_hours, \
                  paused_until, events_captured, events_dropped, last_event_ts, degraded_json, \
-                 collector_failures_json, last_known_permissions_json \
+                 collector_failures_json, NULL \
+                 FROM daemon_state WHERE id = 1"
+            }
+            STORE_SCHEMA_VERSION => {
+                "SELECT pid, started_at, instance_id, mode, heartbeat_at, retention_hours, \
+                 paused_until, events_captured, events_dropped, last_event_ts, degraded_json, \
+                 collector_failures_json, last_known_capabilities_json \
                  FROM daemon_state WHERE id = 1"
             }
             _ => unreachable!("schema version is validated when the reader opens"),
@@ -324,27 +332,28 @@ impl StoreReader {
                     last_event_ts: row.get(9)?,
                     degraded_json: row.get(10)?,
                     collector_failures_json: row.get(11)?,
-                    last_known_permissions_json: row.get(12)?,
+                    last_known_capabilities_json: row.get(12)?,
                 })
             })
             .optional()?;
 
-        let permissions = read_daemon_permissions(&transaction)?;
-        let last_known_permissions = state
-            .as_ref()
-            .and_then(|state| state.last_known_permissions_json.as_deref())
-            .map(|json| deserialize_permissions("last_known_permissions_json", json))
-            .transpose()?;
-        let last_known_permissions =
-            if self.schema_version < PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION {
-                permissions.clone()
-            } else {
-                last_known_permissions
-            };
+        let capabilities = (self.schema_version == STORE_SCHEMA_VERSION)
+            .then(|| read_daemon_capabilities(&transaction))
+            .transpose()?
+            .flatten();
+        let last_known_capabilities = if self.schema_version == STORE_SCHEMA_VERSION {
+            state
+                .as_ref()
+                .and_then(|state| state.last_known_capabilities_json.as_deref())
+                .map(|json| deserialize_capabilities("last_known_capabilities_json", json))
+                .transpose()?
+        } else {
+            None
+        };
         transaction.commit()?;
         state.map_or_else(
             || Ok(StoreStatus::default()),
-            |state| state.derive(now, permissions, last_known_permissions),
+            |state| state.derive(now, capabilities, last_known_capabilities),
         )
     }
 }
@@ -362,15 +371,15 @@ struct PersistedStatus {
     last_event_ts: Option<String>,
     degraded_json: Option<String>,
     collector_failures_json: Option<String>,
-    last_known_permissions_json: Option<String>,
+    last_known_capabilities_json: Option<String>,
 }
 
 impl PersistedStatus {
     fn derive(
         self,
         now: OffsetDateTime,
-        permissions: Option<DaemonPermissions>,
-        last_known_permissions: Option<DaemonPermissions>,
+        capabilities: Option<DaemonCapabilities>,
+        last_known_capabilities: Option<DaemonCapabilities>,
     ) -> Result<StoreStatus, StoreError> {
         let running = heartbeat_is_fresh(self.heartbeat_at.as_deref(), now)?;
         let pause_requested = match self.paused_until.as_deref() {
@@ -425,39 +434,31 @@ impl PersistedStatus {
             last_event_ts: self.last_event_ts,
             degraded,
             collector_failures,
-            permissions,
-            last_known_permissions,
+            capabilities,
+            last_known_capabilities,
         })
     }
 }
 
-fn read_daemon_permissions(
+fn read_daemon_capabilities(
     connection: &Connection,
-) -> Result<Option<DaemonPermissions>, StoreError> {
-    let table_exists = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'daemon_permissions')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if !table_exists {
-        return Ok(None);
-    }
+) -> Result<Option<DaemonCapabilities>, StoreError> {
     let json = connection
         .query_row(
-            "SELECT snapshot_json FROM daemon_permissions WHERE id = 1",
+            "SELECT snapshot_json FROM daemon_capabilities WHERE id = 1",
             [],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
     json.as_deref()
-        .map(|json| deserialize_permissions("permissions_json", json))
+        .map(|json| deserialize_capabilities("capabilities_json", json))
         .transpose()
 }
 
-fn deserialize_permissions(
+fn deserialize_capabilities(
     field: &'static str,
     json: &str,
-) -> Result<DaemonPermissions, StoreError> {
+) -> Result<DaemonCapabilities, StoreError> {
     serde_json::from_str(json).map_err(|error| StoreError::invalid_json(field, error))
 }
 
@@ -490,6 +491,7 @@ fn readable_schema_version(connection: &Connection) -> Result<i64, StoreError> {
             | RETENTION_STORE_SCHEMA_VERSION
             | COLLECTOR_FAILURES_STORE_SCHEMA_VERSION
             | PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION
+            | CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION
             | STORE_SCHEMA_VERSION
     ) {
         Ok(version)

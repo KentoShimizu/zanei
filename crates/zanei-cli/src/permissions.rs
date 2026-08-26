@@ -1,12 +1,7 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    thread,
-    time::Duration,
-};
+use std::{collections::BTreeSet, thread, time::Duration};
 
 use zanei_collector::Capability;
-use zanei_core::privacy::CHROME_BUNDLE_ID;
-use zanei_core::store::{DaemonPermissions, PermissionState};
+use zanei_core::{CapabilityState, DaemonCapabilities};
 use zanei_macos::permission::{
     PermissionChecker, PermissionError, PermissionStatus, request_accessibility,
     request_input_monitoring,
@@ -109,80 +104,35 @@ fn permission_request_status(
 
 pub(crate) fn probe_permissions(
     required: &BTreeSet<Capability>,
-) -> Result<DaemonPermissions, PermissionError> {
+) -> Result<DaemonCapabilities, PermissionError> {
     let checker = PermissionChecker::new();
     probe_permissions_with(required, |capability| checker.permission_status(capability))
-}
-
-pub(crate) fn permission_snapshot_ready(
-    required: &BTreeSet<Capability>,
-    snapshot: &DaemonPermissions,
-) -> Option<bool> {
-    required
-        .iter()
-        .map(|capability| match capability {
-            Capability::ReadAccessibilityTree => {
-                Some(snapshot.accessibility == PermissionState::Granted)
-            }
-            Capability::ObserveInput => Some(snapshot.input_monitoring == PermissionState::Granted),
-            Capability::AutomateBrowser => snapshot.automation.get(CHROME_BUNDLE_ID).map(|state| {
-                matches!(
-                    state,
-                    PermissionState::Granted | PermissionState::NotDetermined
-                )
-            }),
-        })
-        .try_fold(true, |ready, permission_ready| {
-            permission_ready.map(|permission_ready| ready && permission_ready)
-        })
 }
 
 fn probe_permissions_with<E>(
     required: &BTreeSet<Capability>,
     mut status_for: impl FnMut(&Capability) -> Result<PermissionStatus, E>,
-) -> Result<DaemonPermissions, E> {
+) -> Result<DaemonCapabilities, E> {
     let accessibility = status_for(&Capability::ReadAccessibilityTree)?;
     let input_monitoring = status_for(&Capability::ObserveInput)?;
-    let mut automation = BTreeMap::new();
-    if required.contains(&Capability::AutomateBrowser) {
-        automation.insert(
-            CHROME_BUNDLE_ID.to_owned(),
-            status_for(&Capability::AutomateBrowser)?,
-        );
-    }
-    let permissions_ok = required.iter().all(|capability| {
-        let status = match capability {
-            Capability::ReadAccessibilityTree => Some(accessibility),
-            Capability::ObserveInput => Some(input_monitoring),
-            Capability::AutomateBrowser => automation.get(CHROME_BUNDLE_ID).copied(),
-        };
-        status.is_some_and(|status| permission_is_ready(*capability, status))
-    });
-
-    Ok(DaemonPermissions {
-        permissions_ok,
-        accessibility: permission_state(accessibility),
-        input_monitoring: permission_state(input_monitoring),
-        automation: automation
-            .into_iter()
-            .map(|(bundle_id, status)| (bundle_id, permission_state(status)))
-            .collect(),
-    })
+    let automation = if required.contains(&Capability::AutomateBrowser) {
+        status_for(&Capability::AutomateBrowser)?
+    } else {
+        PermissionStatus::NotDetermined
+    };
+    Ok(DaemonCapabilities::new(
+        required.clone(),
+        capability_state(accessibility),
+        capability_state(input_monitoring),
+        capability_state(automation),
+    ))
 }
 
-fn permission_is_ready(capability: Capability, status: PermissionStatus) -> bool {
-    status == PermissionStatus::Granted
-        || matches!(
-            (capability, status),
-            (Capability::AutomateBrowser, PermissionStatus::NotDetermined)
-        )
-}
-
-const fn permission_state(status: PermissionStatus) -> PermissionState {
+const fn capability_state(status: PermissionStatus) -> CapabilityState {
     match status {
-        PermissionStatus::Granted => PermissionState::Granted,
-        PermissionStatus::Denied => PermissionState::Denied,
-        PermissionStatus::NotDetermined => PermissionState::NotDetermined,
+        PermissionStatus::Granted => CapabilityState::Available,
+        PermissionStatus::Denied => CapabilityState::ActionRequired,
+        PermissionStatus::NotDetermined => CapabilityState::Deferred,
     }
 }
 
@@ -195,7 +145,7 @@ mod tests {
     };
 
     use zanei_collector::Capability;
-    use zanei_core::store::PermissionState;
+    use zanei_core::{CapabilityState, DaemonCapabilities};
     use zanei_macos::permission::PermissionStatus;
 
     use super::{
@@ -406,12 +356,14 @@ mod tests {
         })
         .expect("probe snapshot");
 
-        assert!(!snapshot.permissions_ok);
-        assert_eq!(snapshot.accessibility, PermissionState::Granted);
-        assert_eq!(snapshot.input_monitoring, PermissionState::Denied);
         assert_eq!(
-            snapshot.automation["com.google.Chrome"],
-            PermissionState::NotDetermined
+            snapshot,
+            DaemonCapabilities::new(
+                required,
+                CapabilityState::Available,
+                CapabilityState::ActionRequired,
+                CapabilityState::Deferred,
+            )
         );
     }
 
@@ -427,6 +379,6 @@ mod tests {
         })
         .expect("probe snapshot");
 
-        assert!(snapshot.permissions_ok);
+        assert!(snapshot.ready());
     }
 }

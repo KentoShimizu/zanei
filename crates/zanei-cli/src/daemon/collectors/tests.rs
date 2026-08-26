@@ -10,10 +10,7 @@ use std::{
 };
 
 use zanei_collector::{Capability, RawEvent};
-use zanei_core::{
-    config::CaptureSource,
-    store::{DaemonPermissions, PermissionState},
-};
+use zanei_core::{CapabilityState, DaemonCapabilities, config::CaptureSource};
 use zanei_macos::permission::PermissionStatus;
 
 use super::{
@@ -614,19 +611,20 @@ fn wait_for_relay(managed: &Option<Managed<FakeCollector>>) {
     panic!("collector relay did not finish");
 }
 
-fn granted_permissions() -> DaemonPermissions {
-    DaemonPermissions {
-        permissions_ok: true,
-        accessibility: PermissionState::Granted,
-        input_monitoring: PermissionState::Granted,
-        automation: BTreeMap::new(),
-    }
+fn granted_permissions() -> DaemonCapabilities {
+    DaemonCapabilities::new(
+        BTreeSet::new(),
+        CapabilityState::Available,
+        CapabilityState::Available,
+        CapabilityState::Available,
+    )
 }
 
-fn denied_permissions() -> DaemonPermissions {
-    DaemonPermissions {
-        permissions_ok: false,
-        accessibility: PermissionState::Denied,
-        ..granted_permissions()
-    }
+fn denied_permissions() -> DaemonCapabilities {
+    DaemonCapabilities::new(
+        BTreeSet::new(),
+        CapabilityState::ActionRequired,
+        CapabilityState::Available,
+        CapabilityState::Available,
+    )
 }

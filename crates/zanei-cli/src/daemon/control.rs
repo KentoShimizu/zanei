@@ -186,7 +186,7 @@ mod tests {
         let status = StoreStatus {
             running: true,
             instance_id: Some(owner.instance_id.clone()),
-            permissions: None,
+            capabilities: None,
             ..StoreStatus::default()
         };
 

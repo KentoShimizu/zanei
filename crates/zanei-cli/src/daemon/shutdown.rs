@@ -70,7 +70,7 @@ fn clear_heartbeat(
             base_collector_failures,
             &collector_health.collector_failures,
         ),
-        permissions: None,
+        capabilities: None,
     })?;
     Ok(())
 }

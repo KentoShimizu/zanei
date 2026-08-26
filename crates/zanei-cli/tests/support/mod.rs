@@ -2,7 +2,7 @@
 // different subset of the helpers.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -22,9 +22,8 @@ use zanei_core::schema::{
     KNOWN_EVENT_TYPES, RawEvent, ScrollDirection, UiClickData, UiFocusData, UiValueData, Window,
     WindowTitleData,
 };
-use zanei_core::store::{
-    DaemonMode, DaemonPermissions, DaemonState, PermissionState, StoreKey, StoreReader, StoreWriter,
-};
+use zanei_core::store::{DaemonMode, DaemonState, StoreKey, StoreReader, StoreWriter};
+use zanei_core::{Capability, CapabilityState, DaemonCapabilities};
 
 /// Environment variable the CLI reads the store key from instead of the Keychain.
 pub const STORE_KEY_FILE_ENV: &str = "ZANEI_STORE_KEY_FILE";
@@ -142,12 +141,16 @@ impl Fixture {
                     last_event_ts: status.last_event_ts,
                     degraded: status.degraded,
                     collector_failures: status.collector_failures,
-                    permissions: Some(DaemonPermissions {
-                        permissions_ok,
-                        accessibility: PermissionState::Granted,
-                        input_monitoring: PermissionState::Granted,
-                        automation: BTreeMap::new(),
-                    }),
+                    capabilities: Some(DaemonCapabilities::new(
+                        BTreeSet::from([Capability::ReadAccessibilityTree]),
+                        if permissions_ok {
+                            CapabilityState::Available
+                        } else {
+                            CapabilityState::ActionRequired
+                        },
+                        CapabilityState::Available,
+                        CapabilityState::Deferred,
+                    )),
                 })
             })
             .expect("set fixture recorder permissions");
@@ -229,12 +232,12 @@ fn populate_store(store: &Path, key: &StoreKey) {
             last_event_ts: events.last().map(|event| event.ts.clone()),
             degraded: BTreeMap::new(),
             collector_failures: BTreeMap::from([("eventtap".to_owned(), 1)]),
-            permissions: Some(DaemonPermissions {
-                permissions_ok: true,
-                accessibility: PermissionState::Granted,
-                input_monitoring: PermissionState::Granted,
-                automation: BTreeMap::new(),
-            }),
+            capabilities: Some(DaemonCapabilities::new(
+                BTreeSet::from([Capability::ReadAccessibilityTree]),
+                CapabilityState::Available,
+                CapabilityState::Available,
+                CapabilityState::Deferred,
+            )),
         })
         .expect("fixture daemon state");
 }

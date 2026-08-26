@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::DaemonCapabilities;
+
 pub const HEARTBEAT_STALE_AFTER_SECONDS: i64 = 15;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -18,7 +20,7 @@ pub struct DaemonState {
     pub last_event_ts: Option<String>,
     pub degraded: BTreeMap<String, String>,
     pub collector_failures: BTreeMap<String, u64>,
-    pub permissions: Option<DaemonPermissions>,
+    pub capabilities: Option<DaemonCapabilities>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -37,8 +39,8 @@ pub struct StoreStatus {
     pub last_event_ts: Option<String>,
     pub degraded: BTreeMap<String, String>,
     pub collector_failures: BTreeMap<String, u64>,
-    pub permissions: Option<DaemonPermissions>,
-    pub last_known_permissions: Option<DaemonPermissions>,
+    pub capabilities: Option<DaemonCapabilities>,
+    pub last_known_capabilities: Option<DaemonCapabilities>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -72,29 +74,13 @@ impl StoreStatus {
     }
 
     #[must_use]
-    pub fn reported_permissions(&self) -> Option<&DaemonPermissions> {
-        self.running.then_some(self.permissions.as_ref()).flatten()
+    pub fn reported_capabilities(&self) -> Option<&DaemonCapabilities> {
+        self.running.then_some(self.capabilities.as_ref()).flatten()
     }
 
-    /// Returns the last permission snapshot reported by the recorder, even after it stops.
+    /// Returns the last capability snapshot reported by the recorder, even after it stops.
     #[must_use]
-    pub fn last_reported_permissions(&self) -> Option<&DaemonPermissions> {
-        self.last_known_permissions.as_ref()
+    pub fn last_reported_capabilities(&self) -> Option<&DaemonCapabilities> {
+        self.last_known_capabilities.as_ref()
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct DaemonPermissions {
-    pub permissions_ok: bool,
-    pub accessibility: PermissionState,
-    pub input_monitoring: PermissionState,
-    pub automation: BTreeMap<String, PermissionState>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionState {
-    Granted,
-    Denied,
-    NotDetermined,
 }

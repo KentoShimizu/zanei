@@ -242,7 +242,7 @@ fn status_and_doctor_share_control_text_rendering_without_changing_json() {
             last_event_ts: status.last_event_ts,
             degraded: BTreeMap::from([(COMPONENT.to_owned(), REASON.to_owned())]),
             collector_failures: BTreeMap::from([(COMPONENT.to_owned(), 3)]),
-            permissions: status.permissions,
+            capabilities: status.capabilities,
         })
         .expect("control text health fixture");
     let _store_owner = fixture.hold_store_owner();
