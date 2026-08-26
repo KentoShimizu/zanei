@@ -4,7 +4,8 @@ use std::{
     time::Duration,
 };
 
-use zanei_collector::Permission;
+use zanei_collector::Capability;
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 use zanei_core::store::{DaemonPermissions, PermissionState};
 use zanei_macos::permission::{
     PermissionChecker, PermissionError, PermissionStatus, request_accessibility,
@@ -25,19 +26,19 @@ pub(crate) enum PermissionRequestOutcome {
 }
 
 pub(crate) fn request_missing_permissions(
-    required: &BTreeSet<Permission>,
+    required: &BTreeSet<Capability>,
 ) -> Result<PermissionRequestOutcome, PermissionError> {
     let checker = PermissionChecker::new();
     request_missing_permissions_with(
         required,
-        |permission| permission_request_status(&checker, permission),
-        |permission| match permission {
-            Permission::Accessibility => request_accessibility(),
-            Permission::InputMonitoring => {
+        |capability| permission_request_status(&checker, capability),
+        |capability| match capability {
+            Capability::ReadAccessibilityTree => request_accessibility(),
+            Capability::ObserveInput => {
                 request_input_monitoring();
                 Ok(())
             }
-            Permission::Automation { .. } => unreachable!("automation is requested by use"),
+            Capability::AutomateBrowser => unreachable!("automation is requested by use"),
         },
         thread::sleep,
         PERMISSION_DECISION_POLL_INTERVAL,
@@ -46,24 +47,24 @@ pub(crate) fn request_missing_permissions(
 }
 
 fn request_missing_permissions_with<E>(
-    required: &BTreeSet<Permission>,
-    mut status_for: impl FnMut(&Permission) -> Result<PermissionStatus, E>,
-    mut request: impl FnMut(&Permission) -> Result<(), E>,
+    required: &BTreeSet<Capability>,
+    mut status_for: impl FnMut(&Capability) -> Result<PermissionStatus, E>,
+    mut request: impl FnMut(&Capability) -> Result<(), E>,
     mut sleep: impl FnMut(Duration),
     poll_interval: Duration,
     timeout: Duration,
 ) -> Result<PermissionRequestOutcome, E> {
     let mut outcome = PermissionRequestOutcome::Completed;
-    for permission in [Permission::Accessibility, Permission::InputMonitoring] {
-        if !required.contains(&permission) {
+    for capability in [Capability::ReadAccessibilityTree, Capability::ObserveInput] {
+        if !required.contains(&capability) {
             continue;
         }
-        if status_for(&permission)? != PermissionStatus::NotDetermined {
+        if status_for(&capability)? != PermissionStatus::NotDetermined {
             continue;
         }
-        request(&permission)?;
+        request(&capability)?;
         if !wait_for_permission_grant(
-            &permission,
+            &capability,
             &mut status_for,
             &mut sleep,
             poll_interval,
@@ -76,8 +77,8 @@ fn request_missing_permissions_with<E>(
 }
 
 fn wait_for_permission_grant<E>(
-    permission: &Permission,
-    status_for: &mut impl FnMut(&Permission) -> Result<PermissionStatus, E>,
+    capability: &Capability,
+    status_for: &mut impl FnMut(&Capability) -> Result<PermissionStatus, E>,
     sleep: &mut impl FnMut(Duration),
     poll_interval: Duration,
     timeout: Duration,
@@ -86,7 +87,7 @@ fn wait_for_permission_grant<E>(
     while elapsed < timeout {
         sleep(poll_interval);
         elapsed = elapsed.saturating_add(poll_interval);
-        if status_for(permission)? == PermissionStatus::Granted {
+        if status_for(capability)? == PermissionStatus::Granted {
             return Ok(true);
         }
     }
@@ -95,10 +96,10 @@ fn wait_for_permission_grant<E>(
 
 fn permission_request_status(
     checker: &PermissionChecker,
-    permission: &Permission,
+    capability: &Capability,
 ) -> Result<PermissionStatus, PermissionError> {
-    let status = checker.permission_status(permission)?;
-    if *permission == Permission::Accessibility && status == PermissionStatus::Denied {
+    let status = checker.permission_status(capability)?;
+    if *capability == Capability::ReadAccessibilityTree && status == PermissionStatus::Denied {
         // AXIsProcessTrusted exposes only a Boolean. During prompt coordination, false therefore
         // remains pending-or-denied; only true proves that the request has resolved as granted.
         return Ok(PermissionStatus::NotDetermined);
@@ -107,31 +108,29 @@ fn permission_request_status(
 }
 
 pub(crate) fn probe_permissions(
-    required: &BTreeSet<Permission>,
+    required: &BTreeSet<Capability>,
 ) -> Result<DaemonPermissions, PermissionError> {
     let checker = PermissionChecker::new();
-    probe_permissions_with(required, |permission| checker.permission_status(permission))
+    probe_permissions_with(required, |capability| checker.permission_status(capability))
 }
 
 pub(crate) fn permission_snapshot_ready(
-    required: &BTreeSet<Permission>,
+    required: &BTreeSet<Capability>,
     snapshot: &DaemonPermissions,
 ) -> Option<bool> {
     required
         .iter()
-        .map(|permission| match permission {
-            Permission::Accessibility => Some(snapshot.accessibility == PermissionState::Granted),
-            Permission::InputMonitoring => {
-                Some(snapshot.input_monitoring == PermissionState::Granted)
+        .map(|capability| match capability {
+            Capability::ReadAccessibilityTree => {
+                Some(snapshot.accessibility == PermissionState::Granted)
             }
-            Permission::Automation { bundle_id } => {
-                snapshot.automation.get(bundle_id).map(|state| {
-                    matches!(
-                        state,
-                        PermissionState::Granted | PermissionState::NotDetermined
-                    )
-                })
-            }
+            Capability::ObserveInput => Some(snapshot.input_monitoring == PermissionState::Granted),
+            Capability::AutomateBrowser => snapshot.automation.get(CHROME_BUNDLE_ID).map(|state| {
+                matches!(
+                    state,
+                    PermissionState::Granted | PermissionState::NotDetermined
+                )
+            }),
         })
         .try_fold(true, |ready, permission_ready| {
             permission_ready.map(|permission_ready| ready && permission_ready)
@@ -139,24 +138,25 @@ pub(crate) fn permission_snapshot_ready(
 }
 
 fn probe_permissions_with<E>(
-    required: &BTreeSet<Permission>,
-    mut status_for: impl FnMut(&Permission) -> Result<PermissionStatus, E>,
+    required: &BTreeSet<Capability>,
+    mut status_for: impl FnMut(&Capability) -> Result<PermissionStatus, E>,
 ) -> Result<DaemonPermissions, E> {
-    let accessibility = status_for(&Permission::Accessibility)?;
-    let input_monitoring = status_for(&Permission::InputMonitoring)?;
+    let accessibility = status_for(&Capability::ReadAccessibilityTree)?;
+    let input_monitoring = status_for(&Capability::ObserveInput)?;
     let mut automation = BTreeMap::new();
-    for permission in required {
-        if let Permission::Automation { bundle_id } = permission {
-            automation.insert(bundle_id.clone(), status_for(permission)?);
-        }
+    if required.contains(&Capability::AutomateBrowser) {
+        automation.insert(
+            CHROME_BUNDLE_ID.to_owned(),
+            status_for(&Capability::AutomateBrowser)?,
+        );
     }
-    let permissions_ok = required.iter().all(|permission| {
-        let status = match permission {
-            Permission::Accessibility => Some(accessibility),
-            Permission::InputMonitoring => Some(input_monitoring),
-            Permission::Automation { bundle_id } => automation.get(bundle_id).copied(),
+    let permissions_ok = required.iter().all(|capability| {
+        let status = match capability {
+            Capability::ReadAccessibilityTree => Some(accessibility),
+            Capability::ObserveInput => Some(input_monitoring),
+            Capability::AutomateBrowser => automation.get(CHROME_BUNDLE_ID).copied(),
         };
-        status.is_some_and(|status| permission_is_ready(permission, status))
+        status.is_some_and(|status| permission_is_ready(*capability, status))
     });
 
     Ok(DaemonPermissions {
@@ -170,14 +170,11 @@ fn probe_permissions_with<E>(
     })
 }
 
-fn permission_is_ready(permission: &Permission, status: PermissionStatus) -> bool {
+fn permission_is_ready(capability: Capability, status: PermissionStatus) -> bool {
     status == PermissionStatus::Granted
         || matches!(
-            (permission, status),
-            (
-                Permission::Automation { .. },
-                PermissionStatus::NotDetermined
-            )
+            (capability, status),
+            (Capability::AutomateBrowser, PermissionStatus::NotDetermined)
         )
 }
 
@@ -197,7 +194,7 @@ mod tests {
         time::Duration,
     };
 
-    use zanei_collector::Permission;
+    use zanei_collector::Capability;
     use zanei_core::store::PermissionState;
     use zanei_macos::permission::PermissionStatus;
 
@@ -207,7 +204,8 @@ mod tests {
 
     #[test]
     fn false_accessibility_status_does_not_advance_before_timeout() {
-        let required = BTreeSet::from([Permission::Accessibility, Permission::InputMonitoring]);
+        let required =
+            BTreeSet::from([Capability::ReadAccessibilityTree, Capability::ObserveInput]);
         let requested = RefCell::new(Vec::new());
         let accessibility_checks = Cell::new(0);
         let input_checks = Cell::new(0);
@@ -216,7 +214,7 @@ mod tests {
             &required,
             |permission| {
                 Ok::<_, ()>(match permission {
-                    Permission::Accessibility => {
+                    Capability::ReadAccessibilityTree => {
                         accessibility_checks.set(accessibility_checks.get() + 1);
                         if accessibility_checks.get() == 1 {
                             PermissionStatus::NotDetermined
@@ -224,7 +222,7 @@ mod tests {
                             PermissionStatus::Denied
                         }
                     }
-                    Permission::InputMonitoring => {
+                    Capability::ObserveInput => {
                         assert_eq!(accessibility_checks.get(), 4);
                         input_checks.set(input_checks.get() + 1);
                         if input_checks.get() == 1 {
@@ -233,16 +231,16 @@ mod tests {
                             PermissionStatus::Granted
                         }
                     }
-                    Permission::Automation { .. } => panic!("automation must not be probed"),
+                    Capability::AutomateBrowser => panic!("automation must not be probed"),
                 })
             },
             |permission| {
-                requested.borrow_mut().push(permission.clone());
+                requested.borrow_mut().push(*permission);
                 Ok::<_, ()>(())
             },
             |_| {
                 if input_checks.get() == 0 {
-                    assert_eq!(*requested.borrow(), [Permission::Accessibility]);
+                    assert_eq!(*requested.borrow(), [Capability::ReadAccessibilityTree]);
                 }
             },
             Duration::from_secs(1),
@@ -254,13 +252,14 @@ mod tests {
         assert_eq!(accessibility_checks.get(), 4);
         assert_eq!(
             requested.into_inner(),
-            [Permission::Accessibility, Permission::InputMonitoring]
+            [Capability::ReadAccessibilityTree, Capability::ObserveInput]
         );
     }
 
     #[test]
     fn granted_transition_requests_the_next_permission() {
-        let required = BTreeSet::from([Permission::Accessibility, Permission::InputMonitoring]);
+        let required =
+            BTreeSet::from([Capability::ReadAccessibilityTree, Capability::ObserveInput]);
         let requested = RefCell::new(Vec::new());
         let accessibility_checks = Cell::new(0);
         let input_checks = Cell::new(0);
@@ -269,9 +268,9 @@ mod tests {
             &required,
             |permission| {
                 let checks = match permission {
-                    Permission::Accessibility => &accessibility_checks,
-                    Permission::InputMonitoring => &input_checks,
-                    Permission::Automation { .. } => panic!("automation must not be probed"),
+                    Capability::ReadAccessibilityTree => &accessibility_checks,
+                    Capability::ObserveInput => &input_checks,
+                    Capability::AutomateBrowser => panic!("automation must not be probed"),
                 };
                 checks.set(checks.get() + 1);
                 Ok::<_, ()>(match checks.get() {
@@ -281,12 +280,12 @@ mod tests {
                 })
             },
             |permission| {
-                requested.borrow_mut().push(permission.clone());
+                requested.borrow_mut().push(*permission);
                 Ok::<_, ()>(())
             },
             |_| {
                 if input_checks.get() == 0 {
-                    assert_eq!(*requested.borrow(), [Permission::Accessibility]);
+                    assert_eq!(*requested.borrow(), [Capability::ReadAccessibilityTree]);
                 }
             },
             Duration::from_secs(1),
@@ -297,13 +296,14 @@ mod tests {
         assert_eq!(outcome, PermissionRequestOutcome::Completed);
         assert_eq!(
             requested.into_inner(),
-            [Permission::Accessibility, Permission::InputMonitoring]
+            [Capability::ReadAccessibilityTree, Capability::ObserveInput]
         );
     }
 
     #[test]
     fn accessibility_timeout_requests_input_monitoring_after_120_seconds() {
-        let required = BTreeSet::from([Permission::Accessibility, Permission::InputMonitoring]);
+        let required =
+            BTreeSet::from([Capability::ReadAccessibilityTree, Capability::ObserveInput]);
         let requested = RefCell::new(Vec::new());
         let accessibility_checks = Cell::new(0);
         let input_checks = Cell::new(0);
@@ -313,7 +313,7 @@ mod tests {
             &required,
             |permission| {
                 Ok::<_, ()>(match permission {
-                    Permission::Accessibility => {
+                    Capability::ReadAccessibilityTree => {
                         accessibility_checks.set(accessibility_checks.get() + 1);
                         if accessibility_checks.get() == 1 {
                             PermissionStatus::NotDetermined
@@ -321,7 +321,7 @@ mod tests {
                             PermissionStatus::Denied
                         }
                     }
-                    Permission::InputMonitoring => {
+                    Capability::ObserveInput => {
                         assert_eq!(elapsed.get(), Duration::from_secs(120));
                         input_checks.set(input_checks.get() + 1);
                         if input_checks.get() == 1 {
@@ -330,16 +330,16 @@ mod tests {
                             PermissionStatus::Granted
                         }
                     }
-                    Permission::Automation { .. } => panic!("automation must not be probed"),
+                    Capability::AutomateBrowser => panic!("automation must not be probed"),
                 })
             },
             |permission| {
-                requested.borrow_mut().push(permission.clone());
+                requested.borrow_mut().push(*permission);
                 Ok::<_, ()>(())
             },
             |duration| {
                 if input_checks.get() == 0 {
-                    assert_eq!(*requested.borrow(), [Permission::Accessibility]);
+                    assert_eq!(*requested.borrow(), [Capability::ReadAccessibilityTree]);
                     elapsed.set(elapsed.get() + duration);
                 }
             },
@@ -353,18 +353,16 @@ mod tests {
         assert_eq!(elapsed.get(), Duration::from_secs(120));
         assert_eq!(
             requested.into_inner(),
-            [Permission::Accessibility, Permission::InputMonitoring]
+            [Capability::ReadAccessibilityTree, Capability::ObserveInput]
         );
     }
 
     #[test]
     fn granted_permissions_are_skipped_and_automation_remains_lazy() {
         let required = BTreeSet::from([
-            Permission::Accessibility,
-            Permission::InputMonitoring,
-            Permission::Automation {
-                bundle_id: "com.google.Chrome".to_owned(),
-            },
+            Capability::ReadAccessibilityTree,
+            Capability::ObserveInput,
+            Capability::AutomateBrowser,
         ]);
         let probed = RefCell::new(Vec::new());
         let requested = RefCell::new(Vec::new());
@@ -372,11 +370,11 @@ mod tests {
         let outcome = request_missing_permissions_with(
             &required,
             |permission| {
-                probed.borrow_mut().push(permission.clone());
+                probed.borrow_mut().push(*permission);
                 Ok::<_, ()>(PermissionStatus::Granted)
             },
             |permission| {
-                requested.borrow_mut().push(permission.clone());
+                requested.borrow_mut().push(*permission);
                 Ok::<_, ()>(())
             },
             |_| panic!("granted permissions must not be polled"),
@@ -388,7 +386,7 @@ mod tests {
         assert_eq!(outcome, PermissionRequestOutcome::Completed);
         assert_eq!(
             probed.into_inner(),
-            [Permission::Accessibility, Permission::InputMonitoring]
+            [Capability::ReadAccessibilityTree, Capability::ObserveInput]
         );
         assert!(requested.into_inner().is_empty());
     }
@@ -396,17 +394,15 @@ mod tests {
     #[test]
     fn derives_typed_snapshot_for_every_required_permission() {
         let required = BTreeSet::from([
-            Permission::Accessibility,
-            Permission::InputMonitoring,
-            Permission::Automation {
-                bundle_id: "com.google.Chrome".to_owned(),
-            },
+            Capability::ReadAccessibilityTree,
+            Capability::ObserveInput,
+            Capability::AutomateBrowser,
         ]);
 
         let snapshot = probe_permissions_with(&required, |permission| match permission {
-            Permission::Accessibility => Ok::<_, ()>(PermissionStatus::Granted),
-            Permission::InputMonitoring => Ok(PermissionStatus::Denied),
-            Permission::Automation { .. } => Ok(PermissionStatus::NotDetermined),
+            Capability::ReadAccessibilityTree => Ok::<_, ()>(PermissionStatus::Granted),
+            Capability::ObserveInput => Ok(PermissionStatus::Denied),
+            Capability::AutomateBrowser => Ok(PermissionStatus::NotDetermined),
         })
         .expect("probe snapshot");
 
@@ -421,15 +417,13 @@ mod tests {
 
     #[test]
     fn pending_automation_is_ready_until_the_target_app_can_be_probed() {
-        let required = BTreeSet::from([Permission::Automation {
-            bundle_id: "com.google.Chrome".to_owned(),
-        }]);
+        let required = BTreeSet::from([Capability::AutomateBrowser]);
 
         let snapshot = probe_permissions_with(&required, |permission| match permission {
-            Permission::Accessibility | Permission::InputMonitoring => {
+            Capability::ReadAccessibilityTree | Capability::ObserveInput => {
                 Ok::<_, ()>(PermissionStatus::Denied)
             }
-            Permission::Automation { .. } => Ok(PermissionStatus::NotDetermined),
+            Capability::AutomateBrowser => Ok(PermissionStatus::NotDetermined),
         })
         .expect("probe snapshot");
 

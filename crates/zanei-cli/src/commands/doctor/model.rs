@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use zanei_collector::Permission;
+use zanei_collector::Capability;
 use zanei_core::store::LockedReason;
 
 use super::health::HealthReport;
@@ -14,7 +14,7 @@ pub(super) struct DoctorReport {
     pub(super) missing_required: Vec<&'static str>,
     pub(super) settings_pane: Option<&'static str>,
     #[serde(skip)]
-    pub(super) missing_permissions: Vec<Permission>,
+    pub(super) missing_permissions: Vec<Capability>,
     pub(super) reported_by_recorder: bool,
     pub(super) store_key: StoreKeyReport,
     pub(super) health: HealthReport,
@@ -29,7 +29,7 @@ impl DoctorReport {
         }
     }
 
-    pub(super) fn permissions_to_fix(&self, fix: bool) -> Option<&[Permission]> {
+    pub(super) fn permissions_to_fix(&self, fix: bool) -> Option<&[Capability]> {
         (fix && !self.missing_permissions.is_empty()).then_some(&self.missing_permissions)
     }
 }

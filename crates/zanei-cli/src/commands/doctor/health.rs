@@ -164,7 +164,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
 
-    use zanei_collector::Permission;
+    use zanei_collector::Capability;
     use zanei_core::config::Config;
     use zanei_core::store::{DaemonMode, DaemonPermissions, PermissionState, StoreStatus};
 
@@ -276,7 +276,7 @@ mod tests {
     fn degraded_health_does_not_change_permission_exit_or_fix_policy() {
         let config =
             Config::from_toml("[capture]\nsources = [\"input\"]\n").expect("input capture config");
-        let required = crate::daemon::required_permissions_for(&config);
+        let required = crate::daemon::required_capabilities_for(&config);
         let snapshot = DaemonPermissions {
             permissions_ok: false,
             accessibility: PermissionState::Granted,
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(report.exit_code(), super::super::EXIT_MISSING_PERMISSIONS);
         assert_eq!(
             report.permissions_to_fix(true),
-            Some([Permission::InputMonitoring].as_slice())
+            Some([Capability::ObserveInput].as_slice())
         );
         assert_eq!(report.permissions_to_fix(false), None);
         assert_eq!(

@@ -16,7 +16,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
+use zanei_collector::{Capability, Collector, CollectorError, RawEvent};
 
 pub use mode::EventTapMode;
 
@@ -28,7 +28,7 @@ use crate::{
     text_capture::InputAuthorizationPublisher,
 };
 
-static REQUIRED_PERMISSIONS: [Permission; 1] = [Permission::InputMonitoring];
+static REQUIRED_CAPABILITIES: [Capability; 1] = [Capability::ObserveInput];
 
 pub struct EventTapCollector {
     mode: EventTapMode,
@@ -127,8 +127,8 @@ impl Collector for EventTapCollector {
         "eventtap"
     }
 
-    fn required_permissions(&self) -> &[Permission] {
-        &REQUIRED_PERMISSIONS
+    fn required_capabilities(&self) -> &[Capability] {
+        &REQUIRED_CAPABILITIES
     }
 
     fn start(&mut self, sender: SyncSender<RawEvent>) -> Result<(), CollectorError> {

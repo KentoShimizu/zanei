@@ -13,7 +13,8 @@ use std::{
 };
 
 use thiserror::Error;
-use zanei_collector::Permission;
+use zanei_collector::Capability;
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 
 use crate::ffi::permission::{
     AutomationTarget, AutomationTargetError, accessibility_is_trusted, input_monitoring_status,
@@ -93,22 +94,22 @@ impl PermissionChecker {
 
     pub fn permission_status(
         &self,
-        permission: &Permission,
+        capability: &Capability,
     ) -> Result<PermissionStatus, PermissionError> {
-        permission_status_with(&NativePermissionProbe, permission)
+        permission_status_with(&NativePermissionProbe, capability)
     }
 
-    pub fn open_settings(&self, permission: &Permission) -> Result<(), PermissionError> {
-        open_settings_with(&ProcessSettingsOpener, permission)
+    pub fn open_settings(&self, capability: &Capability) -> Result<(), PermissionError> {
+        open_settings_with(&ProcessSettingsOpener, capability)
     }
 }
 
-pub fn permission_status(permission: &Permission) -> Result<PermissionStatus, PermissionError> {
-    PermissionChecker::new().permission_status(permission)
+pub fn permission_status(capability: &Capability) -> Result<PermissionStatus, PermissionError> {
+    PermissionChecker::new().permission_status(capability)
 }
 
-pub fn open_settings(permission: &Permission) -> Result<(), PermissionError> {
-    PermissionChecker::new().open_settings(permission)
+pub fn open_settings(capability: &Capability) -> Result<(), PermissionError> {
+    PermissionChecker::new().open_settings(capability)
 }
 
 pub fn request_accessibility() -> Result<(), PermissionError> {
@@ -238,24 +239,24 @@ fn automation_status_with_timeout(
 
 fn permission_status_with(
     probe: &impl PermissionProbe,
-    permission: &Permission,
+    capability: &Capability,
 ) -> Result<PermissionStatus, PermissionError> {
-    match permission {
-        Permission::Accessibility => Ok(if probe.accessibility_is_trusted() {
+    match capability {
+        Capability::ReadAccessibilityTree => Ok(if probe.accessibility_is_trusted() {
             PermissionStatus::Granted
         } else {
             // AXIsProcessTrusted exposes only a Boolean and cannot distinguish a first request
             // from an explicit denial.
             PermissionStatus::Denied
         }),
-        Permission::InputMonitoring => match probe.input_monitoring_status() {
+        Capability::ObserveInput => match probe.input_monitoring_status() {
             IO_HID_ACCESS_GRANTED => Ok(PermissionStatus::Granted),
             IO_HID_ACCESS_DENIED => Ok(PermissionStatus::Denied),
             IO_HID_ACCESS_UNKNOWN => Ok(PermissionStatus::NotDetermined),
             status => Err(PermissionError::UnexpectedInputMonitoringStatus { status }),
         },
-        Permission::Automation { bundle_id } => {
-            let status = probe.automation_status(bundle_id)?;
+        Capability::AutomateBrowser => {
+            let status = probe.automation_status(CHROME_BUNDLE_ID)?;
             match status {
                 AE_PERMISSION_GRANTED => Ok(PermissionStatus::Granted),
                 AE_PERMISSION_DENIED => Ok(PermissionStatus::Denied),
@@ -265,7 +266,7 @@ fn permission_status_with(
                     Ok(PermissionStatus::NotDetermined)
                 }
                 status => Err(PermissionError::UnexpectedAutomationStatus {
-                    bundle_id: bundle_id.clone(),
+                    bundle_id: CHROME_BUNDLE_ID.to_owned(),
                     status,
                 }),
             }
@@ -314,12 +315,12 @@ impl SettingsOpener for ProcessSettingsOpener {
 
 fn open_settings_with(
     opener: &impl SettingsOpener,
-    permission: &Permission,
+    capability: &Capability,
 ) -> Result<(), PermissionError> {
-    let settings_url = match permission {
-        Permission::Accessibility => ACCESSIBILITY_SETTINGS_URL,
-        Permission::InputMonitoring => INPUT_MONITORING_SETTINGS_URL,
-        Permission::Automation { .. } => AUTOMATION_SETTINGS_URL,
+    let settings_url = match capability {
+        Capability::ReadAccessibilityTree => ACCESSIBILITY_SETTINGS_URL,
+        Capability::ObserveInput => INPUT_MONITORING_SETTINGS_URL,
+        Capability::AutomateBrowser => AUTOMATION_SETTINGS_URL,
     };
     opener.open(settings_url)
 }
@@ -336,9 +337,9 @@ mod tests {
 
     use super::{
         ACCESSIBILITY_SETTINGS_URL, AE_PERMISSION_GRANTED, AE_PERMISSION_NOT_DETERMINED,
-        AUTOMATION_SETTINGS_URL, AutomationProbeState, AutomationTargetError,
-        INPUT_MONITORING_SETTINGS_URL, Permission, PermissionError, PermissionProbe,
-        PermissionStatus, SettingsOpener, automation_status_with_timeout, automation_target_error,
+        AUTOMATION_SETTINGS_URL, AutomationProbeState, AutomationTargetError, Capability,
+        INPUT_MONITORING_SETTINGS_URL, PermissionError, PermissionProbe, PermissionStatus,
+        SettingsOpener, automation_status_with_timeout, automation_target_error,
         open_settings_with, permission_status_with,
     };
 
@@ -358,6 +359,7 @@ mod tests {
         }
 
         fn automation_status(&self, bundle_id: &str) -> Result<i32, PermissionError> {
+            assert_eq!(bundle_id, zanei_core::privacy::CHROME_BUNDLE_ID);
             self.automation_status
                 .map_err(|error| automation_target_error(bundle_id, error))
         }
@@ -393,18 +395,18 @@ mod tests {
         let untrusted = probe_with(false, 0, Ok(0));
 
         assert_eq!(
-            permission_status_with(&trusted, &Permission::Accessibility).unwrap(),
+            permission_status_with(&trusted, &Capability::ReadAccessibilityTree).unwrap(),
             PermissionStatus::Granted
         );
         assert_eq!(
-            permission_status_with(&untrusted, &Permission::Accessibility).unwrap(),
+            permission_status_with(&untrusted, &Capability::ReadAccessibilityTree).unwrap(),
             PermissionStatus::Denied
         );
     }
 
     #[test]
     fn maps_all_input_monitoring_statuses() {
-        let permission = Permission::InputMonitoring;
+        let permission = Capability::ObserveInput;
 
         assert_eq!(
             permission_status_with(&probe_with(false, 0, Ok(0)), &permission).unwrap(),
@@ -426,9 +428,7 @@ mod tests {
 
     #[test]
     fn maps_all_automation_statuses() {
-        let permission = Permission::Automation {
-            bundle_id: "com.google.Chrome".to_owned(),
-        };
+        let permission = Capability::AutomateBrowser;
 
         assert_eq!(
             permission_status_with(&probe_with(false, 0, Ok(0)), &permission).unwrap(),
@@ -501,9 +501,7 @@ mod tests {
 
     #[test]
     fn preserves_automation_descriptor_failures() {
-        let permission = Permission::Automation {
-            bundle_id: "com.google.Chrome".to_owned(),
-        };
+        let permission = Capability::AutomateBrowser;
         let probe = probe_with(
             false,
             0,
@@ -523,15 +521,9 @@ mod tests {
     fn opens_the_permission_specific_settings_pane() {
         let opener = RecordingOpener::default();
 
-        open_settings_with(&opener, &Permission::Accessibility).unwrap();
-        open_settings_with(&opener, &Permission::InputMonitoring).unwrap();
-        open_settings_with(
-            &opener,
-            &Permission::Automation {
-                bundle_id: "com.google.Chrome".to_owned(),
-            },
-        )
-        .unwrap();
+        open_settings_with(&opener, &Capability::ReadAccessibilityTree).unwrap();
+        open_settings_with(&opener, &Capability::ObserveInput).unwrap();
+        open_settings_with(&opener, &Capability::AutomateBrowser).unwrap();
 
         assert_eq!(
             *opener.opened_urls.borrow(),
@@ -557,7 +549,7 @@ mod tests {
         }
 
         assert!(matches!(
-            open_settings_with(&FailingOpener, &Permission::Accessibility),
+            open_settings_with(&FailingOpener, &Capability::ReadAccessibilityTree),
             Err(PermissionError::SettingsLaunch {
                 settings_url: ACCESSIBILITY_SETTINGS_URL,
                 ..

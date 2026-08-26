@@ -4,7 +4,8 @@ use std::{
     time::Instant,
 };
 
-use zanei_collector::{Collector, Permission, RawEvent};
+use zanei_collector::{Capability, Collector, RawEvent};
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 use zanei_core::store::{DaemonPermissions, PermissionState};
 use zanei_macos::chrome::ChromeCollector;
 
@@ -337,7 +338,7 @@ impl Managed<ChromeCollector> {
 
 pub(super) trait ManagedCollector {
     fn worker_name(&self) -> &str;
-    fn worker_permissions(&self) -> BTreeSet<Permission>;
+    fn worker_capabilities(&self) -> BTreeSet<Capability>;
     fn start_worker(&mut self, sender: SyncSender<RawEvent>) -> Result<(), String>;
     fn stop_worker(&mut self);
 }
@@ -347,10 +348,10 @@ impl<C: Collector> ManagedCollector for C {
         Collector::name(self)
     }
 
-    fn worker_permissions(&self) -> BTreeSet<Permission> {
-        Collector::required_permissions(self)
+    fn worker_capabilities(&self) -> BTreeSet<Capability> {
+        Collector::required_capabilities(self)
             .iter()
-            .cloned()
+            .copied()
             .collect()
     }
 
@@ -458,7 +459,7 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
     let Some(managed) = managed.as_mut() else {
         return Ok(());
     };
-    let required = managed.collector.worker_permissions();
+    let required = managed.collector.worker_capabilities();
     let granted = permissions.map_or(required.is_empty(), |permissions| {
         permissions_granted(&required, permissions)
     });
@@ -506,12 +507,12 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
     Ok(())
 }
 
-fn permissions_granted(required: &BTreeSet<Permission>, permissions: &DaemonPermissions) -> bool {
-    required.iter().all(|permission| match permission {
-        Permission::Accessibility => permissions.accessibility == PermissionState::Granted,
-        Permission::InputMonitoring => permissions.input_monitoring == PermissionState::Granted,
-        Permission::Automation { bundle_id } => {
-            permissions.automation.get(bundle_id) == Some(&PermissionState::Granted)
+fn permissions_granted(required: &BTreeSet<Capability>, permissions: &DaemonPermissions) -> bool {
+    required.iter().all(|capability| match capability {
+        Capability::ReadAccessibilityTree => permissions.accessibility == PermissionState::Granted,
+        Capability::ObserveInput => permissions.input_monitoring == PermissionState::Granted,
+        Capability::AutomateBrowser => {
+            permissions.automation.get(CHROME_BUNDLE_ID) == Some(&PermissionState::Granted)
         }
     })
 }

@@ -11,7 +11,7 @@ use std::{
 };
 
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use zanei_collector::Permission;
+use zanei_collector::Capability;
 use zanei_core::{
     config::{CONFIG_WATCH_INTERVAL, Config, ConfigWatcher},
     normalize::format_timestamp,
@@ -66,8 +66,8 @@ pub enum RecordOutput {
     File(PathBuf),
 }
 
-pub fn required_permissions_for(config: &Config) -> BTreeSet<Permission> {
-    CollectorSet::new(config).required_permissions()
+pub fn required_capabilities_for(config: &Config) -> BTreeSet<Capability> {
+    CollectorSet::new(config).required_capabilities()
 }
 
 pub fn run_daemon(
@@ -103,9 +103,9 @@ pub fn run_daemon(
         let mut collectors = CollectorSet::new(&config);
         let initial_input_monitoring_status = collectors
             .has_eventtap()
-            .then(|| permission_status(&Permission::InputMonitoring));
+            .then(|| permission_status(&Capability::ObserveInput));
         let permission_request_worker =
-            PermissionRequestWorker::start(collectors.required_permissions())?;
+            PermissionRequestWorker::start(collectors.required_capabilities())?;
         let main_thread_observers = collectors.prepare_main_thread();
         Ok((
             main_run_loop,
@@ -331,7 +331,7 @@ struct ActiveDaemon<'a> {
     last_permissions: Option<DaemonPermissions>,
     initial_input_monitoring_status: Option<Result<PermissionStatus, PermissionError>>,
     permission_request_worker: Option<PermissionRequestWorker>,
-    pending_permission_request: Option<BTreeSet<Permission>>,
+    pending_permission_request: Option<BTreeSet<Capability>>,
     executable_guard: ExecutableGuard,
 }
 
@@ -370,14 +370,14 @@ impl ActiveDaemon<'_> {
             if last_config_poll.elapsed() >= CONFIG_WATCH_INTERVAL {
                 let retention_promoted = match self.config_watcher.reload_if_changed() {
                     Ok(Some(config)) => {
-                        let previous_permissions = self.collectors.required_permissions();
+                        let previous_capabilities = self.collectors.required_capabilities();
                         // Replace the downstream privacy filter first: events admitted by the old
                         // collector policy, including queued events, must use the new filter.
                         self.pipeline.replace_filter(&config.filter)?;
                         self.collectors.replace_filter(config.filter.clone());
                         queue_permission_expansion(
-                            &previous_permissions,
-                            &self.collectors.required_permissions(),
+                            &previous_capabilities,
+                            &self.collectors.required_capabilities(),
                             &mut self.pending_permission_request,
                         );
                         self.start_pending_permission_request();

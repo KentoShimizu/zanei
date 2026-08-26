@@ -1,3 +1,5 @@
+mod capability;
+
 pub mod config;
 pub mod normalize;
 pub mod privacy;
@@ -7,4 +9,5 @@ pub mod store;
 pub mod text_delta;
 pub mod timeline;
 
+pub use capability::Capability;
 pub use schema::{CaptureContext, RawEvent};

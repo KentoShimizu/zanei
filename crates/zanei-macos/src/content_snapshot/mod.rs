@@ -23,7 +23,7 @@ use std::{
 use crate::{
     CapturePolicy, chrome::ChromeObserver, focus_context::FocusContext, workspace::WorkspaceEvent,
 };
-use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
+use zanei_collector::{Capability, Collector, CollectorError, RawEvent};
 
 use self::state::SnapshotState;
 
@@ -45,7 +45,7 @@ pub use trigger::{
 };
 pub use walker::SnapshotWalkOutput;
 
-const REQUIRED_PERMISSIONS: [Permission; 1] = [Permission::Accessibility];
+const REQUIRED_CAPABILITIES: [Capability; 1] = [Capability::ReadAccessibilityTree];
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const FILTER_REPLACE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -185,8 +185,8 @@ impl Collector for ContentSnapshotCollector {
         "content_snapshot"
     }
 
-    fn required_permissions(&self) -> &[Permission] {
-        &REQUIRED_PERMISSIONS
+    fn required_capabilities(&self) -> &[Capability] {
+        &REQUIRED_CAPABILITIES
     }
 
     fn start(&mut self, sender: SyncSender<RawEvent>) -> Result<(), CollectorError> {

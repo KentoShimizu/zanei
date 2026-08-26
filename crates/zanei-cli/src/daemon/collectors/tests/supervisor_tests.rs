@@ -790,7 +790,7 @@ fn pending_snapshot_observes_permission_required_failure_without_restarting() {
     let state = Arc::new(FakeState::default());
     let mut managed = Some(Managed::new(FakeCollector::new(
         Arc::clone(&state),
-        BTreeSet::from([Permission::Accessibility]),
+        BTreeSet::from([Capability::ReadAccessibilityTree]),
     )));
     let (pipeline, _events) = mpsc::sync_channel(4);
     let mut errors = BTreeMap::new();
@@ -848,7 +848,7 @@ fn permission_blocked_collector_waits_for_granted_transition() {
     let state = Arc::new(FakeState::default());
     let mut managed = Some(Managed::new(FakeCollector::new(
         Arc::clone(&state),
-        BTreeSet::from([Permission::Accessibility]),
+        BTreeSet::from([Capability::ReadAccessibilityTree]),
     )));
     let (pipeline, _events) = mpsc::sync_channel(4);
     let mut errors = BTreeMap::new();
@@ -911,11 +911,65 @@ fn permission_blocked_collector_waits_for_granted_transition() {
 }
 
 #[test]
+fn deferred_browser_automation_keeps_the_worker_stopped() {
+    let state = Arc::new(FakeState::default());
+    let mut managed = Some(Managed::new(FakeCollector::new(
+        Arc::clone(&state),
+        BTreeSet::from([Capability::AutomateBrowser]),
+    )));
+    let (pipeline, _events) = mpsc::sync_channel(4);
+    let mut errors = BTreeMap::new();
+    let started = Instant::now();
+    start_collector(&mut managed, &pipeline, &mut errors, started);
+    state.finish();
+    wait_for_relay(&managed);
+
+    let mut deferred = granted_permissions();
+    deferred.permissions_ok = true;
+    deferred
+        .automation
+        .insert(CHROME_BUNDLE_ID.to_owned(), PermissionState::NotDetermined);
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&deferred),
+        &mut errors,
+        started,
+    )
+    .expect("record browser worker exit");
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&deferred),
+        &mut errors,
+        started + Duration::from_secs(60),
+    )
+    .expect("hold browser restart while automation is deferred");
+    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
+
+    deferred
+        .automation
+        .insert(CHROME_BUNDLE_ID.to_owned(), PermissionState::Granted);
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&deferred),
+        &mut errors,
+        started + Duration::from_secs(61),
+    )
+    .expect("restart browser worker after automation is granted");
+    assert_eq!(state.starts.load(Ordering::Relaxed), 2);
+
+    state.finish();
+    wait_for_relay(&managed);
+}
+
+#[test]
 fn backoff_deadline_rechecks_current_permission_before_restart() {
     let state = Arc::new(FakeState::default());
     let mut managed = Some(Managed::new(FakeCollector::new(
         Arc::clone(&state),
-        BTreeSet::from([Permission::Accessibility]),
+        BTreeSet::from([Capability::ReadAccessibilityTree]),
     )));
     let (pipeline, _events) = mpsc::sync_channel(4);
     let mut errors = BTreeMap::new();

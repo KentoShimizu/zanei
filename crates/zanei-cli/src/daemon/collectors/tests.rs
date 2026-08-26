@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zanei_collector::{Permission, RawEvent};
+use zanei_collector::{Capability, RawEvent};
 use zanei_core::{
     config::CaptureSource,
     store::{DaemonPermissions, PermissionState},
@@ -249,7 +249,11 @@ fn ui_only_gate_rejects_input_and_clipboard_events() {
 fn permissions_come_from_the_concrete_collectors_selected_by_config() {
     let mut config = zanei_core::config::Config::default();
     config.capture.sources = vec![CaptureSource::App];
-    assert!(CollectorSet::new(&config).required_permissions().is_empty());
+    assert!(
+        CollectorSet::new(&config)
+            .required_capabilities()
+            .is_empty()
+    );
 
     config.capture.sources = vec![CaptureSource::Ui];
     let collectors = CollectorSet::new(&config);
@@ -262,8 +266,8 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
             .is_some_and(|eventtap| { eventtap.collector.secure_input_enabled() })
     );
     assert_eq!(
-        collectors.required_permissions(),
-        [Permission::Accessibility, Permission::InputMonitoring]
+        collectors.required_capabilities(),
+        [Capability::ReadAccessibilityTree, Capability::ObserveInput]
             .into_iter()
             .collect()
     );
@@ -283,10 +287,10 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
     config.capture.text_content = false;
 
     config.capture.sources = vec![CaptureSource::Ui, CaptureSource::Input];
-    let permissions = CollectorSet::new(&config).required_permissions();
+    let permissions = CollectorSet::new(&config).required_capabilities();
     assert_eq!(
         permissions,
-        [Permission::Accessibility, Permission::InputMonitoring]
+        [Capability::ReadAccessibilityTree, Capability::ObserveInput]
             .into_iter()
             .collect()
     );
@@ -296,8 +300,8 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
     assert!(collectors.ax.is_some());
     assert!(collectors.eventtap.is_some());
     assert_eq!(
-        collectors.required_permissions(),
-        [Permission::Accessibility, Permission::InputMonitoring]
+        collectors.required_capabilities(),
+        [Capability::ReadAccessibilityTree, Capability::ObserveInput]
             .into_iter()
             .collect()
     );
@@ -307,13 +311,11 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
     assert!(collectors.workspace.is_some());
     assert!(collectors.chrome.is_some());
     assert_eq!(
-        collectors.required_permissions(),
+        collectors.required_capabilities(),
         [
-            Permission::Accessibility,
-            Permission::InputMonitoring,
-            Permission::Automation {
-                bundle_id: "com.google.Chrome".to_owned(),
-            },
+            Capability::ReadAccessibilityTree,
+            Capability::ObserveInput,
+            Capability::AutomateBrowser,
         ]
         .into_iter()
         .collect()
@@ -322,12 +324,10 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
     config.capture.text_content = false;
     config.capture.sources = vec![CaptureSource::Browser];
     assert_eq!(
-        CollectorSet::new(&config).required_permissions(),
+        CollectorSet::new(&config).required_capabilities(),
         [
-            Permission::Accessibility,
-            Permission::Automation {
-                bundle_id: "com.google.Chrome".to_owned(),
-            },
+            Capability::ReadAccessibilityTree,
+            Capability::AutomateBrowser,
         ]
         .into_iter()
         .collect()
@@ -336,37 +336,35 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
 
 #[test]
 fn text_content_chrome_automation_permission_matrix() {
-    let automation = Permission::Automation {
-        bundle_id: "com.google.Chrome".to_owned(),
-    };
+    let automation = Capability::AutomateBrowser;
     let mut config = zanei_core::config::Config::default();
     config.capture.text_content = true;
 
     for (source, expected) in [
         (
             CaptureSource::Window,
-            BTreeSet::from([Permission::Accessibility]),
+            BTreeSet::from([Capability::ReadAccessibilityTree]),
         ),
         (
             CaptureSource::Ui,
             BTreeSet::from([
-                Permission::Accessibility,
-                Permission::InputMonitoring,
-                automation.clone(),
+                Capability::ReadAccessibilityTree,
+                Capability::ObserveInput,
+                automation,
             ]),
         ),
         (
             CaptureSource::Input,
             BTreeSet::from([
-                Permission::Accessibility,
-                Permission::InputMonitoring,
-                automation.clone(),
+                Capability::ReadAccessibilityTree,
+                Capability::ObserveInput,
+                automation,
             ]),
         ),
     ] {
         config.capture.sources = vec![source];
 
-        assert_eq!(CollectorSet::new(&config).required_permissions(), expected);
+        assert_eq!(CollectorSet::new(&config).required_capabilities(), expected);
     }
 
     config.capture.sources = vec![CaptureSource::Ui];
@@ -379,24 +377,22 @@ fn text_content_chrome_automation_permission_matrix() {
     let excluded = CollectorSet::new(&config);
     assert!(excluded.chrome.is_none());
     assert_eq!(
-        excluded.required_permissions(),
-        BTreeSet::from([Permission::Accessibility, Permission::InputMonitoring])
+        excluded.required_capabilities(),
+        BTreeSet::from([Capability::ReadAccessibilityTree, Capability::ObserveInput])
     );
 }
 
 #[test]
 fn content_snapshot_permission_matrix_honors_global_and_scoped_app_rules() {
-    let accessibility = Permission::Accessibility;
-    let automation = Permission::Automation {
-        bundle_id: "com.google.Chrome".to_owned(),
-    };
+    let accessibility = Capability::ReadAccessibilityTree;
+    let automation = Capability::AutomateBrowser;
     let mut config = zanei_core::config::Config::default();
     config.capture.sources.clear();
     config.capture.content_snapshot = true;
 
     assert_eq!(
-        CollectorSet::new(&config).required_permissions(),
-        BTreeSet::from([accessibility.clone(), automation.clone()])
+        CollectorSet::new(&config).required_capabilities(),
+        BTreeSet::from([accessibility, automation])
     );
 
     config
@@ -405,8 +401,8 @@ fn content_snapshot_permission_matrix_honors_global_and_scoped_app_rules() {
         .exclude_apps
         .push("com.google.Chrome".to_owned());
     assert_eq!(
-        CollectorSet::new(&config).required_permissions(),
-        BTreeSet::from([accessibility.clone()])
+        CollectorSet::new(&config).required_capabilities(),
+        BTreeSet::from([accessibility])
     );
 
     config.filter.content_snapshot.exclude_apps.clear();
@@ -415,7 +411,7 @@ fn content_snapshot_permission_matrix_honors_global_and_scoped_app_rules() {
         .exclude_apps
         .push("com.google.Chrome".to_owned());
     assert_eq!(
-        CollectorSet::new(&config).required_permissions(),
+        CollectorSet::new(&config).required_capabilities(),
         BTreeSet::from([accessibility])
     );
 }
@@ -441,8 +437,8 @@ fn browser_source_honors_global_chrome_scope_at_startup() {
         assert!(!chrome_tracking_required(&config.capture, &config.filter));
         assert!(collectors.chrome.is_none());
         assert_eq!(
-            collectors.required_permissions(),
-            BTreeSet::from([Permission::Accessibility])
+            collectors.required_capabilities(),
+            BTreeSet::from([Capability::ReadAccessibilityTree])
         );
     }
 }
@@ -534,12 +530,12 @@ impl FakeState {
 
 struct FakeCollector {
     state: Arc<FakeState>,
-    required: BTreeSet<Permission>,
+    required: BTreeSet<Capability>,
     fail_start: bool,
 }
 
 impl FakeCollector {
-    fn new(state: Arc<FakeState>, required: BTreeSet<Permission>) -> Self {
+    fn new(state: Arc<FakeState>, required: BTreeSet<Capability>) -> Self {
         Self {
             state,
             required,
@@ -561,7 +557,7 @@ impl ManagedCollector for FakeCollector {
         "fake"
     }
 
-    fn worker_permissions(&self) -> BTreeSet<Permission> {
+    fn worker_capabilities(&self) -> BTreeSet<Capability> {
         self.required.clone()
     }
 

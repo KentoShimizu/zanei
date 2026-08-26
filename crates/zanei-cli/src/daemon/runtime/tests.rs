@@ -32,7 +32,7 @@ use crate::daemon::{
     supervisor::EventTapStartGate,
 };
 use crate::permissions::PermissionRequestOutcome;
-use zanei_collector::Permission;
+use zanei_collector::Capability;
 
 #[test]
 fn initial_heartbeat_is_committed_before_permission_worker_starts() {
@@ -116,11 +116,9 @@ fn initial_input_monitoring_grant_allows_immediate_eventtap_start() {
 
 #[test]
 fn newly_required_chrome_automation_is_queued_after_filter_reload() {
-    let previous = BTreeSet::from([Permission::Accessibility]);
-    let automation = Permission::Automation {
-        bundle_id: "com.google.Chrome".to_owned(),
-    };
-    let current = BTreeSet::from([Permission::Accessibility, automation.clone()]);
+    let previous = BTreeSet::from([Capability::ReadAccessibilityTree]);
+    let automation = Capability::AutomateBrowser;
+    let current = BTreeSet::from([Capability::ReadAccessibilityTree, automation]);
     let mut pending = None;
 
     queue_permission_expansion(&previous, &current, &mut pending);

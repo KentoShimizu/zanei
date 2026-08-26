@@ -20,7 +20,7 @@ impl ActiveDaemon<'_> {
         if self.permission_request_worker.is_some() {
             return None;
         }
-        match probe_permissions(&self.collectors.required_permissions()) {
+        match probe_permissions(&self.collectors.required_capabilities()) {
             Ok(permissions) => {
                 self.degraded.remove("permissions");
                 self.last_permissions = Some(permissions.clone());

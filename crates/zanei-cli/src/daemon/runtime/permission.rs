@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use zanei_collector::Permission;
+use zanei_collector::Capability;
 use zanei_macos::permission::{PermissionError, PermissionStatus};
 
 use super::{
@@ -67,9 +67,9 @@ pub(in crate::daemon) fn service_permission_request_worker(
 }
 
 pub(in crate::daemon) fn queue_permission_expansion(
-    previous: &BTreeSet<Permission>,
-    current: &BTreeSet<Permission>,
-    pending: &mut Option<BTreeSet<Permission>>,
+    previous: &BTreeSet<Capability>,
+    current: &BTreeSet<Capability>,
+    pending: &mut Option<BTreeSet<Capability>>,
 ) {
     if !current.is_subset(previous) {
         *pending = Some(current.clone());

@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use zanei_collector::{Collector, CollectorError, Permission, RawEvent};
+use zanei_collector::{Capability, Collector, CollectorError, RawEvent};
 use zanei_core::config::FilterConfig;
 use zanei_core::schema::ClickButton;
 
@@ -47,7 +47,7 @@ use trigger::publish_focus_transition;
 const CLICK_CHANNEL_CAPACITY: usize = 1_024;
 const MAX_CLICK_OBSERVATIONS_PER_TICK: usize = 1;
 const AX_RUN_LOOP_SLICE: Duration = Duration::from_millis(50);
-const REQUIRED_PERMISSIONS: [Permission; 1] = [Permission::Accessibility];
+const REQUIRED_CAPABILITIES: [Capability; 1] = [Capability::ReadAccessibilityTree];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClickObservation {
@@ -151,8 +151,8 @@ impl Collector for AxCollector {
         "ax"
     }
 
-    fn required_permissions(&self) -> &[Permission] {
-        &REQUIRED_PERMISSIONS
+    fn required_capabilities(&self) -> &[Capability] {
+        &REQUIRED_CAPABILITIES
     }
 
     fn start(&mut self, sender: SyncSender<RawEvent>) -> Result<(), CollectorError> {
