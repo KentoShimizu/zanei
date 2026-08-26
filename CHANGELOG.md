@@ -2,12 +2,51 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-08-26
+
+Privacy defaults, event and diagnostic schemas, agent setup, and AX health
+reporting changed.
+
 - **Privacy default behavior change:** the default `filter.redactors` is now
   `["credit_card", "token"]`; email redaction remains available when explicitly
   configured. Users whose TOML explicitly sets `redactors = [...]` are
   unaffected because that value overrides the merged default. Users whose
   configuration omits `redactors` and relies on the merged default will now
   record email addresses instead of replacing them with `[REDACTED:email]`.
+
+- **Doctor JSON contract change:** permission requirements are now expressed as
+  platform-neutral capabilities (`read_accessibility_tree`, `observe_input`, and
+  `automate_browser`), with macOS permission names, native states, settings URLs,
+  and the Chrome bundle id nested under each capability's `detail`. The old
+  `permissions`, `missing_required`, and `settings_pane` fields were removed.
+  Capability states are `available`, `action_required`, and `deferred`. Human
+  output, exit codes, and `doctor --fix` behavior are unchanged.
+- Recorder capability snapshots use store schema v7. Upgrading preserves events
+  and daemon state while discarding only the old permission snapshot; the next
+  recorder heartbeat writes the capability snapshot. Status and MCP JSON shapes
+  remain unchanged. Plaintext SQLite exports expose `daemon_capabilities`
+  instead of `daemon_permissions`. The migration is forward-only; rollback
+  requires a pre-upgrade backup.
+- `content.snapshot` v3 replaces the derived `data.complete` boolean with
+  `data.cutoff`
+  (`time`, `nodes`, `bytes`, `stopped`, or null), so incomplete traversals say
+  which safety limit ended them. Retained v2 rows remain readable and keep their
+  original shape.
+- AX operation failures now report a current reason with stable phase and kind,
+  the native operation and numeric code when available, and the count of
+  independently unresolved sites. Recovery clears only the matching PID and
+  site; cumulative collector failure counts remain monotonic.
+- `zanei setup` now installs the canonical skill for pi and opencode instead of
+  printing an instruction snippet. Project and user scopes use each agent's
+  native skill directory, including `XDG_CONFIG_HOME` for opencode; opencode MCP
+  configuration remains a documented manual step.
+- Launch-agent start locks are explicitly released even when a spawned process
+  inherits the descriptor, preventing a finished start from blocking the next
+  one.
+- Documentation now distinguishes Claude Desktop chat from Claude Code, states
+  that ChatGPT cannot consume the local stdio MCP server, explains AX activation
+  for every allowed app, and warns that `ui.value` diffs are not verbatim text;
+  quote an eligible `content.snapshot` instead.
 
 ## 0.3.1 — 2026-08-24
 
