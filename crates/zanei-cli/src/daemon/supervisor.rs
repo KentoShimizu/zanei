@@ -303,8 +303,10 @@ impl<C> Managed<C> {
     }
 
     #[cfg(test)]
-    pub(super) const fn started_at_for_test(&self) -> Option<Instant> {
-        self.started_at
+    pub(super) fn record_started_for_test(&mut self, now: Instant) {
+        self.running = true;
+        self.started_at = Some(now);
+        self.restart = self.restart.started();
     }
 
     #[cfg(test)]

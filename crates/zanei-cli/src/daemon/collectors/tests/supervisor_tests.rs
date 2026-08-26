@@ -1,6 +1,7 @@
 use super::*;
 use crate::daemon::collectors::{ProducerFailureOrigin, ProducerFailures};
 use crate::daemon::supervisor::add_restart_degradation;
+use zanei_core::privacy::CHROME_BUNDLE_ID;
 use zanei_macos::chrome::{ChromeFailure, ChromeFailureState, ChromeQueryFailure};
 
 struct FakeClock {
@@ -413,6 +414,10 @@ fn main_thread_producer_failures_prevent_derived_worker_start_failures() {
     workspace.suspend();
 
     let mut eventtap = CollectorSet::new(&input_text_content_test_config());
+    assert!(
+        eventtap.chrome.is_none(),
+        "input lifecycle fixture must not start the system Chrome worker"
+    );
     eventtap.set_producer_result_for_test(
         ProducerFailureOrigin::EventTapMainThread,
         Err("input source observer creation failed"),
@@ -519,6 +524,10 @@ fn producer_reason_has_priority_over_start_restart_and_runtime_degradation() {
 fn content_filter_failure_clears_only_on_worker_ack_or_fresh_start() {
     let config = secure_input_enabled_test_config();
     let mut collectors = CollectorSet::new(&config);
+    assert!(
+        collectors.chrome.is_none(),
+        "content lifecycle fixture must not start the system Chrome worker"
+    );
     let _observers = collectors.prepare_main_thread();
     let (pipeline, _events) = mpsc::sync_channel(4);
     collectors.start(&pipeline);
@@ -567,6 +576,7 @@ fn content_filter_failure_clears_only_on_worker_ack_or_fresh_start() {
 #[test]
 fn removing_chrome_preserves_every_other_failure_origin() {
     let mut config = secure_input_enabled_test_config();
+    config.filter.content_snapshot.exclude_apps.clear();
     let mut collectors = CollectorSet::new(&config);
     assert!(collectors.chrome.is_some());
     for (origin, component) in PRODUCER_FAILURE_CASES {
@@ -583,7 +593,7 @@ fn removing_chrome_preserves_every_other_failure_origin() {
         .filter
         .content_snapshot
         .exclude_apps
-        .push("com.google.Chrome".to_owned());
+        .push(CHROME_BUNDLE_ID.to_owned());
     collectors.replace_filter(config.filter);
 
     assert!(collectors.chrome.is_none());
@@ -966,7 +976,15 @@ fn projected_degradation(
 }
 
 fn collector_set_with_secure_input_result(result: Result<(), &str>) -> CollectorSet {
-    collector_set_with_config_and_secure_input_result(&secure_input_enabled_test_config(), result)
+    let collectors = collector_set_with_config_and_secure_input_result(
+        &secure_input_enabled_test_config(),
+        result,
+    );
+    assert!(
+        collectors.chrome.is_none(),
+        "Secure Input lifecycle fixture must not start the system Chrome worker"
+    );
+    collectors
 }
 
 fn collector_set_with_config_and_secure_input_result(
@@ -989,12 +1007,22 @@ fn secure_input_enabled_test_config() -> zanei_core::config::Config {
     let mut config = collector_lifecycle_test_config();
     config.capture.content_snapshot = true;
     config
+        .filter
+        .content_snapshot
+        .exclude_apps
+        .push(CHROME_BUNDLE_ID.to_owned());
+    config
 }
 
 fn input_text_content_test_config() -> zanei_core::config::Config {
     let mut config = collector_lifecycle_test_config();
     config.capture.sources = vec![CaptureSource::Input];
     config.capture.text_content = true;
+    config
+        .filter
+        .text_content
+        .exclude_apps
+        .push(CHROME_BUNDLE_ID.to_owned());
     config
 }
 
@@ -1036,20 +1064,31 @@ fn assert_exit_survives_collector_set_resume(suspend: bool) {
             .map(String::as_str),
         Some("collector worker terminated unexpectedly")
     );
-    collectors.start(&pipeline);
-    let resumed_at = collectors
+    let resumed_at = Instant::now();
+    collectors
         .chrome
-        .as_ref()
-        .and_then(Managed::started_at_for_test)
-        .expect("resumed Chrome collector start time");
+        .as_mut()
+        .expect("Chrome collector")
+        .record_started_for_test(resumed_at);
+    let mut errors = BTreeMap::new();
 
-    collectors
-        .supervise(&pipeline, None, resumed_at + Duration::from_secs(59))
-        .expect("observe resumed collectors before stable threshold");
+    supervise_collector(
+        &mut collectors.chrome,
+        &pipeline,
+        None,
+        &mut errors,
+        resumed_at + Duration::from_secs(59),
+    )
+    .expect("observe resumed Chrome collector before stable threshold");
     assert!(collectors.health().degraded.contains_key("chrome"));
-    collectors
-        .supervise(&pipeline, None, resumed_at + Duration::from_secs(60))
-        .expect("observe stable resumed collectors");
+    supervise_collector(
+        &mut collectors.chrome,
+        &pipeline,
+        None,
+        &mut errors,
+        resumed_at + Duration::from_secs(60),
+    )
+    .expect("observe stable resumed Chrome collector");
     assert!(
         !collectors.health().degraded.contains_key("chrome"),
         "unexpected exit clears only after the resumed worker is stable"
