@@ -14,6 +14,7 @@ use std::{
 
 use thiserror::Error;
 use zanei_collector::Capability;
+use zanei_core::CapabilityState;
 use zanei_core::privacy::CHROME_BUNDLE_ID;
 
 use crate::ffi::permission::{
@@ -48,6 +49,76 @@ pub enum PermissionStatus {
     Granted,
     Denied,
     NotDetermined,
+}
+
+impl PermissionStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Granted => "granted",
+            Self::Denied => "denied",
+            Self::NotDetermined => "not_determined",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MacOsPermission {
+    Accessibility,
+    InputMonitoring,
+    Automation,
+}
+
+impl MacOsPermission {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accessibility => "accessibility",
+            Self::InputMonitoring => "input_monitoring",
+            Self::Automation => "automation",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MacOsCapabilityDetail {
+    pub platform: &'static str,
+    pub permission: MacOsPermission,
+    pub status: PermissionStatus,
+    pub settings_url: &'static str,
+    pub target_bundle_id: Option<&'static str>,
+}
+
+pub const fn capability_detail(
+    capability: Capability,
+    state: CapabilityState,
+) -> MacOsCapabilityDetail {
+    let (permission, settings_url, target_bundle_id) = match capability {
+        Capability::ReadAccessibilityTree => (
+            MacOsPermission::Accessibility,
+            ACCESSIBILITY_SETTINGS_URL,
+            None,
+        ),
+        Capability::ObserveInput => (
+            MacOsPermission::InputMonitoring,
+            INPUT_MONITORING_SETTINGS_URL,
+            None,
+        ),
+        Capability::AutomateBrowser => (
+            MacOsPermission::Automation,
+            AUTOMATION_SETTINGS_URL,
+            Some(CHROME_BUNDLE_ID),
+        ),
+    };
+    MacOsCapabilityDetail {
+        platform: "macos",
+        permission,
+        status: match state {
+            CapabilityState::Available => PermissionStatus::Granted,
+            CapabilityState::ActionRequired => PermissionStatus::Denied,
+            CapabilityState::Deferred => PermissionStatus::NotDetermined,
+        },
+        settings_url,
+        target_bundle_id,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -317,12 +388,7 @@ fn open_settings_with(
     opener: &impl SettingsOpener,
     capability: &Capability,
 ) -> Result<(), PermissionError> {
-    let settings_url = match capability {
-        Capability::ReadAccessibilityTree => ACCESSIBILITY_SETTINGS_URL,
-        Capability::ObserveInput => INPUT_MONITORING_SETTINGS_URL,
-        Capability::AutomateBrowser => AUTOMATION_SETTINGS_URL,
-    };
-    opener.open(settings_url)
+    opener.open(capability_detail(*capability, CapabilityState::Available).settings_url)
 }
 
 #[cfg(test)]
@@ -338,9 +404,9 @@ mod tests {
     use super::{
         ACCESSIBILITY_SETTINGS_URL, AE_PERMISSION_GRANTED, AE_PERMISSION_NOT_DETERMINED,
         AUTOMATION_SETTINGS_URL, AutomationProbeState, AutomationTargetError, Capability,
-        INPUT_MONITORING_SETTINGS_URL, PermissionError, PermissionProbe, PermissionStatus,
-        SettingsOpener, automation_status_with_timeout, automation_target_error,
-        open_settings_with, permission_status_with,
+        CapabilityState, INPUT_MONITORING_SETTINGS_URL, MacOsPermission, PermissionError,
+        PermissionProbe, PermissionStatus, SettingsOpener, automation_status_with_timeout,
+        automation_target_error, capability_detail, open_settings_with, permission_status_with,
     };
 
     struct StubPermissionProbe {
@@ -365,14 +431,9 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingOpener {
-        opened_urls: RefCell<Vec<&'static str>>,
-    }
-
-    impl SettingsOpener for RecordingOpener {
+    impl SettingsOpener for RefCell<Vec<&'static str>> {
         fn open(&self, settings_url: &'static str) -> Result<(), PermissionError> {
-            self.opened_urls.borrow_mut().push(settings_url);
+            self.borrow_mut().push(settings_url);
             Ok(())
         }
     }
@@ -389,63 +450,58 @@ mod tests {
         }
     }
 
-    #[test]
-    fn maps_accessibility_boolean_to_granted_or_denied() {
-        let trusted = probe_with(true, 0, Ok(0));
-        let untrusted = probe_with(false, 0, Ok(0));
-
-        assert_eq!(
-            permission_status_with(&trusted, &Capability::ReadAccessibilityTree).unwrap(),
-            PermissionStatus::Granted
-        );
-        assert_eq!(
-            permission_status_with(&untrusted, &Capability::ReadAccessibilityTree).unwrap(),
-            PermissionStatus::Denied
-        );
+    fn assert_status(probe: StubPermissionProbe, cap: Capability, want: PermissionStatus) {
+        assert_eq!(permission_status_with(&probe, &cap).unwrap(), want);
     }
 
     #[test]
-    fn maps_all_input_monitoring_statuses() {
-        let permission = Capability::ObserveInput;
-
-        assert_eq!(
-            permission_status_with(&probe_with(false, 0, Ok(0)), &permission).unwrap(),
-            PermissionStatus::Granted
-        );
-        assert_eq!(
-            permission_status_with(&probe_with(false, 1, Ok(0)), &permission).unwrap(),
-            PermissionStatus::Denied
-        );
-        assert_eq!(
-            permission_status_with(&probe_with(false, 2, Ok(0)), &permission).unwrap(),
-            PermissionStatus::NotDetermined
-        );
+    #[rustfmt::skip]
+    fn maps_all_native_permission_statuses() {
+        use {Capability::{AutomateBrowser, ObserveInput, ReadAccessibilityTree}, PermissionStatus::{Denied, Granted, NotDetermined}};
+        assert_status(probe_with(true, 0, Ok(0)), ReadAccessibilityTree, Granted);
+        assert_status(probe_with(false, 0, Ok(0)), ReadAccessibilityTree, Denied);
+        for (raw, expected) in [(0, Granted), (1, Denied), (2, NotDetermined)] {
+            assert_status(probe_with(false, raw, Ok(0)), ObserveInput, expected);
+        }
+        for (raw, expected) in [(0, Granted), (-1_743, Denied), (-1_744, NotDetermined), (-600, NotDetermined)] {
+            assert_status(probe_with(false, 0, Ok(raw)), AutomateBrowser, expected);
+        }
         assert!(matches!(
-            permission_status_with(&probe_with(false, 99, Ok(0)), &permission),
+            permission_status_with(&probe_with(false, 99, Ok(0)), &ObserveInput),
             Err(PermissionError::UnexpectedInputMonitoringStatus { status: 99 })
+        ));
+        let descriptor_failure = probe_with(false, 0, Err(AutomationTargetError::CreateFailed { status: -1_708 }));
+        assert!(matches!(
+            permission_status_with(&descriptor_failure, &AutomateBrowser),
+            Err(PermissionError::AutomationTargetCreation { bundle_id, status: -1_708 })
+                if bundle_id == "com.google.Chrome"
         ));
     }
 
     #[test]
-    fn maps_all_automation_statuses() {
-        let permission = Capability::AutomateBrowser;
-
-        assert_eq!(
-            permission_status_with(&probe_with(false, 0, Ok(0)), &permission).unwrap(),
-            PermissionStatus::Granted
-        );
-        assert_eq!(
-            permission_status_with(&probe_with(false, 0, Ok(-1_743)), &permission).unwrap(),
-            PermissionStatus::Denied
-        );
-        assert_eq!(
-            permission_status_with(&probe_with(false, 0, Ok(-1_744)), &permission).unwrap(),
-            PermissionStatus::NotDetermined
-        );
-        assert_eq!(
-            permission_status_with(&probe_with(false, 0, Ok(-600)), &permission).unwrap(),
-            PermissionStatus::NotDetermined
-        );
+    #[rustfmt::skip]
+    fn describes_each_capability_and_state_for_macos() {
+        use {Capability::{AutomateBrowser, ObserveInput, ReadAccessibilityTree}, CapabilityState::{ActionRequired, Available, Deferred}, PermissionStatus::{Denied, Granted, NotDetermined}};
+        for capability in [ReadAccessibilityTree, ObserveInput, AutomateBrowser] {
+            for (state, status) in [(Available, Granted), (ActionRequired, Denied), (Deferred, NotDetermined)] {
+                assert_eq!(capability_detail(capability, state).status, status);
+            }
+        }
+        let accessibility = capability_detail(ReadAccessibilityTree, Available);
+        assert_eq!(accessibility.platform, "macos");
+        assert_eq!(accessibility.permission, MacOsPermission::Accessibility);
+        assert_eq!(accessibility.settings_url, ACCESSIBILITY_SETTINGS_URL);
+        assert_eq!(accessibility.target_bundle_id, None);
+        let input = capability_detail(ObserveInput, Available);
+        assert_eq!(input.permission, MacOsPermission::InputMonitoring);
+        assert_eq!(input.settings_url, INPUT_MONITORING_SETTINGS_URL);
+        assert_eq!(input.target_bundle_id, None);
+        let automation = capability_detail(AutomateBrowser, Available);
+        assert_eq!(automation.permission, MacOsPermission::Automation);
+        assert_eq!(automation.settings_url, AUTOMATION_SETTINGS_URL);
+        assert_eq!(automation.target_bundle_id, Some(zanei_core::privacy::CHROME_BUNDLE_ID));
+        assert_eq!(MacOsPermission::InputMonitoring.as_str(), "input_monitoring");
+        assert_eq!(NotDetermined.as_str(), "not_determined");
     }
 
     #[test]
@@ -500,33 +556,15 @@ mod tests {
     }
 
     #[test]
-    fn preserves_automation_descriptor_failures() {
-        let permission = Capability::AutomateBrowser;
-        let probe = probe_with(
-            false,
-            0,
-            Err(AutomationTargetError::CreateFailed { status: -1_708 }),
-        );
-
-        assert!(matches!(
-            permission_status_with(&probe, &permission),
-            Err(PermissionError::AutomationTargetCreation {
-                bundle_id,
-                status: -1_708
-            }) if bundle_id == "com.google.Chrome"
-        ));
-    }
-
-    #[test]
     fn opens_the_permission_specific_settings_pane() {
-        let opener = RecordingOpener::default();
+        let opener = RefCell::default();
 
         open_settings_with(&opener, &Capability::ReadAccessibilityTree).unwrap();
         open_settings_with(&opener, &Capability::ObserveInput).unwrap();
         open_settings_with(&opener, &Capability::AutomateBrowser).unwrap();
 
         assert_eq!(
-            *opener.opened_urls.borrow(),
+            *opener.borrow(),
             [
                 ACCESSIBILITY_SETTINGS_URL,
                 INPUT_MONITORING_SETTINGS_URL,

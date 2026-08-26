@@ -1,9 +1,7 @@
 use std::path::Path;
 
-use zanei_collector::Capability;
 use zanei_core::config::Config;
 use zanei_core::store::{LockedReason, StoreError, StoreFormat, StoreStatus};
-use zanei_core::{CapabilityState, DaemonCapabilities};
 
 use super::{EXIT_MISSING_PERMISSIONS, EXIT_SUCCESS};
 use crate::daemon::StoreOwnership;
@@ -14,16 +12,13 @@ use crate::store_access::{self, KeyAccess, KeyPrompt};
 mod health;
 mod model;
 mod render;
+mod report;
 mod requirements;
 
-#[cfg(test)]
-use model::AutomationDetail;
-use model::{DoctorReport, PermissionReport, StatusDetail, StoreKeyReport};
+use model::{DoctorReport, StoreKeyReport};
 use render::{guide_granting, print_human};
-use requirements::{
-    accessibility_events, estimated_permissions, input_events, permission_name_and_pane,
-    snapshot_status, status_name,
-};
+use report::{build_report, capabilities_for_status};
+use requirements::required_capabilities;
 const STARTED_WITH_MISSING_PERMISSIONS: &str = "Zanei recording started with missing permissions — grant them, then run `zanei stop && zanei start`.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -147,8 +142,8 @@ fn evaluate(
     store_key: StoreKeyReport,
     health: health::HealthReport,
 ) -> Result<DoctorReport, CliError> {
-    let required = estimated_permissions(config);
-    let (snapshot, reported_by_recorder) = permissions_for_status(status, || {
+    let required = required_capabilities(config);
+    let (snapshot, reported_by_recorder) = capabilities_for_status(status, || {
         probe_permissions(&required).map_err(CliError::from)
     })?;
     build_report(
@@ -159,96 +154,6 @@ fn evaluate(
         store_key,
         health,
     )
-}
-
-fn permissions_for_status<E>(
-    status: Option<&StoreStatus>,
-    fallback: impl FnOnce() -> Result<DaemonCapabilities, E>,
-) -> Result<(DaemonCapabilities, bool), E> {
-    match status.and_then(StoreStatus::reported_capabilities) {
-        Some(capabilities) => Ok((capabilities.clone(), true)),
-        None => fallback().map(|capabilities| (capabilities, false)),
-    }
-}
-
-fn build_report(
-    config: &Config,
-    required: &std::collections::BTreeSet<Capability>,
-    snapshot: DaemonCapabilities,
-    reported_by_recorder: bool,
-    store_key: StoreKeyReport,
-    health: health::HealthReport,
-) -> Result<DoctorReport, CliError> {
-    let ok = snapshot.ready_for(required).ok_or_else(|| {
-        CliError::InvalidValue(
-            "recorder capability snapshot does not cover current requirements".to_owned(),
-        )
-    })?;
-    let mut checked = required.clone();
-    checked.insert(Capability::ReadAccessibilityTree);
-    checked.insert(Capability::ObserveInput);
-    let mut permissions = PermissionReport::default();
-    let mut missing_required = Vec::new();
-    let mut missing_permissions = Vec::new();
-    let mut settings_pane = None;
-
-    for permission in checked {
-        let status = snapshot_status(&snapshot, &permission);
-        let is_required = required.contains(&permission);
-        match &permission {
-            Capability::ReadAccessibilityTree => {
-                permissions.accessibility = StatusDetail {
-                    status: status_name(status),
-                    required_for: accessibility_events(
-                        &config.capture.sources,
-                        config.capture.content_snapshot,
-                    ),
-                };
-            }
-            Capability::ObserveInput => {
-                permissions.input_monitoring = StatusDetail {
-                    status: status_name(status),
-                    required_for: input_events(&config.capture.sources),
-                };
-            }
-            Capability::AutomateBrowser => {
-                permissions.automation.per_app.insert(
-                    zanei_core::privacy::CHROME_BUNDLE_ID.to_owned(),
-                    status_name(status),
-                );
-            }
-        }
-        // Automation can be indeterminate while the target app is not running. The public
-        // doctor example reports that state but does not classify it as a missing permission.
-        let missing = status != CapabilityState::Available
-            && !matches!(
-                (&permission, status),
-                (Capability::AutomateBrowser, CapabilityState::Deferred)
-            );
-        if is_required && missing {
-            let (name, pane) = permission_name_and_pane(&permission);
-            missing_required.push(name);
-            missing_permissions.push(permission);
-            settings_pane.get_or_insert(pane);
-        }
-    }
-
-    Ok(DoctorReport {
-        ok,
-        capture_sources: config
-            .capture
-            .sources
-            .iter()
-            .map(|source| source.as_str())
-            .collect(),
-        permissions,
-        missing_required,
-        settings_pane,
-        missing_permissions,
-        reported_by_recorder,
-        store_key,
-        health,
-    })
 }
 
 #[cfg(test)]
@@ -264,28 +169,24 @@ mod tests {
 
     use super::health::HealthReport;
     use super::render::{output_indicates_non_persistent_signature, render_human};
-    use super::{
-        AutomationDetail, DoctorReport, PermissionReport, StatusDetail, build_report,
-        permissions_for_status,
-    };
+    use super::{DoctorReport, build_report, capabilities_for_status};
 
     #[test]
     fn denied_report_asks_for_a_recorder_start_before_the_manual_add_fallback() {
-        let report = DoctorReport {
-            store_key: super::StoreKeyReport::default(),
-            ok: false,
-            capture_sources: vec!["input"],
-            permissions: PermissionReport {
-                accessibility: detail("granted", &[]),
-                input_monitoring: detail("denied", &["input.key"]),
-                automation: AutomationDetail::default(),
-            },
-            missing_required: vec!["input_monitoring"],
-            settings_pane: Some("input-pane"),
-            missing_permissions: vec![Capability::ObserveInput],
-            reported_by_recorder: false,
-            health: HealthReport::status_missing(),
-        };
+        let config =
+            Config::from_toml("[capture]\nsources = [\"input\"]\n").expect("input capture config");
+        let required = crate::daemon::required_capabilities_for(&config);
+        let report = permission_report(
+            &config,
+            &required,
+            DaemonCapabilities::new(
+                required.clone(),
+                CapabilityState::Available,
+                CapabilityState::ActionRequired,
+                CapabilityState::Deferred,
+            ),
+            false,
+        );
 
         let rendered = render_human(&report, Path::new("/tmp/zanei test"), false, false);
 
@@ -348,12 +249,21 @@ mod tests {
 
     #[test]
     fn not_determined_automation_explains_the_first_chrome_prompt() {
-        let mut report = granted_report();
-        report
-            .permissions
-            .automation
-            .per_app
-            .insert("com.google.Chrome".to_owned(), "not_determined");
+        let mut config = Config::default();
+        config.capture.sources.clear();
+        config.capture.content_snapshot = true;
+        let required = crate::daemon::required_capabilities_for(&config);
+        let report = permission_report(
+            &config,
+            &required,
+            DaemonCapabilities::new(
+                required.clone(),
+                CapabilityState::Available,
+                CapabilityState::Available,
+                CapabilityState::Deferred,
+            ),
+            false,
+        );
 
         let rendered = render_human(&report, Path::new("/tmp/zanei"), false, false);
 
@@ -383,7 +293,7 @@ mod tests {
     fn denied_report_while_recording_says_restart_recording() {
         let mut report = granted_report();
         report.ok = false;
-        report.missing_required = vec!["input_monitoring"];
+        report.missing_permissions = vec![Capability::ObserveInput];
 
         let rendered = render_human(&report, Path::new("/tmp/zanei"), false, true);
 
@@ -403,7 +313,7 @@ mod tests {
         };
         let fallback_called = Cell::new(false);
 
-        let (selected, from_recorder) = permissions_for_status(Some(&running), || {
+        let (selected, from_recorder) = capabilities_for_status(Some(&running), || {
             fallback_called.set(true);
             Ok::<_, ()>(permission_snapshot(true))
         })
@@ -419,7 +329,7 @@ mod tests {
             ..StoreStatus::default()
         };
         let fallback_called = Cell::new(false);
-        let (selected, from_recorder) = permissions_for_status(Some(&stopped), || {
+        let (selected, from_recorder) = capabilities_for_status(Some(&stopped), || {
             fallback_called.set(true);
             Ok::<_, ()>(permission_snapshot(true))
         })
@@ -464,7 +374,10 @@ mod tests {
         let report = permission_report(&config, &required, snapshot, true);
 
         assert!(!report.ok);
-        assert_eq!(report.missing_required, ["accessibility"]);
+        assert_eq!(
+            report.missing_permissions,
+            [Capability::ReadAccessibilityTree]
+        );
     }
 
     #[test]
@@ -482,11 +395,8 @@ mod tests {
         let report = permission_report(&config, &required, snapshot, false);
 
         assert!(!report.ok);
-        assert_eq!(report.missing_required, ["input_monitoring"]);
-        assert_eq!(
-            report.permissions.input_monitoring.required_for,
-            ["ui.click"]
-        );
+        assert_eq!(report.missing_permissions, [Capability::ObserveInput]);
+        assert_eq!(report.capabilities.observe_input.required_for, ["ui.click"]);
     }
 
     #[test]
@@ -506,12 +416,21 @@ mod tests {
         let report = permission_report(&content, &required, snapshot, false);
 
         assert_eq!(
-            report.permissions.accessibility.required_for,
+            report.capabilities.read_accessibility_tree.required_for,
             ["content.snapshot"]
         );
-        assert_eq!(report.missing_required, ["accessibility"]);
         assert_eq!(
-            report.permissions.automation.per_app["com.google.Chrome"],
+            report.missing_permissions,
+            [Capability::ReadAccessibilityTree]
+        );
+        assert_eq!(
+            report
+                .capabilities
+                .automate_browser
+                .as_ref()
+                .expect("browser capability")
+                .detail
+                .status,
             "not_determined"
         );
     }
@@ -536,21 +455,19 @@ mod tests {
     }
 
     fn granted_report() -> DoctorReport {
-        DoctorReport {
-            store_key: super::StoreKeyReport::default(),
-            ok: true,
-            capture_sources: vec!["app"],
-            permissions: PermissionReport {
-                accessibility: detail("granted", &[]),
-                input_monitoring: detail("granted", &[]),
-                automation: AutomationDetail::default(),
-            },
-            missing_required: Vec::new(),
-            settings_pane: None,
-            missing_permissions: Vec::new(),
-            reported_by_recorder: false,
-            health: HealthReport::status_missing(),
-        }
+        let config = Config::default();
+        let required = crate::daemon::required_capabilities_for(&config);
+        permission_report(
+            &config,
+            &required,
+            DaemonCapabilities::new(
+                required.clone(),
+                CapabilityState::Available,
+                CapabilityState::Available,
+                CapabilityState::Available,
+            ),
+            false,
+        )
     }
 
     fn permission_snapshot(permissions_ok: bool) -> DaemonCapabilities {
@@ -581,12 +498,5 @@ mod tests {
             HealthReport::status_missing(),
         )
         .expect("doctor report")
-    }
-
-    fn detail(status: &'static str, required_for: &[&'static str]) -> StatusDetail {
-        StatusDetail {
-            status,
-            required_for: required_for.to_vec(),
-        }
     }
 }

@@ -127,13 +127,22 @@ required permission is missing. In that combination, stdout is therefore not JSO
   "ok": false,
   "reported_by_recorder": true,
   "capture_sources": ["app", "window", "ui", "input", "browser"],
-  "permissions": {
-    "accessibility":     { "status": "granted", "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"] },
-    "input_monitoring":  { "status": "denied", "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"] },
-    "automation":        { "per_app": { "com.google.Chrome": "not_determined" } }
+  "capabilities": {
+    "read_accessibility_tree": {
+      "state": "available", "required": true,
+      "required_for": ["window.focus", "window.title", "ui.focus", "ui.click", "ui.value", "content.snapshot"],
+      "detail": { "platform": "macos", "permission": "accessibility", "status": "granted", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" }
+    },
+    "observe_input": {
+      "state": "action_required", "required": true,
+      "required_for": ["input.key", "input.scroll", "clipboard.copy", "clipboard.paste", "ui.click"],
+      "detail": { "platform": "macos", "permission": "input_monitoring", "status": "denied", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent" }
+    },
+    "automate_browser": {
+      "state": "deferred", "required": true,
+      "detail": { "platform": "macos", "permission": "automation", "status": "not_determined", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation", "target_bundle_id": "com.google.Chrome" }
+    }
   },
-  "missing_required": ["input_monitoring"],
-  "settings_pane": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
   "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" },
   "health": {
     "state": "degraded",
@@ -143,7 +152,7 @@ required permission is missing. In that combination, stdout is therefore not JSO
 }
 ```
 
-`status` values: `granted` / `denied` / `not_determined`. `reported_by_recorder` is `true` when the result came from a fresh recorder heartbeat. Without one, `doctor` probes from its own process, sets this field to `false`, and the human output notes that the recorder must be started to see its own permissions.
+Capability `state` values are `available` / `action_required` / `deferred`. The nested macOS `detail` preserves the native permission name and `granted` / `denied` / `not_determined` status, and owns the relevant System Settings URL and optional target bundle ID. `reported_by_recorder` is `true` when the result came from a fresh recorder heartbeat. Without one, `doctor` probes from its own process, sets this field to `false`, and the human output notes that the recorder must be started to see its own permissions.
 
 `store_key` reports where the store's encryption key is. `state` is `key_store` (the key was found; `detail` names the place, either the login Keychain or the `ZANEI_STORE_KEY_FILE` development override), `not_needed` (the store is missing, plaintext, or not recognized), `missing` (the store is encrypted but there is no key), `mismatch` (the key does not decrypt this store), `key_store_locked` or `key_store_denied` (`detail` carries the platform's advice, for example that the login Keychain is locked), or `unavailable`; `detail` is present only when there is more to report. Human-readable output adds a `Store key: ...` line after the permission table. `doctor` does not fail when the store is locked: it reports the key state and probes permissions from its own process instead.
 
