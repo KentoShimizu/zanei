@@ -9,15 +9,7 @@ Zanei が持つ agent 向け指示の単一ソースは、標準形式の `skill
 zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
 ```
 
-| フラグ | 説明 |
-| --- | --- |
-| `--agent` | 対象：`claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
-| `--scope` | `project`（既定。カレントリポジトリ）/ `user`（ユーザー全体）。Codex・Hermes Agent・Claude Desktop は常にユーザーグローバルで、この指定を無視する |
-| `--print` | 書き込み予定のファイル変更を、実際には書き込まず表示する |
-
-:::note
-どの agent でも最低 1 つのファイルを書き込むため、まず `--print` を付けて実行し、作成・変更されるファイルを事前確認してください。
-:::
+各フラグの意味は [`setup` CLI リファレンス](/ja/reference/cli#setup)を参照してください。
 
 ## agent 別セットアップ
 
@@ -34,7 +26,7 @@ zanei setup --agent claude
 claude mcp add zanei -- zanei mcp
 ```
 
-`--scope user` を付けると、カレントリポジトリではなく全プロジェクト共通で有効になります。
+Claude Code は project scope では `.claude/skills/zanei/SKILL.md`、user scope では `~/.claude/skills/zanei/SKILL.md` に配置します。
 
 </Tab>
 <Tab title="Codex CLI">
@@ -70,7 +62,7 @@ opencode は Agent Skills を native に読み込むため、このコマンド�
 
 ```
 $XDG_CONFIG_HOME/opencode/skills/zanei/SKILL.md    # --scope user
-.opencode/skills/zanei/SKILL.md                    # --scope project（既定）
+.opencode/skills/zanei/SKILL.md                    # --scope project
 ```
 
 `XDG_CONFIG_HOME` が未設定なら `~/.config` にフォールバックします。opencode 自身の探索と同じ挙動です。
@@ -131,6 +123,8 @@ Claude Desktop の chat は Mac 上で `zanei` を実行できないため、MCP
 
 対象は chat の面だけです。同じアプリ内で動く Claude Code には `zanei setup --agent claude` を実行してください。
 
+Claude Desktop の setup は `--scope` にかかわらず、常に `claude_desktop_config.json` を対象にします。
+
 </Tab>
 <Tab title="pi">
 
@@ -142,7 +136,7 @@ pi は Agent Skills を native に読み込むため、このコマンドは単�
 
 ```
 ~/.pi/agent/skills/zanei/SKILL.md    # --scope user
-.pi/skills/zanei/SKILL.md            # --scope project（既定）
+.pi/skills/zanei/SKILL.md            # --scope project
 ```
 
 pi は設計方針として MCP を持たないため、`zanei mcp` は登録されず、skill が唯一の経路です。
