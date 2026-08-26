@@ -893,7 +893,10 @@ fn setup_opencode_writes_the_skill_and_leaves_opencode_json_to_the_user() {
     fs::write(&opencode_config, r#"{"theme":"existing"}"#).expect("opencode config");
 
     let mut command = fixture.command();
-    command.current_dir(&project).env("HOME", home.path());
+    command
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME");
     let output = command
         .args(["setup", "--agent", "opencode", "--scope", "user"])
         .output()
@@ -913,6 +916,32 @@ fn setup_opencode_writes_the_skill_and_leaves_opencode_json_to_the_user() {
     assert!(stdout.contains("Add this mcp.zanei server entry to your opencode.json:"));
     assert!(stdout.contains(r#""command": ["zanei", "mcp"]"#));
     assert!(!stdout.contains("[mcp command]"));
+}
+
+#[test]
+fn setup_opencode_installs_the_user_skill_under_xdg_config_home() {
+    let fixture = Fixture::populated();
+    let home = TempDir::new().expect("home tempdir");
+    let xdg = TempDir::new().expect("xdg tempdir");
+    let project = fixture.directory.path().join("opencode-xdg-project");
+    fs::create_dir(&project).expect("project");
+
+    let mut command = fixture.command();
+    command
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", xdg.path());
+    let output = command
+        .args(["setup", "--agent", "opencode", "--scope", "user"])
+        .output()
+        .expect("setup output");
+
+    assert!(output.status.success());
+    let skill = fs::read_to_string(xdg.path().join("opencode/skills/zanei/SKILL.md"))
+        .expect("opencode skill under XDG_CONFIG_HOME");
+    assert!(skill.contains("zanei timeline --since 2h --format md"));
+    // The fallback location must stay untouched, or opencode would never find the skill.
+    assert!(!home.path().join(".config").exists());
 }
 
 #[test]

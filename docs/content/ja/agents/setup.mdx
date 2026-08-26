@@ -69,9 +69,11 @@ zanei setup --agent opencode
 opencode は Agent Skills を native に読み込むため、このコマンドは単一ソースの `SKILL.md` をそのまま配置します。
 
 ```
-~/.config/opencode/skills/zanei/SKILL.md    # --scope user
-.opencode/skills/zanei/SKILL.md             # --scope project（既定）
+$XDG_CONFIG_HOME/opencode/skills/zanei/SKILL.md    # --scope user
+.opencode/skills/zanei/SKILL.md                    # --scope project（既定）
 ```
+
+`XDG_CONFIG_HOME` が未設定なら `~/.config` にフォールバックします。opencode 自身の探索と同じ挙動です。
 
 MCP は手動のままです。`opencode mcp add` が対話ウィザードで、非対話用のフラグを持たないためです。以下のエントリを `opencode.json` に追加してください。
 

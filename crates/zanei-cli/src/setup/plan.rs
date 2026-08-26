@@ -181,6 +181,7 @@ impl Installation {
         scope: Scope,
         project_dir: &Path,
         home_dir: &Path,
+        config_dir: &Path,
     ) -> Result<Self, SetupError> {
         let mut installation = Self {
             agent,
@@ -194,7 +195,7 @@ impl Installation {
         match agent {
             Agent::Claude => installation.add_claude(project_dir, home_dir)?,
             Agent::Codex => installation.add_codex(home_dir)?,
-            Agent::Opencode => installation.add_opencode(project_dir, home_dir)?,
+            Agent::Opencode => installation.add_opencode(project_dir, config_dir)?,
             Agent::Hermes => installation.add_hermes(home_dir)?,
             Agent::Pi => installation.add_pi(project_dir, home_dir)?,
             Agent::ClaudeDesktop => installation.add_claude_desktop(home_dir)?,
@@ -256,10 +257,10 @@ impl Installation {
         Ok(())
     }
 
-    fn add_opencode(&mut self, project: &Path, home: &Path) -> Result<(), SetupError> {
+    fn add_opencode(&mut self, project: &Path, config: &Path) -> Result<(), SetupError> {
         let base = match self.scope {
             Scope::Project => project.join(".opencode/skills"),
-            Scope::User => home.join(".config/opencode/skills"),
+            Scope::User => config.join("opencode/skills"),
         };
         self.files
             .push(PlannedFile::exact(base.join("zanei/SKILL.md"), SKILL)?);

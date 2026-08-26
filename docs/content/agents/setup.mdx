@@ -69,9 +69,11 @@ zanei setup --agent opencode
 opencode reads Agent Skills natively, so the command installs the canonical `SKILL.md` unchanged:
 
 ```
-~/.config/opencode/skills/zanei/SKILL.md    # --scope user
-.opencode/skills/zanei/SKILL.md             # --scope project (default)
+$XDG_CONFIG_HOME/opencode/skills/zanei/SKILL.md    # --scope user
+.opencode/skills/zanei/SKILL.md                    # --scope project (default)
 ```
+
+`XDG_CONFIG_HOME` falls back to `~/.config` when unset, matching opencode's own lookup.
 
 MCP stays manual, because `opencode mcp add` is an interactive wizard with no non-interactive flags. Add the entry below to `opencode.json` yourself:
 

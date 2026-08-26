@@ -1,17 +1,37 @@
+use std::ffi::OsString;
 use std::fs;
+use std::path::Path;
 
 use serde_json::Value;
 use tempfile::TempDir;
 
 use super::assets::SKILL;
-use super::{Agent, Scope, run_at};
+use super::{Agent, Scope, SetupError, SetupReport, resolve_config_directory, run_at};
+
+/// `run_at` with the config directory an unset `XDG_CONFIG_HOME` would produce.
+fn setup(
+    agent: Agent,
+    scope: Scope,
+    print_only: bool,
+    project_dir: &Path,
+    home_dir: &Path,
+) -> Result<SetupReport, SetupError> {
+    run_at(
+        agent,
+        scope,
+        print_only,
+        project_dir,
+        home_dir,
+        &home_dir.join(".config"),
+    )
+}
 
 #[test]
 fn print_plan_does_not_write() {
     let project = TempDir::new().expect("project tempdir");
     let home = TempDir::new().expect("home tempdir");
 
-    let report = run_at(
+    let report = setup(
         Agent::Claude,
         Scope::Project,
         true,
@@ -31,7 +51,7 @@ fn claude_skill_and_mcp_command_follow_the_requested_scope() {
     let project = TempDir::new().expect("project tempdir");
     let home = TempDir::new().expect("home tempdir");
 
-    let project_report = run_at(
+    let project_report = setup(
         Agent::Claude,
         Scope::Project,
         false,
@@ -50,7 +70,7 @@ fn claude_skill_and_mcp_command_follow_the_requested_scope() {
             .contains("claude mcp add --scope project zanei -- zanei mcp")
     );
 
-    let user_report = run_at(
+    let user_report = setup(
         Agent::Claude,
         Scope::User,
         false,
@@ -76,7 +96,7 @@ fn codex_skill_is_user_global_exact_and_idempotent_for_both_scopes() {
 
     let skill = home.path().join(".codex/skills/zanei/SKILL.md");
 
-    let first_report = run_at(
+    let first_report = setup(
         Agent::Codex,
         Scope::Project,
         false,
@@ -85,7 +105,7 @@ fn codex_skill_is_user_global_exact_and_idempotent_for_both_scopes() {
     )
     .expect("first setup");
     let first = fs::read_to_string(&skill).expect("first skill");
-    let second_report = run_at(
+    let second_report = setup(
         Agent::Codex,
         Scope::User,
         false,
@@ -118,7 +138,7 @@ fn opencode_skill_follows_the_requested_scope_and_prints_the_mcp_entry() {
     let project_config = project.path().join("opencode.json");
     fs::write(&project_config, r#"{"theme":"project"}"#).expect("project config");
 
-    let project_report = run_at(
+    let project_report = setup(
         Agent::Opencode,
         Scope::Project,
         false,
@@ -132,7 +152,7 @@ fn opencode_skill_follows_the_requested_scope_and_prints_the_mcp_entry() {
         SKILL
     );
 
-    let user_report = run_at(
+    let user_report = setup(
         Agent::Opencode,
         Scope::User,
         false,
@@ -164,7 +184,7 @@ fn opencode_preview_does_not_write_the_skill() {
     let project = TempDir::new().expect("project tempdir");
     let home = TempDir::new().expect("home tempdir");
 
-    let report = run_at(
+    let report = setup(
         Agent::Opencode,
         Scope::Project,
         true,
@@ -182,7 +202,7 @@ fn hermes_skill_and_mcp_command_remain_user_global() {
     let project = TempDir::new().expect("project tempdir");
     let home = TempDir::new().expect("home tempdir");
 
-    let report = run_at(
+    let report = setup(
         Agent::Hermes,
         Scope::Project,
         false,
@@ -212,7 +232,7 @@ fn claude_desktop_json_merge_preserves_unrelated_servers() {
     )
     .expect("seed config");
 
-    run_at(
+    setup(
         Agent::ClaudeDesktop,
         Scope::Project,
         false,
@@ -236,7 +256,7 @@ fn pi_skill_follows_the_requested_scope_and_registers_no_mcp() {
     let project = TempDir::new().expect("project tempdir");
     let home = TempDir::new().expect("home tempdir");
 
-    let project_report = run_at(
+    let project_report = setup(
         Agent::Pi,
         Scope::Project,
         false,
@@ -252,7 +272,7 @@ fn pi_skill_follows_the_requested_scope_and_registers_no_mcp() {
     assert!(!home.path().join(".pi").exists());
 
     let user_report =
-        run_at(Agent::Pi, Scope::User, false, project.path(), home.path()).expect("user setup");
+        setup(Agent::Pi, Scope::User, false, project.path(), home.path()).expect("user setup");
     assert_eq!(
         fs::read_to_string(home.path().join(".pi/agent/skills/zanei/SKILL.md"))
             .expect("user skill"),
@@ -272,9 +292,52 @@ fn pi_preview_does_not_write_the_skill() {
     let project = TempDir::new().expect("project tempdir");
     let home = TempDir::new().expect("home tempdir");
 
-    let report =
-        run_at(Agent::Pi, Scope::User, true, project.path(), home.path()).expect("preview");
+    let report = setup(Agent::Pi, Scope::User, true, project.path(), home.path()).expect("preview");
 
     assert!(!home.path().join(".pi").exists());
     assert!(report.to_string().contains("zanei timeline --since 2h"));
+}
+
+#[test]
+fn opencode_user_skill_follows_xdg_config_home() {
+    let project = TempDir::new().expect("project tempdir");
+    let home = TempDir::new().expect("home tempdir");
+    let xdg = TempDir::new().expect("xdg tempdir");
+
+    run_at(
+        Agent::Opencode,
+        Scope::User,
+        false,
+        project.path(),
+        home.path(),
+        xdg.path(),
+    )
+    .expect("user setup");
+
+    assert_eq!(
+        fs::read_to_string(xdg.path().join("opencode/skills/zanei/SKILL.md")).expect("xdg skill"),
+        SKILL
+    );
+    assert!(!home.path().join(".config").exists());
+}
+
+#[test]
+fn config_directory_ignores_an_unset_or_relative_xdg_config_home() {
+    let home = Path::new("/home/example");
+
+    assert_eq!(
+        resolve_config_directory(None, home),
+        home.join(".config"),
+        "unset falls back to ~/.config"
+    );
+    assert_eq!(
+        resolve_config_directory(Some(OsString::from("relative/config")), home),
+        home.join(".config"),
+        "a relative value is invalid under XDG and must not be resolved against the cwd"
+    );
+    assert_eq!(
+        resolve_config_directory(Some(OsString::from("/elsewhere/config")), home),
+        Path::new("/elsewhere/config"),
+        "an absolute value wins"
+    );
 }
