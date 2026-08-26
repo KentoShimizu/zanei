@@ -12,7 +12,7 @@ Zanei exposes your history through two surfaces, both thin wrappers over the sam
 | Surface | What it is | Who uses it |
 | --- | --- | --- |
 | **CLI** | The `zanei` binary itself. Agents with a shell call it directly | Terminal agents (Claude Code, Codex CLI, opencode, pi, ...) |
-| **[MCP server](/reference/mcp)** | `zanei mcp`, a stdio JSON-RPC server exposing read-only tools | Chat clients that cannot run the CLI (Claude Desktop, ChatGPT connectors), for which MCP is the only path. Terminal agents can use it too |
+| **[MCP server](/reference/mcp)** | `zanei mcp`, a stdio JSON-RPC server exposing read-only tools | Chat clients that cannot run the CLI (Claude Desktop), for which MCP is the only path. Terminal agents can use it too |
 
 The skill is not a third surface; it is the instruction layer that tells the agent when to read your history and how to keep token usage low. How those instructions reach the agent differs by surface:
 
@@ -28,7 +28,7 @@ The skill is not a third surface; it is the instruction layer that tells the age
 | opencode | ✅ `SKILL.md` (`$XDG_CONFIG_HOME/opencode/skills/`, or `.opencode/skills/` with `--scope project`) | ✅ `opencode.json` (manual JSON printed) |
 | Hermes Agent | ✅ `SKILL.md` (`~/.hermes/skills/`) | ✅ `hermes mcp add` |
 | pi | ✅ `SKILL.md` (`~/.pi/agent/skills/`, or `.pi/skills/` with `--scope project`) | — (pi has no MCP by design; the skill covers it) |
-| Claude Desktop chat, ChatGPT connectors (cannot run the CLI) | — | ✅ only path |
+| Claude Desktop chat (cannot run the CLI) | — | ✅ only path |
 
 The Claude desktop app hosts both surfaces. Its chat reaches Zanei over MCP; Claude Code running inside the same app has a shell and uses the Claude Code row above.
 

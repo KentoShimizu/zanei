@@ -3,7 +3,9 @@ title: MCP server
 description: The read-only MCP (Model Context Protocol) server exposed by zanei mcp — tools, schemas, errors, and registration.
 ---
 
-`zanei mcp` exposes recorded activity to MCP clients: terminal agents (Claude Code, Codex, opencode, Hermes Agent) and chat clients that cannot run the CLI (Claude Desktop, ChatGPT connectors), for which MCP is the integration path.
+`zanei mcp` exposes recorded activity to MCP clients: terminal agents (Claude Code, Codex, opencode, Hermes Agent) and chat clients that cannot run the CLI (Claude Desktop), for which MCP is the integration path.
+
+ChatGPT is not one of them. Its connectors accept only remote HTTPS MCP servers, while `zanei mcp` is a local stdio process that opens no network connection of its own. Bridging it to a public URL would put the store on the network, so use [Codex](/agents/setup) for OpenAI agents. What an agent does with the results it reads is a separate question — see [security boundary](#security-boundary).
 
 | | |
 | --- | --- |
