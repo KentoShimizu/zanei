@@ -144,11 +144,7 @@ impl Default for FilterConfig {
             include_only_apps: Vec::new(),
             exclude_websites: Vec::new(),
             include_only_websites: Vec::new(),
-            redactors: vec![
-                RedactorKind::Email,
-                RedactorKind::CreditCard,
-                RedactorKind::Token,
-            ],
+            redactors: vec![RedactorKind::CreditCard, RedactorKind::Token],
             text_content: ScopedFilterConfig::default(),
             content_snapshot: ScopedFilterConfig::default(),
         }
@@ -359,11 +355,7 @@ mod tests {
         assert!(config.filter.include_only_websites.is_empty());
         assert_eq!(
             config.filter.redactors,
-            [
-                RedactorKind::Email,
-                RedactorKind::CreditCard,
-                RedactorKind::Token,
-            ]
+            [RedactorKind::CreditCard, RedactorKind::Token]
         );
         assert_eq!(
             config.output.batch_interval_s,

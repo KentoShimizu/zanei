@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Privacy default behavior change:** the default `filter.redactors` is now
+  `["credit_card", "token"]`; email redaction remains available when explicitly
+  configured. Users whose TOML explicitly sets `redactors = [...]` are
+  unaffected because that value overrides the merged default. Users whose
+  configuration omits `redactors` and relies on the merged default will now
+  record email addresses instead of replacing them with `[REDACTED:email]`.
+
 ## 0.3.1 — 2026-08-24
 
 Chrome capture works again, and recorder problems are now diagnosable.

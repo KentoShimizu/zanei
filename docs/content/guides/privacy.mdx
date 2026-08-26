@@ -41,7 +41,7 @@ If you opt in:
 - Unknown UI elements do not provide `element.value`.
 - `input.key.text` is null while an input method (IME) is active and when the input-source type is unknown; committed text can be captured only as an authorized `ui.value.data.text` difference.
 - Voice input does not itself open an authorization window because it has no recorded keystroke or paste trigger. If voice text is inserted while a 3-second window opened by a preceding recorded keystroke or paste for the same app and focused-element generation is still active, that text can be included in the authorized `ui.value.data.text` difference.
-- [Redactors](#redaction) scrub recognizable secrets from captured values.
+- [Redactors](#redaction) replace recognizable matches for enabled rules; they do not make captured text anonymous.
 
 :::danger
 With `text_content` enabled, captured text stays in your local store for the retention window. Pair it with [filters](/guides/filters) and a short `retention_hours`.
@@ -76,7 +76,9 @@ The recorder stops creating snapshots after 128 MiB in a day. This is an in-memo
 
 ## Redaction
 
-For values that are captured, redactors scrub recognizable sensitive content: emails, credit-card numbers, tokens (`redactors = ["email", "credit_card", "token"]`). Every event carries a `redaction` field recording whether rules were applied.
+For values that are captured, redactors replace recognizable matches for enabled rules. The defaults are credit-card numbers and tokens (`redactors = ["credit_card", "token"]`). Email redaction remains available and works as before when you add `"email"` to the `filter.redactors` array, but it is not enabled by default because an email address is an addressing identifier, not a secret.
+
+Redactors do not remove names, phone or fax numbers, or postal addresses. Use capture-time [filters](/guides/filters) to keep unwanted data out of the store and a short retention period to limit how long captured data remains; redaction is not the control that limits exposure. Every event carries a `redaction` field recording whether rules were applied.
 
 ## Limitations
 
