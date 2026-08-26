@@ -196,7 +196,7 @@ impl Installation {
             Agent::Codex => installation.add_codex(home_dir)?,
             Agent::Opencode => installation.add_opencode()?,
             Agent::Hermes => installation.add_hermes(home_dir)?,
-            Agent::Pi => installation.add_pi()?,
+            Agent::Pi => installation.add_pi(project_dir, home_dir)?,
             Agent::ClaudeDesktop => installation.add_claude_desktop(home_dir)?,
         }
         Ok(installation)
@@ -281,14 +281,15 @@ impl Installation {
         Ok(())
     }
 
-    fn add_pi(&mut self) -> Result<(), SetupError> {
-        let instructions = derive_instruction_document(SKILL, "# Zanei activity context")?;
-        self.manual_steps.push(ManualStep {
-            guidance: "Paste these instructions into a README or another file that pi reads:",
-            content: instructions,
-        });
+    fn add_pi(&mut self, project: &Path, home: &Path) -> Result<(), SetupError> {
+        let base = match self.scope {
+            Scope::Project => project.join(".pi/skills"),
+            Scope::User => home.join(".pi/agent/skills"),
+        };
+        self.files
+            .push(PlannedFile::exact(base.join("zanei/SKILL.md"), SKILL)?);
         self.notes
-            .push("pi uses the CLI skill only and does not register an MCP server.");
+            .push("pi does not support MCP, so the skill is the only surface.");
         Ok(())
     }
 

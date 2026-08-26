@@ -3,7 +3,7 @@ title: Setup
 description: Set up Zanei with native integration or printed instructions for manual placement.
 ---
 
-Zanei ships one canonical `skills/SKILL.md`. `zanei setup` installs it unchanged for agents with native skill support. For opencode and pi, it derives an instruction snippet, prints it to stdout, and leaves placement to you. For MCP, setup prints the registration command to run; only Claude Desktop's config file is written directly, and opencode's MCP JSON is likewise printed for manual configuration.
+Zanei ships one canonical `skills/SKILL.md`. `zanei setup` installs it unchanged for agents with native skill support. For opencode, it derives an instruction snippet, prints it to stdout, and leaves placement to you. For MCP, setup prints the registration command to run; only Claude Desktop's config file is written directly, and opencode's MCP JSON is likewise printed for manual configuration.
 
 ```bash
 zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
@@ -12,8 +12,8 @@ zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope pr
 | Flag | Description |
 | --- | --- |
 | `--agent` | Target: `claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
-| `--scope` | `project` (default; current repository) or `user` (account-wide). It has no effect on the manual opencode/pi output |
-| `--print` | Preview planned file changes without writing. opencode and pi never write files, with or without this flag |
+| `--scope` | `project` (default; current repository) or `user` (account-wide). It has no effect on the manual opencode output |
+| `--print` | Preview planned file changes without writing. opencode never writes files, with or without this flag |
 
 :::note
 For agents that write files, run with `--print` first to preview every file that would be created or modified.
@@ -129,7 +129,14 @@ This covers the chat surface only. For Claude Code running inside the same app, 
 zanei setup --agent pi
 ```
 
-pi ships without MCP and does not support native skills. This command does not modify any files: it derives an instruction snippet from the canonical `SKILL.md` body and prints it to stdout. Paste the snippet wherever you prefer in a README or another instruction file that pi reads. The behavior is the same with or without `--print`; `zanei mcp` is not used.
+pi reads Agent Skills natively, so the command installs the canonical `SKILL.md` unchanged:
+
+```
+~/.pi/agent/skills/zanei/SKILL.md    # --scope user
+.pi/skills/zanei/SKILL.md            # --scope project (default)
+```
+
+pi has no MCP support by design, so `zanei mcp` is not registered and the skill is the only surface.
 
 </Tab>
 </Tabs>

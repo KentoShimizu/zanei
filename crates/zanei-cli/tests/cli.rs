@@ -406,8 +406,8 @@ fn relevant_help_describes_every_option_and_config_init() {
             &["setup", "--help"],
             &[
                 "Agent integration to configure",
-                "Configure the current project or user account; ignored by opencode and pi",
-                "Preview planned file changes without writing; opencode and pi are always write-free",
+                "Configure the current project or user account; ignored by opencode",
+                "Preview planned file changes without writing; opencode is always write-free",
             ],
         ),
         (
@@ -884,68 +884,77 @@ fn setup_codex_print_shows_user_skill_and_writes_nothing() {
 }
 
 #[test]
-fn setup_opencode_and_pi_always_show_manual_steps_and_write_nothing() {
+fn setup_opencode_always_shows_manual_steps_and_writes_nothing() {
     let fixture = Fixture::populated();
     let home = TempDir::new().expect("home tempdir");
 
-    for agent in ["opencode", "pi"] {
-        for print_only in [false, true] {
-            let project = fixture
-                .directory
-                .path()
-                .join(format!("{agent}-{print_only}"));
-            fs::create_dir(&project).expect("project");
-            let agents = project.join("AGENTS.md");
-            let readme = project.join("README.md");
-            let opencode_config = project.join("opencode.json");
-            fs::write(&agents, "# Existing agent instructions\n").expect("AGENTS");
-            fs::write(&readme, "# Existing README\n").expect("README");
-            fs::write(&opencode_config, r#"{"theme":"existing"}"#).expect("opencode config");
+    for print_only in [false, true] {
+        let project = fixture
+            .directory
+            .path()
+            .join(format!("opencode-{print_only}"));
+        fs::create_dir(&project).expect("project");
+        let agents = project.join("AGENTS.md");
+        let opencode_config = project.join("opencode.json");
+        fs::write(&agents, "# Existing agent instructions\n").expect("AGENTS");
+        fs::write(&opencode_config, r#"{"theme":"existing"}"#).expect("opencode config");
 
-            let mut arguments = vec!["setup", "--agent", agent];
-            if print_only {
-                arguments.push("--print");
-            }
-            let mut command = fixture.command();
-            command.current_dir(&project).env("HOME", home.path());
-            let output = command.args(arguments).output().expect("setup output");
-
-            assert!(output.status.success());
-            assert_eq!(
-                fs::read_to_string(agents).expect("unchanged AGENTS"),
-                "# Existing agent instructions\n"
-            );
-            assert_eq!(
-                fs::read_to_string(readme).expect("unchanged README"),
-                "# Existing README\n"
-            );
-            assert_eq!(
-                fs::read_to_string(opencode_config).expect("unchanged opencode config"),
-                r#"{"theme":"existing"}"#
-            );
-            assert!(!project.join(".pi").exists());
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(stdout.contains("[manual setup]"));
-            assert!(stdout.contains("Zanei activity context"));
-            assert!(stdout.contains("zanei timeline --since 2h --format md"));
-            assert!(!stdout.contains("name: zanei"));
-            assert!(!stdout.contains("description: Recover recent local activity context"));
-            if agent == "opencode" {
-                assert!(stdout.contains("Paste these instructions anywhere in your AGENTS.md:"));
-                assert!(stdout.contains("Add this mcp.zanei server entry to your opencode.json:"));
-                assert!(stdout.contains(r#""mcp": {"#));
-                assert!(stdout.contains(r#""command": ["zanei", "mcp"]"#));
-            } else {
-                assert!(stdout.contains(
-                    "Paste these instructions into a README or another file that pi reads:"
-                ));
-                assert!(stdout.contains("does not register an MCP server"));
-                assert!(!stdout.contains("opencode.json"));
-                assert!(!stdout.contains("[mcp command]"));
-            }
+        let mut arguments = vec!["setup", "--agent", "opencode"];
+        if print_only {
+            arguments.push("--print");
         }
+        let mut command = fixture.command();
+        command.current_dir(&project).env("HOME", home.path());
+        let output = command.args(arguments).output().expect("setup output");
+
+        assert!(output.status.success());
+        assert_eq!(
+            fs::read_to_string(agents).expect("unchanged AGENTS"),
+            "# Existing agent instructions\n"
+        );
+        assert_eq!(
+            fs::read_to_string(opencode_config).expect("unchanged opencode config"),
+            r#"{"theme":"existing"}"#
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("[manual setup]"));
+        assert!(stdout.contains("Zanei activity context"));
+        assert!(stdout.contains("zanei timeline --since 2h --format md"));
+        assert!(!stdout.contains("name: zanei"));
+        assert!(!stdout.contains("description: Recover recent local activity context"));
+        assert!(stdout.contains("Paste these instructions anywhere in your AGENTS.md:"));
+        assert!(stdout.contains("Add this mcp.zanei server entry to your opencode.json:"));
+        assert!(stdout.contains(r#""mcp": {"#));
+        assert!(stdout.contains(r#""command": ["zanei", "mcp"]"#));
     }
+}
+
+#[test]
+fn setup_pi_writes_the_skill_for_the_requested_scope_and_registers_no_mcp() {
+    let fixture = Fixture::populated();
+    let home = TempDir::new().expect("home tempdir");
+    let project = fixture.directory.path().join("pi-project");
+    fs::create_dir(&project).expect("project");
+
+    let mut command = fixture.command();
+    command.current_dir(&project).env("HOME", home.path());
+    let output = command
+        .args(["setup", "--agent", "pi", "--scope", "user"])
+        .output()
+        .expect("setup output");
+
+    assert!(output.status.success());
+    let skill =
+        fs::read_to_string(home.path().join(".pi/agent/skills/zanei/SKILL.md")).expect("pi skill");
+    assert!(skill.contains("zanei timeline --since 2h --format md"));
+    assert!(skill.starts_with("---\nname: zanei\n"));
+    assert!(!project.join(".pi").exists());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("pi does not support MCP"));
+    assert!(!stdout.contains("[manual setup]"));
+    assert!(!stdout.contains("[mcp command]"));
 }
 
 #[test]
