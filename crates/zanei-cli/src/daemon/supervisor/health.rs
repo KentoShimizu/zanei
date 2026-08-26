@@ -145,8 +145,17 @@ impl CollectorSet {
                 "ax",
                 ax.collector.degraded_operations(),
             );
+            let failure_state = ax.collector.failure_state();
             let degraded_observers = ax.collector.degraded_observers();
-            if degraded_observers > 0 {
+            if let Some(failure) = failure_state.current() {
+                let unresolved = failure_state.unresolved_sites();
+                let reason = if unresolved > 1 {
+                    format!("state=unavailable {failure} unresolved_sites={unresolved}")
+                } else {
+                    format!("state=unavailable {failure}")
+                };
+                health.degraded.insert("ax".to_owned(), reason);
+            } else if degraded_observers > 0 {
                 let applications = if degraded_observers == 1 {
                     "application"
                 } else {

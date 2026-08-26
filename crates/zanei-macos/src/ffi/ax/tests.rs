@@ -26,6 +26,7 @@ use super::{
     },
 };
 use crate::{
+    ax::health::{AxFailurePhase, AxFailurePublisher, AxRecoverySite},
     focused_field::{FieldClass, field_class},
     secure_input::secure_input_test_channel,
     text_capture::{
@@ -63,7 +64,7 @@ fn fake_field_snapshot(role: Option<&str>) -> ValueFieldSnapshot {
         subrole: None,
         field_class: field_class(role, None),
         registration_class: Some(field_class(role, None)),
-        degraded: false,
+        failure: None,
     }
 }
 
@@ -118,6 +119,15 @@ fn application_role_query_failure_is_degraded_and_reconcile_remains_one_shot() {
     let (_publisher, mut authorizations) = input_authorization_channel();
 
     assert_eq!(observer.fake_degraded_operations(), 1);
+    assert_eq!(
+        observer
+            .fake_failure_state()
+            .current()
+            .map(|failure| failure.phase),
+        Some(AxFailurePhase::Observer)
+    );
+    observer.recover(AxRecoverySite::ApplicationRole);
+    assert!(observer.fake_failure_state().current().is_none());
     assert!(
         observer
             .reconcile_accessibility_if_due(
@@ -435,14 +445,40 @@ fn character_count_is_available_without_captured_content() {
 fn secure_input_or_probe_failure_is_fail_closed() {
     let (probe, responder) = secure_input_test_channel();
     let degraded = AtomicU64::new(0);
+    let failures = AxFailurePublisher::default();
     let response = thread::spawn(move || responder.respond_next(true));
-    assert!(secure_input_active(true, Some(&probe), &degraded, "test"));
+    assert!(secure_input_active(
+        true,
+        Some(&probe),
+        &degraded,
+        &failures,
+        AxRecoverySite::SecureInputTest
+    ));
     response.join().expect("Secure Input response thread");
 
     let (probe, responder) = secure_input_test_channel();
     drop(responder);
-    assert!(secure_input_active(true, Some(&probe), &degraded, "test"));
+    assert!(secure_input_active(
+        true,
+        Some(&probe),
+        &degraded,
+        &failures,
+        AxRecoverySite::SecureInputTest
+    ));
     assert_eq!(degraded.load(Ordering::Relaxed), 1);
+    assert!(failures.state().current().is_some());
+
+    let (probe, responder) = secure_input_test_channel();
+    let response = thread::spawn(move || responder.respond_next(false));
+    assert!(!secure_input_active(
+        true,
+        Some(&probe),
+        &degraded,
+        &failures,
+        AxRecoverySite::SecureInputTest
+    ));
+    response.join().expect("Secure Input recovery response");
+    assert!(failures.state().current().is_none());
 }
 
 #[test]
@@ -457,9 +493,16 @@ fn actual_secure_text_field_is_excluded_from_focus_snapshot() {
 fn secure_input_disabled_allows_authorized_text_capture() {
     let (probe, responder) = secure_input_test_channel();
     let degraded = AtomicU64::new(0);
+    let failures = AxFailurePublisher::default();
     let response = thread::spawn(move || responder.respond_next(false));
 
-    assert!(!secure_input_active(true, Some(&probe), &degraded, "test"));
+    assert!(!secure_input_active(
+        true,
+        Some(&probe),
+        &degraded,
+        &failures,
+        AxRecoverySite::SecureInputTest
+    ));
     response.join().expect("Secure Input response thread");
 }
 
@@ -600,7 +643,7 @@ fn degraded_same_target_classification_preserves_pending_value() {
         subrole: None,
         field_class: FieldClass::Unknown,
         registration_class: None,
-        degraded: true,
+        failure: Some(native_error("AXRole", -25204)),
     };
 
     assert!(classified_field_snapshot(degraded).is_none());
@@ -617,7 +660,7 @@ fn degraded_same_target_classification_preserves_pending_value() {
         subrole: None,
         field_class: FieldClass::SecureText,
         registration_class: None,
-        degraded: false,
+        failure: None,
     };
     assert_eq!(
         classified_field_snapshot(secure).map(|snapshot| snapshot.field_class),

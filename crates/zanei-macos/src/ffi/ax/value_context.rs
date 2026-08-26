@@ -25,7 +25,7 @@ pub(super) fn after_target_preparation<T, E, R>(
 pub(super) fn classified_field_snapshot(
     snapshot: ValueFieldSnapshot,
 ) -> Option<ValueFieldSnapshot> {
-    (!snapshot.degraded).then_some(snapshot)
+    snapshot.failure.is_none().then_some(snapshot)
 }
 
 pub(super) struct FocusedValueContext {

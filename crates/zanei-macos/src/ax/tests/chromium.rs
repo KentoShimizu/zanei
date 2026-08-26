@@ -7,6 +7,7 @@ fn chromium_activation_seeds_focus_without_a_focused_window_notification() {
     let (_click_sender, click_receiver) = click_channel();
     let (output_sender, _output_receiver) = sync_channel(1);
     let context = FocusContext::new();
+    let failure_publisher = AxFailurePublisher::default();
 
     run_ax_loop(
         &mut api,
@@ -22,6 +23,7 @@ fn chromium_activation_seeds_focus_without_a_focused_window_notification() {
         &AtomicU64::new(0),
         &AtomicU64::new(0),
         Arc::new(AtomicU64::new(0)),
+        &failure_publisher,
     );
 
     let focus = context.current().expect("activation-time focus");

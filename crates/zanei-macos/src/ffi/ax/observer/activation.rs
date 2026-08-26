@@ -7,19 +7,23 @@ use time::OffsetDateTime;
 use crate::text_capture::InputAuthorizations;
 
 use super::AppObserver;
+use crate::ax::health::AxRecoverySite;
 use crate::ffi::ax::{NativeAxEvent, NativeAxObservation, element::element_role};
 
 impl AppObserver {
     pub(in crate::ffi::ax) fn activate_accessibility_tree(&mut self, now: Instant) {
         self.accessibility_activation.schedule_reconcile(now);
-        if let Err(error) = element_role(self.application.as_ptr()) {
-            crate::trace::trace!(
-                "component=ax phase=attach action=application_role pid={} operation={} code={}",
-                self.context.pid,
-                error.operation(),
-                error.code()
-            );
-            self.record_degraded();
+        match element_role(self.application.as_ptr()) {
+            Ok(_) => self.recover(AxRecoverySite::ApplicationRole),
+            Err(error) => {
+                crate::trace::trace!(
+                    "component=ax phase=attach action=application_role pid={} operation={} code={}",
+                    self.context.pid,
+                    error.operation(),
+                    error.code()
+                );
+                self.record_native(AxRecoverySite::ApplicationRole, &error);
+            }
         }
     }
 

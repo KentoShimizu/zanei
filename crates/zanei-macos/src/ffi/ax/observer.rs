@@ -7,15 +7,13 @@ mod value_lifecycle;
 pub(in crate::ffi::ax) mod value_registration;
 
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::AtomicU64},
     time::Instant,
 };
 use time::OffsetDateTime;
 
 use crate::{
+    ax::health::{AxFailurePhase, AxFailurePublisher, AxRecoverySite},
     capture_policy::{CaptureDecision, CapturePolicy},
     focused_field::{FieldClass, field_class},
     text_capture::{FocusedTarget, InputAuthorizations},
@@ -45,6 +43,7 @@ pub(super) struct AppObserver {
     notifications: NotificationRegistry,
     retired_contexts: Vec<FocusedValueContext>,
     degraded: Arc<AtomicU64>,
+    failures: AxFailurePublisher,
     capture_text_content: bool,
     app: App,
     capture_policy: CapturePolicy,
@@ -67,6 +66,7 @@ impl AppObserver {
         source: CfRef,
         context: Box<ObserverContext>,
         degraded: Arc<AtomicU64>,
+        failures: AxFailurePublisher,
         capture_text_content: bool,
         app: App,
         capture_policy: CapturePolicy,
@@ -79,6 +79,7 @@ impl AppObserver {
             source,
             context,
             degraded,
+            failures,
             capture_text_content,
             app,
             capture_policy,
@@ -96,6 +97,7 @@ impl AppObserver {
         source: CfRef,
         context: Box<ObserverContext>,
         degraded: Arc<AtomicU64>,
+        failures: AxFailurePublisher,
         capture_text_content: bool,
         app: App,
         capture_policy: CapturePolicy,
@@ -111,6 +113,7 @@ impl AppObserver {
             notifications: NotificationRegistry::default(),
             retired_contexts: Vec::new(),
             degraded,
+            failures,
             capture_text_content,
             app,
             capture_policy,
@@ -176,8 +179,9 @@ impl AppObserver {
             .as_ref()
             .map(|element| window_snapshot(element.as_ptr()))
             .transpose();
-        if self.replace_window_target(target).is_err() {
-            self.record_degraded();
+        match self.replace_window_target(target) {
+            Ok(()) => self.recover(AxRecoverySite::FocusedWindow),
+            Err(error) => self.record_native(AxRecoverySite::FocusedWindow, &error),
         }
         let window = window_result?.flatten();
         Ok(window.map(|window| NativeAxEvent::WindowFocused {
@@ -235,7 +239,10 @@ impl AppObserver {
             secure_input,
             authorizations,
         ) {
-            Ok(events) => events,
+            Ok(events) => {
+                self.recover(AxRecoverySite::FocusedElement);
+                events
+            }
             Err(error) => {
                 crate::trace::trace!(
                     "component=ax phase=focus_target action=error pid={} operation={} code={}",
@@ -243,7 +250,7 @@ impl AppObserver {
                     error.operation(),
                     error.code()
                 );
-                self.record_degraded();
+                self.record_native(AxRecoverySite::FocusedElement, &error);
                 self.clear_focused_target();
                 vec![self.focus_event(observed_at)]
             }
@@ -253,8 +260,9 @@ impl AppObserver {
     pub(super) fn refresh_window_target(&mut self) {
         let result = copy_element(self.application.as_ptr(), "AXFocusedWindow")
             .and_then(|target| self.replace_window_target(target));
-        if result.is_err() {
-            self.record_degraded();
+        match result {
+            Ok(()) => self.recover(AxRecoverySite::FocusedWindow),
+            Err(error) => self.record_native(AxRecoverySite::FocusedWindow, &error),
         }
     }
 
@@ -414,7 +422,7 @@ impl AppObserver {
         let needed_cleanup = self
             .notifications
             .needs_cleanup(target.element.as_ptr(), "AXValueChanged");
-        if self
+        match self
             .notifications
             .unregister(target.element.as_ptr(), "AXValueChanged", || {
                 remove_notification(
@@ -422,21 +430,30 @@ impl AppObserver {
                     target.element.as_ptr(),
                     "AXValueChanged",
                 )
-            })
-            .is_err()
-        {
-            crate::trace::trace!(
-                "component=ax phase=focus_target action=unregister pid={} target_generation={} result=error",
-                self.context.pid,
-                generation
-            );
-            self.record_degraded();
-        } else if needed_cleanup {
-            crate::trace::trace!(
-                "component=ax phase=focus_target action=unregister pid={} target_generation={} result=removed",
-                self.context.pid,
-                generation
-            );
+            }) {
+            Err(error) => {
+                crate::trace::trace!(
+                    "component=ax phase=focus_target action=unregister pid={} target_generation={} result=error",
+                    self.context.pid,
+                    generation
+                );
+                let error = match error {
+                    RegistrationError::Register(error) | RegistrationError::Unregister(error) => {
+                        error
+                    }
+                };
+                self.record_native(AxRecoverySite::FocusedValueUnregistration, &error);
+            }
+            Ok(()) => {
+                self.recover(AxRecoverySite::FocusedValueUnregistration);
+                if needed_cleanup {
+                    crate::trace::trace!(
+                        "component=ax phase=focus_target action=unregister pid={} target_generation={} result=removed",
+                        self.context.pid,
+                        generation
+                    );
+                }
+            }
         }
         if defer_context {
             crate::trace::trace!(
@@ -449,7 +466,6 @@ impl AppObserver {
     }
 
     fn replace_window_target(&mut self, target: Option<OwnedCf>) -> Result<(), NativeAxError> {
-        let degraded = Arc::clone(&self.degraded);
         if self.window_target.as_ref().is_some_and(|current| {
             target
                 .as_ref()
@@ -472,36 +488,58 @@ impl AppObserver {
                         error
                     }
                 })?;
-            if let Some(previous) = self.window_target.take()
-                && self
-                    .notifications
-                    .unregister(previous.as_ptr(), "AXTitleChanged", || {
-                        remove_notification(
-                            self.observer.as_ptr(),
-                            previous.as_ptr(),
-                            "AXTitleChanged",
-                        )
-                    })
-                    .is_err()
-            {
-                degraded.fetch_add(1, Ordering::Relaxed);
+            if let Some(previous) = self.window_target.take() {
+                self.unregister_window_target(&previous);
             }
             self.window_target = Some(target);
-        } else if let Some(previous) = self.window_target.take()
-            && self
-                .notifications
-                .unregister(previous.as_ptr(), "AXTitleChanged", || {
-                    remove_notification(self.observer.as_ptr(), previous.as_ptr(), "AXTitleChanged")
-                })
-                .is_err()
-        {
-            degraded.fetch_add(1, Ordering::Relaxed);
+        } else if let Some(previous) = self.window_target.take() {
+            self.unregister_window_target(&previous);
         }
         Ok(())
     }
 
-    fn record_degraded(&self) {
-        self.degraded.fetch_add(1, Ordering::Relaxed);
+    fn unregister_window_target(&mut self, target: &OwnedCf) {
+        let result = self
+            .notifications
+            .unregister(target.as_ptr(), "AXTitleChanged", || {
+                remove_notification(self.observer.as_ptr(), target.as_ptr(), "AXTitleChanged")
+            });
+        match result {
+            Ok(()) => self.recover(AxRecoverySite::WindowTitleUnregistration),
+            Err(error) => {
+                let error = match error {
+                    RegistrationError::Register(error) | RegistrationError::Unregister(error) => {
+                        error
+                    }
+                };
+                self.record_native(AxRecoverySite::WindowTitleUnregistration, &error);
+            }
+        }
+    }
+
+    pub(in crate::ffi::ax) fn record_native(&self, site: AxRecoverySite, error: &NativeAxError) {
+        self.record_native_at(AxFailurePhase::Observer, site, error);
+    }
+
+    pub(in crate::ffi::ax) fn record_native_at(
+        &self,
+        phase: AxFailurePhase,
+        site: AxRecoverySite,
+        error: &NativeAxError,
+    ) {
+        self.failures.record_native(
+            &self.degraded,
+            Some(i64::from(self.context.pid)),
+            phase,
+            site,
+            error.operation(),
+            error.code(),
+        );
+    }
+
+    pub(in crate::ffi::ax) fn recover(&self, site: AxRecoverySite) {
+        self.failures
+            .recover(Some(i64::from(self.context.pid)), site);
     }
 
     pub(super) fn text_content_allowed(&self, window: Option<&super::NativeWindow>) -> bool {

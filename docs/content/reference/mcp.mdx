@@ -119,7 +119,7 @@ Lightweight check for agents: is recording running? A subset of `zanei status`.
 | Field | Meaning |
 | --- | --- |
 | `events_dropped` | Cumulative events intended for recording but actually lost to backpressure, a full queue, disconnection, or a similar delivery failure; inputs outside the recording scope because they cannot be attributed to an app or window, and unflushed data lost to a crash or `SIGKILL`, are not included |
-| `degraded` | Current collector or runtime degradation by component; removed when the component recovers. AX reports observer unavailability only for apps used since daemon startup: apps activated after startup or currently frontmost. Successful observer attachment removes the degradation |
+| `degraded` | Current collector or runtime degradation by component; removed when the responsible site recovers. AX reasons classify the current failure by stable phase and kind, include the native operation and numeric code when available, and report the number of unresolved PID/operation sites when greater than one. A success clears only its matching site |
 | `collector_failures` | Cumulative collector operation failures by collector; a nonzero value alone does not mean the collector is currently degraded |
 | `capture.content_snapshot` | Whether frontmost-window content snapshots are enabled. Snapshots exist only when this is `true`; scope details are available through CLI `zanei filter show` |
 | `permissions_ok` | The running recorder's own permission result while its heartbeat is fresh; a local probe when no recorder is running |
