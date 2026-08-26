@@ -924,11 +924,12 @@ fn deferred_browser_automation_keeps_the_worker_stopped() {
     state.finish();
     wait_for_relay(&managed);
 
-    let mut deferred = granted_permissions();
-    deferred.permissions_ok = true;
-    deferred
-        .automation
-        .insert(CHROME_BUNDLE_ID.to_owned(), PermissionState::NotDetermined);
+    let deferred = DaemonCapabilities::new(
+        BTreeSet::from([Capability::AutomateBrowser]),
+        CapabilityState::Available,
+        CapabilityState::Available,
+        CapabilityState::Deferred,
+    );
     supervise_collector(
         &mut managed,
         &pipeline,
@@ -947,13 +948,10 @@ fn deferred_browser_automation_keeps_the_worker_stopped() {
     .expect("hold browser restart while automation is deferred");
     assert_eq!(state.starts.load(Ordering::Relaxed), 1);
 
-    deferred
-        .automation
-        .insert(CHROME_BUNDLE_ID.to_owned(), PermissionState::Granted);
     supervise_collector(
         &mut managed,
         &pipeline,
-        Some(&deferred),
+        Some(&granted_permissions()),
         &mut errors,
         started + Duration::from_secs(61),
     )

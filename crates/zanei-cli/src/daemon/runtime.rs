@@ -13,12 +13,12 @@ use std::{
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zanei_collector::Capability;
 use zanei_core::{
+    DaemonCapabilities,
     config::{CONFIG_WATCH_INTERVAL, Config, ConfigWatcher},
     normalize::format_timestamp,
     store::{
-        DaemonMode, DaemonPermissions, DaemonState, LockedReason, StoreError, StoreFormat,
-        StoreReader, StoreStatus, StoreWriter, purge_retired_plaintext, retired_plaintext_stores,
-        set_aside_plaintext,
+        DaemonMode, DaemonState, LockedReason, StoreError, StoreFormat, StoreReader, StoreStatus,
+        StoreWriter, purge_retired_plaintext, retired_plaintext_stores, set_aside_plaintext,
     },
 };
 use zanei_macos::permission::{PermissionError, PermissionStatus, permission_status};
@@ -145,7 +145,7 @@ pub fn run_daemon(
             intake_suspended: false,
             degraded: &mut runtime_degraded,
             last_status: initial_status,
-            last_permissions: None,
+            last_capabilities: None,
             initial_input_monitoring_status,
             permission_request_worker: Some(permission_request_worker),
             pending_permission_request: None,
@@ -328,7 +328,7 @@ struct ActiveDaemon<'a> {
     intake_suspended: bool,
     degraded: &'a mut BTreeMap<String, String>,
     last_status: StoreStatus,
-    last_permissions: Option<DaemonPermissions>,
+    last_capabilities: Option<DaemonCapabilities>,
     initial_input_monitoring_status: Option<Result<PermissionStatus, PermissionError>>,
     permission_request_worker: Option<PermissionRequestWorker>,
     pending_permission_request: Option<BTreeSet<Capability>>,
@@ -408,15 +408,15 @@ impl ActiveDaemon<'_> {
                     return Ok(());
                 }
                 ensure_pipeline_running(self.pipeline, self.collectors)?;
-                let permissions = self.refresh_permissions();
+                let capabilities = self.refresh_capabilities();
                 if !*self.paused && !self.intake_suspended {
                     self.collectors.supervise(
                         self.pipeline.sender(),
-                        permissions.as_ref(),
+                        capabilities.as_ref(),
                         Instant::now(),
                     )?;
                 }
-                self.publish_heartbeat_with_permissions(permissions)?;
+                self.publish_heartbeat_with_capabilities(capabilities)?;
                 last_heartbeat = Instant::now();
             }
             thread::sleep(RUNTIME_POLL_INTERVAL);

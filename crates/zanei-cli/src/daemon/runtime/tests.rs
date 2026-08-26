@@ -60,7 +60,7 @@ fn initial_heartbeat_is_committed_before_permission_worker_starts() {
                 .status()
                 .expect("worker store status");
             assert!(status.running);
-            assert_eq!(status.permissions, None);
+            assert_eq!(status.capabilities, None);
             probe_started.send(()).expect("announce blocking probe");
             release_probe_rx.recv().expect("release blocking probe");
             Ok(PermissionRequestOutcome::Completed)
@@ -78,7 +78,7 @@ fn initial_heartbeat_is_committed_before_permission_worker_starts() {
         status.instance_id.as_deref(),
         Some("42@2026-08-17T10:00:00.000Z")
     );
-    assert_eq!(status.permissions, None);
+    assert_eq!(status.capabilities, None);
 
     release_probe.send(()).expect("release permission probe");
     loop {
@@ -273,14 +273,14 @@ fn typed_collector_failure_and_recovery_are_persisted_by_the_heartbeat() {
         intake_suspended: false,
         degraded: &mut degraded,
         last_status: reader.status().expect("initial store status"),
-        last_permissions: None,
+        last_capabilities: None,
         initial_input_monitoring_status: None,
         permission_request_worker: None,
         pending_permission_request: None,
         executable_guard: ExecutableGuard::new(directory.path().join("zanei")),
     };
     daemon
-        .publish_heartbeat_with_permissions(None)
+        .publish_heartbeat_with_capabilities(None)
         .expect("publish heartbeat");
     pipeline.flush().expect("flush heartbeat");
 
@@ -301,7 +301,7 @@ fn typed_collector_failure_and_recovery_are_persisted_by_the_heartbeat() {
         .expect("Chrome collector")
         .set_health_for_test(true, ChromeFailureState::Available);
     daemon
-        .publish_heartbeat_with_permissions(None)
+        .publish_heartbeat_with_capabilities(None)
         .expect("publish recovery heartbeat");
     pipeline.flush().expect("flush recovery heartbeat");
     assert!(

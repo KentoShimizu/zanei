@@ -166,7 +166,8 @@ mod tests {
 
     use zanei_collector::Capability;
     use zanei_core::config::Config;
-    use zanei_core::store::{DaemonMode, DaemonPermissions, PermissionState, StoreStatus};
+    use zanei_core::store::{DaemonMode, StoreStatus};
+    use zanei_core::{CapabilityState, DaemonCapabilities};
 
     use super::{HealthReport, HealthState};
     use crate::daemon::StoreOwner;
@@ -178,7 +179,7 @@ mod tests {
     fn fresh_heartbeat_without_permission_snapshot_is_pending_for_start() {
         let status = StoreStatus {
             running: true,
-            permissions: None,
+            capabilities: None,
             ..StoreStatus::default()
         };
 
@@ -277,12 +278,12 @@ mod tests {
         let config =
             Config::from_toml("[capture]\nsources = [\"input\"]\n").expect("input capture config");
         let required = crate::daemon::required_capabilities_for(&config);
-        let snapshot = DaemonPermissions {
-            permissions_ok: false,
-            accessibility: PermissionState::Granted,
-            input_monitoring: PermissionState::Denied,
-            automation: BTreeMap::new(),
-        };
+        let snapshot = DaemonCapabilities::new(
+            required.clone(),
+            CapabilityState::Available,
+            CapabilityState::ActionRequired,
+            CapabilityState::Deferred,
+        );
         let owner = store_owner("current");
         let status = StoreStatus {
             running: true,

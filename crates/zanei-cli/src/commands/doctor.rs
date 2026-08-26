@@ -2,9 +2,8 @@ use std::path::Path;
 
 use zanei_collector::Capability;
 use zanei_core::config::Config;
-use zanei_core::store::{
-    DaemonPermissions, LockedReason, PermissionState, StoreError, StoreFormat, StoreStatus,
-};
+use zanei_core::store::{LockedReason, StoreError, StoreFormat, StoreStatus};
+use zanei_core::{CapabilityState, DaemonCapabilities};
 
 use super::{EXIT_MISSING_PERMISSIONS, EXIT_SUCCESS};
 use crate::daemon::StoreOwnership;
@@ -58,7 +57,7 @@ pub fn run(config_path: &Path, store_path: &Path, fix: bool, json: bool) -> Resu
 
 pub(crate) fn permissions_ok(config: &Config) -> Result<bool, CliError> {
     let required = crate::daemon::required_capabilities_for(config);
-    Ok(probe_permissions(&required)?.permissions_ok)
+    Ok(probe_permissions(&required)?.ready())
 }
 
 pub(crate) fn require_recorder_for_start(
@@ -84,10 +83,13 @@ fn evaluate_recorder_for_start(
             "running recorder did not publish a fresh heartbeat".to_owned(),
         ));
     }
-    let Some(snapshot) = status.reported_permissions().cloned() else {
+    let Some(snapshot) = status.reported_capabilities().cloned() else {
         return Ok(StartPermissionState::PendingSnapshot);
     };
     let required = crate::daemon::required_capabilities_for(config);
+    if snapshot.ready_for(&required).is_none() {
+        return Ok(StartPermissionState::PendingSnapshot);
+    }
     let report = build_report(
         config,
         &required,
@@ -161,22 +163,27 @@ fn evaluate(
 
 fn permissions_for_status<E>(
     status: Option<&StoreStatus>,
-    fallback: impl FnOnce() -> Result<DaemonPermissions, E>,
-) -> Result<(DaemonPermissions, bool), E> {
-    match status.and_then(StoreStatus::reported_permissions) {
-        Some(permissions) => Ok((permissions.clone(), true)),
-        None => fallback().map(|permissions| (permissions, false)),
+    fallback: impl FnOnce() -> Result<DaemonCapabilities, E>,
+) -> Result<(DaemonCapabilities, bool), E> {
+    match status.and_then(StoreStatus::reported_capabilities) {
+        Some(capabilities) => Ok((capabilities.clone(), true)),
+        None => fallback().map(|capabilities| (capabilities, false)),
     }
 }
 
 fn build_report(
     config: &Config,
     required: &std::collections::BTreeSet<Capability>,
-    snapshot: DaemonPermissions,
+    snapshot: DaemonCapabilities,
     reported_by_recorder: bool,
     store_key: StoreKeyReport,
     health: health::HealthReport,
 ) -> Result<DoctorReport, CliError> {
+    let ok = snapshot.ready_for(required).ok_or_else(|| {
+        CliError::InvalidValue(
+            "recorder capability snapshot does not cover current requirements".to_owned(),
+        )
+    })?;
     let mut checked = required.clone();
     checked.insert(Capability::ReadAccessibilityTree);
     checked.insert(Capability::ObserveInput);
@@ -186,12 +193,7 @@ fn build_report(
     let mut settings_pane = None;
 
     for permission in checked {
-        let status = snapshot_status(&snapshot, &permission).ok_or_else(|| {
-            CliError::InvalidValue(format!(
-                "recorder permission snapshot is missing {}",
-                permission_name_and_pane(&permission).0
-            ))
-        })?;
+        let status = snapshot_status(&snapshot, &permission);
         let is_required = required.contains(&permission);
         match &permission {
             Capability::ReadAccessibilityTree => {
@@ -218,10 +220,10 @@ fn build_report(
         }
         // Automation can be indeterminate while the target app is not running. The public
         // doctor example reports that state but does not classify it as a missing permission.
-        let missing = status != PermissionState::Granted
+        let missing = status != CapabilityState::Available
             && !matches!(
                 (&permission, status),
-                (Capability::AutomateBrowser, PermissionState::NotDetermined)
+                (Capability::AutomateBrowser, CapabilityState::Deferred)
             );
         if is_required && missing {
             let (name, pane) = permission_name_and_pane(&permission);
@@ -232,7 +234,7 @@ fn build_report(
     }
 
     Ok(DoctorReport {
-        ok: missing_required.is_empty(),
+        ok,
         capture_sources: config
             .capture
             .sources
@@ -252,12 +254,13 @@ fn build_report(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     use zanei_collector::Capability;
     use zanei_core::config::Config;
-    use zanei_core::store::{DaemonPermissions, PermissionState, StoreStatus};
+    use zanei_core::store::StoreStatus;
+    use zanei_core::{CapabilityState, DaemonCapabilities};
 
     use super::health::HealthReport;
     use super::render::{output_indicates_non_persistent_signature, render_human};
@@ -395,7 +398,7 @@ mod tests {
         let running = StoreStatus {
             running: true,
             retention_hours: Some(48),
-            permissions: Some(reported.clone()),
+            capabilities: Some(reported.clone()),
             ..StoreStatus::default()
         };
         let fallback_called = Cell::new(false);
@@ -412,7 +415,7 @@ mod tests {
 
         let stopped = StoreStatus {
             running: false,
-            permissions: Some(permission_snapshot(false)),
+            capabilities: Some(permission_snapshot(false)),
             ..StoreStatus::default()
         };
         let fallback_called = Cell::new(false);
@@ -422,7 +425,7 @@ mod tests {
         })
         .expect("select local permissions");
 
-        assert!(selected.permissions_ok);
+        assert!(selected.ready());
         assert!(!from_recorder);
         assert!(fallback_called.get());
     }
@@ -451,12 +454,12 @@ mod tests {
         let config = Config::from_toml("[capture]\nsources = [\"window\"]\n")
             .expect("window capture config");
         let required = BTreeSet::from([Capability::ReadAccessibilityTree]);
-        let snapshot = DaemonPermissions {
-            permissions_ok: true,
-            accessibility: PermissionState::Denied,
-            input_monitoring: PermissionState::Granted,
-            automation: BTreeMap::new(),
-        };
+        let snapshot = DaemonCapabilities::new(
+            required.clone(),
+            CapabilityState::ActionRequired,
+            CapabilityState::Available,
+            CapabilityState::Deferred,
+        );
 
         let report = permission_report(&config, &required, snapshot, true);
 
@@ -469,12 +472,12 @@ mod tests {
         let config =
             Config::from_toml("[capture]\nsources = [\"ui\"]\n").expect("ui capture config");
         let required = crate::daemon::required_capabilities_for(&config);
-        let snapshot = DaemonPermissions {
-            permissions_ok: false,
-            accessibility: PermissionState::Granted,
-            input_monitoring: PermissionState::Denied,
-            automation: BTreeMap::new(),
-        };
+        let snapshot = DaemonCapabilities::new(
+            required.clone(),
+            CapabilityState::Available,
+            CapabilityState::ActionRequired,
+            CapabilityState::Deferred,
+        );
 
         let report = permission_report(&config, &required, snapshot, false);
 
@@ -494,15 +497,12 @@ mod tests {
         content.capture.sources.clear();
         content.capture.content_snapshot = true;
         let required = crate::daemon::required_capabilities_for(&content);
-        let snapshot = DaemonPermissions {
-            permissions_ok: false,
-            accessibility: PermissionState::Denied,
-            input_monitoring: PermissionState::Granted,
-            automation: BTreeMap::from([(
-                "com.google.Chrome".to_owned(),
-                PermissionState::NotDetermined,
-            )]),
-        };
+        let snapshot = DaemonCapabilities::new(
+            required.clone(),
+            CapabilityState::ActionRequired,
+            CapabilityState::Available,
+            CapabilityState::Deferred,
+        );
         let report = permission_report(&content, &required, snapshot, false);
 
         assert_eq!(
@@ -553,19 +553,23 @@ mod tests {
         }
     }
 
-    fn permission_snapshot(permissions_ok: bool) -> DaemonPermissions {
-        DaemonPermissions {
-            permissions_ok,
-            accessibility: PermissionState::Granted,
-            input_monitoring: PermissionState::Granted,
-            automation: BTreeMap::new(),
-        }
+    fn permission_snapshot(permissions_ok: bool) -> DaemonCapabilities {
+        DaemonCapabilities::new(
+            BTreeSet::from([Capability::ReadAccessibilityTree]),
+            if permissions_ok {
+                CapabilityState::Available
+            } else {
+                CapabilityState::ActionRequired
+            },
+            CapabilityState::Available,
+            CapabilityState::Deferred,
+        )
     }
 
     fn permission_report(
         config: &Config,
         required: &BTreeSet<Capability>,
-        snapshot: DaemonPermissions,
+        snapshot: DaemonCapabilities,
         reported_by_recorder: bool,
     ) -> DoctorReport {
         build_report(

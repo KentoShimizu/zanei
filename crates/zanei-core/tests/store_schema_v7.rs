@@ -6,30 +6,60 @@ use zanei_core::normalize::format_timestamp;
 use zanei_core::schema::{App, EmptyData, Event, EventData, Redaction};
 use zanei_core::store::{QueryFilter, StoreError, StoreReader, StoreWriter, export_plain_sqlite};
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 const RETENTION_HOURS: u64 = 24 * 365 * 100;
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn readers_accept_v1_through_v6_and_writers_migrate_v1_through_v5_sequentially() {
+fn readers_accept_v1_through_v7_and_writers_migrate_v1_through_v6_sequentially() {
     let directory = TestDirectory::new("migration");
-    for version in 1..=5 {
+    let expected = directory.path().join("expected.sqlite");
+    StoreWriter::open(&expected).expect("create expected current schema");
+    let expected_columns = daemon_columns(&expected);
+    for version in 1..=6 {
         let store = directory.path().join(format!("v{version}.sqlite"));
         create_schema(&store, version);
+        if version >= 5 {
+            let connection =
+                rusqlite::Connection::open(&store).expect("open legacy permission fixture");
+            connection
+                .execute(
+                    "UPDATE daemon_state SET last_known_permissions_json = 'malformed legacy snapshot'",
+                    [],
+                )
+                .expect("seed legacy permission metadata");
+            if version == 6 {
+                connection.execute_batch(
+                    r#"UPDATE daemon_state SET pid = 42, started_at = 'start', instance_id = 'instance', mode = 'foreground', heartbeat_at = 'heartbeat', retention_hours = 48, paused_until = 'infinity', events_captured = 7, events_dropped = 2, last_event_ts = 'last', degraded_json = '{"ax":"bad"}', collector_failures_json = '{"ax":3}' WHERE id = 1;
+                    INSERT INTO events(id, ts, mono_ns, source, type) VALUES ('event', 'ts', 1, 'test', 'app.launch');"#,
+                ).expect("seed complete v6 state");
+            }
+        }
         StoreReader::open(&store).expect("prior schema remains readable");
         StoreWriter::open(&store).expect("prior schema migrates");
         assert_eq!(schema_version(&store), CURRENT_SCHEMA_VERSION);
-        assert_eq!(daemon_columns(&store), daemon_columns_for(5));
+        assert_eq!(daemon_columns(&store), expected_columns);
+        if version == 6 {
+            let preserved = rusqlite::Connection::open(&store)
+                .expect("open migrated v6 fixture")
+                .query_row(
+                    r#"SELECT pid = 42 AND started_at = 'start' AND instance_id = 'instance' AND mode = 'foreground' AND heartbeat_at = 'heartbeat' AND retention_hours = 48 AND paused_until = 'infinity' AND events_captured = 7 AND events_dropped = 2 AND last_event_ts = 'last' AND degraded_json = '{"ax":"bad"}' AND collector_failures_json = '{"ax":3}' AND last_known_capabilities_json IS NULL AND (SELECT count(*) FROM events) = 1 AND NOT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = 'daemon_permissions') AND NOT EXISTS (SELECT 1 FROM daemon_capabilities) FROM daemon_state WHERE id = 1"#,
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("read migrated v6 state");
+            assert!(preserved, "v7 migration changed non-permission v6 state");
+        }
     }
 
-    let current = directory.path().join("v6.sqlite");
+    let current = directory.path().join("v7.sqlite");
     StoreWriter::open(&current).expect("create current store");
     StoreReader::open(&current).expect("current schema remains readable");
     assert_eq!(schema_version(&current), CURRENT_SCHEMA_VERSION);
 }
 
 #[test]
-fn schema_v6_writer_open_is_a_no_op_and_future_versions_fail_fast() {
+fn schema_v7_writer_open_is_a_no_op_and_future_versions_fail_fast() {
     let directory = TestDirectory::new("current-future");
     let current = directory.path().join("current.sqlite");
     StoreWriter::open(&current).expect("create current store");
@@ -38,19 +68,19 @@ fn schema_v6_writer_open_is_a_no_op_and_future_versions_fail_fast() {
     assert_eq!(sqlite_schema_cookie(&current), before);
     assert_eq!(schema_version(&current), CURRENT_SCHEMA_VERSION);
 
-    set_schema_version(&current, 7);
+    set_schema_version(&current, 8);
     assert!(matches!(
         StoreReader::open(&current),
-        Err(StoreError::UnsupportedSchemaVersion(7))
+        Err(StoreError::UnsupportedSchemaVersion(8))
     ));
     assert!(matches!(
         StoreWriter::open(&current),
-        Err(StoreError::UnsupportedSchemaVersion(7))
+        Err(StoreError::UnsupportedSchemaVersion(8))
     ));
 }
 
 #[test]
-fn active_v6_and_retired_v5_are_read_as_one_event_stream() {
+fn active_v7_and_retired_v6_are_read_as_one_event_stream() {
     let directory = TestDirectory::new("retired-union");
     let store = directory.path().join("store.sqlite");
     let retired = directory
@@ -58,11 +88,11 @@ fn active_v6_and_retired_v5_are_read_as_one_event_stream() {
         .join("store.sqlite.plaintext-20260823T020000Z");
     StoreWriter::open(&store)
         .and_then(|mut writer| writer.append(&event("evt_01K00000000000000000002001", "Active")))
-        .expect("active v6 fixture");
+        .expect("active v7 fixture");
     StoreWriter::open(&retired)
         .and_then(|mut writer| writer.append(&event("evt_01K00000000000000000002002", "Retired")))
         .expect("retired fixture");
-    set_schema_version(&retired, 5);
+    set_schema_version(&retired, 6);
 
     let result = StoreReader::open(&store)
         .and_then(|reader| {
@@ -77,12 +107,12 @@ fn active_v6_and_retired_v5_are_read_as_one_event_stream() {
         .expect("active and retired query");
 
     assert_eq!(result.events.len(), 2);
-    assert_eq!(schema_version(&store), 6);
-    assert_eq!(schema_version(&retired), 5);
+    assert_eq!(schema_version(&store), 7);
+    assert_eq!(schema_version(&retired), 6);
 }
 
 #[test]
-fn plaintext_snapshot_destination_uses_schema_v6() {
+fn plaintext_snapshot_destination_uses_schema_v7() {
     let directory = TestDirectory::new("snapshot");
     let store = directory.path().join("store.sqlite");
     let snapshot = directory.path().join("snapshot.sqlite");
@@ -103,7 +133,7 @@ fn plaintext_snapshot_destination_uses_schema_v6() {
     .expect("plaintext snapshot");
 
     assert_eq!(schema_version(&snapshot), CURRENT_SCHEMA_VERSION);
-    StoreReader::open(&snapshot).expect("snapshot is a readable v6 store");
+    StoreReader::open(&snapshot).expect("snapshot is a readable v7 store");
 }
 
 fn create_schema(path: &Path, version: i64) {
@@ -148,13 +178,6 @@ fn create_schema(path: &Path, version: i64) {
             },
         ))
         .expect("create prior schema");
-}
-
-fn daemon_columns_for(version: i64) -> Vec<String> {
-    let directory = TestDirectory::new("expected-columns");
-    let store = directory.path().join("expected.sqlite");
-    create_schema(&store, version);
-    daemon_columns(&store)
 }
 
 fn daemon_columns(path: &Path) -> Vec<String> {
@@ -221,7 +244,7 @@ impl TestDirectory {
     fn new(label: &str) -> Self {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "zanei-store-schema-v6-{label}-{}-{id}",
+            "zanei-store-schema-v7-{label}-{}-{id}",
             std::process::id()
         ));
         std::fs::create_dir(&path).expect("create test directory");

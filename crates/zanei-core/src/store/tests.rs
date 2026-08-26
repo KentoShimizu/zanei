@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -9,12 +9,12 @@ use crate::schema::{
     App, BrowserMode, BrowserNavigateData, ClipboardCopyData, ClipboardOrigin, ContentKind,
     EmptyData, Event, EventData, Redaction, Window,
 };
+use crate::{Capability, CapabilityState, DaemonCapabilities};
 
 use super::{
-    DaemonMode, DaemonPermissions, DaemonState, LockedReason, PermissionState, PurgeFilter,
-    QueryFilter, StoreError, StoreFailureKind, StoreFormat, StoreKey, StoreReader, StoreStatus,
-    StoreWriter, export_plain_sqlite, purge_retired_plaintext, remove_retired,
-    retired_plaintext_stores, set_aside_plaintext,
+    DaemonMode, DaemonState, LockedReason, PurgeFilter, QueryFilter, StoreError, StoreFailureKind,
+    StoreFormat, StoreKey, StoreReader, StoreStatus, StoreWriter, export_plain_sqlite,
+    purge_retired_plaintext, remove_retired, retired_plaintext_stores, set_aside_plaintext,
 };
 
 static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
@@ -228,10 +228,10 @@ fn query_retention_resolution_ignores_unrelated_corrupt_status_fields() {
         .expect("corrupt degraded JSON");
     connection
         .execute(
-            "UPDATE daemon_permissions SET snapshot_json = '{' WHERE id = 1",
+            "INSERT INTO daemon_capabilities(id, snapshot_json) VALUES (1, '{')",
             [],
         )
-        .expect("corrupt permissions JSON");
+        .expect("corrupt capabilities JSON");
     drop(connection);
 
     let events = StoreReader::open(database.path())
@@ -365,12 +365,7 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
         last_event_ts: Some("2026-08-16T09:59:44Z".to_owned()),
         degraded: BTreeMap::from([("chrome".to_owned(), "permission denied".to_owned())]),
         collector_failures: BTreeMap::from([("ax".to_owned(), 2), ("eventtap".to_owned(), 5)]),
-        permissions: Some(DaemonPermissions {
-            permissions_ok: false,
-            accessibility: PermissionState::Granted,
-            input_monitoring: PermissionState::Denied,
-            automation: BTreeMap::new(),
-        }),
+        capabilities: Some(permission_snapshot(false)),
     };
     writer.write_daemon_state(&state).expect("write state");
 
@@ -384,10 +379,10 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
     assert_eq!(fresh.events_dropped, 3);
     assert_eq!(fresh.degraded, state.degraded);
     assert_eq!(fresh.collector_failures, state.collector_failures);
-    assert_eq!(fresh.reported_permissions(), state.permissions.as_ref());
+    assert_eq!(fresh.reported_capabilities(), state.capabilities.as_ref());
     assert_eq!(
-        fresh.last_reported_permissions(),
-        state.permissions.as_ref()
+        fresh.last_reported_capabilities(),
+        state.capabilities.as_ref()
     );
     assert_eq!(fresh.effective_retention_hours(48), 72);
 
@@ -398,10 +393,10 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
     assert!(!stale.paused);
     assert!(stale.degraded.is_empty());
     assert_eq!(stale.collector_failures, state.collector_failures);
-    assert_eq!(stale.reported_permissions(), None);
+    assert_eq!(stale.reported_capabilities(), None);
     assert_eq!(
-        stale.last_reported_permissions(),
-        state.permissions.as_ref()
+        stale.last_reported_capabilities(),
+        state.capabilities.as_ref()
     );
     assert_eq!(stale.effective_retention_hours(48), 48);
 
@@ -438,7 +433,7 @@ fn stopped_state_retains_last_known_permissions_without_reporting_them_as_curren
     let writer = StoreWriter::open(database.path()).expect("open writer");
     let permissions = permission_snapshot(true);
     let mut running = running_state(OffsetDateTime::now_utc(), 48);
-    running.permissions = Some(permissions.clone());
+    running.capabilities = Some(permissions.clone());
     writer
         .write_daemon_state(&running)
         .expect("write recorder permission report");
@@ -453,9 +448,9 @@ fn stopped_state_retains_last_known_permissions_without_reporting_them_as_curren
     assert!(!status.running);
     assert_eq!(status.heartbeat_at, None);
     assert_eq!(status.instance_id, None);
-    assert_eq!(status.permissions, None);
-    assert_eq!(status.reported_permissions(), None);
-    assert_eq!(status.last_reported_permissions(), Some(&permissions));
+    assert_eq!(status.capabilities, None);
+    assert_eq!(status.reported_capabilities(), None);
+    assert_eq!(status.last_reported_capabilities(), Some(&permissions));
 }
 
 #[test]
@@ -465,7 +460,7 @@ fn new_heartbeat_does_not_expose_last_known_permissions_as_current() {
     let now = OffsetDateTime::now_utc();
     let permissions = permission_snapshot(true);
     let mut previous = running_state(now, 48);
-    previous.permissions = Some(permissions.clone());
+    previous.capabilities = Some(permissions.clone());
     writer
         .write_daemon_state(&previous)
         .expect("write previous recorder report");
@@ -482,8 +477,8 @@ fn new_heartbeat_does_not_expose_last_known_permissions_as_current() {
         .and_then(|reader| reader.status_at(now + time::Duration::seconds(1)))
         .expect("read new recorder status");
     assert!(status.running);
-    assert_eq!(status.reported_permissions(), None);
-    assert_eq!(status.last_reported_permissions(), Some(&permissions));
+    assert_eq!(status.reported_capabilities(), None);
+    assert_eq!(status.last_reported_capabilities(), Some(&permissions));
 }
 
 #[test]
@@ -591,30 +586,22 @@ fn recovery_rolls_back_events_when_the_transaction_fails() {
 #[test]
 fn status_reads_legacy_store_without_daemon_permission_table() {
     let database = TestDatabase::new("legacy-status");
-    let writer = StoreWriter::open(database.path()).expect("open writer");
-    writer
-        .write_daemon_state(&DaemonState {
-            pid: Some(42),
-            started_at: Some("2026-08-16T08:00:00Z".to_owned()),
-            instance_id: Some("42@2026-08-16T08:00:00Z".to_owned()),
-            mode: Some(DaemonMode::Foreground),
-            heartbeat_at: Some("2026-08-16T10:00:00Z".to_owned()),
-            retention_hours: Some(48),
-            ..DaemonState::default()
-        })
-        .expect("write heartbeat");
-    drop(writer);
-    rusqlite::Connection::open(database.path())
-        .expect("open legacy store")
-        .execute("DROP TABLE daemon_permissions", [])
-        .expect("remove post-v1 permission table");
+    let version = super::LEGACY_STORE_SCHEMA_VERSION;
+    let connection = rusqlite::Connection::open(database.path()).expect("open legacy store");
+    connection
+        .execute_batch(&legacy_daemon_schema(version))
+        .expect("create legacy schema");
+    connection
+        .execute(legacy_running_state_sql(version), [])
+        .expect("write legacy heartbeat");
+    drop(connection);
 
     let status = StoreReader::open(database.path())
         .and_then(|reader| reader.status_at(timestamp("2026-08-16T10:00:01Z")))
         .expect("read legacy status");
 
     assert!(status.running);
-    assert_eq!(status.reported_permissions(), None);
+    assert_eq!(status.reported_capabilities(), None);
 }
 
 #[test]
@@ -650,7 +637,7 @@ fn readers_handle_retention_and_failure_metrics_from_prior_schemas() {
 }
 
 #[test]
-fn writer_migrates_prior_daemon_state_schemas_to_v5() {
+fn writer_migrates_prior_daemon_state_schemas_to_current() {
     for version in [
         super::LEGACY_STORE_SCHEMA_VERSION,
         super::DAEMON_IDENTITY_STORE_SCHEMA_VERSION,
@@ -691,16 +678,15 @@ fn writer_migrates_prior_daemon_state_schemas_to_v5() {
         assert!(
             columns
                 .iter()
-                .any(|column| column == "last_known_permissions_json")
+                .any(|column| column == "last_known_capabilities_json")
         );
     }
 }
 
 #[test]
-fn v4_migration_copies_the_existing_permission_snapshot_to_last_known() {
+fn v4_migration_discards_the_legacy_permission_snapshot() {
     let database = TestDatabase::new("v4-permissions-migration");
-    let permissions = permission_snapshot(false);
-    let permissions_json = serde_json::to_string(&permissions).expect("serialize permissions");
+    let legacy_permissions_json = "legacy permission snapshot";
     let connection = rusqlite::Connection::open(database.path()).expect("open v4 store");
     connection
         .execute_batch(&legacy_daemon_schema(
@@ -718,18 +704,28 @@ fn v4_migration_copies_the_existing_permission_snapshot_to_last_known() {
     connection
         .execute(
             "INSERT INTO daemon_permissions(id, snapshot_json) VALUES (1, ?1)",
-            [&permissions_json],
+            [&legacy_permissions_json],
         )
         .expect("write v4 permission snapshot");
     drop(connection);
 
     StoreWriter::open(database.path()).expect("migrate v4 writer");
+    let old_table_exists = rusqlite::Connection::open(database.path())
+        .and_then(|connection| {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'daemon_permissions')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+        })
+        .expect("inspect migrated schema");
+    assert!(!old_table_exists);
 
     let status = StoreReader::open(database.path())
         .and_then(|reader| reader.status())
         .expect("read migrated status");
-    assert_eq!(status.reported_permissions(), None);
-    assert_eq!(status.last_reported_permissions(), Some(&permissions));
+    assert_eq!(status.reported_capabilities(), None);
+    assert_eq!(status.last_reported_capabilities(), None);
 }
 
 fn app_launch(id: &str, ts: &str, app_name: &str, bundle_id: &str) -> Event {
@@ -823,21 +819,21 @@ fn running_state(heartbeat_at: OffsetDateTime, retention_hours: u64) -> DaemonSt
         last_event_ts: None,
         degraded: BTreeMap::new(),
         collector_failures: BTreeMap::new(),
-        permissions: None,
+        capabilities: None,
     }
 }
 
-fn permission_snapshot(permissions_ok: bool) -> DaemonPermissions {
-    DaemonPermissions {
-        permissions_ok,
-        accessibility: PermissionState::Granted,
-        input_monitoring: if permissions_ok {
-            PermissionState::Granted
+fn permission_snapshot(permissions_ok: bool) -> DaemonCapabilities {
+    DaemonCapabilities::new(
+        BTreeSet::from([Capability::ReadAccessibilityTree, Capability::ObserveInput]),
+        CapabilityState::Available,
+        if permissions_ok {
+            CapabilityState::Available
         } else {
-            PermissionState::Denied
+            CapabilityState::ActionRequired
         },
-        automation: BTreeMap::new(),
-    }
+        CapabilityState::Deferred,
+    )
 }
 
 fn legacy_daemon_schema(version: i64) -> String {
@@ -1590,12 +1586,7 @@ fn set_aside_store_state_is_adopted_by_the_new_store() {
                 events_dropped: 2,
                 last_event_ts: Some("2026-08-16T09:00:00.000Z".to_owned()),
                 collector_failures: BTreeMap::from([("eventtap".to_owned(), 3)]),
-                permissions: Some(DaemonPermissions {
-                    permissions_ok: false,
-                    accessibility: PermissionState::Granted,
-                    input_monitoring: PermissionState::Denied,
-                    automation: BTreeMap::new(),
-                }),
+                capabilities: Some(permission_snapshot(false)),
                 ..DaemonState::default()
             })
         })
@@ -1629,10 +1620,10 @@ fn set_aside_store_state_is_adopted_by_the_new_store() {
     assert_eq!(status.collector_failures.get("eventtap"), Some(&3));
     assert_eq!(
         status
-            .last_known_permissions
+            .last_known_capabilities
             .as_ref()
-            .map(|permissions| permissions.input_monitoring),
-        Some(PermissionState::Denied)
+            .map(|capabilities| capabilities.state(Capability::ObserveInput)),
+        Some(CapabilityState::ActionRequired)
     );
     assert!(!status.running);
     remove_retired(&retired).expect("remove retired");

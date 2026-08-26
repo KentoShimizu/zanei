@@ -472,7 +472,7 @@ zanei export --since 24h --types app.*,window.*,ui.*,input.*,browser.*,clipboard
 
 `export` は全形式で既定ですべての event type を含み、`content.snapshot` も含みます。`query` と異なり、`--types` 省略時に content を隠しません。`--format json` は event object の array のままです。JSON / JSONL export は未知の event type を skip し、`--quiet` でなければ件数を stderr に warning として出します。
 
-`--format sqlite` は、稼働中のストアと同じテーブル（`events`・`daemon_state`・`daemon_permissions`・`meta`）を持つ平文の SQLite スナップショットを、指定範囲について書き出します。保持期間は他の読み取りと同様に適用されます。SQLite export は対象 row を decode せず copy するため、未知 type も skip せず copy します。`--out` は必須で、省略すると使用法エラー（code 2）です。ファイルは所有者のみ読み書き可（mode 0600）で作成され、上書きはしません。既存のパスを指定すると code 1 で失敗し、`snapshot file already exists at PATH; choose another --out path` を表示します。成功時は `Wrote a plaintext SQLite snapshot with N events to PATH` を表示します（`--quiet` で抑制）。snapshot は暗号化されず、`content.*` が対象なら本文を平文で含みます。機微な JSONL export と同様に扱い、共有・外部処理に必要な family だけを `--types` で選んでください。`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディング、および `zanei query --store snapshot.sqlite` で開けます。
+`--format sqlite` は、稼働中のストアと同じテーブル（`events`・`daemon_state`・`daemon_capabilities`・`meta`）を持つ平文の SQLite スナップショットを、指定範囲について書き出します。保持期間は他の読み取りと同様に適用されます。SQLite export は対象 row を decode せず copy するため、未知 type も skip せず copy します。`--out` は必須で、省略すると使用法エラー（code 2）です。ファイルは所有者のみ読み書き可（mode 0600）で作成され、上書きはしません。既存のパスを指定すると code 1 で失敗し、`snapshot file already exists at PATH; choose another --out path` を表示します。成功時は `Wrote a plaintext SQLite snapshot with N events to PATH` を表示します（`--quiet` で抑制）。snapshot は暗号化されず、`content.*` が対象なら本文を平文で含みます。機微な JSONL export と同様に扱い、共有・外部処理に必要な family だけを `--types` で選んでください。`sqlite3`、DB Browser for SQLite、各言語の SQLite バインディング、および `zanei query --store snapshot.sqlite` で開けます。
 
 ## `purge`
 

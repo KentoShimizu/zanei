@@ -113,9 +113,9 @@ impl StatusReport {
             last_event_after_heartbeat,
         );
         let permissions_ok = owner_matches_heartbeat
-            .then_some(status.permissions.as_ref())
+            .then_some(status.capabilities.as_ref())
             .flatten()
-            .map(|permissions| permissions.permissions_ok)
+            .map(|capabilities| capabilities.ready())
             .map_or_else(|| permissions_ok(config), Ok)?;
         let owner_fields = owner_fields(owner, now)?;
 

@@ -6,7 +6,6 @@ use zanei_core::store::StoreStatus;
 
 use super::super::doctor::StartPermissionState;
 use crate::error::CliError;
-use crate::permissions::permission_snapshot_ready;
 use crate::store_access::{self, KeyPrompt};
 
 pub(super) const WAITING_FOR_PERMISSION_CHECK: &str =
@@ -65,10 +64,10 @@ fn permission_state(config: &Config, status: Option<&StoreStatus>) -> StartPermi
     let required = crate::daemon::required_capabilities_for(config);
     // Never fall back to a CLI-local probe here: the CLI inherits the terminal's TCC identity,
     // not the recorder's, so its result cannot authorize a recorder-specific opt-in prompt.
-    let Some(snapshot) = status.and_then(StoreStatus::last_reported_permissions) else {
+    let Some(snapshot) = status.and_then(StoreStatus::last_reported_capabilities) else {
         return StartPermissionState::PendingSnapshot;
     };
-    match permission_snapshot_ready(&required, snapshot) {
+    match snapshot.ready_for(&required) {
         Some(true) => StartPermissionState::Ready,
         Some(false) => StartPermissionState::Missing,
         None => StartPermissionState::PendingSnapshot,
@@ -77,19 +76,18 @@ fn permission_state(config: &Config, status: Option<&StoreStatus>) -> StartPermi
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
 
     use tempfile::TempDir;
-    use zanei_core::store::{
-        DaemonMode, DaemonPermissions, DaemonState, PermissionState, StoreWriter,
-    };
+    use zanei_core::store::{DaemonMode, DaemonState, StoreWriter};
+    use zanei_core::{CapabilityState, DaemonCapabilities};
 
     use super::*;
 
     #[test]
     fn persisted_last_report_is_used_before_bootstrap() {
         let status = StoreStatus {
-            last_known_permissions: Some(granted_permissions()),
+            last_known_capabilities: Some(granted_permissions()),
             ..StoreStatus::default()
         };
 
@@ -112,7 +110,7 @@ mod tests {
                 mode: Some(DaemonMode::Launchd),
                 heartbeat_at: Some("2026-08-17T10:00:01Z".to_owned()),
                 retention_hours: Some(48),
-                permissions: Some(granted_permissions()),
+                capabilities: Some(granted_permissions()),
                 ..DaemonState::default()
             })
             .expect("write recorder report");
@@ -132,28 +130,14 @@ mod tests {
 
         let state = permission_state(&Config::default(), None);
 
-        assert!(terminal_tcc_snapshot.permissions_ok);
+        assert!(terminal_tcc_snapshot.ready());
         assert_eq!(state, StartPermissionState::PendingSnapshot);
     }
 
     #[test]
-    fn incomplete_recorder_report_is_pending() {
-        let mut incomplete = granted_permissions();
-        incomplete.automation.clear();
+    fn current_config_rechecks_denied_persisted_states() {
         let status = StoreStatus {
-            last_known_permissions: Some(incomplete),
-            ..StoreStatus::default()
-        };
-
-        let state = permission_state(&Config::default(), Some(&status));
-
-        assert_eq!(state, StartPermissionState::PendingSnapshot);
-    }
-
-    #[test]
-    fn denied_persisted_report_is_missing() {
-        let status = StoreStatus {
-            last_known_permissions: Some(denied_permissions()),
+            last_known_capabilities: Some(denied_permissions()),
             ..StoreStatus::default()
         };
 
@@ -162,27 +146,39 @@ mod tests {
         assert_eq!(state, StartPermissionState::Missing);
     }
 
-    fn granted_permissions() -> DaemonPermissions {
-        DaemonPermissions {
-            permissions_ok: true,
-            accessibility: PermissionState::Granted,
-            input_monitoring: PermissionState::Granted,
-            automation: BTreeMap::from([(
-                "com.google.Chrome".to_owned(),
-                PermissionState::Granted,
-            )]),
-        }
+    #[test]
+    fn newly_required_capability_waits_for_a_fresh_snapshot() {
+        let status = StoreStatus {
+            last_known_capabilities: Some(DaemonCapabilities::new(
+                BTreeSet::new(),
+                CapabilityState::Available,
+                CapabilityState::Available,
+                CapabilityState::Deferred,
+            )),
+            ..StoreStatus::default()
+        };
+
+        assert_eq!(
+            permission_state(&Config::default(), Some(&status)),
+            StartPermissionState::PendingSnapshot
+        );
     }
 
-    fn denied_permissions() -> DaemonPermissions {
-        DaemonPermissions {
-            permissions_ok: false,
-            accessibility: PermissionState::Denied,
-            input_monitoring: PermissionState::Granted,
-            automation: BTreeMap::from([(
-                "com.google.Chrome".to_owned(),
-                PermissionState::Granted,
-            )]),
-        }
+    fn granted_permissions() -> DaemonCapabilities {
+        DaemonCapabilities::new(
+            crate::daemon::required_capabilities_for(&Config::default()),
+            CapabilityState::Available,
+            CapabilityState::Available,
+            CapabilityState::Available,
+        )
+    }
+
+    fn denied_permissions() -> DaemonCapabilities {
+        DaemonCapabilities::new(
+            crate::daemon::required_capabilities_for(&Config::default()),
+            CapabilityState::ActionRequired,
+            CapabilityState::Available,
+            CapabilityState::Available,
+        )
     }
 }

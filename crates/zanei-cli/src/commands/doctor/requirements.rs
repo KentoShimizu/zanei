@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 
 use zanei_collector::Capability;
 use zanei_core::config::{CaptureSource, Config};
+#[cfg(test)]
 use zanei_core::privacy::CHROME_BUNDLE_ID;
-use zanei_core::store::{DaemonPermissions, PermissionState};
+use zanei_core::{CapabilityState, DaemonCapabilities};
 
 const ACCESSIBILITY_PANE: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
@@ -36,14 +37,10 @@ pub(super) fn estimated_permissions(config: &Config) -> BTreeSet<Capability> {
 }
 
 pub(super) fn snapshot_status(
-    snapshot: &DaemonPermissions,
+    snapshot: &DaemonCapabilities,
     capability: &Capability,
-) -> Option<PermissionState> {
-    match capability {
-        Capability::ReadAccessibilityTree => Some(snapshot.accessibility),
-        Capability::ObserveInput => Some(snapshot.input_monitoring),
-        Capability::AutomateBrowser => snapshot.automation.get(CHROME_BUNDLE_ID).copied(),
-    }
+) -> CapabilityState {
+    snapshot.state(*capability)
 }
 
 pub(super) fn permission_name_and_pane(capability: &Capability) -> (&'static str, &'static str) {
@@ -54,11 +51,11 @@ pub(super) fn permission_name_and_pane(capability: &Capability) -> (&'static str
     }
 }
 
-pub(super) const fn status_name(status: PermissionState) -> &'static str {
+pub(super) const fn status_name(status: CapabilityState) -> &'static str {
     match status {
-        PermissionState::Granted => "granted",
-        PermissionState::Denied => "denied",
-        PermissionState::NotDetermined => "not_determined",
+        CapabilityState::Available => "granted",
+        CapabilityState::ActionRequired => "denied",
+        CapabilityState::Deferred => "not_determined",
     }
 }
 

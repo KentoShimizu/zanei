@@ -1,9 +1,10 @@
 use rusqlite::Connection;
 
 use super::{
-    COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION,
-    LEGACY_STORE_SCHEMA_VERSION, PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION,
-    RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError,
+    COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION,
+    DAEMON_IDENTITY_STORE_SCHEMA_VERSION, LEGACY_STORE_SCHEMA_VERSION,
+    PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION, RETENTION_STORE_SCHEMA_VERSION,
+    STORE_SCHEMA_VERSION, StoreError,
 };
 
 pub(super) fn migrate_schema(connection: &Connection) -> Result<(), StoreError> {
@@ -12,8 +13,7 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<(), StoreError> 
     if version == STORE_SCHEMA_VERSION {
         return Ok(());
     }
-    if !(LEGACY_STORE_SCHEMA_VERSION..=PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION).contains(&version)
-    {
+    if !(LEGACY_STORE_SCHEMA_VERSION..=CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION).contains(&version) {
         return Err(StoreError::UnsupportedSchemaVersion(version));
     }
     let transaction = connection.unchecked_transaction()?;
@@ -42,14 +42,21 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<(), StoreError> 
             }
             COLLECTOR_FAILURES_STORE_SCHEMA_VERSION => {
                 transaction.execute_batch(
-                    "ALTER TABLE daemon_state ADD COLUMN last_known_permissions_json TEXT; \
-                     UPDATE daemon_state SET last_known_permissions_json = \
-                         (SELECT snapshot_json FROM daemon_permissions WHERE id = 1) \
-                     WHERE id = 1;",
+                    "ALTER TABLE daemon_state ADD COLUMN last_known_permissions_json TEXT;",
                 )?;
                 PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION
             }
-            PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION => STORE_SCHEMA_VERSION,
+            PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION => CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION,
+            CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION => {
+                transaction.execute_batch(
+                    "ALTER TABLE daemon_state RENAME COLUMN last_known_permissions_json \
+                         TO last_known_capabilities_json; \
+                     UPDATE daemon_state SET last_known_capabilities_json = NULL WHERE id = 1; \
+                     DROP TABLE IF EXISTS daemon_permissions; \
+                     DELETE FROM daemon_capabilities;",
+                )?;
+                STORE_SCHEMA_VERSION
+            }
             _ => unreachable!("schema version range was validated before migration"),
         };
         transaction.execute("UPDATE meta SET schema_version = ?1", [next])?;
