@@ -28,7 +28,7 @@ One event per line (NDJSON) in raw outputs (`query --format jsonl`, `record`, `e
 
 | Field | Description |
 | --- | --- |
-| `v` | Minimum envelope version required to interpret this event type. Existing event types use `1`; `content.snapshot` uses `2` |
+| `v` | Minimum envelope version required to interpret this event type and payload. Existing event types use `1`; retained legacy `content.snapshot` events use `2`; current `content.snapshot` events use `3` |
 | `id` | ULID-based event ID, unique and time-sortable |
 | `ts` | Wall-clock timestamp (RFC3339, millisecond precision) |
 | `mono_ns` | Monotonic clock in nanoseconds, for reliable ordering even across wall-clock changes |
@@ -51,7 +51,7 @@ Zanei measures these limits in UTF-8 bytes during normalization. A value at the 
 
 | Limit | Fields | Rationale |
 | --- | --- | --- |
-| 32 KiB (32,768 bytes) | `content.snapshot.data.text` at collection time | Bounds one Accessibility snapshot while preserving useful visible text; a cut-off snapshot has `data.complete: false` |
+| 32 KiB (32,768 bytes) | `content.snapshot.data.text` at collection time | Bounds one Accessibility snapshot while preserving useful visible text; a snapshot stopped by this limit has `data.cutoff: "bytes"` |
 | 64 KiB (65,536 bytes) | `element.value`; every `data.text`, including the independent safety check for `content.snapshot` | Bounds per-field redaction, serialization, and in-memory batch cost. Snapshot collection stops earlier at 32 KiB, so this is only a core safety valve for that type |
 | 4 KiB (4,096 bytes) | `window.title`; `element.title`; `data.prev_title` for `window.title`; `data.url` and `data.tab_title` for `browser.navigate` | URLs and titles are context metadata; normal values fit comfortably while abnormal OS or application payloads are rejected |
 
@@ -98,7 +98,7 @@ What each type carries in `data`, and whether the envelope's `window` / `element
 | `browser.navigate` | ✓ | — | `url` (null only after size limiting), `tab_title`, `mode` (always `"normal"`), `transition` (`navigate`/`tab_switch`/null) |
 | `clipboard.copy` | ✓ / — | — | `origin` (`copy_shortcut`/`unknown`), `content_kind` (`text`/`image`/`file`/`other`), `size_bytes`, `text`. Unknown origin has no app/window attribution or body |
 | `clipboard.paste` | ✓ | — | `content_kind`, `size_bytes`, `text`, and `field_kind` of the paste target |
-| `content.snapshot` | ✓ | — | `text` (`string` or null after the core size safety rule), `chars` (pre-redaction character count after the collector limit), `complete` (whether the visible tree was read within the collection limits), `trigger` (`settle`, `refresh`, or `focus_out`). Source is `macos.ax` |
+| `content.snapshot` | ✓ | — | Current v3: `text` (`string` or null after the core size safety rule), `chars` (pre-redaction character count after the collector limit), `cutoff` (`time`, `nodes`, `bytes`, or `stopped` when traversal stops early; null when it completes), and `trigger` (`settle`, `refresh`, or `focus_out`). Retained legacy v2 events instead carry `complete` and do not identify the cut-off reason. Source is `macos.ax` |
 
 `field_kind` classifies the focused input field: `text` / `search` / `url` / `email` / `number` / `other`, or null when focus is not on a text-like element. There is no `password` value. Text bodies require Accessibility to confirm a known non-secure input field; failure to confirm leaves `input.key.text` and pasted text null.
 
@@ -166,7 +166,7 @@ Only content (what you typed or copied) is opt-in. Facts of use (shortcuts, clic
 
 ## Schema versioning
 
-The envelope version is per event type, not a global output version. The existing 13 types require `v: 1`; `content.snapshot` requires `v: 2`. A consumer that understands only `v: 1` does not need to accept a `v: 2` event. The envelope, event taxonomy, contexts, and per-type payloads are closed: `content.snapshot` with `v: 1`, an existing type with `v: 2`, unknown fields, and unknown event types are invalid. Adding a type requires a new minimum `v` and a matching store migration.
+The envelope version is per event type and payload, not a global output version. The existing 13 types require `v: 1`; current `content.snapshot` events require `v: 3`. Retained legacy `content.snapshot` events with `v: 2` remain valid, and `query`, `export`, and MCP `query_events` return them losslessly with their `complete` field rather than inventing a cut-off reason. A consumer that understands only `v: 2` does not need to accept a `v: 3` event. The envelope, event taxonomy, contexts, and per-version payloads are closed: `content.snapshot` with `v: 1`, v2 with `cutoff`, v3 with `complete`, an existing non-snapshot type with v2 or v3, unknown fields, and unknown event types are invalid. Adding a type requires a new minimum `v` and a matching store migration.
 
 Store readers skip rows whose event type they do not recognize instead of failing the whole read. CLI `query` and `export` keep their JSON array shapes and warn with the skipped count on stderr; `--quiet` suppresses the warning. MCP `query_events`, `timeline --format json`, and structured MCP `get_timeline` report the count as `skipped_unknown_types` in their existing result objects.
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Zanei event envelope (per-type versions 1 and 2)",
-  "description": "The authoritative closed OS-independent envelope shared by every event Zanei records. The existing 13 event types require v1 and content.snapshot requires v2. One event appears per line (NDJSON) in raw outputs (query --format jsonl, record, export) and in the events[] array of the MCP query_events result. This file is the single machine-readable contract for all exposure surfaces; the Rust core's schema types are tested against it. Unknown fields, event types, and type-version pairs are rejected. Adding an event type requires a new minimum v and matching store migration.",
+  "title": "Zanei event envelope (per-type versions 1, 2, and 3)",
+  "description": "The authoritative closed OS-independent envelope shared by every event Zanei records. The existing 13 event types require v1, retained legacy content.snapshot events use v2, and current content.snapshot events use v3. One event appears per line (NDJSON) in raw outputs (query --format jsonl, record, export) and in the events[] array of the MCP query_events result. This file is the single machine-readable contract for all exposure surfaces; the Rust core's schema types are tested against it. Unknown fields, event types, and type-version pairs are rejected. Adding an event type requires a new minimum v and matching store migration.",
   "type": "object",
   "additionalProperties": false,
   "required": ["v", "id", "ts", "mono_ns", "source", "type", "app", "window", "element", "data", "truncated", "redaction"],
@@ -20,8 +20,8 @@
   },
   "properties": {
     "v": {
-      "enum": [1, 2],
-      "description": "Minimum envelope version required to interpret this event type. Existing event types use 1; content.snapshot uses 2."
+      "enum": [1, 2, 3],
+      "description": "Minimum envelope version required to interpret this event type and payload. Existing event types use 1; retained legacy content.snapshot events use 2; current content.snapshot events use 3."
     },
     "id": {
       "type": "string",
@@ -115,7 +115,7 @@
     },
     "truncated": {
       "type": "boolean",
-      "description": "True when normalize removed at least one URL, title, or text field because its UTF-8 byte length exceeded the documented per-field limit. For content.snapshot this is the core 64 KiB safety valve; it is independent from data.complete, which describes whether the collector completed traversal within its 32 KiB and other collection budgets. This required field is true exactly when redaction.rules contains size_limit."
+      "description": "True when normalize removed at least one URL, title, or text field because its UTF-8 byte length exceeded the documented per-field limit. For content.snapshot this is the core 64 KiB safety valve; it is independent from the collector result reported by data.cutoff in v3 or data.complete in retained legacy v2 events. This required field is true exactly when redaction.rules contains size_limit."
     },
     "redaction": {
       "type": "object",
@@ -138,11 +138,11 @@
   "allOf": [
     {
       "if": { "properties": { "type": { "const": "content.snapshot" } } },
-      "then": { "properties": { "v": { "const": 2 } } },
+      "then": { "properties": { "v": { "enum": [2, 3] } } },
       "else": { "properties": { "v": { "const": 1 } } }
     },
     {
-      "if": { "properties": { "v": { "const": 2 } } },
+      "if": { "properties": { "v": { "enum": [2, 3] } } },
       "then": { "properties": { "type": { "const": "content.snapshot" } } }
     },
     {
@@ -389,7 +389,12 @@
       }
     },
     {
-      "if": { "properties": { "type": { "const": "content.snapshot" } } },
+      "if": {
+        "properties": {
+          "type": { "const": "content.snapshot" },
+          "v": { "const": 2 }
+        }
+      },
       "then": {
         "properties": {
           "data": {
@@ -399,7 +404,7 @@
             "properties": {
               "text": {
                 "type": ["string", "null"],
-                "description": "Visible Accessibility text after configured redaction. The collector limits UTF-8 output to 32 KiB at a character boundary and reports that collection cut-off with complete=false. The core independently nulls text above its 64 KiB safety limit and marks the envelope truncated=true."
+                "description": "Visible Accessibility text after configured redaction. The collector limits UTF-8 output to 32 KiB at a character boundary and reports an incomplete retained legacy snapshot with complete=false. The core independently nulls text above its 64 KiB safety limit and marks the envelope truncated=true."
               },
               "chars": {
                 "type": "integer",
@@ -409,7 +414,45 @@
               },
               "complete": {
                 "type": "boolean",
-                "description": "True only when traversal completed within the collector's time, node, and 32 KiB byte budgets. This is independent from the envelope truncated flag, which reports the core's 64 KiB safety valve."
+                "description": "True only when traversal completed within the collector's time, node, and 32 KiB byte budgets. Retained legacy v2 events do not identify which budget stopped an incomplete traversal. This is independent from the envelope truncated flag, which reports the core's 64 KiB safety valve."
+              },
+              "trigger": {
+                "enum": ["settle", "refresh", "focus_out"],
+                "description": "The scheduling trigger that caused this snapshot."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "const": "content.snapshot" },
+          "v": { "const": 3 }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "chars", "cutoff", "trigger"],
+            "properties": {
+              "text": {
+                "type": ["string", "null"],
+                "description": "Visible Accessibility text after configured redaction. The collector limits UTF-8 output to 32 KiB at a character boundary and reports the reason for a collection cut-off in cutoff. The core independently nulls text above its 64 KiB safety limit and marks the envelope truncated=true."
+              },
+              "chars": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615,
+                "description": "Character count measured by the collector before redaction. It is unchanged when redaction or the core size safety valve transforms text."
+              },
+              "cutoff": {
+                "type": ["string", "null"],
+                "enum": ["time", "nodes", "bytes", "stopped", null],
+                "description": "Why traversal stopped before completion: the time, node, or 32 KiB byte budget, or recorder shutdown. Null only when traversal completed. This is independent from the envelope truncated flag, which reports the core's 64 KiB safety valve."
               },
               "trigger": {
                 "enum": ["settle", "refresh", "focus_out"],

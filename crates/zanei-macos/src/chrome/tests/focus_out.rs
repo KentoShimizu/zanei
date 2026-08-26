@@ -439,12 +439,12 @@ fn snapshot_event(window_id: i64, text: &str) -> zanei_collector::RawEvent {
             id: Some(window_id),
         }),
         element: None,
-        data: EventData::ContentSnapshot(ContentSnapshotData {
-            text: Some(text.to_owned()),
-            chars: u64::try_from(text.chars().count()).expect("fixture length"),
-            complete: true,
-            trigger: ContentSnapshotTrigger::FocusOut,
-        }),
+        data: EventData::ContentSnapshot(ContentSnapshotData::new(
+            Some(text.to_owned()),
+            u64::try_from(text.chars().count()).expect("fixture length"),
+            None,
+            ContentSnapshotTrigger::FocusOut,
+        )),
         capture_context: Default::default(),
     }
 }

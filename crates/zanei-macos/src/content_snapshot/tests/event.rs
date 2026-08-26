@@ -4,7 +4,7 @@ use zanei_core::{
     config::{FilterConfig, RedactorKind},
     normalize::Normalizer,
     privacy::PrivacyFilter,
-    schema::{CaptureContext, ContentSnapshotTrigger, EventData},
+    schema::{CaptureContext, ContentSnapshotCutoff, ContentSnapshotTrigger, EventData},
 };
 
 use crate::content_snapshot::{
@@ -15,7 +15,7 @@ use crate::content_snapshot::{
 use super::support::trigger;
 
 #[test]
-fn raw_event_matches_the_v2_content_snapshot_contract() {
+fn raw_event_matches_the_v3_content_snapshot_contract() {
     let candidate = ScheduledSnapshot {
         target: trigger(7, 11, SnapshotTriggerKind::Focus, Instant::now()),
         trigger: ContentSnapshotTrigger::Settle,
@@ -28,7 +28,7 @@ fn raw_event_matches_the_v2_content_snapshot_contract() {
             window_id: 11,
         },
         "日本語 alice@example.com".to_owned(),
-        false,
+        None,
         CaptureContext {
             website_host: Some("example.com".to_owned()),
         },
@@ -50,7 +50,7 @@ fn raw_event_matches_the_v2_content_snapshot_contract() {
     };
     assert_eq!(data.text.as_deref(), Some("日本語 alice@example.com"));
     assert_eq!(data.chars, 21);
-    assert!(!data.complete);
+    assert_eq!(data.cutoff(), Some(None));
     assert_eq!(data.trigger, ContentSnapshotTrigger::Settle);
 
     let normalized = Normalizer::new()
@@ -58,7 +58,7 @@ fn raw_event_matches_the_v2_content_snapshot_contract() {
         .expect("normalize raw event")
         .pop()
         .expect("content snapshot emits immediately");
-    assert_eq!(normalized.version, 2);
+    assert_eq!(normalized.version, 3);
     let filtered = PrivacyFilter::new(FilterConfig {
         redactors: vec![RedactorKind::Email],
         ..FilterConfig::default()
@@ -70,4 +70,36 @@ fn raw_event_matches_the_v2_content_snapshot_contract() {
     };
     assert_eq!(data.text.as_deref(), Some("日本語 [REDACTED:email]"));
     assert_eq!(data.chars, 21);
+}
+
+#[test]
+fn raw_event_preserves_every_snapshot_cutoff_reason() {
+    let candidate = ScheduledSnapshot {
+        target: trigger(7, 11, SnapshotTriggerKind::Focus, Instant::now()),
+        trigger: ContentSnapshotTrigger::Refresh,
+        activity_window: None,
+    };
+
+    for cutoff in [
+        ContentSnapshotCutoff::Time,
+        ContentSnapshotCutoff::Nodes,
+        ContentSnapshotCutoff::Bytes,
+        ContentSnapshotCutoff::Stopped,
+    ] {
+        let event = build_raw_event(
+            &candidate,
+            SnapshotWindowKey {
+                pid: 7,
+                window_id: 11,
+            },
+            "partial".to_owned(),
+            Some(cutoff),
+            CaptureContext::default(),
+            time::OffsetDateTime::UNIX_EPOCH,
+        );
+        let EventData::ContentSnapshot(data) = event.data else {
+            panic!("content payload");
+        };
+        assert_eq!(data.cutoff(), Some(Some(cutoff)));
+    }
 }

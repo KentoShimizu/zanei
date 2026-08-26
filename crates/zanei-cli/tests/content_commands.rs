@@ -280,7 +280,7 @@ fn default_reads_exclude_content_while_explicit_queries_and_all_exports_include_
         assert!(
             events
                 .iter()
-                .any(|event| event.event_type == "content.snapshot" && event.version == 2),
+                .any(|event| event.event_type == "content.snapshot" && event.version == 3),
             "types={types}: {events:?}"
         );
     }
@@ -415,7 +415,7 @@ fn mcp_status_query_and_timeline_apply_the_content_contract() {
         serde_json::json!({ "types": ["content.snapshot"] }),
     );
     assert_eq!(content["events"][0]["type"], "content.snapshot");
-    assert_eq!(content["events"][0]["v"], 2);
+    assert_eq!(content["events"][0]["v"], 3);
     let timeline = mcp_tool(
         &mut stdin,
         &mut stdout,
@@ -1029,16 +1029,17 @@ fn event(
 
 fn content_event(id: &str, app_name: &str, at: OffsetDateTime) -> Event {
     let text = format!("Visible snapshot for {app_name}");
+    let chars = text.chars().count() as u64;
     event(
         id,
         app_name,
         at,
-        EventData::ContentSnapshot(ContentSnapshotData {
-            chars: text.chars().count() as u64,
-            text: Some(text),
-            complete: true,
-            trigger: ContentSnapshotTrigger::Settle,
-        }),
+        EventData::ContentSnapshot(ContentSnapshotData::new(
+            Some(text),
+            chars,
+            None,
+            ContentSnapshotTrigger::Settle,
+        )),
         Some(Window {
             title: Some(format!("{app_name} window")),
             id: Some(11),

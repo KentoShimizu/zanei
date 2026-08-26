@@ -167,6 +167,7 @@ fn chromium_profile_produces_snapshot_through_trigger_scheduler_and_worker() {
     // numeric Chromium AXValue handling. Reverting any gate drops or nulls it.
     assert_eq!(data.trigger, ContentSnapshotTrigger::Settle);
     assert_eq!(data.text.as_deref(), Some("Checked option\nHeading"));
+    assert_eq!(data.cutoff(), Some(None));
     assert_eq!(
         event.capture_context.website_host.as_deref(),
         Some("allowed.example")

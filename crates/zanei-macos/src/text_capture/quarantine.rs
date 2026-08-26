@@ -281,12 +281,12 @@ mod tests {
         let mut event = event(OffsetDateTime::UNIX_EPOCH);
         event.source = "macos.ax".to_owned();
         event.event_type = "content.snapshot".to_owned();
-        event.data = EventData::ContentSnapshot(ContentSnapshotData {
-            text: Some("private snapshot".to_owned()),
-            chars: 16,
-            complete: true,
-            trigger: ContentSnapshotTrigger::FocusOut,
-        });
+        event.data = EventData::ContentSnapshot(ContentSnapshotData::new(
+            Some("private snapshot".to_owned()),
+            16,
+            None,
+            ContentSnapshotTrigger::FocusOut,
+        ));
         event
     }
 

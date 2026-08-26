@@ -51,7 +51,7 @@ In 0.3.0, the default `[filter.text_content]` scope excludes Safari, Firefox, Br
 
 ## Content snapshots are opt-in
 
-`capture.content_snapshot = true` records text that macOS Accessibility exposes in the visible part of the frontmost window. It does not take screenshots, use OCR, or call screen-recording APIs. A snapshot is considered after the window settles, periodically while you remain active in it, and when you leave it. Each event contains at most 32 KiB of UTF-8 text; longer or incomplete reads have `data.complete: false`.
+`capture.content_snapshot = true` records text that macOS Accessibility exposes in the visible part of the frontmost window. It does not take screenshots, use OCR, or call screen-recording APIs. A snapshot is considered after the window settles, periodically while you remain active in it, and when you leave it. Each event contains at most 32 KiB of UTF-8 text. `data.cutoff` reports `time`, `nodes`, `bytes`, or `stopped` when traversal ends early, and is null when traversal completes.
 
 Content snapshots are independent from typed-content capture and from `capture.sources`. Zanei does not read secure-field subtrees or the values of single-line input fields, and it takes no snapshot while Secure Input is active. However, text you typed can still appear after it is rendered elsewhere in the window or in a multi-line text area. Snapshots can also contain messages, documents, and other text written by other people.
 

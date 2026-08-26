@@ -6,9 +6,10 @@ use std::{
     time::Duration,
 };
 
+use zanei_core::schema::ContentSnapshotCutoff;
+
 use crate::{
     content_snapshot::{
-        SnapshotCutoff,
         budget::WalkBudget,
         walker::{
             NodeContentAttributes, NodeSafeAttributes, SnapshotNode, SnapshotReadError, WalkClock,
@@ -288,7 +289,7 @@ fn readable_text_assembly_trims_fragments_and_collapses_blank_lines() {
 }
 
 #[test]
-fn node_time_and_utf8_byte_budgets_report_specific_cutoffs() {
+fn node_time_utf8_byte_and_stop_conditions_report_specific_cutoffs() {
     let mut node_root = FakeNode::new("AXGroup");
     node_root.children = vec![FakeNode::new("AXStaticText"), FakeNode::new("AXStaticText")];
     let shared = node_root.clone();
@@ -300,8 +301,7 @@ fn node_time_and_utf8_byte_budgets_report_specific_cutoffs() {
             ..generous_budget()
         },
     );
-    assert_eq!(nodes.cutoff, Some(SnapshotCutoff::Nodes));
-    assert!(!nodes.complete);
+    assert_eq!(nodes.cutoff, Some(ContentSnapshotCutoff::Nodes));
 
     let mut timed = FakeNode::new("AXGroup");
     timed.call_micros = 100_000;
@@ -314,7 +314,7 @@ fn node_time_and_utf8_byte_budgets_report_specific_cutoffs() {
             ..generous_budget()
         },
     );
-    assert_eq!(timed.cutoff, Some(SnapshotCutoff::Time));
+    assert_eq!(timed.cutoff, Some(ContentSnapshotCutoff::Time));
     assert_eq!(timed.elapsed, Duration::from_millis(200));
 
     let mut bytes = FakeNode::new("AXStaticText");
@@ -330,7 +330,19 @@ fn node_time_and_utf8_byte_budgets_report_specific_cutoffs() {
     );
     assert_eq!(bytes.text, "éé");
     assert_eq!(bytes.text.len(), 4);
-    assert_eq!(bytes.cutoff, Some(SnapshotCutoff::Bytes));
+    assert_eq!(bytes.cutoff, Some(ContentSnapshotCutoff::Bytes));
+
+    let stopped = FakeNode::new("AXGroup");
+    let clock = FakeClock(Arc::clone(&stopped.elapsed_micros));
+    let stopped = walk_snapshot(
+        stopped,
+        frame(0.0, 0.0, 100.0, 100.0),
+        generous_budget(),
+        &clock,
+        || true,
+    )
+    .expect("stopped walk");
+    assert_eq!(stopped.cutoff, Some(ContentSnapshotCutoff::Stopped));
 }
 
 #[test]
@@ -341,7 +353,7 @@ fn node_failures_are_degraded_and_offscreen_nodes_are_excluded() {
     failed.children.push(failed_child);
     failed.fail_safe_read = true;
     let output = walk(failed, generous_budget());
-    assert!(output.complete);
+    assert_eq!(output.cutoff, None);
     assert_eq!(output.degraded_nodes, 2);
 
     let mut root = FakeNode::new("AXGroup");
@@ -353,7 +365,7 @@ fn node_failures_are_degraded_and_offscreen_nodes_are_excluded() {
     root = root.with_shared(&shared);
     let output = walk(root, generous_budget());
     assert!(output.text.is_empty());
-    assert!(output.complete);
+    assert_eq!(output.cutoff, None);
 }
 
 #[test]
@@ -404,7 +416,7 @@ fn numeric_values_drop_only_the_affected_nodes() {
 
     let output = walk(root, generous_budget());
 
-    assert!(output.complete);
+    assert_eq!(output.cutoff, None);
     assert_eq!(output.degraded_nodes, 2);
     assert_eq!(output.text, "Visible text");
 }

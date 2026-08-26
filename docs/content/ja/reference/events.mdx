@@ -28,7 +28,7 @@ Zanei が記録するすべてのイベントは、ソースによらず OS 非�
 
 | フィールド | 説明 |
 | --- | --- |
-| `v` | この event type を解釈するために必要な最小 envelope version。既存 type は `1`、`content.snapshot` は `2` |
+| `v` | この event type と payload を解釈するために必要な最小 envelope version。既存 type は `1`、保持中の旧 `content.snapshot` event は `2`、現在の `content.snapshot` event は `3` |
 | `id` | ULID ベースのイベント ID。一意かつ時刻順ソート可能 |
 | `ts` | 実時刻タイムスタンプ（RFC3339、ミリ秒精度） |
 | `mono_ns` | 単調時計（ナノ秒）。実時刻が変わっても順序が保たれる |
@@ -51,7 +51,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 
 | 上限 | 対象 field | 根拠 |
 | --- | --- | --- |
-| 32 KiB（32,768 bytes） | 取得時の `content.snapshot.data.text` | 有用な可視 text を保ちながら Accessibility snapshot 1 件を制限。打ち切った snapshot は `data.complete: false` |
+| 32 KiB（32,768 bytes） | 取得時の `content.snapshot.data.text` | 有用な可視 text を保ちながら Accessibility snapshot 1 件を制限。この上限で打ち切った snapshot は `data.cutoff: "bytes"` |
 | 64 KiB（65,536 bytes） | `element.value` と `content.snapshot` を含むすべての `data.text` | field 単位の redaction・serialize・batch memory コストを制限。snapshot は取得段階で 32 KiB に止まるため、この type には core の独立した安全弁としてだけ働く |
 | 4 KiB（4,096 bytes） | `window.title`、`element.title`、`window.title` の `data.prev_title`、`browser.navigate` の `data.url`・`data.tab_title` | URL/title は文脈 metadata であり、通常値を十分収めながら異常な OS・application payload を拒否するため |
 
@@ -98,7 +98,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `browser.navigate` | ✓ | — | `url`（size limit 適用後のみ null）、`tab_title`、`mode`（常に `"normal"`）、`transition`（`navigate`/`tab_switch`/null） |
 | `clipboard.copy` | ✓ / — | — | `origin`（`copy_shortcut`/`unknown`）、`content_kind`（`text`/`image`/`file`/`other`）、`size_bytes`、`text`。unknown origin は app/window 帰属と本文を持たない |
 | `clipboard.paste` | ✓ | — | `content_kind`、`size_bytes`、`text`、ペースト先の `field_kind` |
-| `content.snapshot` | ✓ | — | `text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`complete`（可視 tree を取得上限内で読み終えたか）、`trigger`（`settle` / `refresh` / `focus_out`）。source は `macos.ax` |
+| `content.snapshot` | ✓ | — | 現在の v3：`text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`cutoff`（打ち切り時は `time` / `nodes` / `bytes` / `stopped`、完了時は null）、`trigger`（`settle` / `refresh` / `focus_out`）。保持中の旧 v2 event は代わりに `complete` を持ち、打ち切り理由は識別できない。source は `macos.ax` |
 
 `field_kind` はフォーカス中の入力フィールドの種別です：`text` / `search` / `url` / `email` / `number` / `other`、テキスト系要素にフォーカスがなければ null。`password` という値は存在しません。Accessibility が既知の非 secure 入力欄を確認できなければ、`input.key.text` とペースト本文は null です。
 
@@ -166,7 +166,7 @@ opt-in なのは「内容」（打った・コピーした文字列）だけで�
 
 ## スキーマのバージョニング
 
-envelope version は出力全体ではなく event type ごとに決まります。既存 13 type は `v: 1`、`content.snapshot` は `v: 2` が必要です。`v: 1` だけを理解する consumer は `v: 2` event を受理する必要がありません。envelope・event taxonomy・context・型別 payload は closed です。`content.snapshot` の `v: 1`、既存 type の `v: 2`、未知の field・event type は不正です。type の追加には新しい最小 `v` と対応する store migration が必要です。
+envelope version は出力全体ではなく event type と payload ごとに決まります。既存 13 type は `v: 1`、現在の `content.snapshot` event は `v: 3` が必要です。`v: 2` の旧 `content.snapshot` event も有効なまま保持し、`query`・`export`・MCP `query_events` は打ち切り理由を捏造せず、`complete` field を持つ v2 のまま欠落なく返します。`v: 2` だけを理解する consumer は `v: 3` event を受理する必要がありません。envelope・event taxonomy・context・version 別 payload は closed です。`content.snapshot` の `v: 1`、`cutoff` を持つ v2、`complete` を持つ v3、snapshot 以外の既存 type の v2 / v3、未知の field・event type は不正です。type の追加には新しい最小 `v` と対応する store migration が必要です。
 
 store reader は未知の event type を含む行を skip し、read 全体は失敗させません。CLI の `query` と `export` は JSON array の形を維持し、skip 件数を stderr に warning として出します。`--quiet` で抑止できます。MCP `query_events`、`timeline --format json`、structured MCP `get_timeline` は既存の result object に `skipped_unknown_types` を返します。
 

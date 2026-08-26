@@ -43,7 +43,7 @@ pub use trigger::{
     SnapshotTrigger, SnapshotTriggerKind, SnapshotTriggerPublisher, SnapshotTriggerReceiver,
     snapshot_trigger_channel,
 };
-pub use walker::{SnapshotCutoff, SnapshotWalkOutput};
+pub use walker::SnapshotWalkOutput;
 
 const REQUIRED_PERMISSIONS: [Permission; 1] = [Permission::Accessibility];
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);

@@ -346,12 +346,12 @@ fn event_payloads() -> Vec<(&'static str, EventData)> {
         ),
         (
             "content.snapshot",
-            EventData::ContentSnapshot(ContentSnapshotData {
-                text: Some("Visible fixture snapshot".to_owned()),
-                chars: 24,
-                complete: true,
-                trigger: ContentSnapshotTrigger::Settle,
-            }),
+            EventData::ContentSnapshot(ContentSnapshotData::new(
+                Some("Visible fixture snapshot".to_owned()),
+                24,
+                None,
+                ContentSnapshotTrigger::Settle,
+            )),
         ),
     ]
 }

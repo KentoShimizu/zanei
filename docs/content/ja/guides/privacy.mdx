@@ -51,7 +51,7 @@ opt-in を有効にした場合の挙動は次のとおりです。
 
 ## Content snapshot は opt-in
 
-`capture.content_snapshot = true` は、前面ウィンドウの可視範囲で macOS Accessibility が公開するテキストを記録します。スクリーンショット・OCR・画面収録 API は使いません。ウィンドウの内容が静止した後、同じウィンドウで操作を続けている間の定期取得、ウィンドウを離れるときに snapshot の候補を作ります。1 event の UTF-8 本文は最大 32 KiB で、途中までしか読めなかった場合は `data.complete: false` になります。
+`capture.content_snapshot = true` は、前面ウィンドウの可視範囲で macOS Accessibility が公開するテキストを記録します。スクリーンショット・OCR・画面収録 API は使いません。ウィンドウの内容が静止した後、同じウィンドウで操作を続けている間の定期取得、ウィンドウを離れるときに snapshot の候補を作ります。1 event の UTF-8 本文は最大 32 KiB です。走査を途中で打ち切った場合は `data.cutoff` に `time` / `nodes` / `bytes` / `stopped` が入り、完了時は null になります。
 
 Content snapshot は入力内容の捕捉とも `capture.sources` とも独立しています。secure field の subtree と単行入力欄の値は読みません。Secure Input 中は snapshot を取りません。ただし、入力したテキストがウィンドウ内の別の場所や複数行のテキスト領域に表示されると含まれ得ます。他人が書いた message・document・その他の表示テキストも含み得ます。
 

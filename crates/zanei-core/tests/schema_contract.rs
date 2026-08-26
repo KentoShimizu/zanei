@@ -4,8 +4,8 @@ use zanei_core::config::{FilterConfig, RedactorKind};
 use zanei_core::normalize::{CONTENT_SNAPSHOT_SAFETY_MAX_BYTES, normalize};
 use zanei_core::privacy::PrivacyFilter;
 use zanei_core::schema::{
-    App, ContentSnapshotData, ContentSnapshotTrigger, Event, EventData, KNOWN_EVENT_TYPES,
-    RawEvent, Window,
+    App, ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotTrigger, Event, EventData,
+    KNOWN_EVENT_TYPES, RawEvent, Window,
 };
 
 const EVENT_SCHEMA: &str = include_str!("../../../docs/public/schema/event.schema.json");
@@ -73,7 +73,7 @@ fn schema_and_rust_accept_the_same_boundary_corpus() {
     let unknown_type = envelope("future.event", json!({}));
     let mut content_with_v1 = envelope(
         "content.snapshot",
-        json!({ "text": "Visible", "chars": 7, "complete": true, "trigger": "settle" }),
+        json!({ "text": "Visible", "chars": 7, "cutoff": null, "trigger": "settle" }),
     );
     content_with_v1["v"] = json!(1);
     let mut existing_with_v2 = envelope("app.launch", json!({}));
@@ -259,11 +259,64 @@ fn serialization_rejects_mismatched_type_version_pairs() {
 
     let mut content: Event = serde_json::from_value(envelope(
         "content.snapshot",
-        json!({ "text": "Visible", "chars": 7, "complete": true, "trigger": "settle" }),
+        json!({ "text": "Visible", "chars": 7, "cutoff": null, "trigger": "settle" }),
     ))
     .expect("content event");
     content.version = 1;
     assert!(serde_json::to_value(content).is_err());
+}
+
+#[test]
+fn retained_v2_content_snapshot_round_trips_without_inventing_a_cutoff() {
+    let validator = validator();
+    let mut legacy = envelope(
+        "content.snapshot",
+        json!({
+            "text": "Visible", "chars": 7,
+            "complete": false, "trigger": "settle"
+        }),
+    );
+    legacy["v"] = json!(2);
+
+    assert_acceptance(&validator, "retained v2 content.snapshot", &legacy, true);
+    let event: Event = serde_json::from_value(legacy.clone()).expect("deserialize retained v2");
+    let EventData::ContentSnapshot(data) = &event.data else {
+        panic!("expected content.snapshot");
+    };
+    assert_eq!(data.cutoff(), None, "v2 has no recorded cutoff reason");
+    assert_eq!(data.legacy_complete(), Some(false));
+    assert_eq!(
+        serde_json::to_value(event).expect("serialize retained v2"),
+        legacy
+    );
+}
+
+#[test]
+fn content_snapshot_payload_shape_must_match_its_version() {
+    let validator = validator();
+    let mut legacy_shape_at_v3 = envelope(
+        "content.snapshot",
+        json!({ "text": "Visible", "chars": 7, "complete": true, "trigger": "settle" }),
+    );
+    legacy_shape_at_v3["v"] = json!(3);
+    assert_acceptance(
+        &validator,
+        "legacy content snapshot shape at v3",
+        &legacy_shape_at_v3,
+        false,
+    );
+
+    let mut current_shape_at_v2 = envelope(
+        "content.snapshot",
+        json!({ "text": "Visible", "chars": 7, "cutoff": null, "trigger": "settle" }),
+    );
+    current_shape_at_v2["v"] = json!(2);
+    assert_acceptance(
+        &validator,
+        "current content snapshot shape at v2",
+        &current_shape_at_v2,
+        false,
+    );
 }
 
 #[test]
@@ -274,39 +327,47 @@ fn content_snapshot_redaction_and_independent_size_boundaries_are_preserved() {
         ..Default::default()
     });
     let redacted = filter
-        .process(normalized_snapshot(original.to_owned(), true))
+        .process(normalized_snapshot(original.to_owned(), None))
         .expect("snapshot remains in scope");
     let EventData::ContentSnapshot(data) = redacted.data else {
         panic!("expected content.snapshot");
     };
     assert_eq!(data.text.as_deref(), Some("Contact [REDACTED:email]"));
     assert_eq!(data.chars, original.chars().count() as u64);
-    assert!(data.complete);
+    assert_eq!(data.cutoff(), Some(None));
     assert_eq!(redacted.redaction.rules, ["email"]);
 
     for bytes in [32 * 1024, 32 * 1024 + 1, CONTENT_SNAPSHOT_SAFETY_MAX_BYTES] {
-        let event = normalized_snapshot("x".repeat(bytes), bytes <= 32 * 1024).event;
+        let cutoff = (bytes > 32 * 1024).then_some(ContentSnapshotCutoff::Bytes);
+        let event = normalized_snapshot("x".repeat(bytes), cutoff).event;
         let EventData::ContentSnapshot(data) = &event.data else {
             panic!("expected content.snapshot");
         };
         assert_eq!(data.text.as_ref().map(String::len), Some(bytes));
         assert_eq!(data.chars, bytes as u64);
-        assert_eq!(data.complete, bytes <= 32 * 1024);
+        assert_eq!(data.cutoff(), Some(cutoff));
         assert!(!event.is_truncated());
     }
 
     let oversized_bytes = CONTENT_SNAPSHOT_SAFETY_MAX_BYTES + 1;
-    let event = normalized_snapshot("x".repeat(oversized_bytes), false).event;
+    let event = normalized_snapshot(
+        "x".repeat(oversized_bytes),
+        Some(ContentSnapshotCutoff::Bytes),
+    )
+    .event;
     let EventData::ContentSnapshot(data) = &event.data else {
         panic!("expected content.snapshot");
     };
     assert_eq!(data.text, None);
     assert_eq!(data.chars, oversized_bytes as u64);
-    assert!(!data.complete);
+    assert_eq!(data.cutoff(), Some(Some(ContentSnapshotCutoff::Bytes)));
     assert!(event.is_truncated());
 }
 
-fn normalized_snapshot(text: String, complete: bool) -> zanei_core::normalize::NormalizedEvent {
+fn normalized_snapshot(
+    text: String,
+    cutoff: Option<ContentSnapshotCutoff>,
+) -> zanei_core::normalize::NormalizedEvent {
     let chars = text.chars().count() as u64;
     normalize(
         RawEvent {
@@ -323,12 +384,12 @@ fn normalized_snapshot(text: String, complete: bool) -> zanei_core::normalize::N
                 id: Some(7),
             }),
             element: None,
-            data: EventData::ContentSnapshot(ContentSnapshotData {
-                text: Some(text),
+            data: EventData::ContentSnapshot(ContentSnapshotData::new(
+                Some(text),
                 chars,
-                complete,
-                trigger: ContentSnapshotTrigger::Settle,
-            }),
+                cutoff,
+                ContentSnapshotTrigger::Settle,
+            )),
             capture_context: Default::default(),
         },
         OffsetDateTime::UNIX_EPOCH,
@@ -435,11 +496,11 @@ fn fixtures() -> Vec<Fixture> {
             "content.snapshot",
             json!({
                 "text": "Visible text", "chars": 12,
-                "complete": true, "trigger": "settle"
+                "cutoff": null, "trigger": "settle"
             }),
             json!({
                 "text": "Visible text", "chars": 12,
-                "complete": true, "trigger": "unknown"
+                "cutoff": null, "trigger": "unknown"
             }),
         ),
     ]
@@ -455,7 +516,7 @@ fn fixture(event_type: &'static str, valid_data: Value, invalid_data: Value) -> 
 
 fn envelope(event_type: &str, data: Value) -> Value {
     let mut value = json!({
-        "v": if event_type == "content.snapshot" { 2 } else { 1 },
+        "v": if event_type == "content.snapshot" { 3 } else { 1 },
         "id": format!("evt_{}", ulid::Ulid::new()),
         "ts": "2026-08-16T12:34:56.789Z",
         "mono_ns": 123456789,
