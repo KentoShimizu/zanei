@@ -9,15 +9,7 @@ Zanei ships one canonical `skills/SKILL.md`. `zanei setup` installs it unchanged
 zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
 ```
 
-| Flag | Description |
-| --- | --- |
-| `--agent` | Target: `claude` / `codex` / `opencode` / `hermes` / `pi` / `claude-desktop` |
-| `--scope` | `project` (default; current repository) or `user` (account-wide). Codex, Hermes Agent, and Claude Desktop are always user-global and ignore it |
-| `--print` | Preview planned file changes without writing |
-
-:::note
-Every agent writes at least one file, so run with `--print` first to preview what would be created or modified.
-:::
+See the [`setup` CLI reference](/reference/cli#setup) for flag semantics.
 
 ## Per-agent setup
 
@@ -34,7 +26,7 @@ This installs the canonical `SKILL.md` unchanged where Claude Code discovers ski
 claude mcp add zanei -- zanei mcp
 ```
 
-With `--scope user`, the skill installs for all your projects instead of the current repository.
+Claude Code installs the skill at `.claude/skills/zanei/SKILL.md` for project scope and `~/.claude/skills/zanei/SKILL.md` for user scope.
 
 </Tab>
 <Tab title="Codex CLI">
@@ -70,7 +62,7 @@ opencode reads Agent Skills natively, so the command installs the canonical `SKI
 
 ```
 $XDG_CONFIG_HOME/opencode/skills/zanei/SKILL.md    # --scope user
-.opencode/skills/zanei/SKILL.md                    # --scope project (default)
+.opencode/skills/zanei/SKILL.md                    # --scope project
 ```
 
 `XDG_CONFIG_HOME` falls back to `~/.config` when unset, matching opencode's own lookup.
@@ -131,6 +123,8 @@ Claude Desktop's chat cannot run `zanei` on your Mac, so MCP is its surface. The
 
 This covers the chat surface only. For Claude Code running inside the same app, run `zanei setup --agent claude`.
 
+Claude Desktop setup always targets `claude_desktop_config.json` regardless of `--scope`.
+
 </Tab>
 <Tab title="pi">
 
@@ -142,7 +136,7 @@ pi reads Agent Skills natively, so the command installs the canonical `SKILL.md`
 
 ```
 ~/.pi/agent/skills/zanei/SKILL.md    # --scope user
-.pi/skills/zanei/SKILL.md            # --scope project (default)
+.pi/skills/zanei/SKILL.md            # --scope project
 ```
 
 pi has no MCP support by design, so `zanei mcp` is not registered and the skill is the only surface.
