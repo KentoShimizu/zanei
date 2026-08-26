@@ -112,60 +112,69 @@ fn codex_skill_is_user_global_exact_and_idempotent_for_both_scopes() {
 }
 
 #[test]
-fn opencode_is_manual_only_for_both_scopes_and_print_modes() {
-    for scope in [Scope::Project, Scope::User] {
-        for print_only in [false, true] {
-            let project = TempDir::new().expect("project tempdir");
-            let home = TempDir::new().expect("home tempdir");
-            let project_agents = project.path().join("AGENTS.md");
-            let project_config = project.path().join("opencode.json");
-            let user_directory = home.path().join(".config/opencode");
-            let user_agents = user_directory.join("AGENTS.md");
-            let user_config = user_directory.join("opencode.json");
-            fs::create_dir_all(&user_directory).expect("user opencode directory");
-            fs::write(&project_agents, "# Project instructions\n").expect("project AGENTS");
-            fs::write(&project_config, r#"{"theme":"project"}"#).expect("project config");
-            fs::write(&user_agents, "# User instructions\n").expect("user AGENTS");
-            fs::write(&user_config, r#"{"theme":"user"}"#).expect("user config");
+fn opencode_skill_follows_the_requested_scope_and_prints_the_mcp_entry() {
+    let project = TempDir::new().expect("project tempdir");
+    let home = TempDir::new().expect("home tempdir");
+    let project_config = project.path().join("opencode.json");
+    fs::write(&project_config, r#"{"theme":"project"}"#).expect("project config");
 
-            let report = run_at(
-                Agent::Opencode,
-                scope,
-                print_only,
-                project.path(),
-                home.path(),
-            )
-            .expect("manual setup");
+    let project_report = run_at(
+        Agent::Opencode,
+        Scope::Project,
+        false,
+        project.path(),
+        home.path(),
+    )
+    .expect("project setup");
+    assert_eq!(
+        fs::read_to_string(project.path().join(".opencode/skills/zanei/SKILL.md"))
+            .expect("project skill"),
+        SKILL
+    );
 
-            assert!(!report.has_changes());
-            assert_eq!(
-                fs::read_to_string(project_agents).expect("unchanged project AGENTS"),
-                "# Project instructions\n"
-            );
-            assert_eq!(
-                fs::read_to_string(project_config).expect("unchanged project config"),
-                r#"{"theme":"project"}"#
-            );
-            assert_eq!(
-                fs::read_to_string(user_agents).expect("unchanged user AGENTS"),
-                "# User instructions\n"
-            );
-            assert_eq!(
-                fs::read_to_string(user_config).expect("unchanged user config"),
-                r#"{"theme":"user"}"#
-            );
+    let user_report = run_at(
+        Agent::Opencode,
+        Scope::User,
+        false,
+        project.path(),
+        home.path(),
+    )
+    .expect("user setup");
+    assert_eq!(
+        fs::read_to_string(home.path().join(".config/opencode/skills/zanei/SKILL.md"))
+            .expect("user skill"),
+        SKILL
+    );
 
-            let output = report.to_string();
-            assert!(output.contains("Paste these instructions anywhere in your AGENTS.md:"));
-            assert!(output.contains("## Zanei activity context"));
-            assert!(output.contains(canonical_body_without_heading()));
-            assert!(output.contains("Add this mcp.zanei server entry to your opencode.json:"));
-            assert!(output.contains(r#""mcp": {"#));
-            assert!(output.contains(r#""command": ["zanei", "mcp"]"#));
-            assert!(!output.contains("name: zanei"));
-            assert!(!output.contains("description: Recover recent local activity context"));
-        }
+    // setup never edits opencode.json itself; the entry is printed for the user to place.
+    assert_eq!(
+        fs::read_to_string(project_config).expect("unchanged project config"),
+        r#"{"theme":"project"}"#
+    );
+    for report in [project_report, user_report] {
+        let output = report.to_string();
+        assert!(output.contains("Add this mcp.zanei server entry to your opencode.json:"));
+        assert!(output.contains(r#""command": ["zanei", "mcp"]"#));
+        assert!(!output.contains("[mcp command]"));
     }
+}
+
+#[test]
+fn opencode_preview_does_not_write_the_skill() {
+    let project = TempDir::new().expect("project tempdir");
+    let home = TempDir::new().expect("home tempdir");
+
+    let report = run_at(
+        Agent::Opencode,
+        Scope::Project,
+        true,
+        project.path(),
+        home.path(),
+    )
+    .expect("preview");
+
+    assert!(!project.path().join(".opencode").exists());
+    assert!(report.to_string().contains("zanei timeline --since 2h"));
 }
 
 #[test]
@@ -268,15 +277,4 @@ fn pi_preview_does_not_write_the_skill() {
 
     assert!(!home.path().join(".pi").exists());
     assert!(report.to_string().contains("zanei timeline --since 2h"));
-}
-
-fn canonical_body_without_heading() -> &'static str {
-    let (_, body) = SKILL
-        .split_once("\n---\n")
-        .expect("canonical skill frontmatter");
-    let (_, instructions) = body
-        .trim_start()
-        .split_once('\n')
-        .expect("canonical skill heading");
-    instructions.trim()
 }

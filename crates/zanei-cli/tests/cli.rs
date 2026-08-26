@@ -406,8 +406,8 @@ fn relevant_help_describes_every_option_and_config_init() {
             &["setup", "--help"],
             &[
                 "Agent integration to configure",
-                "Configure the current project or user account; ignored by opencode",
-                "Preview planned file changes without writing; opencode is always write-free",
+                "Configure the current project or user account; user-global agents ignore it",
+                "Preview planned file changes without writing",
             ],
         ),
         (
@@ -884,50 +884,35 @@ fn setup_codex_print_shows_user_skill_and_writes_nothing() {
 }
 
 #[test]
-fn setup_opencode_always_shows_manual_steps_and_writes_nothing() {
+fn setup_opencode_writes_the_skill_and_leaves_opencode_json_to_the_user() {
     let fixture = Fixture::populated();
     let home = TempDir::new().expect("home tempdir");
+    let project = fixture.directory.path().join("opencode-project");
+    fs::create_dir(&project).expect("project");
+    let opencode_config = project.join("opencode.json");
+    fs::write(&opencode_config, r#"{"theme":"existing"}"#).expect("opencode config");
 
-    for print_only in [false, true] {
-        let project = fixture
-            .directory
-            .path()
-            .join(format!("opencode-{print_only}"));
-        fs::create_dir(&project).expect("project");
-        let agents = project.join("AGENTS.md");
-        let opencode_config = project.join("opencode.json");
-        fs::write(&agents, "# Existing agent instructions\n").expect("AGENTS");
-        fs::write(&opencode_config, r#"{"theme":"existing"}"#).expect("opencode config");
+    let mut command = fixture.command();
+    command.current_dir(&project).env("HOME", home.path());
+    let output = command
+        .args(["setup", "--agent", "opencode", "--scope", "user"])
+        .output()
+        .expect("setup output");
 
-        let mut arguments = vec!["setup", "--agent", "opencode"];
-        if print_only {
-            arguments.push("--print");
-        }
-        let mut command = fixture.command();
-        command.current_dir(&project).env("HOME", home.path());
-        let output = command.args(arguments).output().expect("setup output");
+    assert!(output.status.success());
+    let skill = fs::read_to_string(home.path().join(".config/opencode/skills/zanei/SKILL.md"))
+        .expect("opencode skill");
+    assert!(skill.contains("zanei timeline --since 2h --format md"));
+    assert!(skill.starts_with("---\nname: zanei\n"));
+    assert_eq!(
+        fs::read_to_string(opencode_config).expect("unchanged opencode config"),
+        r#"{"theme":"existing"}"#
+    );
 
-        assert!(output.status.success());
-        assert_eq!(
-            fs::read_to_string(agents).expect("unchanged AGENTS"),
-            "# Existing agent instructions\n"
-        );
-        assert_eq!(
-            fs::read_to_string(opencode_config).expect("unchanged opencode config"),
-            r#"{"theme":"existing"}"#
-        );
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("[manual setup]"));
-        assert!(stdout.contains("Zanei activity context"));
-        assert!(stdout.contains("zanei timeline --since 2h --format md"));
-        assert!(!stdout.contains("name: zanei"));
-        assert!(!stdout.contains("description: Recover recent local activity context"));
-        assert!(stdout.contains("Paste these instructions anywhere in your AGENTS.md:"));
-        assert!(stdout.contains("Add this mcp.zanei server entry to your opencode.json:"));
-        assert!(stdout.contains(r#""mcp": {"#));
-        assert!(stdout.contains(r#""command": ["zanei", "mcp"]"#));
-    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Add this mcp.zanei server entry to your opencode.json:"));
+    assert!(stdout.contains(r#""command": ["zanei", "mcp"]"#));
+    assert!(!stdout.contains("[mcp command]"));
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use serde_json::{Map, Value, json};
 
-use super::assets::{SKILL, derive_instruction_document};
+use super::assets::SKILL;
 use super::error::SetupError;
 
 const OPENCODE_MCP_CONFIG: &str = r#"{
@@ -194,7 +194,7 @@ impl Installation {
         match agent {
             Agent::Claude => installation.add_claude(project_dir, home_dir)?,
             Agent::Codex => installation.add_codex(home_dir)?,
-            Agent::Opencode => installation.add_opencode()?,
+            Agent::Opencode => installation.add_opencode(project_dir, home_dir)?,
             Agent::Hermes => installation.add_hermes(home_dir)?,
             Agent::Pi => installation.add_pi(project_dir, home_dir)?,
             Agent::ClaudeDesktop => installation.add_claude_desktop(home_dir)?,
@@ -256,12 +256,15 @@ impl Installation {
         Ok(())
     }
 
-    fn add_opencode(&mut self) -> Result<(), SetupError> {
-        let instructions = derive_instruction_document(SKILL, "## Zanei activity context")?;
-        self.manual_steps.push(ManualStep {
-            guidance: "Paste these instructions anywhere in your AGENTS.md:",
-            content: instructions,
-        });
+    fn add_opencode(&mut self, project: &Path, home: &Path) -> Result<(), SetupError> {
+        let base = match self.scope {
+            Scope::Project => project.join(".opencode/skills"),
+            Scope::User => home.join(".config/opencode/skills"),
+        };
+        self.files
+            .push(PlannedFile::exact(base.join("zanei/SKILL.md"), SKILL)?);
+        // opencode's `mcp add` is an interactive wizard with no non-interactive flags,
+        // so the server entry is printed for the user to place instead of run as a command.
         self.manual_steps.push(ManualStep {
             guidance: "Add this mcp.zanei server entry to your opencode.json:",
             content: OPENCODE_MCP_CONFIG.to_owned(),

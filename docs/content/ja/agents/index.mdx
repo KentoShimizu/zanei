@@ -17,7 +17,7 @@ Zanei が履歴を公開する経路は 2 つあり、どちらも同じロー�
 skill は 3 つ目の経路ではなく、「いつ履歴を見るか」「トークンを抑える呼び方」を agent に伝える指示レイヤーです。指示の届き方は経路ごとに異なります。
 
 - MCP では指示がプロトコルに含まれています。ツール名・説明・既定値・スキーマは `tools/list` で配信されるため、MCP クライアントに追加の設定は不要です。Claude Desktop の [setup](/ja/agents/setup) がサーバ登録だけで済むのはこのためです。
-- CLI は agent に対して自己記述的でないため、Zanei は単一の `skills/SKILL.md` を指示の正本として持ちます。setup は skill 対応 agent にはそのまま配置します。opencode では `AGENTS.md` 向けの指示を導出して表示し、配置はユーザー自身が行います。各 agent はその指示を固有の方式で読み込みます。
+- CLI は agent に対して自己記述的でないため、Zanei は単一の `skills/SKILL.md` を指示の正本として持ちます。setup は下表のすべての agent にそのまま配置し、各 agent は固有の skill 探索方式でそれを読み込みます。
 
 ## 対応 agent
 
@@ -25,7 +25,7 @@ skill は 3 つ目の経路ではなく、「いつ履歴を見るか」「ト�
 | --- | --- | --- |
 | Claude Code | ✅ `SKILL.md` | ✅ |
 | Codex CLI | ✅ `SKILL.md`（`~/.codex/skills/`） | ✅ `codex mcp add` |
-| opencode | ✅ `SKILL.md` から導出してユーザーが配置する `AGENTS.md` スニペット | ✅ `opencode.json`（手動設定用 JSON を表示） |
+| opencode | ✅ `SKILL.md`（`~/.config/opencode/skills/`、`--scope project` なら `.opencode/skills/`） | ✅ `opencode.json`（手動設定用 JSON を表示） |
 | Hermes Agent | ✅ `SKILL.md`（`~/.hermes/skills/`） | ✅ `hermes mcp add` |
 | pi | ✅ `SKILL.md`（`~/.pi/agent/skills/`、`--scope project` なら `.pi/skills/`） | —（pi は設計方針として MCP を持たない。skill 経路で対応） |
 | Claude Desktop の chat・ChatGPT コネクタ（CLI を実行できない） | — | ✅ 唯一の経路 |

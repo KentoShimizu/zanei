@@ -3,7 +3,7 @@ title: セットアップ
 description: native 連携または手動配置用に表示される指示で、agent に Zanei を設定する。
 ---
 
-Zanei が持つ agent 向け指示の単一ソースは、標準形式の `skills/SKILL.md` だけです。`zanei setup` は skill 対応 agent にはそのまま配置します。opencode では指示スニペットを導出して stdout に表示し、配置はユーザー自身が行います。MCP については各 agent 向けの登録コマンドを表示し、設定ファイルへ直接書き込むのは Claude Desktop のみです。opencode の MCP JSON も手動設定用に表示します。
+Zanei が持つ agent 向け指示の単一ソースは、標準形式の `skills/SKILL.md` だけです。`zanei setup` は対応するすべての agent にそのまま配置します。MCP については各 agent 向けの登録コマンドを表示し、設定ファイルへ直接書き込むのは Claude Desktop のみです。opencode の MCP JSON は手動設定用に表示します。
 
 ```bash
 zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
@@ -66,7 +66,14 @@ Codex の skill と MCP 登録はユーザーグローバルのため、`--scope
 zanei setup --agent opencode
 ```
 
-このコマンドはファイルを一切変更しません。以下の MCP JSON と、単一ソースの `SKILL.md` 本文から導出した `AGENTS.md` スニペットを stdout に表示します。JSON は `opencode.json` に追加し、指示スニペットは `AGENTS.md` の好きな場所に貼り付けてください。`--print` の有無による挙動の違いはありません。
+opencode は Agent Skills を native に読み込むため、このコマンドは単一ソースの `SKILL.md` をそのまま配置します。
+
+```
+~/.config/opencode/skills/zanei/SKILL.md    # --scope user
+.opencode/skills/zanei/SKILL.md             # --scope project（既定）
+```
+
+MCP は手動のままです。`opencode mcp add` が対話ウィザードで、非対話用のフラグを持たないためです。以下のエントリを `opencode.json` に追加してください。
 
 ```json opencode.json
 {
