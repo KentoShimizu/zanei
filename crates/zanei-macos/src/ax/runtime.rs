@@ -16,11 +16,12 @@ use crate::{
     workspace::ApplicationInfo,
 };
 
-use super::ClickObservation;
+use super::{
+    ClickObservation,
+    health::{AxFailure, AxFailureKind, AxFailurePhase, AxFailurePublisher},
+};
 
 pub(super) trait AxApi {
-    type AttachError;
-
     fn running_applications(&self) -> Vec<ApplicationInfo>;
     fn frontmost_application(&self) -> Option<ApplicationInfo>;
     fn attach(
@@ -28,8 +29,8 @@ pub(super) trait AxApi {
         pid: i32,
         app: App,
         manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxEvent>, Self::AttachError>;
-    fn focused_window(&mut self, pid: i32) -> Result<Option<NativeWindow>, Self::AttachError>;
+    ) -> Result<Vec<NativeAxEvent>, AxFailure>;
+    fn focused_window(&mut self, pid: i32) -> Result<Option<NativeWindow>, NativeAxError>;
     fn reconcile_manual_accessibility(&mut self, policy: &ManualAccessibilityPolicy);
     fn detach(&mut self, pid: i32) -> Vec<NativeAxEvent>;
     fn poll(&mut self, timeout: Duration) -> Vec<NativeAxObservation>;
@@ -50,6 +51,7 @@ impl SystemAxApi {
         secure_input_probe: Option<SecureInputProbe>,
         capture_policy: CapturePolicy,
         observe_chrome_loads: bool,
+        failure_publisher: AxFailurePublisher,
     ) -> Self {
         Self {
             native: NativeAx::new(
@@ -58,6 +60,7 @@ impl SystemAxApi {
                 secure_input_probe,
                 capture_policy,
                 observe_chrome_loads,
+                failure_publisher,
             ),
         }
     }
@@ -68,8 +71,6 @@ impl SystemAxApi {
 }
 
 impl AxApi for SystemAxApi {
-    type AttachError = NativeAxError;
-
     fn running_applications(&self) -> Vec<ApplicationInfo> {
         running_applications()
             .into_iter()
@@ -86,8 +87,19 @@ impl AxApi for SystemAxApi {
         pid: i32,
         app: App,
         manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
-        self.native.attach(pid, app, manual_accessibility)
+    ) -> Result<Vec<NativeAxEvent>, AxFailure> {
+        self.native
+            .attach(pid, app, manual_accessibility)
+            .map_err(|error| {
+                AxFailure::new(
+                    Some(i64::from(pid)),
+                    AxFailurePhase::Attach,
+                    AxFailureKind::NativeAx {
+                        operation: error.operation(),
+                        code: error.code(),
+                    },
+                )
+            })
     }
 
     fn focused_window(&mut self, pid: i32) -> Result<Option<NativeWindow>, NativeAxError> {

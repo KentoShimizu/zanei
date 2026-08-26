@@ -119,7 +119,7 @@ agent 向けの軽量チェック：記録は動いているか。`zanei status`
 | フィールド | 意味 |
 | --- | --- |
 | `events_dropped` | 本来記録対象だったが、backpressure・queue full・切断などの配送障害で実際に失われたイベントの累計。app または window に帰属できず記録対象外となる入力と、crash / `SIGKILL` で失われた未 flush データは含まない |
-| `degraded` | component ごとの現在の collector / runtime 劣化状態。回復時に削除される。AX の observer 不在は、daemon 起動後に使用された app、すなわち起動後に activate されたか現在 frontmost の app のみ報告する。observer の attach 成功時に劣化状態から除去される |
+| `degraded` | component ごとの現在の collector / runtime 劣化状態。責任を持つ site の回復時に削除される。AX reason は現在の failure を安定した phase / kind で分類し、取得できる場合は native operation と数値 code、未解消の PID / operation site が複数ならその件数を報告する。成功時に削除するのは対応する site だけ |
 | `collector_failures` | collector ごとの累積処理失敗回数。非ゼロであることだけでは現在劣化中を意味しない |
 | `capture.content_snapshot` | 前面ウィンドウの content snapshot が有効か。snapshot が存在するのは `true` のときだけ。scope 詳細は CLI の `zanei filter show` で確認 |
 | `permissions_ok` | heartbeat が新鮮な間は実行中 recorder 自身の権限判定。recorder 不在時はローカル probe の結果 |

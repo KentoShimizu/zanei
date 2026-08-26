@@ -20,8 +20,9 @@ mod manual_accessibility;
 mod title;
 
 use super::{
-    ApplicationActivationPolicy, ApplicationInfo, AxApi, AxEventBuilder, ClickObservation,
-    NativeAxEvent, NativeHitTest, ObserverHealth, WorkspaceEvent, attach_app, click_channel,
+    ApplicationInfo, AxApi, AxEventBuilder, AxFailure, AxFailureKind, AxFailurePhase,
+    AxFailurePublisher, AxFailureState, AxRecoverySite, ClickObservation, NativeAxEvent,
+    NativeHitTest, ObserverHealth, WorkspaceEvent, attach_app, click_channel,
     publish_focus_observation, run_ax_loop,
 };
 use crate::{
@@ -35,6 +36,7 @@ use crate::{
     focus_context::FocusContext,
     focused_field::{FieldClass, FocusedField},
     text_capture::input_authorization_channel,
+    workspace::ApplicationActivationPolicy,
 };
 
 pub(super) fn capture_policy() -> CapturePolicy {
@@ -245,7 +247,7 @@ struct FakeAxApi {
     frontmost_application: Option<ApplicationInfo>,
     attached_pids: Vec<i32>,
     attach_events: Vec<NativeAxEvent>,
-    attach_results: VecDeque<Result<Vec<NativeAxEvent>, ()>>,
+    attach_results: VecDeque<Result<Vec<NativeAxEvent>, AxFailure>>,
     poll_observations: VecDeque<Vec<NativeAxObservation>>,
     current_degraded_observers: Option<Arc<AtomicU64>>,
     observed_degraded_observers: Option<u64>,
@@ -256,6 +258,11 @@ struct FakeAxApi {
     reconciled_manual_accessibility: Vec<bool>,
     replacement_on_first_poll: Option<(ManualAccessibilityPolicy, FilterConfig)>,
     focused_window: Option<NativeWindow>,
+    failure_publisher: AxFailurePublisher,
+    observed_failure_state: Option<AxFailureState>,
+    stopped_failure_state: Option<AxFailureState>,
+    flush_failure: bool,
+    pending_degraded_operations: AtomicU64,
 }
 
 impl FakeAxApi {
@@ -281,9 +288,18 @@ impl FakeAxApi {
     }
 }
 
-impl AxApi for FakeAxApi {
-    type AttachError = ();
+const fn fake_attach_failure(pid: i64, code: i32) -> AxFailure {
+    AxFailure::new(
+        Some(pid),
+        AxFailurePhase::Attach,
+        AxFailureKind::NativeAx {
+            operation: "AXObserverCreate",
+            code,
+        },
+    )
+}
 
+impl AxApi for FakeAxApi {
     fn running_applications(&self) -> Vec<ApplicationInfo> {
         self.running_applications.clone()
     }
@@ -297,7 +313,7 @@ impl AxApi for FakeAxApi {
         pid: i32,
         app: App,
         _manual_accessibility: bool,
-    ) -> Result<Vec<NativeAxEvent>, Self::AttachError> {
+    ) -> Result<Vec<NativeAxEvent>, AxFailure> {
         self.attached_pids.push(pid);
         self.attached_apps.push(app);
         self.attach_results
@@ -309,7 +325,10 @@ impl AxApi for FakeAxApi {
         Vec::new()
     }
 
-    fn focused_window(&mut self, _pid: i32) -> Result<Option<NativeWindow>, Self::AttachError> {
+    fn focused_window(
+        &mut self,
+        _pid: i32,
+    ) -> Result<Option<NativeWindow>, crate::ffi::ax::NativeAxError> {
         Ok(self.focused_window.clone())
     }
 
@@ -329,6 +348,7 @@ impl AxApi for FakeAxApi {
             .current_degraded_observers
             .as_ref()
             .map(|current| current.load(Ordering::Relaxed));
+        self.observed_failure_state = Some(self.failure_publisher.state());
         if self.stop_after_polls.is_none()
             && let Some(stop) = self.stop_after_poll.as_ref()
         {
@@ -343,6 +363,17 @@ impl AxApi for FakeAxApi {
     }
 
     fn flush_pending(&mut self) -> Vec<NativeAxEvent> {
+        if self.flush_failure {
+            self.failure_publisher.record(
+                &self.pending_degraded_operations,
+                AxRecoverySite::SecureInputFlush,
+                AxFailure::new(
+                    None,
+                    AxFailurePhase::SecureInput,
+                    AxFailureKind::SecureInputProbeTimeout,
+                ),
+            );
+        }
         Vec::new()
     }
 
@@ -355,7 +386,7 @@ impl AxApi for FakeAxApi {
     }
 
     fn take_degraded_operations(&self) -> u64 {
-        0
+        self.pending_degraded_operations.swap(0, Ordering::Relaxed)
     }
 }
 
@@ -408,6 +439,7 @@ fn run_fake_ax_loop_with_context(
     let (_click_sender, click_receiver) = click_channel();
     let (output_sender, output_receiver) = sync_channel(16);
     api.current_degraded_observers = Some(Arc::clone(&current_degraded_observers));
+    let failure_publisher = api.failure_publisher.clone();
     run_ax_loop(
         api,
         stop,
@@ -422,18 +454,21 @@ fn run_fake_ax_loop_with_context(
         &AtomicU64::new(0),
         degraded_operations,
         current_degraded_observers,
+        &failure_publisher,
     );
+    api.stopped_failure_state = Some(failure_publisher.state());
     output_receiver.try_iter().collect()
 }
 
 #[test]
-fn initial_enumeration_attaches_regular_and_accessory_applications_only() {
+fn initial_enumeration_filters_apps_and_counts_shutdown_flush_failure() {
     let mut api = FakeAxApi {
         running_applications: vec![
             app_with_policy(7, ApplicationActivationPolicy::Regular),
             app_with_policy(8, ApplicationActivationPolicy::Accessory),
             app_with_policy(9, ApplicationActivationPolicy::Prohibited),
         ],
+        flush_failure: true,
         ..FakeAxApi::default()
     };
     let (_lifecycle_sender, lifecycle_receiver) = sync_channel(1);
@@ -449,8 +484,9 @@ fn initial_enumeration_attaches_regular_and_accessory_applications_only() {
     );
 
     assert_eq!(api.attached_pids, vec![7, 8]);
-    assert_eq!(degraded_operations.load(Ordering::Relaxed), 0);
+    assert_eq!(degraded_operations.load(Ordering::Relaxed), 1);
     assert_eq!(current_degraded_observers.load(Ordering::Relaxed), 0);
+    assert_eq!(api.stopped_failure_state, Some(AxFailureState::default()));
 }
 
 #[test]
@@ -657,6 +693,7 @@ fn prohibited_application_is_skipped_before_pid_and_failure_accounting() {
     let degraded_operations = AtomicU64::new(0);
     let current_degraded_observers = Arc::new(AtomicU64::new(0));
     let mut observer_health = ObserverHealth::new(Arc::clone(&current_degraded_observers));
+    let failure_publisher = AxFailurePublisher::default();
 
     let pending = attach_app(
         &mut api,
@@ -664,6 +701,7 @@ fn prohibited_application_is_skipped_before_pid_and_failure_accounting() {
         app_with_policy(i64::MAX, ApplicationActivationPolicy::Prohibited),
         &manual_accessibility_policy(),
         &degraded_operations,
+        &failure_publisher,
         &mut observer_health,
     );
 
@@ -714,6 +752,7 @@ fn did_wake_resyncs_focus_and_publishes_a_focus_trigger() {
     focus_context.activate(app(), Some(window()));
     let (trigger_publisher, trigger_receiver) = snapshot_trigger_channel();
     let current_degraded_observers = Arc::new(AtomicU64::new(0));
+    let failure_publisher = AxFailurePublisher::default();
 
     run_ax_loop(
         &mut api,
@@ -729,6 +768,7 @@ fn did_wake_resyncs_focus_and_publishes_a_focus_trigger() {
         &AtomicU64::new(0),
         &AtomicU64::new(0),
         current_degraded_observers,
+        &failure_publisher,
     );
 
     let SnapshotTriggerMessage::FocusTransition { transition, .. } =
@@ -758,6 +798,7 @@ fn did_wake_without_frontmost_app_clears_stale_focus() {
     focus_context.activate(app(), Some(window()));
     let transitions = focus_context.subscribe();
     let current_degraded_observers = Arc::new(AtomicU64::new(0));
+    let failure_publisher = AxFailurePublisher::default();
 
     run_ax_loop(
         &mut api,
@@ -773,6 +814,7 @@ fn did_wake_without_frontmost_app_clears_stale_focus() {
         &AtomicU64::new(0),
         &AtomicU64::new(0),
         current_degraded_observers,
+        &failure_publisher,
     );
 
     let transition = transitions.try_recv().expect("wake clear transition");
@@ -783,7 +825,7 @@ fn did_wake_without_frontmost_app_clears_stale_focus() {
 }
 
 #[test]
-fn observer_health_clears_each_pid_only_after_its_recovery() {
+fn health_tracks_observers_and_operation_sites_independently() {
     let published = Arc::new(AtomicU64::new(0));
     let mut health = ObserverHealth::new(Arc::clone(&published));
 
@@ -798,6 +840,28 @@ fn observer_health_clears_each_pid_only_after_its_recovery() {
     assert_eq!(published.load(Ordering::Relaxed), 1);
     health.mark_available(8);
     assert_eq!(published.load(Ordering::Relaxed), 0);
+
+    let failures = AxFailurePublisher::default();
+    let counter = AtomicU64::new(0);
+    failures.record(&counter, AxRecoverySite::Attach, fake_attach_failure(7, -1));
+    failures.record(&counter, AxRecoverySite::Decode, fake_attach_failure(7, -2));
+    failures.record(&counter, AxRecoverySite::Attach, fake_attach_failure(8, -2));
+    failures.record(&counter, AxRecoverySite::Decode, fake_attach_failure(8, -2));
+    failures.record(&counter, AxRecoverySite::Decode, fake_attach_failure(8, -3));
+    assert_eq!(failures.state().unresolved_sites(), 4);
+    assert_eq!(
+        failures
+            .state()
+            .current()
+            .and_then(|failure| match failure.kind {
+                AxFailureKind::NativeAx { code, .. } => Some(code),
+                _ => None,
+            }),
+        Some(-3)
+    );
+    failures.recover(Some(7), AxRecoverySite::Attach);
+    assert_eq!(failures.state().unresolved_sites(), 3);
+    assert_eq!(counter.load(Ordering::Relaxed), 5);
 }
 
 #[test]
@@ -805,7 +869,7 @@ fn failed_attach_for_unactivated_app_is_not_degraded() {
     let stop = Arc::new(AtomicBool::new(false));
     let mut api = FakeAxApi {
         running_applications: vec![app()],
-        attach_results: VecDeque::from([Err(())]),
+        attach_results: VecDeque::from([Err(fake_attach_failure(7, -25204))]),
         stop_after_poll: Some(Arc::clone(&stop)),
         ..FakeAxApi::default()
     };
@@ -825,13 +889,20 @@ fn failed_attach_for_unactivated_app_is_not_degraded() {
     assert_eq!(api.observed_degraded_observers, Some(0));
     assert_eq!(current_degraded_observers.load(Ordering::Relaxed), 0);
     assert_eq!(degraded_operations.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        api.observed_failure_state
+            .and_then(AxFailureState::current)
+            .map(|failure| failure.to_string()),
+        Some("phase=attach kind=native_ax operation=AXObserverCreate code=-25204".to_owned())
+    );
+    assert_eq!(api.stopped_failure_state, Some(AxFailureState::default()));
 }
 
 #[test]
 fn failed_attach_for_activated_app_is_degraded() {
     let stop = Arc::new(AtomicBool::new(false));
     let mut api = FakeAxApi {
-        attach_results: VecDeque::from([Err(())]),
+        attach_results: VecDeque::from([Err(fake_attach_failure(7, -25204))]),
         stop_after_poll: Some(Arc::clone(&stop)),
         ..FakeAxApi::default()
     };
@@ -860,7 +931,11 @@ fn failed_attach_for_activated_app_is_degraded() {
 fn successful_reattach_clears_activated_app_degradation() {
     let stop = Arc::new(AtomicBool::new(false));
     let mut api = FakeAxApi {
-        attach_results: VecDeque::from([Err(()), Ok(Vec::new()), Ok(Vec::new())]),
+        attach_results: VecDeque::from([
+            Err(fake_attach_failure(7, -25204)),
+            Ok(Vec::new()),
+            Ok(Vec::new()),
+        ]),
         stop_after_poll: Some(Arc::clone(&stop)),
         ..FakeAxApi::default()
     };
@@ -886,6 +961,7 @@ fn successful_reattach_clears_activated_app_degradation() {
     );
 
     assert_eq!(api.attached_pids, vec![7, 8, 7]);
+    assert_eq!(api.observed_failure_state, Some(AxFailureState::default()));
     assert_eq!(api.observed_degraded_observers, Some(0));
     assert_eq!(current_degraded_observers.load(Ordering::Relaxed), 0);
     assert_eq!(degraded_operations.load(Ordering::Relaxed), 1);

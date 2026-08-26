@@ -147,11 +147,11 @@ impl fmt::Display for NativeAxError {
 }
 
 impl NativeAxError {
-    pub(super) const fn operation(&self) -> &'static str {
+    pub(crate) const fn operation(&self) -> &'static str {
         self.operation
     }
 
-    pub(super) const fn code(&self) -> i32 {
+    pub(crate) const fn code(&self) -> i32 {
         self.code
     }
 

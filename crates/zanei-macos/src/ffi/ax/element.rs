@@ -42,7 +42,7 @@ pub(super) struct ValueSnapshot {
     pub(super) role: Option<String>,
     pub(super) subrole: Option<String>,
     pub(super) field_class: FieldClass,
-    pub(super) degraded: bool,
+    pub(super) failure: Option<NativeAxError>,
 }
 
 pub(super) struct ValueFieldSnapshot {
@@ -50,7 +50,7 @@ pub(super) struct ValueFieldSnapshot {
     pub(super) subrole: Option<String>,
     pub(super) field_class: FieldClass,
     pub(super) registration_class: Option<FieldClass>,
-    pub(super) degraded: bool,
+    pub(super) failure: Option<NativeAxError>,
 }
 
 pub(super) fn element_snapshot(
@@ -160,7 +160,7 @@ pub(super) fn value_snapshot(
     secure_input: bool,
 ) -> ValueSnapshot {
     let classification = value_field_snapshot(element, secure_input);
-    if classification.degraded
+    if classification.failure.is_some()
         || matches!(
             classification.field_class,
             FieldClass::SecureText | FieldClass::Unknown
@@ -170,7 +170,7 @@ pub(super) fn value_snapshot(
             classification.field_class,
             classification.role,
             classification.subrole,
-            classification.degraded,
+            classification.failure,
         );
     }
     let ValueFieldSnapshot {
@@ -194,14 +194,14 @@ pub(super) fn value_snapshot(
         Ok(value) => value,
         Err(error) => {
             trace_value_read_error(AX_VALUE_ATTRIBUTE, &error);
-            return suppressed_value_snapshot(FieldClass::Unknown, role, subrole, true);
+            return suppressed_value_snapshot(FieldClass::Unknown, role, subrole, Some(error));
         }
     };
     let character_count = match copy_attribute(element, AX_NUMBER_OF_CHARACTERS_ATTRIBUTE) {
         Ok(character_count) => character_count,
         Err(error) => {
             trace_value_read_error(AX_NUMBER_OF_CHARACTERS_ATTRIBUTE, &error);
-            return suppressed_value_snapshot(FieldClass::Unknown, role, subrole, true);
+            return suppressed_value_snapshot(FieldClass::Unknown, role, subrole, Some(error));
         }
     };
     let character_count = character_count.and_then(|value| i64_value(value.as_ptr()));
@@ -211,7 +211,7 @@ pub(super) fn value_snapshot(
         role,
         subrole,
         field_class,
-        degraded: false,
+        failure: None,
     }
 }
 
@@ -222,7 +222,7 @@ pub(super) fn value_field_snapshot(element: CfRef, secure_input: bool) -> ValueF
             subrole: None,
             field_class: FieldClass::SecureText,
             registration_class: None,
-            degraded: false,
+            failure: None,
         };
     }
     let role = copy_string(element, "AXRole");
@@ -239,14 +239,14 @@ pub(super) fn value_field_snapshot(element: CfRef, secure_input: bool) -> ValueF
             registration_class: Some(field_class(role.as_deref(), subrole.as_deref())),
             role,
             subrole,
-            degraded: false,
+            failure: None,
         },
-        _ => ValueFieldSnapshot {
+        (Err(error), _) | (_, Err(error)) => ValueFieldSnapshot {
             role: None,
             subrole: None,
             field_class: FieldClass::Unknown,
             registration_class: None,
-            degraded: true,
+            failure: Some(error),
         },
     }
 }
@@ -264,7 +264,7 @@ fn suppressed_value_snapshot(
     field_class: FieldClass,
     role: Option<String>,
     subrole: Option<String>,
-    degraded: bool,
+    failure: Option<NativeAxError>,
 ) -> ValueSnapshot {
     ValueSnapshot {
         value: None,
@@ -272,7 +272,7 @@ fn suppressed_value_snapshot(
         role,
         subrole,
         field_class,
-        degraded,
+        failure,
     }
 }
 

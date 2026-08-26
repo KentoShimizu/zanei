@@ -61,6 +61,7 @@ impl AppObserver {
                 source,
                 context,
                 degraded,
+                Default::default(),
                 false,
                 app,
                 capture_policy,
@@ -73,6 +74,7 @@ impl AppObserver {
                 source,
                 context,
                 degraded,
+                Default::default(),
                 false,
                 app,
                 capture_policy,
@@ -123,5 +125,9 @@ impl AppObserver {
 
     pub(in crate::ffi::ax) fn fake_degraded_operations(&self) -> u64 {
         self.degraded.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(in crate::ffi::ax) fn fake_failure_state(&self) -> crate::ax::AxFailureState {
+        self.failures.state()
     }
 }

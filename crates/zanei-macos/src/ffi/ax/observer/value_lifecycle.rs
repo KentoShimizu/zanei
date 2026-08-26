@@ -1,9 +1,10 @@
 //! Focused and retired AX value lifecycle.
 
-use std::{sync::atomic::Ordering, time::Instant};
+use std::{sync::atomic::AtomicU64, time::Instant};
 use time::OffsetDateTime;
 
 use crate::{
+    ax::health::{AxFailurePhase, AxFailurePublisher, AxRecoverySite},
     focused_field::FieldClass,
     text_capture::{FocusChangeCapture, InputAuthorizations},
 };
@@ -38,6 +39,9 @@ impl AppObserver {
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
+        let failures = self.failures.clone();
+        let degraded = self.degraded.clone();
+        let pid = i64::from(self.context.pid);
         let capture_decision = self
             .focused_target
             .current()
@@ -69,18 +73,22 @@ impl AppObserver {
             let snapshot =
                 value_snapshot(target.element.as_ptr(), capture_text_content, secure_input);
             let registration_class =
-                (!secure_input && !snapshot.degraded).then_some(snapshot.field_class);
+                (!secure_input && snapshot.failure.is_none()).then_some(snapshot.field_class);
             crate::trace::trace!(
                 "component=ax phase=value action=observe pid={} target_generation={} field_class={} value_len={} degraded={}",
                 self.context.pid,
                 context.generation,
                 crate::trace::field_class_name(snapshot.field_class),
                 optional_u64(snapshot.value_len),
-                snapshot.degraded
+                snapshot.failure.is_some()
             );
-            if snapshot.degraded {
-                self.degraded.fetch_add(1, Ordering::Relaxed);
-            }
+            track_snapshot(
+                &failures,
+                &degraded,
+                pid,
+                AxRecoverySite::ValueSnapshot,
+                snapshot.failure.as_ref(),
+            );
             let observation = context.observation(
                 self.context.pid,
                 notification_at,
@@ -242,11 +250,15 @@ impl AppObserver {
             self.context.pid,
             generation,
             crate::trace::field_class_name(snapshot.field_class),
-            snapshot.degraded
+            snapshot.failure.is_some()
         );
-        if snapshot.degraded {
-            self.degraded.fetch_add(1, Ordering::Relaxed);
-        }
+        track_snapshot(
+            &self.failures,
+            &self.degraded,
+            i64::from(pid),
+            AxRecoverySite::FieldClassSnapshot,
+            snapshot.failure.as_ref(),
+        );
         let observer = self.observer.as_ptr();
         let context_pointer = (&raw const *self.context).cast_mut().cast();
         let registration = self.refresh_current_field_class_with(
@@ -266,27 +278,11 @@ impl AppObserver {
                     )
                 });
         match registration {
-            Err(RegistrationError::Register(error)) => {
-                crate::trace::trace!(
-                    "component=ax phase=focus_target action=register pid={} target_generation={} registration=error operation={} code={}",
-                    pid,
-                    generation,
-                    error.operation(),
-                    error.code()
-                );
-                self.degraded.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(RegistrationError::Unregister(error)) => {
-                crate::trace::trace!(
-                    "component=ax phase=focus_target action=unregister pid={} target_generation={} result=error operation={} code={}",
-                    pid,
-                    generation,
-                    error.operation(),
-                    error.code()
-                );
-                self.degraded.fetch_add(1, Ordering::Relaxed);
+            Err(error) => {
+                self.record_registration_error(error);
             }
             Ok(()) if was_active && !is_active => {
+                self.recover(AxRecoverySite::FocusedValueUnregistration);
                 crate::trace::trace!(
                     "component=ax phase=focus_target action=unregister pid={} target_generation={} result=removed",
                     pid,
@@ -294,6 +290,7 @@ impl AppObserver {
                 );
             }
             Ok(()) if !was_active && is_active => {
+                self.recover(AxRecoverySite::FocusedValueRegistration);
                 crate::trace::trace!(
                     "component=ax phase=focus_target action=register pid={} target_generation={} registration=registered",
                     pid,
@@ -369,28 +366,13 @@ impl AppObserver {
                 .accepts_delivery(target.element.as_ptr(), "AXValueChanged")
         });
         match registration {
-            Err(RegistrationError::Register(error)) => {
-                crate::trace::trace!(
-                    "component=ax phase=focus_target action=register pid={} target_generation={} registration=error operation={} code={}",
-                    pid,
-                    generation,
-                    error.operation(),
-                    error.code()
-                );
-                self.degraded.fetch_add(1, Ordering::Relaxed);
-                return false;
-            }
-            Err(RegistrationError::Unregister(error)) => {
-                crate::trace::trace!(
-                    "component=ax phase=focus_target action=unregister pid={} target_generation={} result=error operation={} code={}",
-                    pid,
-                    generation,
-                    error.operation(),
-                    error.code()
-                );
-                self.degraded.fetch_add(1, Ordering::Relaxed);
+            Err(error) => {
+                if self.record_registration_error(error) {
+                    return false;
+                }
             }
             Ok(()) if was_active && !is_active => {
+                self.recover(AxRecoverySite::FocusedValueUnregistration);
                 crate::trace::trace!(
                     "component=ax phase=focus_target action=unregister pid={} target_generation={} result=removed",
                     pid,
@@ -398,6 +380,7 @@ impl AppObserver {
                 );
             }
             Ok(()) if !was_active && is_active => {
+                self.recover(AxRecoverySite::FocusedValueRegistration);
                 crate::trace::trace!(
                     "component=ax phase=focus_target action=register pid={} target_generation={} registration=registered",
                     pid,
@@ -407,6 +390,17 @@ impl AppObserver {
             Ok(()) => {}
         }
         true
+    }
+
+    fn record_registration_error(&self, error: RegistrationError) -> bool {
+        let (site, error) = match error {
+            RegistrationError::Register(error) => (AxRecoverySite::FocusedValueRegistration, error),
+            RegistrationError::Unregister(error) => {
+                (AxRecoverySite::FocusedValueUnregistration, error)
+            }
+        };
+        self.record_native_at(AxFailurePhase::ValueLifecycle, site, &error);
+        site == AxRecoverySite::FocusedValueRegistration
     }
 
     pub(in crate::ffi::ax) fn reconcile_current_value_notification_with(
@@ -434,6 +428,9 @@ impl AppObserver {
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> FocusChangeResolution {
+        let failures = self.failures.clone();
+        let degraded = self.degraded.clone();
+        let pid = i64::from(self.context.pid);
         let capture_decision = self
             .focused_target
             .current()
@@ -452,8 +449,14 @@ impl AppObserver {
         }
         let context = &mut target.context;
         let snapshot = value_snapshot(target.element.as_ptr(), capture_text_content, secure_input);
-        if snapshot.degraded {
-            self.degraded.fetch_add(1, Ordering::Relaxed);
+        if snapshot.failure.is_some() {
+            track_snapshot(
+                &failures,
+                &degraded,
+                pid,
+                AxRecoverySite::FocusChangeSnapshot,
+                snapshot.failure.as_ref(),
+            );
             return match context
                 .capture
                 .resolve_unreadable_focus_change(authorizations)
@@ -471,6 +474,13 @@ impl AppObserver {
                 }
             };
         }
+        track_snapshot(
+            &failures,
+            &degraded,
+            pid,
+            AxRecoverySite::FocusChangeSnapshot,
+            None,
+        );
         let observation = context.observation(
             self.context.pid,
             notification_at,
@@ -499,4 +509,25 @@ impl AppObserver {
 
 fn optional_u64(value: Option<u64>) -> String {
     value.map_or_else(|| "none".to_owned(), |value| value.to_string())
+}
+
+fn track_snapshot(
+    failures: &AxFailurePublisher,
+    degraded: &AtomicU64,
+    pid: i64,
+    site: AxRecoverySite,
+    error: Option<&NativeAxError>,
+) {
+    if let Some(error) = error {
+        failures.record_native(
+            degraded,
+            Some(pid),
+            AxFailurePhase::ValueLifecycle,
+            site,
+            error.operation(),
+            error.code(),
+        );
+    } else {
+        failures.recover(Some(pid), site);
+    }
 }

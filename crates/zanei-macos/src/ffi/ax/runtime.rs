@@ -11,7 +11,9 @@ use std::{
 };
 
 use crate::{
-    CapturePolicy, InputAuthorizations, SecureInputProbe, secure_input::SecureInputProbeError,
+    CapturePolicy, InputAuthorizations, SecureInputProbe,
+    ax::health::{AxFailure, AxFailureKind, AxFailurePhase, AxFailurePublisher, AxRecoverySite},
+    secure_input::SecureInputProbeError,
 };
 use time::OffsetDateTime;
 use zanei_core::schema::App;
@@ -41,6 +43,7 @@ pub(crate) struct NativeAx {
     receiver: Receiver<QueuedNotification>,
     dropped: Arc<AtomicU64>,
     degraded: Arc<AtomicU64>,
+    failures: AxFailurePublisher,
     capture_text_content: bool,
     authorizations: InputAuthorizations,
     secure_input_probe: Option<SecureInputProbe>,
@@ -55,6 +58,7 @@ impl NativeAx {
         secure_input_probe: Option<SecureInputProbe>,
         capture_policy: CapturePolicy,
         observe_chrome_loads: bool,
+        failures: AxFailurePublisher,
     ) -> Self {
         let (sender, receiver) = sync_channel(CALLBACK_QUEUE_CAPACITY);
         Self {
@@ -64,6 +68,7 @@ impl NativeAx {
             receiver,
             dropped: Arc::new(AtomicU64::new(0)),
             degraded: Arc::new(AtomicU64::new(0)),
+            failures,
             capture_text_content,
             authorizations,
             secure_input_probe,
@@ -82,7 +87,8 @@ impl NativeAx {
             self.capture_text_content,
             self.secure_input_probe.as_ref(),
             &self.degraded,
-            "attach",
+            &self.failures,
+            AxRecoverySite::SecureInputAttach,
         );
         if let Some(observer) = self.observers.get_mut(&pid) {
             observer.update_attach(app, manual_accessibility);
@@ -111,27 +117,31 @@ impl NativeAx {
                 context_pointer,
             )?;
         }
-        if add_notification(
-            observer.as_ptr(),
-            application.as_ptr(),
-            "AXWindowCreated",
-            context_pointer,
-        )
-        .is_err()
-        {
-            self.degraded.fetch_add(1, Ordering::Relaxed);
-        }
-        if self.observe_chrome_loads
-            && app.bundle_id.as_deref() == Some(zanei_core::privacy::CHROME_BUNDLE_ID)
-            && add_notification(
+        self.track_native(
+            pid,
+            AxFailurePhase::Attach,
+            AxRecoverySite::WindowCreatedRegistration,
+            add_notification(
                 observer.as_ptr(),
                 application.as_ptr(),
-                "AXLoadComplete",
+                "AXWindowCreated",
                 context_pointer,
-            )
-            .is_err()
+            ),
+        );
+        if self.observe_chrome_loads
+            && app.bundle_id.as_deref() == Some(zanei_core::privacy::CHROME_BUNDLE_ID)
         {
-            self.degraded.fetch_add(1, Ordering::Relaxed);
+            self.track_native(
+                pid,
+                AxFailurePhase::Attach,
+                AxRecoverySite::LoadCompleteRegistration,
+                add_notification(
+                    observer.as_ptr(),
+                    application.as_ptr(),
+                    "AXLoadComplete",
+                    context_pointer,
+                ),
+            );
         }
 
         // SAFETY: the observer is a live +1 AXObserver owned by this runtime.
@@ -145,6 +155,7 @@ impl NativeAx {
             source,
             context,
             Arc::clone(&self.degraded),
+            self.failures.clone(),
             self.capture_text_content,
             app,
             self.capture_policy.clone(),
@@ -169,7 +180,8 @@ impl NativeAx {
             self.capture_text_content,
             self.secure_input_probe.as_ref(),
             &self.degraded,
-            "detach",
+            &self.failures,
+            AxRecoverySite::SecureInputDetach,
         );
         let mut events = Vec::new();
         if let Some(mut observer) = self.observers.remove(&pid) {
@@ -228,7 +240,11 @@ impl NativeAx {
                 drained
             );
             match self.decode(notification) {
-                Ok(decoded) => events.extend(decoded.into_iter().map(NativeAxObservation::from)),
+                Ok(decoded) => {
+                    self.failures
+                        .recover(Some(i64::from(pid)), AxRecoverySite::Decode);
+                    events.extend(decoded.into_iter().map(NativeAxObservation::from));
+                }
                 Err(error) => {
                     crate::trace::trace!(
                         "component=ax phase=decode action=error pid={} operation={} code={}",
@@ -236,7 +252,12 @@ impl NativeAx {
                         error.operation(),
                         error.code()
                     );
-                    self.degraded.fetch_add(1, Ordering::Relaxed);
+                    self.record_native(
+                        pid,
+                        AxFailurePhase::Runtime,
+                        AxRecoverySite::Decode,
+                        &error,
+                    );
                 }
             }
         }
@@ -245,7 +266,8 @@ impl NativeAx {
             self.capture_text_content,
             self.secure_input_probe.as_ref(),
             &self.degraded,
-            "poll",
+            &self.failures,
+            AxRecoverySite::SecureInputPoll,
         );
         for observer in self.observers.values_mut() {
             events.extend(observer.reconcile_accessibility_if_due(
@@ -279,7 +301,8 @@ impl NativeAx {
             self.capture_text_content,
             self.secure_input_probe.as_ref(),
             &self.degraded,
-            "flush",
+            &self.failures,
+            AxRecoverySite::SecureInputFlush,
         );
         for observer in self.observers.values_mut() {
             events.extend(observer.flush_pending(secure_input, &mut self.authorizations));
@@ -297,24 +320,45 @@ impl NativeAx {
     pub(crate) fn hit_test(&self, pid: i32, x: f64, y: f64) -> Option<NativeHitTest> {
         let observer = self.observers.get(&pid)?;
         let element = match element_at_position(observer.application.as_ptr(), x, y) {
-            Ok(Some(element)) => element,
-            Ok(None) => return None,
-            Err(_) => {
-                self.degraded.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(element)) => {
+                self.failures
+                    .recover(Some(i64::from(pid)), AxRecoverySite::HitTestElement);
+                element
+            }
+            Ok(None) => {
+                self.failures
+                    .recover(Some(i64::from(pid)), AxRecoverySite::HitTestElement);
+                return None;
+            }
+            Err(error) => {
+                self.record_native(
+                    pid,
+                    AxFailurePhase::Runtime,
+                    AxRecoverySite::HitTestElement,
+                    &error,
+                );
                 return None;
             }
         };
         match element_snapshot(element.as_ptr(), |window| {
             observer.text_content_allowed(window)
         }) {
-            Ok(Some((window, element))) => Some(NativeHitTest {
-                pid,
-                window,
-                element,
-            }),
-            Ok(None) => None,
-            Err(_) => {
-                self.degraded.fetch_add(1, Ordering::Relaxed);
+            Ok(hit) => {
+                self.failures
+                    .recover(Some(i64::from(pid)), AxRecoverySite::HitTestSnapshot);
+                hit.map(|(window, element)| NativeHitTest {
+                    pid,
+                    window,
+                    element,
+                })
+            }
+            Err(error) => {
+                self.record_native(
+                    pid,
+                    AxFailurePhase::Runtime,
+                    AxRecoverySite::HitTestSnapshot,
+                    &error,
+                );
                 None
             }
         }
@@ -328,6 +372,36 @@ impl NativeAx {
         self.degraded.swap(0, Ordering::Relaxed)
     }
 
+    fn track_native(
+        &self,
+        pid: i32,
+        phase: AxFailurePhase,
+        site: AxRecoverySite,
+        result: Result<(), NativeAxError>,
+    ) {
+        match result {
+            Ok(()) => self.failures.recover(Some(i64::from(pid)), site),
+            Err(error) => self.record_native(pid, phase, site, &error),
+        }
+    }
+
+    fn record_native(
+        &self,
+        pid: i32,
+        phase: AxFailurePhase,
+        site: AxRecoverySite,
+        error: &NativeAxError,
+    ) {
+        self.failures.record_native(
+            &self.degraded,
+            Some(i64::from(pid)),
+            phase,
+            site,
+            error.operation(),
+            error.code(),
+        );
+    }
+
     fn decode(&mut self, queued: QueuedNotification) -> Result<Vec<NativeAxEvent>, NativeAxError> {
         let name = string_value(queued.notification.as_ptr())
             .ok_or_else(|| native_error("AX notification decoding", -1))?;
@@ -338,7 +412,8 @@ impl NativeAx {
             self.capture_text_content,
             self.secure_input_probe.as_ref(),
             &self.degraded,
-            "decode",
+            &self.failures,
+            AxRecoverySite::SecureInputDecode,
         );
         let Some(observer) = self.observers.get_mut(&queued.pid) else {
             crate::trace::trace!(
@@ -407,34 +482,44 @@ pub(super) fn secure_input_active(
     capture_text_content: bool,
     probe: Option<&SecureInputProbe>,
     degraded: &AtomicU64,
-    phase: &'static str,
+    failures: &AxFailurePublisher,
+    site: AxRecoverySite,
 ) -> bool {
     if !capture_text_content {
         return false;
     }
     let Some(probe) = probe else {
         crate::trace::trace!(
-            "component=ax phase={} action=secure_input_probe enabled=true reason=probe_missing",
-            phase
+            "component=ax phase=secure_input action=probe site={:?} enabled=true reason=probe_missing",
+            site
         );
         return true;
     };
     match probe.enabled() {
         Ok(enabled) => {
+            failures.recover(None, site);
             crate::trace::trace!(
-                "component=ax phase={} action=secure_input_probe enabled={}",
-                phase,
+                "component=ax phase=secure_input action=probe site={:?} enabled={}",
+                site,
                 enabled
             );
             enabled
         }
         Err(error) => {
             crate::trace::trace!(
-                "component=ax phase={} action=secure_input_probe enabled=true error={}",
-                phase,
+                "component=ax phase=secure_input action=probe site={:?} enabled=true error={}",
+                site,
                 secure_input_error(error)
             );
-            degraded.fetch_add(1, Ordering::Relaxed);
+            let kind = match error {
+                SecureInputProbeError::Disconnected => AxFailureKind::SecureInputProbeDisconnected,
+                SecureInputProbeError::Timeout => AxFailureKind::SecureInputProbeTimeout,
+            };
+            failures.record(
+                degraded,
+                site,
+                AxFailure::new(None, AxFailurePhase::SecureInput, kind),
+            );
             true
         }
     }
@@ -465,6 +550,7 @@ mod tests {
             None,
             CapturePolicy::new(chrome, filter, None),
             false,
+            AxFailurePublisher::default(),
         );
         native.observers.insert(
             7,

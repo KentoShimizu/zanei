@@ -26,16 +26,17 @@ use crate::{
 
 use self::{
     event::{AxEvent, AxEventBuilder},
-    health::ObserverHealth,
+    health::{AxFailurePublisher, AxRecoverySite, ObserverHealth},
 };
 
 pub use crate::ffi::ax::NativeWindow;
+pub use health::{AxFailure, AxFailureKind, AxFailurePhase, AxFailureState};
 
 #[cfg(test)]
 use crate::ffi::ax::NativeHitTest;
 
 mod event;
-mod health;
+pub(crate) mod health;
 mod output;
 mod runtime;
 mod trigger;
@@ -79,6 +80,7 @@ pub struct AxCollector {
     dropped_events: Arc<AtomicU64>,
     degraded_operations: Arc<AtomicU64>,
     current_degraded_observers: Arc<AtomicU64>,
+    failure_publisher: AxFailurePublisher,
 }
 
 pub struct AxCollectorOptions {
@@ -119,6 +121,7 @@ impl AxCollector {
             dropped_events: Arc::new(AtomicU64::new(0)),
             degraded_operations: Arc::new(AtomicU64::new(0)),
             current_degraded_observers: Arc::new(AtomicU64::new(0)),
+            failure_publisher: AxFailurePublisher::default(),
         }
     }
 
@@ -139,6 +142,11 @@ impl AxCollector {
     #[must_use]
     pub fn degraded_observers(&self) -> u64 {
         self.current_degraded_observers.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn failure_state(&self) -> AxFailureState {
+        self.failure_publisher.state()
     }
 
     pub fn replace_filter(&self, filter: FilterConfig) {
@@ -187,6 +195,7 @@ impl Collector for AxCollector {
         let dropped_events = Arc::clone(&self.dropped_events);
         let degraded_operations = Arc::clone(&self.degraded_operations);
         let current_degraded_observers = Arc::clone(&self.current_degraded_observers);
+        let failure_publisher = self.failure_publisher.clone();
         let secure_input_probe = self.secure_input_probe.clone();
         let capture_text_content = self.capture_text_content;
         let capture_policy = self.capture_policy.clone();
@@ -213,6 +222,7 @@ impl Collector for AxCollector {
                     &dropped_events,
                     &degraded_operations,
                     current_degraded_observers,
+                    failure_publisher,
                 );
                 (lifecycle_receiver, click_receiver, authorizations)
             })
@@ -234,6 +244,7 @@ impl Collector for AxCollector {
             }
         }
         self.current_degraded_observers.store(0, Ordering::Relaxed);
+        self.failure_publisher.clear();
     }
 }
 
@@ -269,6 +280,7 @@ fn run_ax(
     dropped_events: &AtomicU64,
     degraded_operations: &AtomicU64,
     current_degraded_observers: Arc<AtomicU64>,
+    failure_publisher: AxFailurePublisher,
 ) -> InputAuthorizations {
     let mut api = SystemAxApi::new(
         capture_text_content,
@@ -276,6 +288,7 @@ fn run_ax(
         secure_input_probe,
         capture_policy.clone(),
         chrome_observer.is_some(),
+        failure_publisher.clone(),
     );
     run_ax_loop(
         &mut api,
@@ -291,6 +304,7 @@ fn run_ax(
         dropped_events,
         degraded_operations,
         current_degraded_observers,
+        &failure_publisher,
     );
     api.into_authorizations()
 }
@@ -310,6 +324,7 @@ fn run_ax_loop(
     dropped_events: &AtomicU64,
     degraded_operations: &AtomicU64,
     current_degraded_observers: Arc<AtomicU64>,
+    failure_publisher: &AxFailurePublisher,
 ) {
     let mut output = AxOutput::new(
         sender,
@@ -329,6 +344,7 @@ fn run_ax_loop(
                 app,
                 &manual_accessibility_policy,
                 degraded_operations,
+                failure_publisher,
                 &mut observer_health,
             )
         })
@@ -367,6 +383,7 @@ fn run_ax_loop(
                         app.clone(),
                         &manual_accessibility_policy,
                         degraded_operations,
+                        failure_publisher,
                         &mut observer_health,
                     );
                     let window = focused_window(api, &app);
@@ -384,6 +401,7 @@ fn run_ax_loop(
                         app,
                         &manual_accessibility_policy,
                         degraded_operations,
+                        failure_publisher,
                         &mut observer_health,
                     );
                     publish_attached_focus(&focus_context, &attached);
@@ -395,6 +413,7 @@ fn run_ax_loop(
                         focus_context.terminate(app.pid),
                     );
                     observer_health.remove(app.pid);
+                    failure_publisher.remove_pid(app.pid);
                     if let Ok(pid) = i32::try_from(app.pid) {
                         let pending = api.detach(pid);
                         send_observations(&mut output, &mut builder, pending, &focus_context);
@@ -464,8 +483,10 @@ fn run_ax_loop(
         api.flush_pending(),
         &focus_context,
     );
+    degraded_operations.fetch_add(api.take_degraded_operations(), Ordering::Relaxed);
     output.flush();
     observer_health.clear();
+    failure_publisher.clear();
 }
 
 fn focused_window(api: &mut impl AxApi, app: &ApplicationInfo) -> Option<NativeWindow> {
@@ -492,8 +513,9 @@ fn attach_app(
     api: &mut impl AxApi,
     builder: &mut AxEventBuilder,
     app: ApplicationInfo,
-    manual_accessibility_policy: &ManualAccessibilityPolicy,
-    degraded_operations: &AtomicU64,
+    policy: &ManualAccessibilityPolicy,
+    degraded: &AtomicU64,
+    failures: &AxFailurePublisher,
     observer_health: &mut ObserverHealth,
 ) -> AttachResult {
     if app.activation_policy == ApplicationActivationPolicy::Prohibited {
@@ -501,14 +523,22 @@ fn attach_app(
     }
     let Ok(pid) = i32::try_from(app.pid) else {
         observer_health.mark_unavailable(app.pid);
-        degraded_operations.fetch_add(1, Ordering::Relaxed);
+        failures.record(
+            degraded,
+            AxRecoverySite::Attach,
+            AxFailure::new(
+                Some(app.pid),
+                AxFailurePhase::Attach,
+                AxFailureKind::InvalidPid,
+            ),
+        );
         return AttachResult::default();
     };
     builder.add_app(app.clone());
-    let manual_accessibility = manual_accessibility_policy.allows(&app.raw_app());
-    match api.attach(pid, app.raw_app(), manual_accessibility) {
+    match api.attach(pid, app.raw_app(), policy.allows(&app.raw_app())) {
         Ok(observations) => {
             observer_health.mark_available(app.pid);
+            failures.recover(Some(app.pid), AxRecoverySite::Attach);
             observations
                 .into_iter()
                 .map(NativeAxEvent::internalize_focus)
@@ -522,19 +552,14 @@ fn attach_app(
                                 .output
                                 .extend(builder.event(NativeAxEvent::UiValueChanged(event)));
                         }
-                        NativeAxObservation::Event(
-                            NativeAxEvent::WindowFocused { .. }
-                            | NativeAxEvent::WindowTitleChanged { .. }
-                            | NativeAxEvent::UiFocused { .. }
-                            | NativeAxEvent::PageLoaded { .. },
-                        ) => {}
+                        NativeAxObservation::Event(_) => {}
                     }
                     attached
                 })
         }
-        Err(_) => {
+        Err(failure) => {
             observer_health.mark_unavailable(app.pid);
-            degraded_operations.fetch_add(1, Ordering::Relaxed);
+            failures.record(degraded, AxRecoverySite::Attach, failure);
             AttachResult::default()
         }
     }
