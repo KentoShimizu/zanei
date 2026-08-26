@@ -223,49 +223,51 @@ fn claude_desktop_json_merge_preserves_unrelated_servers() {
 }
 
 #[test]
-fn pi_is_manual_only_for_both_scopes_and_print_modes() {
-    for scope in [Scope::Project, Scope::User] {
-        for print_only in [false, true] {
-            let project = TempDir::new().expect("project tempdir");
-            let home = TempDir::new().expect("home tempdir");
-            let project_readme = project.path().join(".pi/skills/zanei/README.md");
-            let user_readme = home.path().join(".pi/skills/zanei/README.md");
-            fs::create_dir_all(project_readme.parent().expect("project README parent"))
-                .expect("project pi directory");
-            fs::create_dir_all(user_readme.parent().expect("user README parent"))
-                .expect("user pi directory");
-            fs::write(&project_readme, "# Project README\n").expect("project README");
-            fs::write(&user_readme, "# User README\n").expect("user README");
+fn pi_skill_follows_the_requested_scope_and_registers_no_mcp() {
+    let project = TempDir::new().expect("project tempdir");
+    let home = TempDir::new().expect("home tempdir");
 
-            let report = run_at(Agent::Pi, scope, print_only, project.path(), home.path())
-                .expect("manual setup");
+    let project_report = run_at(
+        Agent::Pi,
+        Scope::Project,
+        false,
+        project.path(),
+        home.path(),
+    )
+    .expect("project setup");
+    assert_eq!(
+        fs::read_to_string(project.path().join(".pi/skills/zanei/SKILL.md"))
+            .expect("project skill"),
+        SKILL
+    );
+    assert!(!home.path().join(".pi").exists());
 
-            assert!(!report.has_changes());
-            assert_eq!(
-                fs::read_to_string(project_readme).expect("unchanged project README"),
-                "# Project README\n"
-            );
-            assert_eq!(
-                fs::read_to_string(user_readme).expect("unchanged user README"),
-                "# User README\n"
-            );
-            let output = report.to_string();
-            assert!(
-                output.contains(
-                    "Paste these instructions into a README or another file that pi reads:"
-                )
-            );
-            assert!(output.contains("# Zanei activity context"));
-            assert!(output.contains(canonical_body_without_heading()));
-            assert!(
-                output.contains("pi uses the CLI skill only and does not register an MCP server")
-            );
-            assert!(!output.contains("name: zanei"));
-            assert!(!output.contains("description: Recover recent local activity context"));
-            assert!(!output.contains("opencode.json"));
-            assert!(!output.contains("[mcp command]"));
-        }
+    let user_report =
+        run_at(Agent::Pi, Scope::User, false, project.path(), home.path()).expect("user setup");
+    assert_eq!(
+        fs::read_to_string(home.path().join(".pi/agent/skills/zanei/SKILL.md"))
+            .expect("user skill"),
+        SKILL
+    );
+
+    for report in [project_report, user_report] {
+        let output = report.to_string();
+        assert!(output.contains("pi does not support MCP"));
+        assert!(!output.contains("[mcp command]"));
+        assert!(!output.contains("[manual setup]"));
     }
+}
+
+#[test]
+fn pi_preview_does_not_write_the_skill() {
+    let project = TempDir::new().expect("project tempdir");
+    let home = TempDir::new().expect("home tempdir");
+
+    let report =
+        run_at(Agent::Pi, Scope::User, true, project.path(), home.path()).expect("preview");
+
+    assert!(!home.path().join(".pi").exists());
+    assert!(report.to_string().contains("zanei timeline --since 2h"));
 }
 
 fn canonical_body_without_heading() -> &'static str {

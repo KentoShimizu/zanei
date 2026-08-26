@@ -3,7 +3,7 @@ title: セットアップ
 description: native 連携または手動配置用に表示される指示で、agent に Zanei を設定する。
 ---
 
-Zanei が持つ agent 向け指示の単一ソースは、標準形式の `skills/SKILL.md` だけです。`zanei setup` は skill 対応 agent にはそのまま配置します。opencode と pi では指示スニペットを導出して stdout に表示し、配置はユーザー自身が行います。MCP については各 agent 向けの登録コマンドを表示し、設定ファイルへ直接書き込むのは Claude Desktop のみです。opencode の MCP JSON も手動設定用に表示します。
+Zanei が持つ agent 向け指示の単一ソースは、標準形式の `skills/SKILL.md` だけです。`zanei setup` は skill 対応 agent にはそのまま配置します。opencode では指示スニペットを導出して stdout に表示し、配置はユーザー自身が行います。MCP については各 agent 向けの登録コマンドを表示し、設定ファイルへ直接書き込むのは Claude Desktop のみです。opencode の MCP JSON も手動設定用に表示します。
 
 ```bash
 zanei setup --agent <claude|codex|opencode|hermes|pi|claude-desktop> [--scope project|user] [--print]
@@ -129,7 +129,14 @@ Claude Desktop の chat は Mac 上で `zanei` を実行できないため、MCP
 zanei setup --agent pi
 ```
 
-pi は MCP を搭載せず、skill にも対応していません。このコマンドはファイルを一切変更せず、単一ソースの `SKILL.md` 本文から指示スニペットを導出して stdout に表示します。スニペットは README など、pi が読み込む指示ファイルの好きな場所に貼り付けてください。`--print` の有無による挙動の違いはなく、`zanei mcp` も使いません。
+pi は Agent Skills を native に読み込むため、このコマンドは単一ソースの `SKILL.md` をそのまま配置します。
+
+```
+~/.pi/agent/skills/zanei/SKILL.md    # --scope user
+.pi/skills/zanei/SKILL.md            # --scope project（既定）
+```
+
+pi は設計方針として MCP を持たないため、`zanei mcp` は登録されず、skill が唯一の経路です。
 
 </Tab>
 </Tabs>
