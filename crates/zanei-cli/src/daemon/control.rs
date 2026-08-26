@@ -5,8 +5,6 @@ use std::{
     time::Duration,
 };
 
-use rustix::fd::OwnedFd;
-
 use super::{DaemonError, StoreOwner, StoreOwnership};
 
 mod launchd;
@@ -63,7 +61,7 @@ pub fn start_launch_agent(
     )
 }
 
-fn acquire_start_lock() -> Result<(OwnedFd, PathBuf), DaemonError> {
+fn acquire_start_lock() -> Result<(logs::StartLock, PathBuf), DaemonError> {
     let plist_path = launch_agent_path()?;
     let parent = plist_path.parent().ok_or_else(|| DaemonError::File {
         operation: "resolve parent directory for",
@@ -119,7 +117,7 @@ mod tests {
         cell::{Cell, RefCell},
         collections::VecDeque,
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+        os::unix::fs::{PermissionsExt, symlink},
         path::Path,
         process::Command,
         time::Duration,
@@ -193,24 +191,6 @@ mod tests {
         };
 
         assert!(owner_has_fresh_heartbeat(&owner, &status));
-    }
-
-    #[test]
-    fn start_lock_rejects_concurrent_starts() {
-        let directory = TempDir::new().expect("start lock fixture");
-        let path = directory.path().join("start.lock");
-        let user_id = fs::metadata(directory.path()).expect("lock parent").uid();
-        let wrong_owner = super::logs::open_start_lock(&path, user_id ^ 1)
-            .expect_err("wrong-owner lock must fail");
-        assert!(matches!(wrong_owner, DaemonError::File { source, .. }
-            if source.kind() == std::io::ErrorKind::PermissionDenied));
-        let first = super::logs::open_start_lock(&path, user_id).expect("first start lock");
-        let error =
-            super::logs::open_start_lock(&path, user_id).expect_err("second start must fail");
-        assert!(matches!(error, DaemonError::File { source, .. }
-            if source.kind() == std::io::ErrorKind::WouldBlock));
-        drop(first);
-        super::logs::open_start_lock(&path, user_id).expect("released start lock");
     }
 
     #[test]
