@@ -138,9 +138,9 @@ security delete-generic-password -s dev.zanei.store
 
 Zanei 0.3.0 以降はストアを暗号化します。0.2.x 以前が書いたストアは平文の SQLite で、recorder はこのファイルを書き換えません。アップグレード後に最初に `zanei start` したとき、旧ストアを `store.sqlite.plaintext-<日時>` という名前に変えて新しい暗号化ストア `store.sqlite` の隣に残し、新しい store を schema version 7 で作成して、`zanei: kept the previous plaintext store as …` とログに出します。`zanei query`・`zanei timeline`・`zanei export`・MCP サーバーのすべての読み取りは、両方のファイルのイベントを一つの履歴として返すので、アップグレード前に記録したものがタイムラインから消えることはありません。`zanei status` は退避したファイルを `store.retired_plaintext` に表示します。
 
-退避したファイルは平文のままです。中身は退避した時点より前のイベントだけなので、その時点が保持期間（`output.retention_hours`、既定 48 時間）を外れた時点で recorder がファイルごと削除します。保持期間が長ければ長く残り、短ければ早く消えます。それまでの間も、保持期間を外れたイベントは稼働中のストアと同じタイミングでファイル内から削除されます。`zanei pause` 中であればその状態とイベント数のカウンタは新しいストアに引き継がれます。`zanei purge --all` はすぐに削除し、ファイルを自分で削除しても構いません。
+退避したファイルは平文のままです。中身は退避した時点より前のイベントだけなので、その時点が保持期間（`output.retention_hours`、既定 48 時間）を外れた時点で recorder がファイルごと削除します。保持期間が長ければ長く残り、短ければ早く消えます。それまでの間も、保持期間を外れたイベントは稼働中のストアと同じタイミングでファイル内から削除されます。`zanei pause` 中であればその状態とイベント数のカウンタは新しいストアに引き継がれます。`zanei purge --all` はすぐに削除し、ファイルを自分で削除しても構いません。暗号化済みの 0.3.x store を 0.4.0 へ upgrade すると schema version 7 へ in-place migration し、event と daemon state を保持して、recorder が再取得できる permission snapshot だけを破棄します。
 
-0.2.x binary は schema 7 の live store を開けず、strict な config reader は `capture.content_snapshot`・`[filter.text_content]`・`[filter.content_snapshot]` を拒否し得ます。store metadata を version 5 に書き戻してはいけません。0.2.x に戻すには upgrade 前の backup を restore し、これらの設定を除いてください。それ以外は新しい store を読むために 0.3.x binary を残します。
+store migration は forward-only です。rollback が必要になり得る場合は upgrade 前の backup を残してください。rollback 時はその backup を restore し、schema version metadata を手作業で書き換えてはいけません。
 
 ## `zanei start` で `Bootstrap failed: 5: Input/output error` が表示されます
 

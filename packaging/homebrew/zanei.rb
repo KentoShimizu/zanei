@@ -18,6 +18,7 @@ class Zanei < Formula
     else
       (libexec/"Zanei.app").install "Contents"
     end
+    libexec.install "THIRD_PARTY_NOTICES.md"
     bin.install_symlink libexec/"Zanei.app/Contents/MacOS/zanei"
   end
 
