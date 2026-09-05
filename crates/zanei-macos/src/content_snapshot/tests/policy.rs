@@ -144,9 +144,9 @@ fn chrome_unknown_incognito_global_site_and_snapshot_site_fail_closed() {
         policy
             .decision(PrivacyScope::ContentSnapshot, &chrome.raw_app(), Some(11))
             .capture_context()
-            .website_host
+            .url
             .as_deref(),
-        Some("public.example")
+        Some("https://public.example/page")
     );
 }
 

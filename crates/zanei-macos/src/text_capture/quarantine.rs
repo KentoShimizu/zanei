@@ -157,7 +157,7 @@ fn resolve_confirmed(mut held: HeldEvent, policy: &CapturePolicy) -> Option<Rele
         HeldBodyKind::Snapshot { .. } => PrivacyScope::ContentSnapshot,
     };
     let decision = policy.decision(scope, &held.event.app, Some(held.key.window_id));
-    held.event.capture_context = decision.capture_context();
+    // Confirmation authorizes the held body; it cannot change where it originated.
     if !decision.is_allowed() && matches!(held.kind, HeldBodyKind::Snapshot { .. }) {
         return drop_snapshot(&held, "denied");
     }
@@ -288,6 +288,66 @@ mod tests {
             ContentSnapshotTrigger::FocusOut,
         ));
         event
+    }
+
+    #[test]
+    fn failed_confirmation_does_not_rebind_input_to_the_new_destination() {
+        use crate::text_capture::routing::{TextBodyRoute, route_text_body};
+        use zanei_core::normalize::Normalizer;
+
+        let (publisher, _, policy, observer) = setup();
+        let mut quarantine = TextQuarantine::new(observer);
+        let mut normalizer = Normalizer::new();
+        let now = Instant::now();
+        for (index, url) in ["https://allowed.example/a", "https://allowed.example/b"]
+            .into_iter()
+            .enumerate()
+        {
+            let start = now + Duration::from_millis(index as u64 * 10);
+            observe(&publisher, url, start);
+            let TextBodyRoute::Quarantine {
+                event,
+                key,
+                version,
+                ..
+            } = route_text_body(event(OffsetDateTime::UNIX_EPOCH), &policy, None)
+            else {
+                panic!("allowed input must await confirmation")
+            };
+            quarantine.hold_at(
+                event,
+                key,
+                version,
+                HeldBodyKind::Text,
+                start + Duration::from_millis(1),
+            );
+            observe(
+                &publisher,
+                "https://allowed.example/b",
+                start + Duration::from_millis(2),
+            );
+            let released = quarantine
+                .release(start + Duration::from_millis(3), &policy)
+                .pop()
+                .expect("confirmed metadata")
+                .into_parts()
+                .0;
+            normalizer
+                .push_at(released, OffsetDateTime::UNIX_EPOCH, index as u64)
+                .unwrap();
+        }
+        let events = normalizer.flush();
+        assert_eq!(events.len(), 2, "different destinations must not coalesce");
+        for (index, event) in events.iter().enumerate() {
+            let EventData::InputKey(data) = &event.data else {
+                panic!("input.key")
+            };
+            assert_eq!(data.count, 1);
+            assert_eq!(
+                data.text.as_deref(),
+                if index == 0 { None } else { Some("private") }
+            );
+        }
     }
 
     #[test]

@@ -140,7 +140,7 @@ impl CapturePolicy {
     }
 
     /// Re-evaluates the current policy before delivery. An earlier decision may only
-    /// tighten access and owns the Chrome version bound to later confirmation.
+    /// tighten access and owns the original context/version bound to confirmation.
     #[must_use]
     pub(crate) fn decision_at_send(
         &self,
@@ -153,6 +153,7 @@ impl CapturePolicy {
         if let Some(earlier) = earlier {
             current.allowed &= earlier.allowed;
             current.chrome_version = earlier.chrome_version;
+            current.capture_context = earlier.capture_context();
         }
         current
     }
