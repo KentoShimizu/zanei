@@ -95,6 +95,12 @@ pub struct DoctorArgs {
 pub struct StartArgs {
     #[arg(long, help = "Run recording in the foreground without launchd")]
     pub foreground: bool,
+    #[arg(
+        long,
+        requires = "foreground",
+        help = "Exit when the parent closes stdin; requires --foreground"
+    )]
+    pub exit_on_stdin_eof: bool,
 }
 
 #[derive(Debug, Args)]

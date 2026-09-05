@@ -4,6 +4,7 @@ use std::{
     path::Path,
     sync::{Arc, atomic::AtomicBool, mpsc},
     thread,
+    time::Duration,
 };
 
 use signal_hook::{
@@ -13,7 +14,9 @@ use signal_hook::{
     low_level::unregister,
 };
 
-use super::{DaemonError, runtime::RecordOutput};
+use super::{DaemonError, collectors::CollectorSet, pipeline::Pipeline, runtime::RecordOutput};
+
+pub(super) const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Creates the store's parent directory when it is missing. A directory Zanei
 /// creates is owner-only; an existing directory (for example one chosen with
@@ -135,7 +138,8 @@ pub(crate) struct StdinEofWatcher {
 
 impl StdinEofWatcher {
     pub(crate) fn start() -> Result<Option<Self>, DaemonError> {
-        if std::io::stdin().is_terminal() {
+        let stdin = std::io::stdin();
+        if stdin.is_terminal() {
             return Ok(None);
         }
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -160,6 +164,15 @@ impl StdinEofWatcher {
         Ok(Some(Self { receiver }))
     }
 
+    pub(crate) fn start_required() -> Result<Self, DaemonError> {
+        Self::start()?.ok_or_else(|| {
+            DaemonError::Stdin(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--exit-on-stdin-eof requires non-terminal stdin",
+            ))
+        })
+    }
+
     pub(crate) fn try_result(&self) -> Option<Result<(), std::io::Error>> {
         match self.receiver.try_recv() {
             Ok(result) => Some(result),
@@ -167,4 +180,26 @@ impl StdinEofWatcher {
             Err(mpsc::TryRecvError::Disconnected) => Some(Ok(())),
         }
     }
+}
+
+pub(crate) fn wait_for_record_shutdown(
+    pipeline: &Pipeline,
+    collectors: &mut CollectorSet,
+) -> Result<(), DaemonError> {
+    let signals = ShutdownSignals::install()?;
+    let stop = signals.stop_flag();
+    let stdin = StdinEofWatcher::start()?;
+    collectors.start(pipeline.sender());
+
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(watcher) = stdin.as_ref() {
+            match watcher.try_result() {
+                Some(Ok(())) => break,
+                Some(Err(error)) => return Err(DaemonError::Stdin(error)),
+                None => {}
+            }
+        }
+        thread::sleep(RUNTIME_POLL_INTERVAL);
+    }
+    Ok(())
 }
