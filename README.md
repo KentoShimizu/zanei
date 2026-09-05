@@ -44,8 +44,10 @@ Signed and notarized. Building from source: [packaging](packaging/README.md).
 zanei start
 ```
 
-Grant the permissions macOS asks for. If a System Settings row is missing, `zanei doctor --fix`
-opens the right pane with the `Zanei.app` path copied and revealed in Finder. Then:
+Grant the permissions macOS asks for. `zanei doctor --fix` opens the required settings panes.
+For missing Accessibility or Input Monitoring, it copies the app/executable path and reveals it
+in Finder for manual addition. For Automation, enable the recorder’s `Google Chrome` or `Safari`
+toggle; Automation alone does not copy a path or open Finder. Then:
 
 ```bash
 zanei stop && zanei start   # asks once whether to record typed text; default no
