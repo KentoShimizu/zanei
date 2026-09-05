@@ -1,5 +1,6 @@
 //! Capture-time filtering and free-text redaction.
 
+mod capture_policy;
 mod matcher;
 mod redactor;
 
@@ -7,6 +8,7 @@ use crate::config::FilterConfig;
 use crate::normalize::{NormalizedEvent, enforce_size_limits};
 use crate::schema::{App, Element, Event, EventData};
 
+pub use capture_policy::{CaptureDeniedReason, CapturePolicyDecision, evaluate_capture_policy};
 pub use matcher::{BUILT_IN_EXCLUDED_APP_NAMES, BUILT_IN_EXCLUDED_BUNDLE_IDS};
 
 use matcher::{app_is_allowed, extract_url_host, host_is_allowed};
