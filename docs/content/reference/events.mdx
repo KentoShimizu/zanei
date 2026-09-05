@@ -95,7 +95,7 @@ What each type carries in `data`, and whether the envelope's `window` / `element
 | `ui.value` | ✓ | ✓ | `field_kind`, `value_len`, `text`. `text` is the newly added authorized difference, or null; it is null in Chrome Incognito and website-filtered windows. `element.value` is never recorded for free-text or unknown fields |
 | `input.key` | ✓ | — | `kind`, `modifiers`, `count`, `combo`, `text`, `field_kind` (details below) |
 | `input.scroll` | ✓ | — | `direction`, `amount`, `count` — coalesced totals |
-| `browser.navigate` | ✓ | — | `url` (null only after size limiting), `tab_title`, `mode` (always `"normal"`), `transition` (`navigate`/`tab_switch`/null) |
+| `browser.navigate` | ✓ | — | `url` (null only after size limiting), `tab_title`, `mode` (`"normal"` or `"unknown"`), `transition` (`navigate`/`tab_switch`/null) |
 | `clipboard.copy` | ✓ / — | — | `origin` (`copy_shortcut`/`unknown`), `content_kind` (`text`/`image`/`file`/`other`), `size_bytes`, `text`. Unknown origin has no app/window attribution or body |
 | `clipboard.paste` | ✓ | — | `content_kind`, `size_bytes`, `text`, and `field_kind` of the paste target |
 | `content.snapshot` | ✓ | — | Current v3: `text` (`string` or null after the core size safety rule), `chars` (pre-redaction character count after the collector limit), `cutoff` (`time`, `nodes`, `bytes`, or `stopped` when traversal stops early; null when it completes), and `trigger` (`settle`, `refresh`, or `focus_out`). Retained legacy v2 events instead carry `complete` and do not identify the cut-off reason. Source is `macos.ax` |
@@ -178,7 +178,7 @@ Timeline output never includes snapshot bodies. Each session reports how many sn
 
 ## Browser URL capture
 
-`browser.navigate` (URL capture) currently supports Chrome only. Chromium exposes each window's mode (`normal` / `incognito`) via AppleScript. Incognito windows produce no URL events, and their text-content-derived bodies remain null without a configuration knob.
+`browser.navigate` (URL capture) currently supports Chrome only. Chromium exposes each window's mode (`normal` / `incognito`) via AppleScript. Incognito windows produce no URL events, and their text-content-derived bodies remain null without a configuration knob. The shared event contract also permits `mode: "unknown"` for browser observations whose privacy mode cannot be determined; such observations are never treated as `normal`.
 
 Navigations are observed when the tab, window, title, or page load changes. An in-page navigation that changes neither the title nor focus may not produce `browser.navigate`.
 

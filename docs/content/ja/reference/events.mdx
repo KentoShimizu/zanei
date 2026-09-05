@@ -95,7 +95,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `ui.value` | ✓ | ✓ | `field_kind`、`value_len`、`text`。`text` は認可された入力によって増えた差分、または null。Chrome incognito・サイト除外中は null。自由入力・不明なフィールドでは `element.value` は記録されない |
 | `input.key` | ✓ | — | `kind`、`modifiers`、`count`、`combo`、`text`、`field_kind`（詳細は下記） |
 | `input.scroll` | ✓ | — | `direction`、`amount`、`count`（coalesce 済みの合計） |
-| `browser.navigate` | ✓ | — | `url`（size limit 適用後のみ null）、`tab_title`、`mode`（常に `"normal"`）、`transition`（`navigate`/`tab_switch`/null） |
+| `browser.navigate` | ✓ | — | `url`（size limit 適用後のみ null）、`tab_title`、`mode`（`"normal"` または `"unknown"`）、`transition`（`navigate`/`tab_switch`/null） |
 | `clipboard.copy` | ✓ / — | — | `origin`（`copy_shortcut`/`unknown`）、`content_kind`（`text`/`image`/`file`/`other`）、`size_bytes`、`text`。unknown origin は app/window 帰属と本文を持たない |
 | `clipboard.paste` | ✓ | — | `content_kind`、`size_bytes`、`text`、ペースト先の `field_kind` |
 | `content.snapshot` | ✓ | — | 現在の v3：`text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`cutoff`（打ち切り時は `time` / `nodes` / `bytes` / `stopped`、完了時は null）、`trigger`（`settle` / `refresh` / `focus_out`）。保持中の旧 v2 event は代わりに `complete` を持ち、打ち切り理由は識別できない。source は `macos.ax` |
@@ -178,7 +178,7 @@ timeline は snapshot 本文を inline しません。各 session は snapshot �
 
 ## ブラウザの URL 捕捉
 
-`browser.navigate`（URL 捕捉）は現在 Chrome のみ対応します。Chromium は AppleScript でウィンドウのモード（`normal` / `incognito`）を返します。incognito は URL イベントを生成せず、本文も設定なしで null のままです。
+`browser.navigate`（URL 捕捉）は現在 Chrome のみ対応します。Chromium は AppleScript でウィンドウのモード（`normal` / `incognito`）を返します。incognito は URL イベントを生成せず、本文も設定なしで null のままです。共有イベント契約では、プライバシーモードを判定できない観測を `mode: "unknown"` で表せます。この観測を `normal` として扱うことはありません。
 
 navigation はタブ・ウィンドウ・タイトル・ページ読み込みの変化時に観測します。タイトルもフォーカスも変化しないページ内 navigation では `browser.navigate` が生成されない場合があります。
 

@@ -315,8 +315,8 @@
                 "description": "Title of the active tab, after redaction."
               },
               "mode": {
-                "const": "normal",
-                "description": "Always \"normal\": incognito windows never produce events, so no other value can occur. Kept in the payload as an auditable trace of that guarantee."
+                "enum": ["normal", "unknown"],
+                "description": "Browser privacy mode. \"normal\" is confirmed non-private; \"unknown\" preserves a browser observation whose privacy mode cannot be determined."
               },
               "transition": {
                 "enum": ["navigate", "tab_switch", null],
