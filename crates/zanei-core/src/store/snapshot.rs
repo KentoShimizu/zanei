@@ -167,11 +167,12 @@ fn copy_events(
     conditions: &CopyConditions,
 ) -> Result<u64, StoreError> {
     let sql = format!(
-        "INSERT OR IGNORE INTO events(id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
+        "INSERT INTO events(id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
          window_title, window_id, element_json, data_json, redaction_json) \
          SELECT id, ts, mono_ns, source, type, bundle_id, app_name, pid, \
          window_title, window_id, element_json, data_json, redaction_json \
-         FROM {alias}.events WHERE {}",
+         FROM {alias}.events AS source WHERE {} \
+         AND NOT EXISTS (SELECT 1 FROM main.events WHERE id = source.id)",
         conditions.sql
     );
     let count = snapshot.execute(&sql, params_from_iter(conditions.parameters.iter()))?;
