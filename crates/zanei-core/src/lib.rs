@@ -10,4 +10,4 @@ pub mod text_delta;
 pub mod timeline;
 
 pub use capability::{Capability, CapabilityState, DaemonCapabilities};
-pub use schema::{CaptureContext, RawEvent};
+pub use schema::{CaptureContext, CaptureSurface, RawEvent};

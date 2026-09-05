@@ -9,14 +9,14 @@ use std::{
 use zanei_core::{
     config::FilterConfig,
     privacy::{PrivacyScope, host_is_allowed_for, website_host},
-    schema::CaptureContext,
+    schema::{CaptureContext, CaptureSurface},
 };
 
 use crate::ffi::applescript::AppleScriptWindowId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ChromeWindowState {
-    Normal { host: Option<String> },
+    Normal { url: String, tab_id: Option<String> },
     Incognito,
 }
 
@@ -88,16 +88,27 @@ impl ChromeEligibilityPublisher {
         applescript_window_id: Option<AppleScriptWindowId>,
         observed_at: Instant,
     ) {
+        self.observe_with_surface_at(pid, observation, applescript_window_id, None, observed_at);
+    }
+
+    pub(crate) fn observe_with_surface_at(
+        &self,
+        pid: i64,
+        observation: ChromeEligibilityObservation,
+        applescript_window_id: Option<AppleScriptWindowId>,
+        tab_id: Option<&str>,
+        observed_at: Instant,
+    ) {
+        let applescript_window_id_for_record = applescript_window_id.clone();
         let Ok(pid) = i32::try_from(pid) else {
             return;
         };
         let (key, next_state) = match observation {
-            ChromeEligibilityObservation::Normal { window_id, url } => (
-                window_id.map(|window_id| (pid, window_id)),
-                Some(ChromeWindowState::Normal {
-                    host: website_host(&url),
-                }),
-            ),
+            ChromeEligibilityObservation::Normal { window_id, url } => {
+                let key = window_id.map(|window_id| (pid, window_id));
+                let tab_id = tab_id.map(str::to_owned);
+                (key, Some(ChromeWindowState::Normal { url, tab_id }))
+            }
             ChromeEligibilityObservation::Incognito { window_id } => (
                 window_id.map(|window_id| (pid, window_id)),
                 Some(ChromeWindowState::Incognito),
@@ -129,12 +140,12 @@ impl ChromeEligibilityPublisher {
                 .is_none_or(|window_id| record.applescript_window_id.as_ref() == Some(window_id))
         {
             record.observed_at = observed_at;
-            if let Some(applescript_window_id) = applescript_window_id {
-                record.applescript_window_id = Some(applescript_window_id);
+            if let Some(applescript_window_id) = applescript_window_id.as_ref() {
+                record.applescript_window_id = Some(applescript_window_id.clone());
             }
             return;
         }
-        let remembered_window_id = applescript_window_id.or_else(|| {
+        let remembered_window_id = applescript_window_id_for_record.or_else(|| {
             state
                 .windows
                 .get(&key)
@@ -250,16 +261,24 @@ impl ChromeEligibilityTracker {
         let capture_context = record
             .state
             .as_ref()
-            .map(|window| CaptureContext {
-                website_host: match window {
-                    ChromeWindowState::Normal { host } => host.clone(),
-                    ChromeWindowState::Incognito => None,
+            .map(|window| match window {
+                ChromeWindowState::Normal { url, tab_id } => CaptureContext {
+                    url: Some(url.clone()),
+                    surface: Some(Box::new(CaptureSurface {
+                        cg_window_id: Some(window_id),
+                        applescript_window_id: record
+                            .applescript_window_id
+                            .as_ref()
+                            .map(|id| id.as_str().to_owned()),
+                        tab_id: tab_id.clone(),
+                    })),
                 },
+                ChromeWindowState::Incognito => CaptureContext::default(),
             })
             .unwrap_or_default();
         let allowed = match record.state.as_ref() {
-            Some(ChromeWindowState::Normal { host }) => {
-                host_is_allowed_for(scope, host.as_deref(), &state.filter)
+            Some(ChromeWindowState::Normal { url, .. }) => {
+                host_is_allowed_for(scope, website_host(url).as_deref(), &state.filter)
             }
             Some(ChromeWindowState::Incognito) | None => false,
         };
@@ -514,8 +533,8 @@ mod tests {
 
         assert!(decision.is_allowed());
         assert_eq!(
-            decision.capture_context().website_host.as_deref(),
-            Some("example.com")
+            decision.capture_context().url.as_deref(),
+            Some("https://example.com/path")
         );
         assert!(decision.version().is_some());
     }

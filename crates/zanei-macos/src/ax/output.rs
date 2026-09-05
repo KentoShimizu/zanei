@@ -237,8 +237,8 @@ mod tests {
         };
         assert_eq!(data.text, None);
         assert_eq!(
-            event.capture_context.website_host.as_deref(),
-            Some("v2.example")
+            event.capture_context.url.as_deref(),
+            Some("https://v2.example/")
         );
     }
 }

@@ -1,5 +1,8 @@
 //! Pure policy evaluation for the accepted browser/AX/pipeline consumers.
 //! This does not acquire a surface, verify its freshness, or replace Secure Input/private guards.
+//! Chrome private browsing is rejected by its eligibility owner; Safari private state remains
+//! Unknown and is never converted to Normal here. An explicitly bound Safari URL may still use
+//! app/site rules, while this evaluator does not enable Safari collection or permissions.
 
 use crate::config::CapturePolicyConfig;
 use crate::config::capture_policy::{BrowserMode, BrowserPolicy, BrowserUrlRule, PolicyAction};

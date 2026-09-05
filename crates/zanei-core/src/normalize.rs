@@ -232,18 +232,20 @@ enum PendingKind {
     Key {
         app: String,
         window: WindowKey,
-        website_host: Option<String>,
+        capture_context: CaptureContext,
         field_kind: Option<FieldKind>,
         kind: InputKeyKind,
     },
     Scroll {
         app: String,
         window: WindowKey,
+        capture_context: CaptureContext,
         direction: ScrollDirection,
     },
     WindowTitle {
         app: String,
         window: WindowKey,
+        capture_context: CaptureContext,
     },
 }
 
@@ -285,7 +287,7 @@ fn pending_kind(normalized: &NormalizedEvent) -> Option<PendingKind> {
             Some(PendingKind::Key {
                 app,
                 window,
-                website_host: normalized.capture_context.website_host.clone(),
+                capture_context: normalized.capture_context.clone(),
                 field_kind: data.field_kind,
                 kind: data.kind,
             })
@@ -293,11 +295,14 @@ fn pending_kind(normalized: &NormalizedEvent) -> Option<PendingKind> {
         EventData::InputScroll(data) => Some(PendingKind::Scroll {
             app,
             window,
+            capture_context: normalized.capture_context.clone(),
             direction: data.direction,
         }),
-        EventData::WindowTitle(_) if event.window.is_some() => {
-            Some(PendingKind::WindowTitle { app, window })
-        }
+        EventData::WindowTitle(_) if event.window.is_some() => Some(PendingKind::WindowTitle {
+            app,
+            window,
+            capture_context: normalized.capture_context.clone(),
+        }),
         _ => None,
     }
 }

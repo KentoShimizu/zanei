@@ -30,7 +30,8 @@ fn raw_event_matches_the_v3_content_snapshot_contract() {
         "日本語 alice@example.com".to_owned(),
         None,
         CaptureContext {
-            website_host: Some("example.com".to_owned()),
+            url: Some("https://example.com/path".to_owned()),
+            surface: None,
         },
         time::OffsetDateTime::UNIX_EPOCH,
     );
@@ -42,8 +43,8 @@ fn raw_event_matches_the_v3_content_snapshot_contract() {
     assert!(event.element.is_none());
     assert_eq!(event.observed_at, Some(time::OffsetDateTime::UNIX_EPOCH));
     assert_eq!(
-        event.capture_context.website_host.as_deref(),
-        Some("example.com")
+        event.capture_context.url.as_deref(),
+        Some("https://example.com/path")
     );
     let EventData::ContentSnapshot(data) = &event.data else {
         panic!("content payload");

@@ -397,13 +397,14 @@ pub(super) fn observe_query_once<A: ChromeApi>(
                 None
             };
             metrics.failure.observe_success();
-            eligibility.observe_with_window_id_at(
+            eligibility.observe_with_surface_at(
                 pid,
                 ChromeEligibilityObservation::Normal {
                     window_id: snapshot.window_id,
                     url: snapshot.url.clone(),
                 },
                 Some(snapshot.applescript_window_id.clone()),
+                Some(&snapshot.tab_key),
                 observed_at,
             );
             let (Some(navigation), Some(app)) = (navigation, app) else {
@@ -482,7 +483,20 @@ fn record_failure(
 }
 
 fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
-    let website_host = zanei_core::privacy::website_host(&navigation.snapshot.url);
+    let capture_context = zanei_core::schema::CaptureContext {
+        url: Some(navigation.snapshot.url.clone()),
+        surface: Some(Box::new(zanei_core::schema::CaptureSurface {
+            cg_window_id: navigation.snapshot.window_id,
+            applescript_window_id: Some(
+                navigation
+                    .snapshot
+                    .applescript_window_id
+                    .as_str()
+                    .to_owned(),
+            ),
+            tab_id: Some(navigation.snapshot.tab_key.clone()),
+        })),
+    };
     RawEvent {
         observed_at: None,
         source: EVENT_SOURCE.to_owned(),
@@ -504,7 +518,7 @@ fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
             mode: BrowserMode::Normal,
             transition: navigation.transition,
         }),
-        capture_context: zanei_core::schema::CaptureContext { website_host },
+        capture_context,
     }
 }
 

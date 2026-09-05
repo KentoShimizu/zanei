@@ -3,9 +3,9 @@ use zanei_core::config::{FilterConfig, RedactorKind, ScopedFilterConfig};
 use zanei_core::normalize::{NormalizedEvent, Normalizer};
 use zanei_core::privacy::PrivacyFilter;
 use zanei_core::schema::{
-    App, CaptureContext, ClipboardCopyData, ClipboardOrigin, ClipboardPasteData, ContentKind,
-    Element, Event, EventData, FieldKind, InputKeyData, InputKeyKind, RawEvent, Redaction,
-    UiValueData, Window,
+    App, CaptureContext, CaptureSurface, ClipboardCopyData, ClipboardOrigin, ClipboardPasteData,
+    ContentKind, Element, Event, EventData, FieldKind, InputKeyData, InputKeyKind, RawEvent,
+    Redaction, UiValueData, Window,
 };
 
 #[test]
@@ -191,16 +191,68 @@ fn coalescing_never_crosses_window_or_website_host_context() {
     let events = normalizer.flush();
     assert_eq!(events.len(), 3);
     assert_eq!(
-        events[0].capture_context.website_host.as_deref(),
-        Some("one.example")
+        events[0].capture_context.url.as_deref(),
+        Some("https://one.example/")
     );
     assert_eq!(
-        events[1].capture_context.website_host.as_deref(),
-        Some("two.example")
+        events[1].capture_context.url.as_deref(),
+        Some("https://two.example/")
     );
     assert_eq!(
         events[2].window.as_ref().and_then(|window| window.id),
         Some(2)
+    );
+}
+
+#[test]
+fn coalescing_never_crosses_complete_bound_context() {
+    let mut normalizer = Normalizer::new();
+    let mut first = raw_input(1, "same.example");
+    first.capture_context.url = Some("https://same.example/first".to_owned());
+    first.capture_context.surface = Some(Box::new(CaptureSurface {
+        cg_window_id: Some(1),
+        applescript_window_id: Some("window-a".to_owned()),
+        tab_id: Some("tab-a".to_owned()),
+    }));
+    let mut second = raw_input(1, "same.example");
+    second.capture_context.url = Some("https://same.example/second".to_owned());
+    second.capture_context.surface = Some(Box::new(CaptureSurface {
+        cg_window_id: Some(1),
+        applescript_window_id: Some("window-a".to_owned()),
+        tab_id: Some("tab-a".to_owned()),
+    }));
+
+    let mut third = second.clone();
+    third.capture_context.surface.as_mut().unwrap().tab_id = Some("tab-b".to_owned());
+
+    assert!(
+        normalizer
+            .push_at(first, OffsetDateTime::now_utc(), 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        normalizer
+            .push_at(second, OffsetDateTime::now_utc(), 2)
+            .unwrap()
+            .is_empty()
+    );
+
+    assert!(
+        normalizer
+            .push_at(third, OffsetDateTime::now_utc(), 3)
+            .unwrap()
+            .is_empty()
+    );
+    let events = normalizer.flush();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0].capture_context.url.as_deref(),
+        Some("https://same.example/first")
+    );
+    assert_eq!(
+        events[1].capture_context.url.as_deref(),
+        Some("https://same.example/second")
     );
 }
 
@@ -232,7 +284,8 @@ fn normalized_for(data: EventData, website_host: Option<&str>, app: App) -> Norm
             },
         },
         capture_context: CaptureContext {
-            website_host: website_host.map(str::to_owned),
+            url: website_host.map(|host| format!("https://{host}/")),
+            surface: None,
         },
     }
 }
@@ -277,7 +330,8 @@ fn raw_input(window_id: i64, website_host: &str) -> RawEvent {
         element: None,
         data: input_text("x"),
         capture_context: CaptureContext {
-            website_host: Some(website_host.to_owned()),
+            url: Some(format!("https://{website_host}/")),
+            surface: None,
         },
     }
 }
