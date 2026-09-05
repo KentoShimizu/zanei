@@ -52,6 +52,7 @@ impl ContextCursor {
 #[serde(deny_unknown_fields)]
 struct Anchor {
     id: String,
+    // Canonical RFC3339 keeps the original offset while bounding fractional precision.
     ts: String,
 }
 
@@ -119,6 +120,29 @@ pub struct ContextPage {
     pub has_more: bool,
     /// Read coverage only. Retrieve selected evidence to establish body coverage.
     pub coverage: ContextRange,
+}
+
+impl ContextPage {
+    /// Adopt a nonempty prefix after the wire owner measures its encoded budget.
+    /// The retained rows and all progress fields advance together.
+    pub fn retain_prefix(&mut self, rows: usize) -> Result<(), ContextPageError> {
+        if rows == self.observations.len() {
+            return Ok(());
+        }
+        if rows == 0 || rows > self.observations.len() {
+            return Err(ContextPageError::InvalidRequest("invalid page prefix"));
+        }
+        self.observations.truncate(rows);
+        let last = &self.observations[rows - 1];
+        self.next_cursor.sequence = last.append_sequence;
+        self.next_cursor.anchor = Some(Anchor {
+            id: last.id.clone(),
+            ts: last.ts.clone(),
+        });
+        self.coverage.through = last.append_sequence;
+        self.has_more = last.append_sequence < self.upper_bound.sequence;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -267,7 +291,7 @@ fn position(
 }
 
 fn read_anchor(connection: &Connection, sequence: u64) -> Result<Option<Anchor>, StoreError> {
-    Ok(connection
+    let raw = connection
         .query_row(
             "SELECT id, ts FROM events WHERE append_sequence=?1",
             [sequence],
@@ -278,7 +302,12 @@ fn read_anchor(connection: &Connection, sequence: u64) -> Result<Option<Anchor>,
                 })
             },
         )
-        .optional()?)
+        .optional()?;
+    raw.map(|mut anchor| {
+        anchor.ts = canonical_event_time(&anchor.ts)?;
+        Ok(anchor)
+    })
+    .transpose()
 }
 
 fn anchor_matches(
@@ -342,7 +371,7 @@ fn read_range(
             observations.push(ContextObservation {
                 append_sequence: sequence,
                 id: row.get(1)?,
-                ts,
+                ts: canonical_event_time(&ts)?,
                 pid: row.get(3)?,
                 window_id: row.get(4)?,
                 source: text(row, 5)?,
@@ -403,6 +432,12 @@ fn unavailable_range(
 
 fn parse_event_time(value: &str) -> Result<OffsetDateTime, StoreError> {
     OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| StoreError::invalid_timestamp("event.ts", value.to_owned()))
+}
+
+pub(super) fn canonical_event_time(value: &str) -> Result<String, StoreError> {
+    parse_event_time(value)?
+        .format(&Rfc3339)
         .map_err(|_| StoreError::invalid_timestamp("event.ts", value.to_owned()))
 }
 
