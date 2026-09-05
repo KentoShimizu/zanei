@@ -12,6 +12,15 @@ pub enum Capability {
     ObserveInput,
     /// Automate the supported browser to observe its current state.
     AutomateBrowser,
+    /// Automate Safari to observe its current state.
+    AutomateSafari,
+}
+
+impl Capability {
+    #[must_use]
+    pub const fn is_browser_automation(self) -> bool {
+        matches!(self, Self::AutomateBrowser | Self::AutomateSafari)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -29,6 +38,8 @@ pub struct DaemonCapabilities {
     read_accessibility_tree: CapabilityState,
     observe_input: CapabilityState,
     automate_browser: CapabilityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automate_safari: Option<CapabilityState>,
 }
 
 impl DaemonCapabilities {
@@ -44,7 +55,14 @@ impl DaemonCapabilities {
             read_accessibility_tree,
             observe_input,
             automate_browser,
+            automate_safari: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_automate_safari(mut self, state: CapabilityState) -> Self {
+        self.automate_safari = Some(state);
+        self
     }
 
     #[must_use]
@@ -53,6 +71,10 @@ impl DaemonCapabilities {
             Capability::ReadAccessibilityTree => self.read_accessibility_tree,
             Capability::ObserveInput => self.observe_input,
             Capability::AutomateBrowser => self.automate_browser,
+            Capability::AutomateSafari => match self.automate_safari {
+                Some(state) => state,
+                None => CapabilityState::Deferred,
+            },
         }
     }
 
@@ -63,10 +85,12 @@ impl DaemonCapabilities {
 
     #[must_use]
     pub fn ready_for(&self, required: &BTreeSet<Capability>) -> Option<bool> {
-        required.is_subset(&self.required).then(|| {
+        (required.is_subset(&self.required)
+            && (!required.contains(&Capability::AutomateSafari) || self.automate_safari.is_some()))
+        .then(|| {
             required.iter().all(|capability| {
                 self.state(*capability) == CapabilityState::Available
-                    || (*capability == Capability::AutomateBrowser
+                    || (capability.is_browser_automation()
                         && self.state(*capability) == CapabilityState::Deferred)
             })
         })

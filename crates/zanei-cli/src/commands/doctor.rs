@@ -279,6 +279,87 @@ mod tests {
     }
 
     #[test]
+    fn safari_report_keeps_target_bundle_and_deferred_readiness() {
+        let config = Config::default();
+        let required = BTreeSet::from([Capability::AutomateSafari]);
+        let snapshot = DaemonCapabilities::new(
+            required.clone(),
+            CapabilityState::Available,
+            CapabilityState::Available,
+            CapabilityState::Available,
+        )
+        .with_automate_safari(CapabilityState::Deferred);
+        let report = permission_report(&config, &required, snapshot, true);
+
+        assert!(report.ok);
+        assert_eq!(report.exit_code(), super::EXIT_SUCCESS);
+        assert_eq!(report.missing_permissions, []);
+        let rendered = render_human(&report, Path::new("/tmp/zanei"), false, false);
+        assert!(rendered.contains("safari_automation"));
+        assert!(rendered.contains("com.apple.Safari"));
+        assert!(rendered.contains("the first time Zanei contacts Safari"));
+    }
+
+    #[test]
+    fn safari_denial_is_action_required_for_doctor() {
+        let config = Config::default();
+        let required = BTreeSet::from([Capability::AutomateSafari]);
+        let snapshot = DaemonCapabilities::new(
+            required.clone(),
+            CapabilityState::Available,
+            CapabilityState::Available,
+            CapabilityState::Available,
+        )
+        .with_automate_safari(CapabilityState::ActionRequired);
+        let report = permission_report(&config, &required, snapshot, true);
+
+        assert!(!report.ok);
+        assert_eq!(report.exit_code(), super::EXIT_MISSING_PERMISSIONS);
+        assert_eq!(report.missing_permissions, [Capability::AutomateSafari]);
+        let rendered = render_human(&report, Path::new("/tmp/zanei"), false, false);
+        assert!(rendered.contains("safari_automation"));
+        assert!(rendered.contains("com.apple.Safari"));
+        assert!(rendered.contains("System Settings pane:"));
+    }
+
+    #[test]
+    fn doctor_keeps_chrome_denied_and_safari_granted_separate() {
+        let config = Config::default();
+        let required = BTreeSet::from([Capability::AutomateBrowser, Capability::AutomateSafari]);
+        let snapshot = DaemonCapabilities::new(
+            required.clone(),
+            CapabilityState::Available,
+            CapabilityState::Available,
+            CapabilityState::ActionRequired,
+        )
+        .with_automate_safari(CapabilityState::Available);
+        let report = permission_report(&config, &required, snapshot, true);
+
+        assert!(!report.ok);
+        assert_eq!(report.missing_permissions, [Capability::AutomateBrowser]);
+        assert_eq!(
+            report
+                .capabilities
+                .automate_browser
+                .as_ref()
+                .expect("Chrome capability")
+                .detail
+                .target_bundle_id,
+            Some("com.google.Chrome")
+        );
+        assert_eq!(
+            report
+                .capabilities
+                .automate_safari
+                .as_ref()
+                .expect("Safari capability")
+                .detail
+                .target_bundle_id,
+            Some("com.apple.Safari")
+        );
+    }
+
+    #[test]
     fn granted_report_while_recording_says_recording_is_running() {
         let report = granted_report();
 
