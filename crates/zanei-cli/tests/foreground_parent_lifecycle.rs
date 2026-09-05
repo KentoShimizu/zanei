@@ -169,6 +169,8 @@ fn parent_helper() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn child from parent helper");
+    // Child::wait closes its stdin; keep the writer alive until this parent dies.
+    let _stdin = child.stdin.take().expect("child stdin must be piped");
     let _ = child.wait().expect("wait child from parent helper");
 }
 
