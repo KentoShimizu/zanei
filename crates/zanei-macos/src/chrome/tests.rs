@@ -106,6 +106,7 @@ fn observe_once<A: ChromeApi>(
         tracker,
         Some(app),
         ChromeQuery::FrontWindow {
+            target: BrowserTarget::from_bundle_id(app.bundle_id.as_deref()).unwrap(),
             pid: app.pid,
             window_id: None,
         },
@@ -518,6 +519,7 @@ fn on_demand_requests_within_debounce_coalesce_into_one_observation() {
     assert_eq!(
         api.queries,
         [ChromeQuery::FrontWindow {
+            target: BrowserTarget::Chrome,
             pid: 42,
             window_id: Some(7),
         }]
@@ -576,8 +578,10 @@ fn snapshot_for_window(
         window_id: Some(window_id),
         applescript_window_id: AppleScriptWindowId::for_test(applescript_window_id),
         window_title: Some(title.to_owned()),
-        tab_key: tab.to_owned(),
-        url: url.to_owned(),
+        page: BrowserPage::Chrome {
+            tab_key: tab.to_owned(),
+            url: url.to_owned(),
+        },
         tab_title: Some(title.to_owned()),
     }
 }
