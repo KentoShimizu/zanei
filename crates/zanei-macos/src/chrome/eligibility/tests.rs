@@ -1,5 +1,5 @@
 use zanei_core::config::capture_policy::{
-    BrowserMode, BrowserPolicy, CapturePolicyConfig, IdePolicy, PolicyAction,
+    BrowserMode, BrowserPolicy, BrowserUrlRule, CapturePolicyConfig, IdePolicy, PolicyAction,
 };
 use zanei_core::config::{FilterConfig, ScopedFilterConfig};
 
@@ -274,10 +274,57 @@ fn safari_url_unknown_uses_app_policy_and_standalone_safari_is_denied() {
             url: None,
         },
     );
-    assert!(tracker.allows_url_events(7, Some(11)));
+    assert!(!tracker.allows_url_events(7, Some(11)));
+    assert!(tracker.allows_text(7, Some(11)));
+    assert!(tracker.allows_snapshot(7, Some(11)));
 
     tracker.replace_filter(safari_policy(PolicyAction::Block));
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Safari {
+            window_id: Some(11),
+            url: None,
+        },
+    );
     assert!(!tracker.allows_url_events(7, Some(11)));
+    assert!(!tracker.allows_text(7, Some(11)));
+    assert!(!tracker.allows_snapshot(7, Some(11)));
+}
+
+#[test]
+fn app_owned_chrome_uses_block_list_default_and_allow_list_after_reobservation() {
+    let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+    publisher.observe(7, normal(11, "https://blocked.example/"));
+    let mut filter = safari_policy(PolicyAction::Allow);
+    let policy = filter.capture_policy.as_mut().expect("capture policy");
+    policy.allowed_apps = vec!["Google Chrome".to_owned()];
+    policy.browser.default_policy = PolicyAction::Block;
+    policy.browser.allow_list = vec![BrowserUrlRule {
+        host: "allowed.example".to_owned(),
+        path_prefix: "/docs".to_owned(),
+        match_subdomains: false,
+    }];
+    policy.browser.block_list = vec![BrowserUrlRule {
+        host: "blocked.example".to_owned(),
+        path_prefix: "/".to_owned(),
+        match_subdomains: false,
+    }];
+
+    tracker.replace_filter(filter);
+    assert!(tracker.state_version(7, 11).is_none());
+
+    publisher.observe(7, normal(11, "https://blocked.example/"));
+    assert!(!tracker.allows_url_events(7, Some(11)));
+    assert!(!tracker.allows_text(7, Some(11)));
+    assert!(!tracker.allows_snapshot(7, Some(11)));
+
+    publisher.observe(7, normal(11, "https://other.example/"));
+    assert!(!tracker.allows_url_events(7, Some(11)));
+
+    publisher.observe(7, normal(11, "https://allowed.example/docs/start"));
+    assert!(tracker.allows_url_events(7, Some(11)));
+    assert!(tracker.allows_text(7, Some(11)));
+    assert!(tracker.allows_snapshot(7, Some(11)));
 }
 
 #[test]

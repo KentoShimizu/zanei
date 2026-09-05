@@ -228,8 +228,8 @@ pub struct ChromeEligibilityTracker {
 
 impl ChromeEligibilityTracker {
     pub fn allows_url_events(&self, pid: i64, window_id: Option<i64>) -> bool {
-        self.decision(PrivacyScope::AllEvents, pid, window_id)
-            .is_allowed()
+        let decision = self.decision(PrivacyScope::AllEvents, pid, window_id);
+        decision.is_allowed() && decision.capture_context().url.is_some()
     }
 
     pub fn allows_text(&self, pid: i64, window_id: Option<i64>) -> bool {
@@ -331,10 +331,10 @@ impl ChromeEligibilityTracker {
             .unwrap_or_default();
         let allowed = match record.state.as_ref() {
             Some(BrowserWindowState::Normal { url, .. }) => {
-                host_is_allowed_for(scope, website_host(url).as_deref(), &state.filter)
+                browser_is_allowed(BrowserTarget::Chrome, scope, Some(url), &state.filter)
             }
             Some(BrowserWindowState::Safari { url }) => {
-                safari_is_allowed(url.as_deref(), state.filter.capture_policy.as_ref())
+                browser_is_allowed(BrowserTarget::Safari, scope, url.as_deref(), &state.filter)
             }
             Some(BrowserWindowState::Incognito) | None => false,
         };
@@ -422,26 +422,31 @@ fn next_version(state: &mut EligibilityState) -> u64 {
     state.next_version
 }
 
-fn safari_is_allowed(
+fn browser_is_allowed(
+    target: BrowserTarget,
+    scope: PrivacyScope,
     url: Option<&str>,
-    policy: Option<&zanei_core::config::CapturePolicyConfig>,
+    filter: &FilterConfig,
 ) -> bool {
-    let Some(policy) = policy else {
-        return false;
-    };
-    matches!(
-        evaluate_capture_policy(
-            policy,
-            &App {
-                name: BrowserTarget::Safari.display_name().to_owned(),
-                bundle_id: Some(BrowserTarget::Safari.bundle_id().to_owned()),
-                pid: None,
-            },
-            None,
-            url,
+    match filter.capture_policy.as_ref() {
+        Some(policy) => matches!(
+            evaluate_capture_policy(
+                policy,
+                &App {
+                    name: target.display_name().to_owned(),
+                    bundle_id: Some(target.bundle_id().to_owned()),
+                    pid: None,
+                },
+                None,
+                url,
+            ),
+            CapturePolicyDecision::Allow
         ),
-        CapturePolicyDecision::Allow
-    )
+        None if target == BrowserTarget::Chrome => {
+            host_is_allowed_for(scope, url.and_then(website_host).as_deref(), filter)
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]
