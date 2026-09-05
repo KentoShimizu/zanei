@@ -1,5 +1,7 @@
 mod apps;
 mod config;
+mod context_read;
+mod context_wire;
 mod control;
 mod doctor;
 mod filter;
@@ -39,6 +41,9 @@ pub(crate) fn run_with_app_directory(
     cli: Cli,
     app_directory: &dyn AppDirectory,
 ) -> Result<u8, CliError> {
+    if matches!(&cli.command, Command::ContextRead) {
+        return context_read::run(cli.config.as_deref(), cli.store.as_deref());
+    }
     let key_environment =
         crate::store_access::initialize_key_environment().map_err(CliError::InvalidValue)?;
     if key_environment.uses_custom_keychain_identity()
@@ -60,6 +65,9 @@ pub(crate) fn run_with_app_directory(
     }
 
     match cli.command {
+        Command::ContextRead => {
+            unreachable!("context protocol is dispatched before normal startup")
+        }
         Command::Doctor(args) => doctor::run(&paths.config, &paths.store, args.fix, cli.json),
         Command::Start(args) => control::start(
             &paths,
