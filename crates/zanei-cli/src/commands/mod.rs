@@ -61,7 +61,13 @@ pub(crate) fn run_with_app_directory(
 
     match cli.command {
         Command::Doctor(args) => doctor::run(&paths.config, &paths.store, args.fix, cli.json),
-        Command::Start(args) => control::start(&paths, args.foreground, cli.quiet, cli.json),
+        Command::Start(args) => control::start(
+            &paths,
+            args.foreground,
+            args.exit_on_stdin_eof,
+            cli.quiet,
+            cli.json,
+        ),
         Command::Stop => control::stop(&paths.store, cli.quiet),
         Command::Pause(args) => control::pause(&paths.store, args.duration.as_deref(), cli.quiet),
         Command::Resume => control::resume(&paths.store, cli.quiet),
@@ -101,7 +107,7 @@ pub(crate) fn run_with_app_directory(
             Ok(EXIT_SUCCESS)
         }
         Command::Daemon => {
-            crate::daemon::run_daemon(&paths.config, &paths.store, DaemonMode::Launchd)?;
+            crate::daemon::run_daemon(&paths.config, &paths.store, DaemonMode::Launchd, false)?;
             Ok(EXIT_SUCCESS)
         }
     }

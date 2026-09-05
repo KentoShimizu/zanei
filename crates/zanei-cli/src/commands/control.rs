@@ -28,10 +28,21 @@ const TEXT_CONTENT_OPT_IN_GUIDANCE: &str = "Typed and clipboard content is not r
 const PENDING_PERMISSION_SNAPSHOT_GUIDANCE: &str = "recorder is still waiting for macOS permission dialogs — dialogs may take a moment to appear; if none are visible, run `zanei doctor --fix`; respond to any dialogs, then check `zanei doctor`";
 const RESTARTING_RECORDER: &str = "Restarting the recorder to apply text content capture...";
 
-pub fn start(paths: &Paths, foreground: bool, quiet: bool, json: bool) -> Result<u8, CliError> {
+pub fn start(
+    paths: &Paths,
+    foreground: bool,
+    exit_on_stdin_eof: bool,
+    quiet: bool,
+    json: bool,
+) -> Result<u8, CliError> {
     let config = Config::load(&paths.config)?;
     if foreground {
-        crate::daemon::run_daemon(&paths.config, &paths.store, DaemonMode::Foreground)?;
+        crate::daemon::run_daemon(
+            &paths.config,
+            &paths.store,
+            DaemonMode::Foreground,
+            exit_on_stdin_eof,
+        )?;
         return Ok(EXIT_SUCCESS);
     }
 
@@ -100,7 +111,7 @@ fn prompt_text_content(
 fn restart_background(paths: &Paths) -> Result<u8, CliError> {
     let stop_exit = stop(&paths.store, true)?;
     if stop_exit == EXIT_SUCCESS {
-        start(paths, false, true, false)
+        start(paths, false, false, true, false)
     } else {
         Ok(stop_exit)
     }
