@@ -115,10 +115,7 @@ pub(super) fn render_human(
             .iter()
             .filter(|capability| capability.is_browser_automation())
         {
-            output.push_str(&automation_guidance(
-                *capability,
-                (!report.reported_by_recorder).then_some(permission_target),
-            ));
+            output.push_str(&automation_guidance(*capability));
         }
     }
 
@@ -219,11 +216,7 @@ pub(super) fn render_human(
     output
 }
 
-pub(super) fn guide_granting(
-    missing: &[Capability],
-    executable: &Path,
-    reported_by_recorder: bool,
-) -> Result<(), CliError> {
+pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Result<(), CliError> {
     use std::io::{BufRead, Write};
 
     let permission_target = permission_target_path(executable);
@@ -255,13 +248,7 @@ pub(super) fn guide_granting(
             pane_title(permission)
         );
         if permission.is_browser_automation() {
-            print!(
-                "{}",
-                automation_guidance(
-                    *permission,
-                    (!reported_by_recorder).then_some(permission_target),
-                )
-            );
+            print!("{}", automation_guidance(*permission));
         } else {
             if bundled {
                 println!(
@@ -353,7 +340,7 @@ fn pane_title(capability: &Capability) -> String {
 
 fn automation_target(capability: Capability) -> &'static str {
     match capability {
-        Capability::AutomateBrowser => "Chrome",
+        Capability::AutomateBrowser => "Google Chrome",
         Capability::AutomateSafari => "Safari",
         Capability::ReadAccessibilityTree | Capability::ObserveInput => unreachable!(),
     }
@@ -365,16 +352,9 @@ fn has_manual_permission_missing(missing: &[Capability]) -> bool {
         .any(|capability| !capability.is_browser_automation())
 }
 
-fn automation_guidance(capability: Capability, recorder: Option<&Path>) -> String {
-    let requester = match recorder {
-        Some(path) => format!("recorder app/executable `{}`", path.display()),
-        None => {
-            "app/executable running the recorder (which may differ from this diagnostic command)"
-                .to_owned()
-        }
-    };
+fn automation_guidance(capability: Capability) -> String {
     format!(
-        "Automation ({}): In System Settings → Privacy & Security → Automation, find the {requester} and switch its `{}` toggle ON.\n",
+        "Automation ({}): In System Settings → Privacy & Security → Automation, find the app/executable running the recorder (which may differ from this diagnostic command) and switch its `{}` toggle ON.\n",
         automation_target(capability),
         automation_target(capability),
     )

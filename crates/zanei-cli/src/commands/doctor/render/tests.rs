@@ -34,9 +34,9 @@ fn report_with_missing(missing: &[Capability]) -> DoctorReport {
     .expect("permission report fixture")
 }
 #[test]
-fn browser_automation_denial_uses_recorder_path_and_target_toggle() {
+fn browser_automation_denial_uses_target_toggle_without_diagnostic_path() {
     for (capability, target) in [
-        (Capability::AutomateBrowser, "Chrome"),
+        (Capability::AutomateBrowser, "Google Chrome"),
         (Capability::AutomateSafari, "Safari"),
     ] {
         let rendered = super::render_human(
@@ -46,7 +46,7 @@ fn browser_automation_denial_uses_recorder_path_and_target_toggle() {
             false,
         );
         assert!(rendered.contains(&format!("Automation ({target})")));
-        assert!(rendered.contains("recorder app/executable `/Applications/Pantaray.app"));
+        assert!(!rendered.contains("/Applications/Pantaray.app"));
         assert!(rendered.contains(&format!("switch its `{target}` toggle ON")));
         for forbidden in ["click `+`", "Command-V", "Finder", "stop && start"] {
             assert!(
@@ -87,21 +87,23 @@ fn mixed_denial_combines_targeted_automation_and_manual_guidance() {
 }
 
 #[test]
-fn recorder_report_does_not_identify_the_diagnostic_executable_as_requester() {
-    for (capability, target) in [
-        (Capability::AutomateBrowser, "Chrome"),
-        (Capability::AutomateSafari, "Safari"),
-    ] {
-        let mut report = report_with_missing(&[capability]);
-        report.reported_by_recorder = true;
-        let rendered = super::render_human(
-            &report,
-            Path::new("/Applications/OtherCopy.app/Contents/MacOS/zanei"),
-            false,
-            true,
-        );
-        assert!(!rendered.contains("OtherCopy.app"));
-        assert!(rendered.contains("app/executable running the recorder"));
-        assert!(rendered.contains(&format!("switch its `{target}` toggle ON")));
+fn running_recorder_with_or_without_snapshot_does_not_identify_diagnostic_path() {
+    for reported_by_recorder in [false, true] {
+        for (capability, target) in [
+            (Capability::AutomateBrowser, "Google Chrome"),
+            (Capability::AutomateSafari, "Safari"),
+        ] {
+            let mut report = report_with_missing(&[capability]);
+            report.reported_by_recorder = reported_by_recorder;
+            let rendered = super::render_human(
+                &report,
+                Path::new("/Applications/OtherCopy.app/Contents/MacOS/zanei"),
+                false,
+                true,
+            );
+            assert!(!rendered.contains("OtherCopy.app"));
+            assert!(rendered.contains("app/executable running the recorder"));
+            assert!(rendered.contains(&format!("switch its `{target}` toggle ON")));
+        }
     }
 }
