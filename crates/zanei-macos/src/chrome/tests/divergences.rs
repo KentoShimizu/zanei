@@ -987,9 +987,17 @@ fn browser_queries_require_both_configuration_and_current_policy() {
     }
 }
 
-#[test]
-fn focus_and_background_confirmation_bind_browser_target_even_with_identical_window_ids() {
-    let (publisher, _) = chrome_eligibility_channel(both_browser_filter());
+fn background_confirmation_preserves_foreground(
+    background: BrowserTarget,
+    result: Result<ChromeObservation, ChromeFailure>,
+) {
+    let foreground = if background == BrowserTarget::Chrome {
+        BrowserTarget::Safari
+    } else {
+        BrowserTarget::Chrome
+    };
+    let pid = browser_app(background).pid;
+    let (publisher, capture) = chrome_eligibility_channel(both_browser_filter());
     publisher.set_query_targets(BTreeSet::from([
         BrowserTarget::Chrome,
         BrowserTarget::Safari,
@@ -998,23 +1006,18 @@ fn focus_and_background_confirmation_bind_browser_target_even_with_identical_win
     let (sender, events) = sync_channel(4);
     let mut state = ChromeWorkerState::default();
     let mut api = FakeApi::new(
-        [
-            BrowserTarget::Chrome,
-            BrowserTarget::Safari,
-            BrowserTarget::Chrome,
-        ]
-        .map(|target| {
-            Ok(ChromeObservation::Snapshot(browser_snapshot(
-                target,
-                Some("https://allowed.example"),
-            )))
-        }),
+        [background, foreground]
+            .map(|target| {
+                Ok(ChromeObservation::Snapshot(browser_snapshot(
+                    target,
+                    Some("https://allowed.example"),
+                )))
+            })
+            .into_iter()
+            .chain([result]),
     );
     let now = Instant::now();
-    for (index, target) in [BrowserTarget::Chrome, BrowserTarget::Safari]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, target) in [background, foreground].into_iter().enumerate() {
         let mut focus = chrome_focus(7);
         focus.app = browser_app(target);
         focus.generation = index as u64 + 1;
@@ -1039,10 +1042,7 @@ fn focus_and_background_confirmation_bind_browser_target_even_with_identical_win
         assert_eq!(data.transition, None);
     }
     handle_observation_trigger(
-        ObservationTrigger::OnDemand {
-            pid: 42,
-            window_id: 7,
-        },
+        ObservationTrigger::OnDemand { pid, window_id: 7 },
         now,
         &mut api,
         &sender,
@@ -1058,18 +1058,68 @@ fn focus_and_background_confirmation_bind_browser_target_even_with_identical_win
         &metrics,
         &publisher,
     );
-    assert_eq!(api.queries[0].target(), BrowserTarget::Chrome);
-    assert_eq!(api.queries[1].target(), BrowserTarget::Safari);
+    assert_eq!(api.queries[0].target(), background);
+    assert_eq!(api.queries[1].target(), foreground);
     assert_eq!(
         api.queries[2],
         ChromeQuery::Window {
-            target: BrowserTarget::Chrome,
-            pid: 42,
+            target: background,
+            pid,
             window_id: 7,
             applescript_window_id: AppleScriptWindowId::for_test("101")
         }
     );
     assert!(events.try_recv().is_err());
+    for (url, emits, allowed) in [
+        ("https://allowed.example", false, true),
+        ("https://allowed.example/private", false, false),
+        ("https://allowed.example/next", true, true),
+    ] {
+        let mut api = FakeApi::new([Ok(ChromeObservation::Snapshot(browser_snapshot(
+            foreground,
+            Some(url),
+        )))]);
+        handle_observation_trigger(
+            ObservationTrigger::PageLoaded {
+                pid: browser_app(foreground).pid,
+            },
+            now,
+            &mut api,
+            &sender,
+            &mut state,
+            &metrics,
+            &publisher,
+        );
+        assert_eq!(
+            api.query_count, 1,
+            "background result must preserve foreground observation"
+        );
+        assert_eq!(events.try_recv().is_ok(), emits);
+        let decision = capture.decision(
+            PrivacyScope::TextContent,
+            browser_app(foreground).pid,
+            Some(7),
+        );
+        assert_eq!(decision.is_allowed(), allowed);
+        assert_eq!(decision.capture_context().url.as_deref(), Some(url));
+    }
+}
+
+#[test]
+fn background_browser_results_preserve_foreground_with_identical_window_ids() {
+    for background in [BrowserTarget::Chrome, BrowserTarget::Safari] {
+        let snapshot = browser_snapshot(background, Some("https://allowed.example"));
+        let mut invalid = snapshot.clone();
+        invalid.applescript_window_id = AppleScriptWindowId::for_test("mismatched");
+        for result in [
+            Ok(ChromeObservation::Snapshot(snapshot)),
+            Ok(ChromeObservation::NotRunning),
+            Err(ChromeFailure::Query(ChromeQueryFailure::AppleEvent(-1743))),
+            Ok(ChromeObservation::Snapshot(invalid)),
+        ] {
+            background_confirmation_preserves_foreground(background, result);
+        }
+    }
 }
 
 struct ReconfigureBrowserDuringQuery<'a> {

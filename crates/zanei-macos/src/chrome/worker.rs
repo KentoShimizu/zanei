@@ -225,12 +225,17 @@ fn leave_chrome_focus(state: &mut ChromeWorkerState) {
 }
 
 fn terminate_chrome(pid: i64, state: &mut ChromeWorkerState) {
-    state.frontmost = None;
+    if state
+        .frontmost
+        .as_ref()
+        .is_some_and(|focus| focus.app.pid == pid)
+    {
+        leave_chrome_focus(state);
+    }
     state.apps.remove(&pid);
     state
         .on_demand
         .retain(|(candidate_pid, _), _| *candidate_pid != pid);
-    state.navigation.reset_page();
 }
 
 fn observe_frontmost<A: ChromeApi>(
@@ -395,7 +400,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
         Ok(ChromeObservation::Snapshot(snapshot)) => {
             if let Err(error) = validate_query_snapshot(&query, &snapshot) {
                 return record_failure(
-                    tracker,
+                    emit_navigation.then_some(tracker),
                     &query,
                     ChromeFailure::Validation(error.into()),
                     observed_at,
@@ -405,7 +410,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             }
             if emit_navigation && app.is_none() {
                 return record_failure(
-                    tracker,
+                    emit_navigation.then_some(tracker),
                     &query,
                     ChromeFailure::Validation(ChromeValidationFailure::MissingApplication),
                     observed_at,
@@ -425,7 +430,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
                     Ok(navigation) => navigation,
                     Err(error) => {
                         return record_failure(
-                            tracker,
+                            emit_navigation.then_some(tracker),
                             &query,
                             ChromeFailure::Validation(error.into()),
                             observed_at,
@@ -509,11 +514,13 @@ pub(super) fn observe_query_once<A: ChromeApi>(
                 None,
                 observed_at,
             );
-            tracker.reset_page();
+            if emit_navigation {
+                tracker.reset_page();
+            }
             ObservationOutcome::Inactive
         }
         Err(error) => record_failure(
-            tracker,
+            emit_navigation.then_some(tracker),
             &query,
             error,
             observed_at,
@@ -524,7 +531,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
 }
 
 fn record_failure(
-    tracker: &mut NavigationTracker,
+    tracker: Option<&mut NavigationTracker>,
     query: &ChromeQuery,
     failure: ChromeFailure,
     observed_at: Instant,
@@ -538,7 +545,9 @@ fn record_failure(
         None,
         observed_at,
     );
-    tracker.reset_page();
+    if let Some(tracker) = tracker {
+        tracker.reset_page();
+    }
     context.metrics.degraded.fetch_add(1, Ordering::Relaxed);
     context
         .metrics
