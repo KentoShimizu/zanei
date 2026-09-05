@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(data.text, None);
         assert_eq!(
             event.capture_context.url.as_deref(),
-            Some("https://v2.example/")
+            Some("https://v1.example/")
         );
     }
 }
