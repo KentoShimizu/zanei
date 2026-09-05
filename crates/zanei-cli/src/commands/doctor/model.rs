@@ -88,6 +88,8 @@ pub(super) struct CapabilityReport {
     pub(super) observe_input: CapabilityDetail,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) automate_browser: Option<CapabilityDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) automate_safari: Option<CapabilityDetail>,
 }
 
 impl CapabilityReport {
@@ -96,6 +98,7 @@ impl CapabilityReport {
             Capability::ReadAccessibilityTree => Some(&self.read_accessibility_tree),
             Capability::ObserveInput => Some(&self.observe_input),
             Capability::AutomateBrowser => self.automate_browser.as_ref(),
+            Capability::AutomateSafari => self.automate_safari.as_ref(),
         }
     }
 }

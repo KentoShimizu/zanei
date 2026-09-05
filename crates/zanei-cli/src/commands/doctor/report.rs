@@ -59,6 +59,14 @@ pub(super) fn build_report(
                 Vec::new(),
             )
         }),
+        automate_safari: required.contains(&Capability::AutomateSafari).then(|| {
+            CapabilityDetail::new(
+                Capability::AutomateSafari,
+                snapshot.state(Capability::AutomateSafari),
+                true,
+                Vec::new(),
+            )
+        }),
     };
 
     Ok(DoctorReport {
@@ -79,5 +87,5 @@ pub(super) fn build_report(
 
 fn requires_action(capability: Capability, state: CapabilityState) -> bool {
     state != CapabilityState::Available
-        && !(capability == Capability::AutomateBrowser && state == CapabilityState::Deferred)
+        && !(capability.is_browser_automation() && state == CapabilityState::Deferred)
 }

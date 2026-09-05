@@ -61,6 +61,16 @@ pub(super) fn render_human(
                 .expect("macOS automation detail has a target bundle ID")
         ));
     }
+    if let Some(automation) = &report.capabilities.automate_safari {
+        output.push_str(&format!(
+            "safari_automation {:<14} {}\n",
+            automation.detail.status,
+            automation
+                .detail
+                .target_bundle_id
+                .expect("macOS automation detail has a target bundle ID")
+        ));
+    }
     if report.reported_by_recorder {
         output.push_str("\nPermission status as reported by the running recorder.\n");
     } else {
@@ -71,14 +81,24 @@ pub(super) fn render_human(
     output.push_str(&format!("Store key: {}\n", report.store_key.describe()));
     output.push_str(&report.health.render_human());
 
-    let automation_pending = report
+    let chrome_automation_pending = report
         .capabilities
         .automate_browser
         .as_ref()
         .is_some_and(|capability| capability.detail.status == "not_determined");
-    if automation_pending {
+    if chrome_automation_pending {
         output.push_str(
             "\nAutomation: macOS will show a permission dialog the first time Zanei contacts Chrome; no setup is needed in advance.\n",
+        );
+    }
+    let safari_automation_pending = report
+        .capabilities
+        .automate_safari
+        .as_ref()
+        .is_some_and(|capability| capability.detail.status == "not_determined");
+    if safari_automation_pending {
+        output.push_str(
+            "\nAutomation: macOS will show a permission dialog the first time Zanei contacts Safari; no setup is needed in advance.\n",
         );
     }
 
@@ -132,7 +152,7 @@ pub(super) fn render_human(
             output.push_str("✓ All required permissions are granted. Recording is running.\n");
         }
         (true, false) => {
-            if automation_pending {
+            if chrome_automation_pending || safari_automation_pending {
                 output.push_str("✓ Permissions are ready. Run `zanei start` to begin recording.\n");
             } else {
                 output.push_str(
@@ -251,6 +271,9 @@ fn pane_title(capability: &Capability) -> String {
         Capability::ObserveInput => "Input Monitoring".to_owned(),
         Capability::AutomateBrowser => {
             format!("Automation ({})", zanei_core::privacy::CHROME_BUNDLE_ID)
+        }
+        Capability::AutomateSafari => {
+            format!("Automation ({})", zanei_macos::permission::SAFARI_BUNDLE_ID)
         }
     }
 }
