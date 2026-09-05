@@ -36,6 +36,19 @@ fn make_app_creates_the_signed_bundle_contract() {
         "dev.zanei.recorder"
     );
     assert_eq!(plist_value(&plist_path, "CFBundleName"), "Zanei");
+    let icon_name = plist_value(&plist_path, "CFBundleIconFile");
+    let icon_path = app_path.join("Contents/Resources").join(icon_name);
+    let decoded_icon = temporary_directory.path().join("Zanei.iconset");
+    let icon_status = Command::new("/usr/bin/iconutil")
+        .args(["-c", "iconset"])
+        .arg(&icon_path)
+        .arg("-o")
+        .arg(&decoded_icon)
+        .status()
+        .expect("decode bundled app icon");
+    assert!(icon_status.success(), "bundled icon must be a valid ICNS");
+    assert!(decoded_icon.join("icon_16x16.png").is_file());
+    assert!(decoded_icon.join("icon_512x512@2x.png").is_file());
     assert_eq!(plist_value(&plist_path, "CFBundlePackageType"), "APPL");
     assert_eq!(
         plist_value(&plist_path, "CFBundleShortVersionString"),

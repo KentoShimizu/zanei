@@ -61,6 +61,8 @@ main() {
   local -r executable_directory="${staged_app}/Contents/MacOS"
   mkdir -p -- "${executable_directory}"
   install -m 755 -- "${binary_path}" "${executable_directory}/zanei"
+  mkdir -p -- "${staged_app}/Contents/Resources"
+  install -m 644 -- "${SCRIPT_DIRECTORY}/Zanei.icns" "${staged_app}/Contents/Resources/Zanei.icns"
 
   cat > "${staged_app}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -73,6 +75,8 @@ main() {
   <string>dev.zanei.recorder</string>
   <key>CFBundleName</key>
   <string>Zanei</string>
+  <key>CFBundleIconFile</key>
+  <string>Zanei.icns</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
