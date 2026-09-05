@@ -31,9 +31,10 @@ use zanei_core::privacy::CHROME_BUNDLE_ID;
 use zanei_core::schema::BrowserTransition;
 
 use crate::{
+    browser_context::BrowserTarget,
     ffi::applescript::{
         AppleScriptClient, AppleScriptError, AppleScriptResponseError, AppleScriptWindowId,
-        BrowserTarget, Observation as NativeObservation, Snapshot as NativeSnapshot,
+        Observation as NativeObservation, Snapshot as NativeSnapshot,
     },
     focus_context::{FocusContext, FocusTransition, FocusTransitionReceiver},
 };

@@ -53,6 +53,7 @@ pub enum ScrollDirection {
 #[serde(rename_all = "snake_case")]
 pub enum BrowserMode {
     Normal,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -1,11 +1,10 @@
 //! In-process AppleScript execution with all Objective-C pointers kept private.
 
-use crate::permission::SAFARI_BUNDLE_ID;
+use crate::browser_context::BrowserTarget;
 use std::{
     ffi::{CStr, c_char, c_void},
     ptr::NonNull,
 };
-use zanei_core::privacy::CHROME_BUNDLE_ID;
 
 #[cfg(target_arch = "x86_64")]
 type ObjcBool = i8;
@@ -94,13 +93,6 @@ impl AppleScriptWindowId {
     pub(crate) fn for_test(value: &str) -> Self {
         Self(value.to_owned())
     }
-}
-// Safari is intentionally not wired into the Chrome worker until Z07e.
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BrowserTarget {
-    Chrome,
-    Safari,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Snapshot {
@@ -200,7 +192,7 @@ impl AppleScriptClient {
 fn application_path(target: BrowserTarget) -> Result<String, AppleScriptError> {
     let class = class(c"NSWorkspace", "NSWorkspace")?;
     let workspace = send_object(class, c"sharedWorkspace");
-    let bundle_id = autoreleased_string(bundle_id(target))?;
+    let bundle_id = autoreleased_string(target.bundle_id())?;
     let url = send_object_with_object(
         workspace,
         c"URLForApplicationWithBundleIdentifier:",
@@ -211,12 +203,6 @@ fn application_path(target: BrowserTarget) -> Result<String, AppleScriptError> {
         BrowserTarget::Chrome => AppleScriptError::ChromeUnavailable,
         BrowserTarget::Safari => AppleScriptError::SafariUnavailable,
     })
-}
-fn bundle_id(target: BrowserTarget) -> &'static str {
-    match target {
-        BrowserTarget::Chrome => CHROME_BUNDLE_ID,
-        BrowserTarget::Safari => SAFARI_BUNDLE_ID,
-    }
 }
 fn front_window_source(target: BrowserTarget, application_path: &str) -> String {
     let template = match target {
@@ -245,7 +231,7 @@ fn target_window_source(
 fn render_script_template(template: &str, target: BrowserTarget, application_path: &str) -> String {
     let escaped_path = escape_applescript_string(application_path);
     template
-        .replace("{bundle_id}", bundle_id(target))
+        .replace("{bundle_id}", target.bundle_id())
         .replace("{application_path}", &escaped_path)
 }
 fn escape_applescript_string(value: &str) -> String {

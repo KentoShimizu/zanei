@@ -5,6 +5,8 @@ pub mod app_directory;
 #[cfg(target_os = "macos")]
 pub mod ax;
 #[cfg(target_os = "macos")]
+pub mod browser_context;
+#[cfg(target_os = "macos")]
 pub mod capture_policy;
 #[cfg(target_os = "macos")]
 pub mod chrome;

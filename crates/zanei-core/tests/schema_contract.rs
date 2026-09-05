@@ -251,6 +251,26 @@ fn truncated_browser_url_round_trips_with_the_size_limit_rule() {
 }
 
 #[test]
+fn unknown_browser_mode_round_trips_without_becoming_normal() {
+    let validator = validator();
+    let value = envelope(
+        "browser.navigate",
+        json!({
+            "url": "https://example.com/path", "tab_title": null,
+            "mode": "unknown", "transition": "navigate"
+        }),
+    );
+
+    assert_acceptance(&validator, "unknown browser mode", &value, true);
+    let event: Event = serde_json::from_value(value.clone()).expect("unknown mode");
+    let EventData::BrowserNavigate(data) = &event.data else {
+        panic!("expected browser.navigate");
+    };
+    assert_eq!(data.mode, zanei_core::schema::BrowserMode::Unknown);
+    assert_eq!(serde_json::to_value(event).expect("round trip"), value);
+}
+
+#[test]
 fn serialization_rejects_mismatched_type_version_pairs() {
     let mut existing: Event =
         serde_json::from_value(envelope("app.launch", json!({}))).expect("existing event");
