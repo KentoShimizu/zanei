@@ -121,9 +121,11 @@ fn store_key_report(store_path: &Path) -> StoreKeyReport {
     match StoreFormat::probe(store_path) {
         Ok(StoreFormat::Encrypted) => {
             match store_access::load_store_key(KeyAccess::Existing, KeyPrompt::Allowed) {
-                Ok(Some(_)) => {
-                    StoreKeyReport::new("key_store", Some(store_access::key_store().location()))
-                }
+                Ok(Some(_)) => match store_access::key_store() {
+                    Ok(store) => StoreKeyReport::new("key_store", Some(store.location())),
+                    Err(StoreError::Locked(reason)) => StoreKeyReport::from_locked(&reason),
+                    Err(error) => StoreKeyReport::new("unavailable", Some(error.to_string())),
+                },
                 Ok(None) => StoreKeyReport::from_locked(&LockedReason::KeyMissing),
                 Err(StoreError::Locked(reason)) => StoreKeyReport::from_locked(&reason),
                 Err(error) => StoreKeyReport::new("unavailable", Some(error.to_string())),

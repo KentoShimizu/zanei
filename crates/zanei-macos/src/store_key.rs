@@ -32,26 +32,28 @@ const DENIED_ADVICE: &str = "macOS denied this process access to the store key i
 #[derive(Clone, Debug)]
 pub struct KeychainStoreKey {
     service: String,
+    label: String,
 }
 
 impl Default for KeychainStoreKey {
     fn default() -> Self {
-        Self::with_service(STORE_KEY_SERVICE)
+        Self::with_service(STORE_KEY_SERVICE, STORE_KEY_LABEL)
     }
 }
 
 impl KeychainStoreKey {
     #[must_use]
-    pub fn with_service(service: impl Into<String>) -> Self {
+    pub fn with_service(service: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             service: service.into(),
+            label: label.into(),
         }
     }
 }
 
 impl KeyStore for KeychainStoreKey {
     fn location(&self) -> String {
-        format!("the login Keychain (item \"{STORE_KEY_LABEL}\")")
+        format!("the login Keychain (item \"{}\")", self.label)
     }
 
     fn load(&self, interaction: KeyStoreInteraction) -> Result<Option<StoreKey>, KeyStoreError> {
@@ -72,7 +74,7 @@ impl KeyStore for KeychainStoreKey {
         keychain::add_generic_password(
             &self.service,
             STORE_KEY_ACCOUNT,
-            STORE_KEY_LABEL,
+            &self.label,
             STORE_KEY_DESCRIPTION,
             hex.as_bytes(),
         )
