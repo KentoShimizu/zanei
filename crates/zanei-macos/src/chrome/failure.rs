@@ -1,9 +1,12 @@
 //! Privacy-safe Chrome dependency failures and lifecycle state.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{Arc, PoisonError, RwLock},
 };
+
+use crate::browser_context::BrowserTarget;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChromeFailure {
@@ -177,36 +180,49 @@ impl fmt::Display for ChromeFailureTransition {
 
 #[derive(Clone, Default)]
 pub(super) struct ChromeFailurePublisher {
-    state: Arc<RwLock<ChromeFailureState>>,
+    state: Arc<RwLock<BTreeMap<BrowserTarget, ChromeFailureState>>>,
 }
 
 impl ChromeFailurePublisher {
-    pub(super) fn state(&self) -> ChromeFailureState {
-        *self.state.read().unwrap_or_else(PoisonError::into_inner)
+    pub(super) fn state(&self, targets: &BTreeSet<BrowserTarget>) -> ChromeFailureState {
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find_map(|(target, state)| {
+                (targets.contains(target) && state.current().is_some()).then_some(*state)
+            })
+            .unwrap_or_default()
     }
 
-    pub(super) fn observe_failure(&self, failure: ChromeFailure) {
+    pub(super) fn observe_failure(&self, target: BrowserTarget, failure: ChromeFailure) {
         let transition = self
             .state
             .write()
             .unwrap_or_else(PoisonError::into_inner)
+            .entry(target)
+            .or_default()
             .observe_failure(failure);
-        trace_transition(transition);
+        trace_transition(target, transition);
     }
 
-    pub(super) fn observe_success(&self) {
+    pub(super) fn observe_success(&self, target: BrowserTarget) {
         let transition = self
             .state
             .write()
             .unwrap_or_else(PoisonError::into_inner)
+            .entry(target)
+            .or_default()
             .observe_success();
-        trace_transition(transition);
+        trace_transition(target, transition);
     }
 }
 
-fn trace_transition(transition: Option<ChromeFailureTransition>) {
+fn trace_transition(target: BrowserTarget, transition: Option<ChromeFailureTransition>) {
     if let Some(transition) = transition {
-        crate::trace::trace!("component=chrome action=failure_transition {transition}");
+        crate::trace::trace!(
+            "component=chrome action=failure_transition target={target:?} {transition}"
+        );
     }
 }
 

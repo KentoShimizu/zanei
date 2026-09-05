@@ -54,6 +54,7 @@ fn s21_front_window_result_is_unavailable_when_focus_generation_changes() {
         &mut NavigationTracker::default(),
         Some(&chrome_app()),
         ChromeQuery::FrontWindow {
+            target: BrowserTarget::Chrome,
             pid: 42,
             window_id: Some(7),
         },
@@ -100,6 +101,7 @@ fn ownership_stop_discards_a_blocking_query_result() {
         &mut NavigationTracker::default(),
         None,
         ChromeQuery::Window {
+            target: BrowserTarget::Chrome,
             pid: 42,
             window_id: 7,
             applescript_window_id: AppleScriptWindowId::for_test("window-101"),
@@ -129,7 +131,7 @@ fn front_response_identity_is_targeted_instead_of_cg_window_number() {
         Some(7),
     );
     assert_eq!(snapshot.applescript_window_id.as_str(), "101");
-    assert_eq!(snapshot.tab_key, "tab-alpha-001");
+    assert_eq!(snapshot.page.tab_key(), Some("tab-alpha-001"));
     let mut initial_api = FakeApi::new([Ok(ChromeObservation::Snapshot(snapshot))]);
     let (initial_sender, _initial_events) = sync_channel(1);
     assert!(matches!(
@@ -153,6 +155,7 @@ fn front_response_identity_is_targeted_instead_of_cg_window_number() {
 
     eligibility.clear_all();
     let mut state = ChromeWorkerState::default();
+    state.apps.insert(42, chrome_app());
     let mut api = FakeApi::new([Ok(ChromeObservation::NoWindow)]);
     let (sender, _) = sync_channel(1);
 
@@ -180,6 +183,7 @@ fn front_response_identity_is_targeted_instead_of_cg_window_number() {
     assert_eq!(
         api.queries,
         [ChromeQuery::Window {
+            target: BrowserTarget::Chrome,
             pid: 42,
             window_id: 7,
             applescript_window_id: AppleScriptWindowId::for_test("101"),
@@ -214,6 +218,7 @@ fn cg_window_number_used_as_applescript_identity_fails_closed() {
         &mut NavigationTracker::default(),
         None,
         ChromeQuery::Window {
+            target: BrowserTarget::Chrome,
             pid: 42,
             window_id: 7,
             applescript_window_id: AppleScriptWindowId::for_test("7"),
@@ -227,7 +232,7 @@ fn cg_window_number_used_as_applescript_identity_fails_closed() {
     assert_eq!(tracker.state_version(42, 7), None);
     assert_eq!(metrics.degraded.load(Ordering::Relaxed), 1);
     assert_eq!(
-        metrics.failure.state(),
+        metrics.failure.state(&eligibility.query_targets()),
         ChromeFailureState::Unavailable(ChromeFailure::Validation(
             ChromeValidationFailure::WindowIdentityMismatch
         ))
@@ -250,7 +255,10 @@ fn v2_5_worker_panic_clears_state_and_preserves_receivers_for_restart() {
     );
     let mut collector = ChromeCollector::new(eligibility, focus_context, observer);
     let failure = ChromeFailure::Query(ChromeQueryFailure::AppleEvent(-1712));
-    collector.metrics.failure.observe_failure(failure);
+    collector
+        .metrics
+        .failure
+        .observe_failure(BrowserTarget::Chrome, failure);
     let (output, _events) = sync_channel(1);
     collector.panic_next_worker_for_test();
 
@@ -354,7 +362,7 @@ fn parse_and_validation_failures_recover_only_after_a_valid_snapshot() {
         ObservationOutcome::Continue
     ));
     assert_eq!(
-        metrics.failure.state(),
+        metrics.failure.state(&eligibility.query_targets()),
         ChromeFailureState::Unavailable(parse_failure)
     );
     assert!(!capture.allows_text(42, Some(7)));
@@ -371,7 +379,7 @@ fn parse_and_validation_failures_recover_only_after_a_valid_snapshot() {
         ObservationOutcome::Continue
     ));
     assert_eq!(
-        metrics.failure.state(),
+        metrics.failure.state(&eligibility.query_targets()),
         ChromeFailureState::Unavailable(ChromeFailure::Validation(
             ChromeValidationFailure::EmptyWindowIdentity
         ))
@@ -389,7 +397,10 @@ fn parse_and_validation_failures_recover_only_after_a_valid_snapshot() {
         ),
         ObservationOutcome::Continue
     ));
-    assert_eq!(metrics.failure.state(), ChromeFailureState::Available);
+    assert_eq!(
+        metrics.failure.state(&eligibility.query_targets()),
+        ChromeFailureState::Available
+    );
     assert!(capture.allows_text(42, Some(7)));
     assert_eq!(metrics.degraded.load(Ordering::Relaxed), 2);
     let event = events.try_recv().expect("recovery navigation");
@@ -444,7 +455,10 @@ fn output_disconnect_remains_a_structural_worker_stop() {
     );
 
     assert_eq!(api.query_count, 2);
-    assert_eq!(metrics.failure.state(), ChromeFailureState::Available);
+    assert_eq!(
+        metrics.failure.state(&eligibility.query_targets()),
+        ChromeFailureState::Available
+    );
     assert_eq!(metrics.degraded.load(Ordering::Relaxed), 2);
     assert_eq!(metrics.dropped.load(Ordering::Relaxed), 1);
 }
@@ -680,10 +694,10 @@ fn identical_policy_reload_preserves_version_and_allows_query_publication() {
         42,
         ChromeEligibilityObservation::Normal {
             window_id: Some(7),
-            url: snapshot.url.clone(),
+            url: snapshot.page.url().unwrap().to_owned(),
         },
         Some(snapshot.applescript_window_id.clone()),
-        Some(&snapshot.tab_key),
+        snapshot.page.tab_key(),
         initial,
     );
     let version = capture.state_version(42, 7);
@@ -760,4 +774,464 @@ fn denied_url_is_not_published_or_used_as_the_next_navigation_origin() {
         assert_eq!(data.url, "https://other.example/public");
         assert_eq!(data.transition, None);
     }
+}
+
+fn both_browser_filter() -> FilterConfig {
+    let mut filter = publication_filter();
+    let policy = filter.capture_policy.as_mut().unwrap();
+    policy.allowed_apps.push("Safari".to_owned());
+    policy.browser.on_url_unavailable = zanei_core::config::capture_policy::PolicyAction::Allow;
+    filter
+}
+
+fn browser_app(target: BrowserTarget) -> ApplicationInfo {
+    ApplicationInfo {
+        name: target.display_name().to_owned(),
+        bundle_id: Some(target.bundle_id().to_owned()),
+        pid: if target == BrowserTarget::Chrome {
+            42
+        } else {
+            43
+        },
+        ..chrome_app()
+    }
+}
+
+fn browser_snapshot(target: BrowserTarget, url: Option<&str>) -> ChromeSnapshot {
+    let mut value = snapshot_for_window(
+        7,
+        "101",
+        "tab-1",
+        url.unwrap_or("https://allowed.example"),
+        "Page",
+    );
+    if target == BrowserTarget::Safari {
+        value.page = BrowserPage::Safari {
+            url: url.map(str::to_owned),
+        };
+    }
+    value
+}
+
+#[test]
+fn denied_browser_does_not_stop_or_get_hidden_by_other_browser_success() {
+    let denied = ChromeFailure::from(AppleScriptError::Execute { code: Some(-1743) });
+    assert_eq!(
+        denied,
+        ChromeFailure::Query(ChromeQueryFailure::AppleEvent(-1743))
+    );
+    for (blocked, allowed) in [
+        (BrowserTarget::Chrome, BrowserTarget::Safari),
+        (BrowserTarget::Safari, BrowserTarget::Chrome),
+    ] {
+        let filter = both_browser_filter();
+        let (publisher, capture) = chrome_eligibility_channel(filter.clone());
+        publisher.set_query_targets(BTreeSet::from([blocked, allowed]));
+        let metrics = ChromeMetrics::default();
+        let (sender, events) = sync_channel(8);
+        let mut navigation = NavigationTracker::default();
+        for target in [blocked, allowed] {
+            let mut api = FakeApi::new([Ok(ChromeObservation::Snapshot(browser_snapshot(
+                target,
+                Some("https://allowed.example"),
+            )))]);
+            observe_once(
+                &mut api,
+                &mut navigation,
+                &browser_app(target),
+                &sender,
+                &metrics,
+                &publisher,
+            );
+            assert_eq!(
+                events.try_recv().unwrap().app.bundle_id.as_deref(),
+                Some(target.bundle_id())
+            );
+        }
+        let mut api = FakeApi::new([Err(denied)]);
+        assert!(matches!(
+            observe_once(
+                &mut api,
+                &mut navigation,
+                &browser_app(blocked),
+                &sender,
+                &metrics,
+                &publisher
+            ),
+            ObservationOutcome::Continue
+        ));
+        assert!(events.try_recv().is_err());
+        assert_eq!(capture.state_version(browser_app(blocked).pid, 7), None);
+        assert!(capture.state_version(browser_app(allowed).pid, 7).is_some());
+        let mut api = FakeApi::new([Ok(ChromeObservation::Snapshot(browser_snapshot(
+            allowed,
+            Some("https://allowed.example/next"),
+        )))]);
+        observe_once(
+            &mut api,
+            &mut navigation,
+            &browser_app(allowed),
+            &sender,
+            &metrics,
+            &publisher,
+        );
+        assert!(events.try_recv().is_ok());
+        assert_eq!(
+            metrics.failure.state(&publisher.query_targets()),
+            ChromeFailureState::Unavailable(denied)
+        );
+        publisher.set_query_targets(BTreeSet::from([allowed]));
+        assert_eq!(
+            metrics.failure.state(&publisher.query_targets()),
+            ChromeFailureState::Available
+        );
+        publisher.set_query_targets(BTreeSet::from([blocked, allowed]));
+        let mut changed = filter;
+        changed
+            .capture_policy
+            .as_mut()
+            .unwrap()
+            .allowed_apps
+            .retain(|name| name != blocked.display_name());
+        capture.replace_filter(changed);
+        assert_eq!(
+            metrics.failure.state(&publisher.query_targets()),
+            ChromeFailureState::Available
+        );
+    }
+}
+
+#[test]
+fn safari_unknown_url_preserves_surface_and_unknown_identity_without_url_event() {
+    let (publisher, capture) = chrome_eligibility_channel(both_browser_filter());
+    publisher.set_query_targets(BTreeSet::from([BrowserTarget::Safari]));
+    let metrics = ChromeMetrics::default();
+    let (sender, events) = sync_channel(4);
+    let mut navigation = NavigationTracker::default();
+    for url in [
+        Some("https://allowed.example"),
+        None,
+        Some("https://allowed.example"),
+    ] {
+        let mut api = FakeApi::new([Ok(ChromeObservation::Snapshot(browser_snapshot(
+            BrowserTarget::Safari,
+            url,
+        )))]);
+        observe_once(
+            &mut api,
+            &mut navigation,
+            &browser_app(BrowserTarget::Safari),
+            &sender,
+            &metrics,
+            &publisher,
+        );
+        let decision = capture.decision(PrivacyScope::TextContent, 43, Some(7));
+        assert!(decision.is_allowed());
+        let context = decision.capture_context();
+        assert_eq!(context.url.as_deref(), url);
+        let surface = context.surface.unwrap();
+        assert_eq!(surface.cg_window_id, Some(7));
+        assert_eq!(surface.applescript_window_id.as_deref(), Some("101"));
+        assert_eq!(surface.tab_id, None);
+        if let Some(url) = url {
+            let event = events.try_recv().unwrap();
+            let EventData::BrowserNavigate(data) = event.data else {
+                panic!("navigation");
+            };
+            assert_eq!(data.mode, BrowserMode::Unknown);
+            assert_eq!(data.url, url);
+            assert_eq!(data.transition, None);
+            assert_eq!(event.capture_context.surface.unwrap().tab_id, None);
+        } else {
+            assert!(events.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn browser_queries_require_both_configuration_and_current_policy() {
+    let mut off = both_browser_filter();
+    off.capture_policy.as_mut().unwrap().browser.mode =
+        zanei_core::config::capture_policy::BrowserMode::Off;
+    for (filter, targets, target) in [
+        (
+            both_browser_filter(),
+            BTreeSet::from([BrowserTarget::Chrome]),
+            BrowserTarget::Safari,
+        ),
+        (
+            FilterConfig::default(),
+            BTreeSet::from([BrowserTarget::Safari]),
+            BrowserTarget::Safari,
+        ),
+        (
+            off,
+            BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari]),
+            BrowserTarget::Chrome,
+        ),
+    ] {
+        let (publisher, _) = chrome_eligibility_channel(filter);
+        publisher.set_query_targets(targets);
+        let mut api = FakeApi::new([]);
+        let (sender, events) = sync_channel(1);
+        observe_once(
+            &mut api,
+            &mut NavigationTracker::default(),
+            &browser_app(target),
+            &sender,
+            &ChromeMetrics::default(),
+            &publisher,
+        );
+        assert_eq!(api.query_count, 0);
+        assert!(events.try_recv().is_err());
+    }
+}
+
+#[test]
+fn focus_and_background_confirmation_bind_browser_target_even_with_identical_window_ids() {
+    let (publisher, _) = chrome_eligibility_channel(both_browser_filter());
+    publisher.set_query_targets(BTreeSet::from([
+        BrowserTarget::Chrome,
+        BrowserTarget::Safari,
+    ]));
+    let metrics = ChromeMetrics::default();
+    let (sender, events) = sync_channel(4);
+    let mut state = ChromeWorkerState::default();
+    let mut api = FakeApi::new(
+        [
+            BrowserTarget::Chrome,
+            BrowserTarget::Safari,
+            BrowserTarget::Chrome,
+        ]
+        .map(|target| {
+            Ok(ChromeObservation::Snapshot(browser_snapshot(
+                target,
+                Some("https://allowed.example"),
+            )))
+        }),
+    );
+    let now = Instant::now();
+    for (index, target) in [BrowserTarget::Chrome, BrowserTarget::Safari]
+        .into_iter()
+        .enumerate()
+    {
+        let mut focus = chrome_focus(7);
+        focus.app = browser_app(target);
+        focus.generation = index as u64 + 1;
+        assert!(handle_focus_transition(
+            FocusTransition {
+                previous: state.frontmost.clone(),
+                current: Some(focus),
+                resynced: false
+            },
+            now,
+            &mut api,
+            &sender,
+            &mut state,
+            &metrics,
+            &publisher
+        ));
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.app.bundle_id.as_deref(), Some(target.bundle_id()));
+        let EventData::BrowserNavigate(data) = event.data else {
+            panic!("navigation");
+        };
+        assert_eq!(data.transition, None);
+    }
+    handle_observation_trigger(
+        ObservationTrigger::OnDemand {
+            pid: 42,
+            window_id: 7,
+        },
+        now,
+        &mut api,
+        &sender,
+        &mut state,
+        &metrics,
+        &publisher,
+    );
+    service_on_demand(
+        now + Duration::from_millis(200),
+        &mut api,
+        &sender,
+        &mut state,
+        &metrics,
+        &publisher,
+    );
+    assert_eq!(api.queries[0].target(), BrowserTarget::Chrome);
+    assert_eq!(api.queries[1].target(), BrowserTarget::Safari);
+    assert_eq!(
+        api.queries[2],
+        ChromeQuery::Window {
+            target: BrowserTarget::Chrome,
+            pid: 42,
+            window_id: 7,
+            applescript_window_id: AppleScriptWindowId::for_test("101")
+        }
+    );
+    assert!(events.try_recv().is_err());
+}
+
+struct ReconfigureBrowserDuringQuery<'a> {
+    publisher: &'a ChromeEligibilityPublisher,
+    focus: &'a FocusContext,
+    change_focus: bool,
+}
+
+impl ChromeApi for ReconfigureBrowserDuringQuery<'_> {
+    fn query(&mut self, query: &ChromeQuery) -> Result<ChromeObservation, ChromeFailure> {
+        assert_eq!(query.target(), BrowserTarget::Safari);
+        if self.change_focus {
+            self.focus
+                .activate(browser_app(BrowserTarget::Chrome), None);
+        } else {
+            self.publisher
+                .set_query_targets(BTreeSet::from([BrowserTarget::Chrome]));
+        }
+        Ok(ChromeObservation::Snapshot(browser_snapshot(
+            BrowserTarget::Safari,
+            Some("https://allowed.example/stale"),
+        )))
+    }
+}
+
+#[test]
+fn safari_delayed_result_is_discarded_when_target_configuration_or_focus_changes() {
+    for change_focus in [false, true] {
+        let (publisher, capture) = chrome_eligibility_channel(both_browser_filter());
+        publisher.set_query_targets(BTreeSet::from([
+            BrowserTarget::Chrome,
+            BrowserTarget::Safari,
+        ]));
+        let focus = FocusContext::new();
+        let app = browser_app(BrowserTarget::Safari);
+        focus.activate(app.clone(), None);
+        let stop = AtomicBool::new(false);
+        let metrics = ChromeMetrics::default();
+        let (sender, events) = sync_channel(1);
+        let context = ObservationContext {
+            sender: &sender,
+            stop: &stop,
+            focus_context: &focus,
+            metrics: &metrics,
+            eligibility: &publisher,
+        };
+        let mut api = ReconfigureBrowserDuringQuery {
+            publisher: &publisher,
+            focus: &focus,
+            change_focus,
+        };
+        observe_query_once(
+            &mut api,
+            &mut NavigationTracker::default(),
+            Some(&app),
+            ChromeQuery::FrontWindow {
+                target: BrowserTarget::Safari,
+                pid: 43,
+                window_id: None,
+            },
+            true,
+            Instant::now(),
+            &context,
+        );
+        assert!(events.try_recv().is_err());
+        assert_eq!(capture.state_version(43, 7), None);
+        assert_eq!(metrics.degraded.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn client_switch_failure_never_reuses_the_other_browser_client() {
+    let mut api = SystemChromeApi::<BrowserTarget> { client: None };
+    assert_eq!(
+        *api.get_or_initialize_client(BrowserTarget::Chrome, || Ok(BrowserTarget::Chrome))
+            .unwrap(),
+        BrowserTarget::Chrome
+    );
+    assert!(
+        api.get_or_initialize_client(BrowserTarget::Safari, || Err(
+            AppleScriptError::SafariUnavailable
+        ))
+        .is_err()
+    );
+    assert_eq!(
+        *api.get_or_initialize_client(BrowserTarget::Safari, || Ok(BrowserTarget::Safari))
+            .unwrap(),
+        BrowserTarget::Safari
+    );
+    assert_eq!(
+        *api.get_or_initialize_client(BrowserTarget::Chrome, || Ok(BrowserTarget::Chrome))
+            .unwrap(),
+        BrowserTarget::Chrome
+    );
+}
+
+#[test]
+fn safari_window_and_url_changes_never_assert_known_tab_transitions() {
+    let mut tracker = NavigationTracker::default();
+    let first = browser_snapshot(BrowserTarget::Safari, Some("https://allowed.example"));
+    assert!(tracker.observe(first.clone()).unwrap().is_some());
+    assert!(tracker.observe(first.clone()).unwrap().is_none());
+    let mut another_window = first;
+    another_window.applescript_window_id = AppleScriptWindowId::for_test("102");
+    let change = tracker.observe(another_window.clone()).unwrap().unwrap();
+    assert_eq!(change.transition, None);
+    assert_eq!(change.snapshot.page.tab_key(), None);
+    another_window.page = BrowserPage::Safari {
+        url: Some("https://allowed.example/other".to_owned()),
+    };
+    assert_eq!(
+        tracker.observe(another_window).unwrap().unwrap().transition,
+        None
+    );
+}
+
+#[test]
+fn standalone_safari_focus_leaves_chrome_and_return_emits_again() {
+    let (publisher, _) = chrome_eligibility_channel(FilterConfig::default());
+    let (sender, events) = sync_channel(4);
+    let metrics = ChromeMetrics::default();
+    let mut state = ChromeWorkerState::default();
+    let snapshot = browser_snapshot(BrowserTarget::Chrome, Some("https://allowed.example"));
+    let mut api = FakeApi::new([
+        Ok(ChromeObservation::Snapshot(snapshot.clone())),
+        Ok(ChromeObservation::Snapshot(snapshot)),
+    ]);
+    for (index, target) in [
+        BrowserTarget::Chrome,
+        BrowserTarget::Safari,
+        BrowserTarget::Chrome,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut focus = chrome_focus(7);
+        focus.app = browser_app(target);
+        focus.generation = index as u64 + 1;
+        handle_focus_transition(
+            FocusTransition {
+                previous: state.frontmost.clone(),
+                current: Some(focus),
+                resynced: false,
+            },
+            Instant::now(),
+            &mut api,
+            &sender,
+            &mut state,
+            &metrics,
+            &publisher,
+        );
+        if target == BrowserTarget::Chrome {
+            assert!(events.try_recv().is_ok());
+        } else {
+            assert!(events.try_recv().is_err());
+        }
+    }
+    assert_eq!(
+        api.queries
+            .iter()
+            .map(ChromeQuery::target)
+            .collect::<Vec<_>>(),
+        [BrowserTarget::Chrome, BrowserTarget::Chrome]
+    );
 }

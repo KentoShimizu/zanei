@@ -10,12 +10,11 @@ use std::{
 };
 
 use zanei_collector::RawEvent;
-use zanei_core::privacy::CHROME_BUNDLE_ID;
 
 use super::{
-    ChromeApi, ChromeEligibilityObservation, ChromeEligibilityPublisher, ChromeFailure,
-    ChromeMetrics, ChromeObservation, ChromeQuery, ChromeSnapshot, ChromeValidationFailure,
-    ObservationTrigger, eligibility::EligibilityPublication,
+    BrowserPage, ChromeApi, ChromeEligibilityObservation, ChromeEligibilityPublisher,
+    ChromeFailure, ChromeMetrics, ChromeObservation, ChromeQuery, ChromeSnapshot,
+    ChromeValidationFailure, ObservationTrigger, eligibility::EligibilityPublication,
 };
 use crate::{
     browser_context::BrowserTarget,
@@ -194,7 +193,10 @@ pub(super) fn handle_focus_transition<A: ChromeApi>(
         state.navigation.clear();
     }
     let Some(current) = transition.current else {
-        if let Some(previous) = transition.previous.filter(|focus| is_chrome(&focus.app)) {
+        if let Some(previous) = transition
+            .previous
+            .filter(|focus| browser_target(&focus.app).is_some())
+        {
             context.eligibility.observe(
                 previous.app.pid,
                 ChromeEligibilityObservation::Unavailable { window_id: None },
@@ -205,7 +207,9 @@ pub(super) fn handle_focus_transition<A: ChromeApi>(
         }
         return true;
     };
-    if !is_chrome(&current.app) {
+    if browser_target(&current.app)
+        .is_none_or(|target| context.eligibility.query_revision(target).is_none())
+    {
         leave_chrome_focus(state);
         return true;
     }
@@ -244,7 +248,11 @@ fn observe_frontmost<A: ChromeApi>(
     else {
         return true;
     };
+    let Some(target) = browser_target(&focus.app) else {
+        return true;
+    };
     let query = ChromeQuery::FrontWindow {
+        target,
         pid,
         window_id: focus.window.as_ref().and_then(|window| window.id),
     };
@@ -273,25 +281,32 @@ fn observe_confirmation<A: ChromeApi>(
     state: &mut ChromeWorkerState,
     context: &ObservationContext<'_>,
 ) -> bool {
+    let Some(app) = state.apps.get(&pid) else {
+        return true;
+    };
+    let Some(target) = browser_target(app) else {
+        return true;
+    };
     let query = context
         .eligibility
         .applescript_window_id(pid, window_id)
         .map_or(
             ChromeQuery::FrontWindow {
+                target,
                 pid,
                 window_id: Some(window_id),
             },
             |applescript_window_id| ChromeQuery::Window {
+                target,
                 pid,
                 window_id,
                 applescript_window_id,
             },
         );
-    let app = state.apps.get(&pid);
     match observe_query_once(
         api,
         &mut state.navigation,
-        app,
+        Some(app),
         query,
         false,
         observed_at,
@@ -306,8 +321,8 @@ fn observe_confirmation<A: ChromeApi>(
     }
 }
 
-fn is_chrome(app: &ApplicationInfo) -> bool {
-    app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID)
+fn browser_target(app: &ApplicationInfo) -> Option<BrowserTarget> {
+    BrowserTarget::from_bundle_id(app.bundle_id.as_deref())
 }
 
 pub(super) enum ObservationOutcome {
@@ -341,11 +356,15 @@ pub(super) fn observe_query_once<A: ChromeApi>(
         eligibility,
     } = context;
     let pid = query.pid();
+    let target = query.target();
     let attribution = FrontWindowAttribution::capture(query.clone(), focus_context);
     if stop.load(Ordering::Acquire) {
         return ObservationOutcome::Stop;
     }
-    let Some(revision) = eligibility.filter_revision() else {
+    if !attribution.allows(focus_context) {
+        return ObservationOutcome::Continue;
+    }
+    let Some(revision) = eligibility.query_revision(target) else {
         return ObservationOutcome::Continue;
     };
     let observation = api.query(&query);
@@ -377,7 +396,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             if let Err(error) = validate_query_snapshot(&query, &snapshot) {
                 return record_failure(
                     tracker,
-                    pid,
+                    &query,
                     ChromeFailure::Validation(error.into()),
                     observed_at,
                     context,
@@ -387,14 +406,17 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             if emit_navigation && app.is_none() {
                 return record_failure(
                     tracker,
-                    pid,
+                    &query,
                     ChromeFailure::Validation(ChromeValidationFailure::MissingApplication),
                     observed_at,
                     context,
                     &mut publication,
                 );
             }
-            let url_allowed = publication.allows_url(BrowserTarget::Chrome, &snapshot.url);
+            let url_allowed = snapshot
+                .page
+                .url()
+                .is_some_and(|url| publication.allows_url(target, url));
             if emit_navigation && !url_allowed {
                 tracker.reset_page();
             }
@@ -404,7 +426,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
                     Err(error) => {
                         return record_failure(
                             tracker,
-                            pid,
+                            &query,
                             ChromeFailure::Validation(error.into()),
                             observed_at,
                             context,
@@ -415,15 +437,21 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             } else {
                 None
             };
-            metrics.failure.observe_success();
+            metrics.failure.observe_success(target);
             publication.observe(
                 pid,
-                ChromeEligibilityObservation::Normal {
-                    window_id: snapshot.window_id,
-                    url: snapshot.url.clone(),
+                match &snapshot.page {
+                    BrowserPage::Chrome { url, .. } => ChromeEligibilityObservation::Normal {
+                        window_id: snapshot.window_id,
+                        url: url.clone(),
+                    },
+                    BrowserPage::Safari { url } => ChromeEligibilityObservation::Safari {
+                        window_id: snapshot.window_id,
+                        url: url.clone(),
+                    },
                 },
                 Some(snapshot.applescript_window_id.clone()),
-                Some(&snapshot.tab_key),
+                snapshot.page.tab_key(),
                 observed_at,
             );
             let (Some(navigation), Some(app)) = (navigation, app) else {
@@ -443,7 +471,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             }
         }
         Ok(ChromeObservation::Incognito { window_id }) => {
-            metrics.failure.observe_success();
+            metrics.failure.observe_success(target);
             publication.observe(
                 pid,
                 ChromeEligibilityObservation::Incognito { window_id },
@@ -457,7 +485,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             ObservationOutcome::Continue
         }
         Ok(ChromeObservation::NoWindow) => {
-            metrics.failure.observe_success();
+            metrics.failure.observe_success(target);
             publication.observe(
                 pid,
                 ChromeEligibilityObservation::Unavailable {
@@ -473,7 +501,7 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             ObservationOutcome::Continue
         }
         Ok(ChromeObservation::NotRunning) => {
-            metrics.failure.observe_success();
+            metrics.failure.observe_success(target);
             publication.observe(
                 pid,
                 ChromeEligibilityObservation::Unavailable { window_id: None },
@@ -484,20 +512,27 @@ pub(super) fn observe_query_once<A: ChromeApi>(
             tracker.reset_page();
             ObservationOutcome::Inactive
         }
-        Err(error) => record_failure(tracker, pid, error, observed_at, context, &mut publication),
+        Err(error) => record_failure(
+            tracker,
+            &query,
+            error,
+            observed_at,
+            context,
+            &mut publication,
+        ),
     }
 }
 
 fn record_failure(
     tracker: &mut NavigationTracker,
-    pid: i64,
+    query: &ChromeQuery,
     failure: ChromeFailure,
     observed_at: Instant,
     context: &ObservationContext<'_>,
     publication: &mut EligibilityPublication<'_>,
 ) -> ObservationOutcome {
     publication.observe(
-        pid,
+        query.pid(),
         ChromeEligibilityObservation::Unavailable { window_id: None },
         None,
         None,
@@ -505,7 +540,10 @@ fn record_failure(
     );
     tracker.reset_page();
     context.metrics.degraded.fetch_add(1, Ordering::Relaxed);
-    context.metrics.failure.observe_failure(failure);
+    context
+        .metrics
+        .failure
+        .observe_failure(query.target(), failure);
     ObservationOutcome::Continue
 }
 

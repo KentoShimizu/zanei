@@ -85,6 +85,7 @@ fn focus_out_confirmation_targets_background_window_and_releases_body() {
     assert_eq!(
         api.queries.last(),
         Some(&ChromeQuery::Window {
+            target: BrowserTarget::Chrome,
             pid: 42,
             window_id: 7,
             applescript_window_id: AppleScriptWindowId::for_test("window-101"),
@@ -181,7 +182,7 @@ fn targeted_identity_mismatch_nulls_text_and_drops_snapshot() {
     ));
     assert_eq!(tracker.state_version(42, 7), None);
     assert_eq!(
-        metrics.failure.state(),
+        metrics.failure.state(&eligibility.query_targets()),
         ChromeFailureState::Unavailable(ChromeFailure::Validation(
             ChromeValidationFailure::WindowIdentityMismatch
         ))
@@ -266,6 +267,7 @@ fn window_identity_change_advances_version_and_invalidates_quarantined_bodies() 
     assert_eq!(
         api.queries.last(),
         Some(&ChromeQuery::FrontWindow {
+            target: BrowserTarget::Chrome,
             pid: 42,
             window_id: Some(7),
         })
@@ -376,6 +378,7 @@ fn intra_app_focus_out_confirmation_targets_previous_window() {
     assert_eq!(
         api.queries.last(),
         Some(&ChromeQuery::Window {
+            target: BrowserTarget::Chrome,
             pid: 42,
             window_id: 7,
             applescript_window_id: AppleScriptWindowId::for_test("window-101"),
