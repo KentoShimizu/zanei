@@ -102,19 +102,53 @@ pub(super) fn render_human(
         );
     }
 
-    if report.missing_permissions.is_empty() {
+    let has_non_automation_missing = has_manual_permission_missing(&report.missing_permissions);
+    let has_automation_missing = report
+        .missing_permissions
+        .iter()
+        .any(|capability| capability.is_browser_automation());
+
+    if has_automation_missing {
+        output.push_str("\nTo grant browser Automation:\n");
+        for capability in report
+            .missing_permissions
+            .iter()
+            .filter(|capability| capability.is_browser_automation())
+        {
+            output.push_str(&automation_guidance(*capability));
+        }
+    }
+
+    if !has_non_automation_missing {
+        if !report.missing_permissions.is_empty() {
+            if let Some(pane) = report.missing_permissions.iter().find_map(|capability| {
+                report
+                    .capabilities
+                    .get(*capability)
+                    .map(|report| report.detail.settings_url)
+            }) {
+                output.push_str(&format!("System Settings pane: {pane}\n"));
+            }
+        }
         output.push('\n');
-        output.push_str(permission_list_note(bundled));
+        if report.missing_permissions.is_empty() {
+            output.push_str(permission_list_note(bundled));
+        }
     } else {
-        if let Some(pane) = report.missing_permissions.iter().find_map(|capability| {
-            report
-                .capabilities
-                .get(*capability)
-                .map(|report| report.detail.settings_url)
-        }) {
+        if let Some(pane) = report
+            .missing_permissions
+            .iter()
+            .filter(|capability| !capability.is_browser_automation())
+            .find_map(|capability| {
+                report
+                    .capabilities
+                    .get(*capability)
+                    .map(|report| report.detail.settings_url)
+            })
+        {
             output.push_str(&format!("\nSystem Settings pane: {pane}\n"));
         }
-        output.push_str("\nTo grant a missing permission:\n");
+        output.push_str("\nTo grant Accessibility or Input Monitoring:\n");
         output.push_str(
             "  1. Run `zanei start` (`zanei stop && zanei start` if it is already running) so the recorder asks macOS for the permission.\n",
         );
@@ -147,11 +181,11 @@ pub(super) fn render_human(
     }
 
     output.push('\n');
-    match (report.ok, recording) {
-        (true, true) => {
+    match (report.ok, recording, has_non_automation_missing) {
+        (true, true, _) => {
             output.push_str("✓ All required permissions are granted. Recording is running.\n");
         }
-        (true, false) => {
+        (true, false, _) => {
             if chrome_automation_pending || safari_automation_pending {
                 output.push_str("✓ Permissions are ready. Run `zanei start` to begin recording.\n");
             } else {
@@ -160,38 +194,50 @@ pub(super) fn render_human(
                 );
             }
         }
-        (false, true) => {
+        (false, true, true) => {
             output.push_str(
                 "After granting the permissions, restart recording with `zanei stop && zanei start` so the recorder picks them up.\n",
             );
         }
-        (false, false) => {
+        (false, false, true) => {
             output.push_str("After granting the permissions, run `zanei start`.\n");
         }
+        (false, true, false) if has_automation_missing => output.push_str(
+            "After enabling the listed Automation toggles, the recorder can use them on its next browser access.\n",
+        ),
+        (false, false, false) if has_automation_missing => {
+            output.push_str("After enabling the listed Automation toggles, run `zanei start` to begin recording.\n");
+        }
+        (false, true, false) => output.push_str(
+            "After granting the permissions, restart recording with `zanei stop && zanei start` so the recorder picks them up.\n",
+        ),
+        (false, false, false) => output.push_str("After granting the permissions, run `zanei start`.\n"),
     }
     output
 }
 
-// Interactive walkthrough for `doctor --fix`: one pane at a time, with the app
-// or executable path already on the clipboard and its target revealed in Finder,
-// so granting needs no outside knowledge of how macOS permission lists work.
 pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Result<(), CliError> {
     use std::io::{BufRead, Write};
 
     let permission_target = permission_target_path(executable);
     let bundled = permission_target != executable;
-    copy_to_clipboard(&permission_target.display().to_string());
-    reveal_in_finder(permission_target)?;
+    let has_non_automation_missing = has_manual_permission_missing(missing);
+    if has_non_automation_missing {
+        copy_to_clipboard(&permission_target.display().to_string());
+        reveal_in_finder(permission_target)?;
+    }
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let checker = PermissionChecker::new();
     let total = missing.len();
     println!();
-    println!(
-        "First run `zanei start` (`zanei stop && zanei start` if it is already running) so the recorder asks macOS for the permissions."
-    );
-    println!("Finder is showing the app or executable whose path is on your clipboard.");
+    if has_non_automation_missing {
+        println!(
+            "First run `zanei start` (`zanei stop && zanei start` if it is already running) so the recorder asks macOS for the permissions."
+        );
+        println!("Finder is showing the app or executable whose path is on your clipboard.");
+    }
     for (index, permission) in missing.iter().enumerate() {
         checker.open_settings(permission)?;
         println!();
@@ -201,21 +247,29 @@ pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Resul
             total,
             pane_title(permission)
         );
-        if bundled {
-            println!("  1. Accessibility lists the bundled app as `Zanei`; switch that row ON.");
+        if permission.is_browser_automation() {
+            print!("{}", automation_guidance(*permission));
         } else {
-            println!("  1. In Accessibility, switch the executable's row ON if it is listed.");
+            if bundled {
+                println!(
+                    "  1. Accessibility lists the bundled app as `Zanei`; switch that row ON."
+                );
+            } else {
+                println!("  1. In Accessibility, switch the executable's row ON if it is listed.");
+            }
+            println!(
+                "  2. Input Monitoring may omit its row after a dialog grant. The recorder-reported `zanei doctor` result is authoritative."
+            );
+            println!("  3. To manage a missing row from this list, click the `+` button.");
+            println!(
+                "  4. In the file dialog press Command-V, then Return. (The path is on your clipboard:)"
+            );
+            println!("       {}", permission_target.display());
+            println!("  5. Click Open, then switch the new row ON.");
+            println!(
+                "  Alternatively drag the revealed app or executable from Finder onto the list."
+            );
         }
-        println!(
-            "  2. Input Monitoring may omit its row after a dialog grant. The recorder-reported `zanei doctor` result is authoritative."
-        );
-        println!("  3. To manage a missing row from this list, click the `+` button.");
-        println!(
-            "  4. In the file dialog press Command-V, then Return. (The path is on your clipboard:)"
-        );
-        println!("       {}", permission_target.display());
-        println!("  5. Click Open, then switch the new row ON.");
-        println!("  Alternatively drag the revealed app or executable from Finder onto the list.");
         if index + 1 < total {
             print!("Press Return when done to open the next pane... ");
             let _ = stdout.flush();
@@ -224,10 +278,16 @@ pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Resul
         }
     }
     println!();
-    println!(
-        "When every toggle is on, run `zanei stop && zanei start` (or `zanei start` if it is not running), then `zanei doctor` to confirm."
-    );
-    println!("{}", permission_list_note(bundled).trim_end());
+    if has_non_automation_missing {
+        println!(
+            "When every toggle is on, run `zanei stop && zanei start` (or `zanei start` if it is not running), then `zanei doctor` to confirm."
+        );
+        println!("{}", permission_list_note(bundled).trim_end());
+    } else {
+        println!(
+            "After enabling the listed Automation toggles, run `zanei start` if recording is stopped, then `zanei doctor` to confirm."
+        );
+    }
     Ok(())
 }
 
@@ -270,12 +330,34 @@ fn pane_title(capability: &Capability) -> String {
         Capability::ReadAccessibilityTree => "Accessibility".to_owned(),
         Capability::ObserveInput => "Input Monitoring".to_owned(),
         Capability::AutomateBrowser => {
-            format!("Automation ({})", zanei_core::privacy::CHROME_BUNDLE_ID)
+            format!("Automation ({})", automation_target(*capability))
         }
         Capability::AutomateSafari => {
-            format!("Automation ({})", zanei_macos::permission::SAFARI_BUNDLE_ID)
+            format!("Automation ({})", automation_target(*capability))
         }
     }
+}
+
+fn automation_target(capability: Capability) -> &'static str {
+    match capability {
+        Capability::AutomateBrowser => "Google Chrome",
+        Capability::AutomateSafari => "Safari",
+        Capability::ReadAccessibilityTree | Capability::ObserveInput => unreachable!(),
+    }
+}
+
+fn has_manual_permission_missing(missing: &[Capability]) -> bool {
+    missing
+        .iter()
+        .any(|capability| !capability.is_browser_automation())
+}
+
+fn automation_guidance(capability: Capability) -> String {
+    format!(
+        "Automation ({}): In System Settings → Privacy & Security → Automation, find the app/executable running the recorder (which may differ from this diagnostic command) and switch its `{}` toggle ON.\n",
+        automation_target(capability),
+        automation_target(capability),
+    )
 }
 
 fn copy_to_clipboard(text: &str) {
@@ -353,9 +435,8 @@ mod tests {
     use std::path::Path;
     use std::process::ExitStatus;
 
-    use tempfile::TempDir;
-
     use super::{OPEN, permission_list_note, permission_target_path, reveal_in_finder_with};
+    use tempfile::TempDir;
 
     #[test]
     fn bundled_permission_reset_note_requires_zanei_to_still_be_installed() {
@@ -433,3 +514,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "render/tests.rs"]
+mod automation_tests;

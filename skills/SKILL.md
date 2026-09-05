@@ -38,7 +38,7 @@ Zanei records the user's activity on this machine as OS-level events — app swi
 Walk the user through it; do not just say "grant permissions in System Settings":
 
 1. `zanei start` (or `zanei stop && zanei start`), then respond to the macOS dialogs — Accessibility comes first and granting it is usually sufficient.
-2. If a permission stays missing, `zanei doctor --fix` opens the right pane, copies the installed `Zanei.app` path, and reveals it in Finder for a manual `+` add.
+2. If a permission stays missing, `zanei doctor --fix` opens the required panes. Missing Accessibility or Input Monitoring also copies the app/executable path and reveals it in Finder for a manual `+` add. Automation instead requires enabling the recorder’s `Google Chrome` or `Safari` toggle; it has no manual `+` add, and Automation alone does not copy a path or open Finder. The diagnostic executable may differ from the recorder.
 3. `zanei doctor`'s recorder-reported result is the authority, even when a System Settings row is missing.
 4. After granting, `zanei stop && zanei start`. The first fully-granted interactive start asks a one-time y/N about recording typed text and clipboard contents — the user answers it, not you.
 

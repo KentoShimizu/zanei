@@ -36,7 +36,7 @@ description: Zanei が要求する TCC 権限の一覧、付与手順、zanei do
 | 入力監視 | Privacy & Security → Input Monitoring |
 | オートメーション | Privacy & Security → Automation（初回の実 Apple Event 時に macOS が確認。起動時には要求しない） |
 
-付与操作は必ずユーザーが行います。`zanei doctor --fix` がするのは、該当ペインを開いて追加すべき path をコピーするところまでです。正確な挙動は次節に書いています。
+付与操作は必ずユーザーが行います。`zanei doctor --fix` は必要なペインを開き、権限ごとの操作を案内します。正確な挙動は次節に書いています。
 
 ## `doctor` で確認する
 
@@ -53,9 +53,13 @@ zanei doctor --fix
 `--fix` は不足している必要権限のペインを 1 つずつ開きます。複数のペインが必要な場合は
 ペイン間で Return キー入力を待ち、最後のペイン後には待機しません。`--json --fix` も指定でき、
 最初に JSON report を出力した後、必要権限が不足していれば同じ対話フローを実行します。
-この場合の stdout は JSON のみではありません。対話フローでは、symlink 解決後の `Zanei.app`
-のルート、またはバンドル外の実行ファイルをコピーし、同じ対象を Finder に表示します。不足が
-なければ JSON だけを出力します。
+この場合の stdout は JSON のみではありません。アクセシビリティまたは入力監視が不足している
+場合は、symlink 解決後の `Zanei.app` のルート、またはバンドル外の実行ファイルをコピーし、
+同じ対象を Finder に表示します。オートメーションでは、recorder を実行している app/executable
+の `Google Chrome` または `Safari` トグルを有効にするよう案内します。診断コマンドと recorder
+は異なる実行ファイルの場合があります。オートメーションだけが不足している場合は path のコピーや
+Finder 表示を行わず、拒否後の再起動で許可ダイアログが再表示されるとも案内しません。
+不足がなければ `--json --fix` は JSON だけを出力します。
 
 ### agent・スクリプト向け：`--json`
 

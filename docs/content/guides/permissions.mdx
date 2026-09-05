@@ -36,7 +36,7 @@ The signed app bundle has the stable TCC identity `dev.zanei.recorder`. Permissi
 | Input Monitoring | Privacy & Security → Input Monitoring |
 | Automation | Privacy & Security → Automation (macOS asks on the first Apple Event; Zanei does not request it at startup) |
 
-Granting is always your own action: `zanei doctor --fix` only opens the right panes and copies the path to add. Its exact behavior is described below.
+Granting is always your own action: `zanei doctor --fix` opens the required panes and explains the relevant controls. Its exact behavior is described below.
 
 ## Verify with `doctor`
 
@@ -53,9 +53,13 @@ zanei doctor --fix
 `--fix` opens missing required-permission panes one at a time. When more than one pane is needed,
 it waits for Return between panes and does not wait after the final pane. `--json --fix` is accepted:
 Zanei prints the JSON report first, then runs the same interactive guide when a required permission
-is missing, so stdout is not JSON-only. The guide copies the symlink-resolved `Zanei.app` root, or
-the executable for an unbundled installation, and reveals that same target in Finder. When nothing
-required is missing, it prints only JSON.
+is missing, so stdout is not JSON-only. When Accessibility or Input Monitoring is missing, the
+guide copies the symlink-resolved `Zanei.app` root, or the executable for an unbundled installation,
+and reveals that same target in Finder. For Automation, it directs you to the app/executable
+running the recorder and its `Google Chrome` or `Safari` toggle. This requester may differ from
+the diagnostic executable. Automation alone does not copy a path or reveal a Finder target,
+and restarting does not promise another permission dialog after denial. When nothing required
+is missing, `--json --fix` prints only JSON.
 
 ### For agents and scripts: `--json`
 
