@@ -1,22 +1,21 @@
-use rusqlite::Connection;
+use rusqlite::Transaction;
 
 use super::{
-    COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION,
-    DAEMON_IDENTITY_STORE_SCHEMA_VERSION, LEGACY_STORE_SCHEMA_VERSION,
-    PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION, RETENTION_STORE_SCHEMA_VERSION,
-    STORE_SCHEMA_VERSION, StoreError,
+    CAPABILITIES_STORE_SCHEMA_VERSION, COLLECTOR_FAILURES_STORE_SCHEMA_VERSION,
+    CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION,
+    LEGACY_STORE_SCHEMA_VERSION, PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION,
+    RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError,
 };
 
-pub(super) fn migrate_schema(connection: &Connection) -> Result<(), StoreError> {
+pub(super) fn migrate_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let mut version =
-        connection.query_row("SELECT schema_version FROM meta", [], |row| row.get(0))?;
+        transaction.query_row("SELECT schema_version FROM meta", [], |row| row.get(0))?;
     if version == STORE_SCHEMA_VERSION {
         return Ok(());
     }
-    if !(LEGACY_STORE_SCHEMA_VERSION..=CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION).contains(&version) {
+    if !(LEGACY_STORE_SCHEMA_VERSION..=CAPABILITIES_STORE_SCHEMA_VERSION).contains(&version) {
         return Err(StoreError::UnsupportedSchemaVersion(version));
     }
-    let transaction = connection.unchecked_transaction()?;
     while version < STORE_SCHEMA_VERSION {
         let next = match version {
             LEGACY_STORE_SCHEMA_VERSION => {
@@ -55,6 +54,10 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<(), StoreError> 
                      DROP TABLE IF EXISTS daemon_permissions; \
                      DELETE FROM daemon_capabilities;",
                 )?;
+                CAPABILITIES_STORE_SCHEMA_VERSION
+            }
+            CAPABILITIES_STORE_SCHEMA_VERSION => {
+                super::append_sequence::migrate_events(transaction)?;
                 STORE_SCHEMA_VERSION
             }
             _ => unreachable!("schema version range was validated before migration"),
@@ -62,6 +65,5 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<(), StoreError> 
         transaction.execute("UPDATE meta SET schema_version = ?1", [next])?;
         version = next;
     }
-    transaction.commit()?;
     Ok(())
 }

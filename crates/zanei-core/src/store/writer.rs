@@ -63,9 +63,12 @@ impl PurgeFilter {
 }
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
+// A published append position must survive power loss; sync each batch commit,
+// including macOS's full disk-cache flush, so a commit cannot reuse its sequence.
 const STORE_PRAGMAS: &str = "
 PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
+PRAGMA synchronous=FULL;
+PRAGMA fullfsync=ON;
 PRAGMA busy_timeout=5000;
 PRAGMA auto_vacuum=INCREMENTAL;
 ";
@@ -110,7 +113,7 @@ impl StoreWriter {
         if format == StoreFormat::Missing {
             create_private_file(path)?;
         }
-        let connection = Connection::open(store_uri(path)?)?;
+        let mut connection = Connection::open(store_uri(path)?)?;
         connection.busy_timeout(StdDuration::from_millis(BUSY_TIMEOUT_MILLISECONDS))?;
         let format = match (format, key) {
             (StoreFormat::Encrypted, Some(key)) => {
@@ -130,8 +133,11 @@ impl StoreWriter {
             (StoreFormat::Unrecognized, _) => StoreFormat::Unrecognized,
         };
         connection.execute_batch(STORE_PRAGMAS)?;
-        connection.execute_batch(STORE_TABLES)?;
-        super::migration::migrate_schema(&connection)?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute_batch(STORE_TABLES)?;
+        super::migration::migrate_schema(&transaction)?;
+        transaction.commit()?;
         Ok(Self { connection, format })
     }
 
@@ -156,13 +162,7 @@ impl StoreWriter {
             .collect::<Result<Vec<_>, _>>()?;
         let transaction = self.connection.transaction()?;
         insert_events(&transaction, &prepared)?;
-        let captured = i64::try_from(prepared.len())
-            .map_err(|_| StoreError::NumericOverflow("events_captured"))?;
-        transaction.execute(
-            "UPDATE daemon_state SET events_captured = events_captured + ?1, \
-             last_event_ts = ?2 WHERE id = 1",
-            params![captured, prepared.last().map(|event| event.ts)],
-        )?;
+        increment_event_progress(&transaction, &prepared)?;
         transaction.commit()?;
         Ok(prepared.len())
     }
@@ -557,3 +557,7 @@ fn serialize_capabilities(capabilities: &DaemonCapabilities) -> Result<String, S
     serde_json::to_string(capabilities)
         .map_err(|error| StoreError::invalid_json("capabilities_json", error))
 }
+
+#[cfg(test)]
+#[path = "tests/append_sequence_durability.rs"]
+mod durability_tests;

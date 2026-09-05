@@ -335,7 +335,7 @@ fn default_reads_exclude_content_while_explicit_queries_and_all_exports_include_
         .expect("open SQLite export")
         .query_row("SELECT schema_version FROM meta", [], |row| row.get(0))
         .expect("snapshot schema version");
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 
     let timeline = fixture
         .command()

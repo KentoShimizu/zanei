@@ -6,12 +6,12 @@ use zanei_core::normalize::format_timestamp;
 use zanei_core::schema::{App, EmptyData, Event, EventData, Redaction};
 use zanei_core::store::{QueryFilter, StoreError, StoreReader, StoreWriter, export_plain_sqlite};
 
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
 const RETENTION_HOURS: u64 = 24 * 365 * 100;
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn readers_accept_v1_through_v7_and_writers_migrate_v1_through_v6_sequentially() {
+fn readers_accept_prior_schemas_and_writers_migrate_them_sequentially() {
     let directory = TestDirectory::new("migration");
     let expected = directory.path().join("expected.sqlite");
     StoreWriter::open(&expected).expect("create expected current schema");
@@ -59,7 +59,7 @@ fn readers_accept_v1_through_v7_and_writers_migrate_v1_through_v6_sequentially()
 }
 
 #[test]
-fn schema_v7_writer_open_is_a_no_op_and_future_versions_fail_fast() {
+fn current_writer_open_is_a_no_op_and_future_versions_fail_fast() {
     let directory = TestDirectory::new("current-future");
     let current = directory.path().join("current.sqlite");
     StoreWriter::open(&current).expect("create current store");
@@ -68,19 +68,19 @@ fn schema_v7_writer_open_is_a_no_op_and_future_versions_fail_fast() {
     assert_eq!(sqlite_schema_cookie(&current), before);
     assert_eq!(schema_version(&current), CURRENT_SCHEMA_VERSION);
 
-    set_schema_version(&current, 8);
+    set_schema_version(&current, 9);
     assert!(matches!(
         StoreReader::open(&current),
-        Err(StoreError::UnsupportedSchemaVersion(8))
+        Err(StoreError::UnsupportedSchemaVersion(9))
     ));
     assert!(matches!(
         StoreWriter::open(&current),
-        Err(StoreError::UnsupportedSchemaVersion(8))
+        Err(StoreError::UnsupportedSchemaVersion(9))
     ));
 }
 
 #[test]
-fn active_v7_and_retired_v6_are_read_as_one_event_stream() {
+fn active_store_and_retired_v6_are_read_as_one_event_stream() {
     let directory = TestDirectory::new("retired-union");
     let store = directory.path().join("store.sqlite");
     let retired = directory
@@ -107,12 +107,12 @@ fn active_v7_and_retired_v6_are_read_as_one_event_stream() {
         .expect("active and retired query");
 
     assert_eq!(result.events.len(), 2);
-    assert_eq!(schema_version(&store), 7);
+    assert_eq!(schema_version(&store), CURRENT_SCHEMA_VERSION);
     assert_eq!(schema_version(&retired), 6);
 }
 
 #[test]
-fn plaintext_snapshot_destination_uses_schema_v7() {
+fn plaintext_snapshot_destination_uses_current_schema() {
     let directory = TestDirectory::new("snapshot");
     let store = directory.path().join("store.sqlite");
     let snapshot = directory.path().join("snapshot.sqlite");
