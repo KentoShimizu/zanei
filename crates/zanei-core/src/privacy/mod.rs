@@ -52,7 +52,7 @@ impl PrivacyFilter {
         let website_host = if event.event_type.starts_with("browser.") {
             Some(extract_url_host(browser_url(&event)?)?)
         } else {
-            capture_context.website_host
+            capture_context.url.as_deref().and_then(extract_url_host)
         };
         let global_host_allowed = website_scope_is_allowed(
             PrivacyScope::AllEvents,

@@ -4,16 +4,82 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zanei_core::config::FilterConfig;
 use zanei_core::schema::{
     App, BrowserMode, ContentSnapshotData, ContentSnapshotTrigger, EventData, Window,
 };
+use zanei_core::{config::FilterConfig, privacy::PrivacyScope};
 
 use crate::{
     CapturePolicy,
+    ffi::applescript::AppleScriptWindowId,
     text_capture::{ChromeWindowKey, TextQuarantine},
     workspace::ApplicationInfo,
 };
+
+#[test]
+fn eligibility_invalidates_complete_url_and_known_tab_changes() {
+    let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://example.com/first".to_owned(),
+        },
+    );
+    let first_version = tracker.state_version(7, 11).expect("first version");
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://example.com/second".to_owned(),
+        },
+    );
+    let second_version = tracker.state_version(7, 11).expect("second version");
+    assert!(second_version > first_version);
+    assert_eq!(
+        tracker
+            .decision(PrivacyScope::TextContent, 7, Some(11))
+            .capture_context()
+            .url
+            .as_deref(),
+        Some("https://example.com/second")
+    );
+
+    publisher.observe_with_surface_at(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://example.com/second".to_owned(),
+        },
+        Some(AppleScriptWindowId::for_test("window-a")),
+        Some("tab-a"),
+        Instant::now(),
+    );
+    let tab_a_version = tracker.state_version(7, 11).expect("tab-a version");
+    publisher.observe_with_surface_at(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://example.com/second".to_owned(),
+        },
+        Some(AppleScriptWindowId::for_test("window-a")),
+        Some("tab-b"),
+        Instant::now(),
+    );
+    assert!(
+        tracker
+            .state_version(7, 11)
+            .is_some_and(|version| version > tab_a_version)
+    );
+    assert_eq!(
+        tracker
+            .decision(PrivacyScope::TextContent, 7, Some(11))
+            .capture_context()
+            .surface
+            .and_then(|surface| surface.tab_id),
+        Some("tab-b".to_owned())
+    );
+}
 
 use super::*;
 

@@ -2,7 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::EventData;
+use super::{CaptureContext, EventData};
 
 const LEGACY_EVENT_SCHEMA_VERSION: u8 = 1;
 const LEGACY_CONTENT_SNAPSHOT_SCHEMA_VERSION: u8 = 2;
@@ -362,11 +362,6 @@ struct EventRef<'a> {
     data: &'a EventData,
     truncated: bool,
     redaction: &'a Redaction,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CaptureContext {
-    pub website_host: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

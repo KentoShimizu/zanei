@@ -165,7 +165,7 @@ fn snapshot_ts_quarantine_release_preserves_candidate_time_and_reservation() {
         7,
         ChromeEligibilityObservation::Normal {
             window_id: Some(11),
-            url: "https://allowed.example/confirmed".to_owned(),
+            url: "https://allowed.example/initial".to_owned(),
         },
     );
     let released = quarantine.release(now + std::time::Duration::from_millis(1), &policy);

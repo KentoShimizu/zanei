@@ -1,10 +1,12 @@
+mod capture_context;
 mod model;
 mod payload;
 
+pub use capture_context::{CaptureContext, CaptureSurface};
 pub(crate) use model::event_schema_version_for_data;
 pub use model::{
-    App, CaptureContext, Element, Event, KNOWN_EVENT_TYPES, RawEvent, Redaction, Window,
-    event_schema_version, is_known_event_type,
+    App, Element, Event, KNOWN_EVENT_TYPES, RawEvent, Redaction, Window, event_schema_version,
+    is_known_event_type,
 };
 pub use payload::{
     BrowserMode, BrowserNavigateData, BrowserTransition, BrowserUrl, ClickButton,

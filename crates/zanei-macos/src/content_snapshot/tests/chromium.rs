@@ -146,7 +146,7 @@ fn chromium_profile_produces_snapshot_through_trigger_scheduler_and_worker() {
             7,
             ChromeEligibilityObservation::Normal {
                 window_id: Some(11),
-                url: "https://allowed.example/confirmed".to_owned(),
+                url: "https://allowed.example/start".to_owned(),
             },
         );
     });
@@ -169,7 +169,7 @@ fn chromium_profile_produces_snapshot_through_trigger_scheduler_and_worker() {
     assert_eq!(data.text.as_deref(), Some("Checked option\nHeading"));
     assert_eq!(data.cutoff(), Some(None));
     assert_eq!(
-        event.capture_context.website_host.as_deref(),
-        Some("allowed.example")
+        event.capture_context.url.as_deref(),
+        Some("https://allowed.example/start")
     );
 }
