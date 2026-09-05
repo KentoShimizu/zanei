@@ -1,4 +1,5 @@
 mod append_sequence;
+mod context_page;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
