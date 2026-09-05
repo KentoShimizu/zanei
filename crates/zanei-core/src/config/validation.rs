@@ -3,6 +3,9 @@ use std::collections::BTreeSet;
 use super::{Config, ConfigError, RedactorKind, ScopedFilterConfig};
 
 pub(super) fn validate(config: &Config) -> Result<(), ConfigError> {
+    if let Some(policy) = &config.filter.capture_policy {
+        policy.validate()?;
+    }
     if config.output.batch_interval_s == 0 {
         return Err(ConfigError::ZeroBatchInterval);
     }
@@ -61,7 +64,7 @@ fn validate_scope(prefix: &'static str, scope: &ScopedFilterConfig) -> Result<()
     Ok(())
 }
 
-fn nonempty_unique(field: &'static str, values: &[String]) -> Result<(), ConfigError> {
+pub(super) fn nonempty_unique(field: &'static str, values: &[String]) -> Result<(), ConfigError> {
     for value in values {
         if value.trim() != value || value.is_empty() {
             return Err(ConfigError::InvalidListValue {
