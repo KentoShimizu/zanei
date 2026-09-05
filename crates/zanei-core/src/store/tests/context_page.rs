@@ -125,7 +125,8 @@ fn writer_accepted_long_fractional_timestamp_survives_page_and_cursor_replay() {
     writer.append(&event(2, NOW)).unwrap();
     let reader = reader(&db);
     let first = page(read(&reader, &request(1), now()));
-    assert_eq!(first.observations[0].ts, original.ts);
+    assert_eq!(first.observations[0].ts, "2026-09-06T10:00:00Z");
+    assert!(serde_json::to_string(&first.next_cursor).unwrap().len() < 300);
     let continuation = ContextPageRequest {
         cursor: Some(
             serde_json::from_str(&serde_json::to_string(&first.next_cursor).unwrap()).unwrap(),
@@ -489,4 +490,30 @@ fn encrypted_store_empty_success_and_independent_writer_appends() {
             .append_sequence,
         2
     );
+}
+
+#[test]
+fn adopting_a_wire_prefix_replays_every_remaining_row() {
+    let db = TestDatabase::new("context-prefix");
+    let mut writer = StoreWriter::open(db.path()).unwrap();
+    writer
+        .append_batch(&(1..=4).map(|n| event(n, NOW)).collect::<Vec<_>>())
+        .unwrap();
+    let reader = reader(&db);
+    let mut first = page(read(&reader, &request(4), now()));
+    assert!(!first.has_more);
+    assert!(first.retain_prefix(0).is_err());
+    assert!(first.retain_prefix(5).is_err());
+    first.retain_prefix(2).unwrap();
+    assert_eq!(first.coverage.through, 2);
+    assert!(first.has_more);
+    let rest = page(read(&reader, &next(&first, 4), now()));
+    assert_eq!(
+        rest.observations
+            .iter()
+            .map(|o| o.append_sequence)
+            .collect::<Vec<_>>(),
+        [3, 4]
+    );
+    assert!(!rest.has_more);
 }

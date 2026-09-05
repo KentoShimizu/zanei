@@ -10,6 +10,7 @@ mod context_page;
 mod error;
 mod event_metadata;
 mod event_row;
+mod evidence_read;
 mod key;
 mod key_store;
 mod query;
@@ -34,6 +35,10 @@ pub use context_page::{
 };
 pub use error::{LockedReason, StoreError, StoreFailureKind};
 pub use event_metadata::{EventMetadata, MetadataFilter};
+pub use evidence_read::{
+    EvidenceContent, EvidenceDetails, EvidenceField, EvidenceOrigin, EvidenceRequest,
+    EvidenceResult, MAX_EVIDENCE_BYTES, SelectedEvidence,
+};
 pub use key::{STORE_KEY_BYTES, StoreFormat, StoreKey};
 pub use key_store::{KeyStore, KeyStoreError, KeyStoreInteraction, load_or_create};
 pub use query::{QueryFilter, QueryResult};
