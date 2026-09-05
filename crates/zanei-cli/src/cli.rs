@@ -49,6 +49,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(about = "Read one bounded context protocol request from stdin")]
+    ContextRead,
     #[command(about = "Diagnose required macOS permissions and guide granting")]
     Doctor(DoctorArgs),
     #[command(about = "Start background recording with launchd")]
