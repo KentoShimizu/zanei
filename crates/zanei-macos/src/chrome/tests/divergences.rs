@@ -483,3 +483,281 @@ impl ChromeApi for StopDuringQuery<'_> {
         )))
     }
 }
+
+fn publication_filter() -> FilterConfig {
+    use zanei_core::config::capture_policy::{
+        BrowserMode, BrowserPolicy, BrowserUrlRule, IdePolicy, PolicyAction,
+    };
+    FilterConfig {
+        capture_policy: Some(zanei_core::config::CapturePolicyConfig {
+            allowed_apps: vec!["Google Chrome".to_owned()],
+            browser: BrowserPolicy {
+                mode: BrowserMode::Rules,
+                default_policy: PolicyAction::Allow,
+                on_url_unavailable: PolicyAction::Block,
+                block_auth: false,
+                block_payments: false,
+                allow_list: Vec::new(),
+                block_list: vec![BrowserUrlRule {
+                    host: "allowed.example".to_owned(),
+                    path_prefix: "/private".to_owned(),
+                    match_subdomains: false,
+                }],
+            },
+            ide: IdePolicy {
+                block_env_files: false,
+                on_file_name_unavailable: PolicyAction::Allow,
+            },
+        }),
+        ..FilterConfig::default()
+    }
+}
+
+struct ReloadDuringQuery<'a> {
+    tracker: &'a ChromeEligibilityTracker,
+    publisher: &'a ChromeEligibilityPublisher,
+    filters: Vec<FilterConfig>,
+    replacement_at: Option<Instant>,
+    result: Option<Result<ChromeObservation, ChromeFailure>>,
+}
+
+impl ChromeApi for ReloadDuringQuery<'_> {
+    fn query(&mut self, _: &ChromeQuery) -> Result<ChromeObservation, ChromeFailure> {
+        for filter in self.filters.drain(..) {
+            self.tracker.replace_filter(filter);
+        }
+        if let Some(observed_at) = self.replacement_at {
+            self.publisher.observe_at(
+                42,
+                ChromeEligibilityObservation::Normal {
+                    window_id: Some(7),
+                    url: "https://allowed.example/new-generation".to_owned(),
+                },
+                observed_at,
+            );
+        }
+        self.result.take().expect("one query")
+    }
+}
+
+#[test]
+fn policy_reload_discards_every_old_query_result_without_touching_new_generation() {
+    for result in [
+        Ok(ChromeObservation::Snapshot(snapshot_for_window(
+            7,
+            "window-101",
+            "tab-1",
+            "https://allowed.example/old",
+            "Old",
+        ))),
+        Ok(ChromeObservation::Snapshot(snapshot_for_window(
+            7,
+            "",
+            "tab-1",
+            "https://allowed.example/old",
+            "Invalid",
+        ))),
+        Ok(ChromeObservation::Incognito { window_id: Some(7) }),
+        Ok(ChromeObservation::NoWindow),
+        Ok(ChromeObservation::NotRunning),
+        Err(ChromeFailure::Query(ChromeQueryFailure::AppleEvent(-1712))),
+    ] {
+        // A -> B -> A must still reject the query started under the first A.
+        for restore_original in [false, true] {
+            let filter = publication_filter();
+            let (publisher, capture) = chrome_eligibility_channel(filter.clone());
+            let mut changed = filter.clone();
+            changed.capture_policy.as_mut().unwrap().browser.block_auth = true;
+            let mut filters = vec![changed];
+            if restore_original {
+                filters.push(filter);
+            }
+            let replacement_at = Instant::now();
+            let mut api = ReloadDuringQuery {
+                tracker: &capture,
+                publisher: &publisher,
+                filters,
+                replacement_at: Some(replacement_at),
+                result: Some(result.clone()),
+            };
+            let (sender, events) = sync_channel(1);
+            let metrics = ChromeMetrics::default();
+            let mut navigation = tracker_with_initial_snapshot();
+            let outcome = observe_once(
+                &mut api,
+                &mut navigation,
+                &chrome_app(),
+                &sender,
+                &metrics,
+                &publisher,
+            );
+            assert!(matches!(outcome, ObservationOutcome::Continue));
+            assert!(events.try_recv().is_err());
+            assert_eq!(capture.observed_at(42, 7), Some(replacement_at));
+            assert!(capture.state_version(42, 7).is_some());
+            assert_eq!(
+                capture
+                    .decision(PrivacyScope::AllEvents, 42, Some(7))
+                    .capture_context()
+                    .url
+                    .as_deref(),
+                Some("https://allowed.example/new-generation")
+            );
+            let mut repeated_page = FakeApi::new([Ok(ChromeObservation::Snapshot(snapshot(
+                "window-1",
+                "tab-1",
+                "https://example.com",
+                "First",
+            )))]);
+            observe_once(
+                &mut repeated_page,
+                &mut navigation,
+                &chrome_app(),
+                &sender,
+                &metrics,
+                &publisher,
+            );
+            assert!(
+                events.try_recv().is_err(),
+                "stale result must not reset navigation"
+            );
+            assert_eq!(metrics.degraded.load(Ordering::Relaxed), 0);
+        }
+    }
+}
+
+#[test]
+fn policy_reload_does_not_reregister_an_invalidated_window() {
+    let (publisher, capture) = chrome_eligibility_channel(publication_filter());
+    publisher.observe(
+        42,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(7),
+            url: "https://allowed.example/before".to_owned(),
+        },
+    );
+    let mut changed = publication_filter();
+    changed.capture_policy.as_mut().unwrap().browser.block_auth = true;
+    let mut api = ReloadDuringQuery {
+        tracker: &capture,
+        publisher: &publisher,
+        filters: vec![changed],
+        replacement_at: None,
+        result: Some(Ok(ChromeObservation::Snapshot(snapshot_for_window(
+            7,
+            "window-101",
+            "tab-1",
+            "https://allowed.example/old",
+            "Old",
+        )))),
+    };
+    let (sender, events) = sync_channel(1);
+    observe_once(
+        &mut api,
+        &mut NavigationTracker::default(),
+        &chrome_app(),
+        &sender,
+        &ChromeMetrics::default(),
+        &publisher,
+    );
+    assert_eq!(capture.state_version(42, 7), None);
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn identical_policy_reload_preserves_version_and_allows_query_publication() {
+    let filter = publication_filter();
+    let (publisher, capture) = chrome_eligibility_channel(filter.clone());
+    let snapshot = snapshot_for_window(
+        7,
+        "window-101",
+        "tab-1",
+        "https://allowed.example/normal",
+        "Normal",
+    );
+    let initial = Instant::now() - Duration::from_secs(1);
+    publisher.observe_with_surface_at(
+        42,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(7),
+            url: snapshot.url.clone(),
+        },
+        Some(snapshot.applescript_window_id.clone()),
+        Some(&snapshot.tab_key),
+        initial,
+    );
+    let version = capture.state_version(42, 7);
+    let mut api = ReloadDuringQuery {
+        tracker: &capture,
+        publisher: &publisher,
+        filters: vec![filter],
+        replacement_at: None,
+        result: Some(Ok(ChromeObservation::Snapshot(snapshot))),
+    };
+    let (sender, events) = sync_channel(1);
+    observe_once(
+        &mut api,
+        &mut NavigationTracker::default(),
+        &chrome_app(),
+        &sender,
+        &ChromeMetrics::default(),
+        &publisher,
+    );
+    assert_eq!(capture.state_version(42, 7), version);
+    assert!(capture.observed_at(42, 7).unwrap() > initial);
+    assert!(events.try_recv().is_ok());
+}
+
+#[test]
+fn denied_url_is_not_published_or_used_as_the_next_navigation_origin() {
+    let standalone = FilterConfig {
+        exclude_websites: vec!["allowed.example".to_owned()],
+        ..FilterConfig::default()
+    };
+    for filter in [publication_filter(), standalone] {
+        let (publisher, capture) = chrome_eligibility_channel(filter);
+        let (sender, events) = sync_channel(2);
+        let mut api = FakeApi::new([
+            Ok(ChromeObservation::Snapshot(snapshot_for_window(
+                7,
+                "window-101",
+                "tab-1",
+                "https://allowed.example/private/details",
+                "Private",
+            ))),
+            Ok(ChromeObservation::Snapshot(snapshot_for_window(
+                7,
+                "window-101",
+                "tab-1",
+                "https://other.example/public",
+                "Public",
+            ))),
+        ]);
+        let mut navigation = tracker_with_initial_snapshot();
+        let metrics = ChromeMetrics::default();
+        observe_once(
+            &mut api,
+            &mut navigation,
+            &chrome_app(),
+            &sender,
+            &metrics,
+            &publisher,
+        );
+        assert!(events.try_recv().is_err());
+        assert!(!capture.allows_url_events(42, Some(7)));
+        observe_once(
+            &mut api,
+            &mut navigation,
+            &chrome_app(),
+            &sender,
+            &metrics,
+            &publisher,
+        );
+        let event = events.try_recv().expect("allowed navigation");
+        let EventData::BrowserNavigate(data) = event.data else {
+            panic!("navigation")
+        };
+        assert_eq!(data.url, "https://other.example/public");
+        assert_eq!(data.transition, None);
+    }
+}
