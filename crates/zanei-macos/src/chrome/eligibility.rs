@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockWriteGuard},
     time::Instant,
 };
 
@@ -57,6 +57,7 @@ struct WindowRecord {
 
 struct EligibilityState {
     filter: FilterConfig,
+    filter_revision: u64,
     windows: HashMap<(i32, i64), WindowRecord>,
     next_version: u64,
 }
@@ -119,80 +120,28 @@ impl ChromeEligibilityPublisher {
         tab_id: Option<&str>,
         observed_at: Instant,
     ) {
-        let applescript_window_id_for_record = applescript_window_id.clone();
-        let Ok(pid) = i32::try_from(pid) else {
-            return;
-        };
-        let (key, next_state) = match observation {
-            ChromeEligibilityObservation::Normal { window_id, url } => {
-                let key = window_id.map(|window_id| (pid, window_id));
-                let tab_id = tab_id.map(str::to_owned);
-                (
-                    key,
-                    Some(BrowserWindowState::Normal {
-                        url: url.into(),
-                        tab_id,
-                    }),
-                )
-            }
-            ChromeEligibilityObservation::Safari { window_id, url } => (
-                window_id.map(|window_id| (pid, window_id)),
-                Some(BrowserWindowState::Safari {
-                    url: url.map(Into::into),
-                }),
-            ),
-            ChromeEligibilityObservation::Incognito { window_id } => (
-                window_id.map(|window_id| (pid, window_id)),
-                Some(BrowserWindowState::Incognito),
-            ),
-            ChromeEligibilityObservation::Unavailable { window_id } => {
-                let Ok(mut state) = self.state.write() else {
-                    crate::trace::trace!(
-                        "component=chrome phase=eligibility action=observe result=poisoned"
-                    );
-                    return;
-                };
-                mark_unavailable(&mut state, pid, window_id, observed_at);
-                return;
-            }
-        };
-        let Ok(mut state) = self.state.write() else {
+        let Ok(state) = self.state.write() else {
             crate::trace::trace!(
                 "component=chrome phase=eligibility action=observe result=poisoned"
             );
             return;
         };
-        let Some(key) = key else {
-            return;
-        };
-        if let Some(record) = state.windows.get_mut(&key)
-            && record.state.as_ref() == next_state.as_ref()
-            && applescript_window_id
-                .as_ref()
-                .is_none_or(|window_id| record.applescript_window_id.as_ref() == Some(window_id))
-        {
-            record.observed_at = observed_at;
-            if let Some(applescript_window_id) = applescript_window_id.as_ref() {
-                record.applescript_window_id = Some(applescript_window_id.clone());
-            }
-            return;
-        }
-        let remembered_window_id = applescript_window_id_for_record.or_else(|| {
-            state
-                .windows
-                .get(&key)
-                .and_then(|record| record.applescript_window_id.clone())
-        });
-        let version = next_version(&mut state);
-        state.windows.insert(
-            key,
-            WindowRecord {
-                state: next_state,
-                version,
-                observed_at,
-                applescript_window_id: remembered_window_id,
-            },
+        EligibilityPublication { state }.observe(
+            pid,
+            observation,
+            applescript_window_id,
+            tab_id,
+            observed_at,
         );
+    }
+
+    pub(crate) fn filter_revision(&self) -> Option<u64> {
+        self.state.read().ok().map(|state| state.filter_revision)
+    }
+
+    pub(crate) fn publication(&self, revision: u64) -> Option<EligibilityPublication<'_>> {
+        let state = self.state.write().ok()?;
+        (state.filter_revision == revision).then_some(EligibilityPublication { state })
     }
 
     pub(crate) fn clear_all(&self) {
@@ -221,6 +170,94 @@ impl ChromeEligibilityPublisher {
     }
 }
 
+/// Serializes query results and nonblocking publication with filter replacement.
+pub(crate) struct EligibilityPublication<'a> {
+    state: RwLockWriteGuard<'a, EligibilityState>,
+}
+
+impl EligibilityPublication<'_> {
+    pub(crate) fn allows_url(&self, target: BrowserTarget, url: &str) -> bool {
+        browser_is_allowed(
+            target,
+            PrivacyScope::AllEvents,
+            Some(url),
+            &self.state.filter,
+        )
+    }
+
+    pub(crate) fn observe(
+        &mut self,
+        pid: i64,
+        observation: ChromeEligibilityObservation,
+        applescript_window_id: Option<AppleScriptWindowId>,
+        tab_id: Option<&str>,
+        observed_at: Instant,
+    ) {
+        let applescript_window_id_for_record = applescript_window_id.clone();
+        let Ok(pid) = i32::try_from(pid) else {
+            return;
+        };
+        let (key, next_state) = match observation {
+            ChromeEligibilityObservation::Normal { window_id, url } => {
+                let key = window_id.map(|window_id| (pid, window_id));
+                let tab_id = tab_id.map(str::to_owned);
+                (
+                    key,
+                    Some(BrowserWindowState::Normal {
+                        url: url.into(),
+                        tab_id,
+                    }),
+                )
+            }
+            ChromeEligibilityObservation::Safari { window_id, url } => (
+                window_id.map(|window_id| (pid, window_id)),
+                Some(BrowserWindowState::Safari {
+                    url: url.map(Into::into),
+                }),
+            ),
+            ChromeEligibilityObservation::Incognito { window_id } => (
+                window_id.map(|window_id| (pid, window_id)),
+                Some(BrowserWindowState::Incognito),
+            ),
+            ChromeEligibilityObservation::Unavailable { window_id } => {
+                mark_unavailable(&mut self.state, pid, window_id, observed_at);
+                return;
+            }
+        };
+        let Some(key) = key else {
+            return;
+        };
+        if let Some(record) = self.state.windows.get_mut(&key)
+            && record.state.as_ref() == next_state.as_ref()
+            && applescript_window_id
+                .as_ref()
+                .is_none_or(|window_id| record.applescript_window_id.as_ref() == Some(window_id))
+        {
+            record.observed_at = observed_at;
+            if let Some(applescript_window_id) = applescript_window_id.as_ref() {
+                record.applescript_window_id = Some(applescript_window_id.clone());
+            }
+            return;
+        }
+        let remembered_window_id = applescript_window_id_for_record.or_else(|| {
+            self.state
+                .windows
+                .get(&key)
+                .and_then(|record| record.applescript_window_id.clone())
+        });
+        let version = next_version(&mut self.state);
+        self.state.windows.insert(
+            key,
+            WindowRecord {
+                state: next_state,
+                version,
+                observed_at,
+                applescript_window_id: remembered_window_id,
+            },
+        );
+    }
+}
+
 #[derive(Clone)]
 pub struct ChromeEligibilityTracker {
     state: Arc<RwLock<EligibilityState>>,
@@ -246,6 +283,9 @@ impl ChromeEligibilityTracker {
         match self.state.write() {
             Ok(mut state) => {
                 let app_owned_policy_changed = state.filter.capture_policy != filter.capture_policy;
+                if state.filter != filter {
+                    state.filter_revision += 1;
+                }
                 state.filter = filter;
                 if app_owned_policy_changed {
                     let observed_at = Instant::now();
@@ -354,6 +394,7 @@ pub fn chrome_eligibility_channel(
 ) -> (ChromeEligibilityPublisher, ChromeEligibilityTracker) {
     let state = Arc::new(RwLock::new(EligibilityState {
         filter,
+        filter_revision: 0,
         windows: HashMap::new(),
         next_version: 0,
     }));
