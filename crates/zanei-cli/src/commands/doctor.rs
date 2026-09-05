@@ -45,7 +45,11 @@ pub fn run(config_path: &Path, store_path: &Path, fix: bool, json: bool) -> Resu
         print_human(&report, &executable, true, report.health.is_running());
     }
     if let Some(missing_permissions) = report.permissions_to_fix(fix) {
-        guide_granting(missing_permissions, &executable)?;
+        guide_granting(
+            missing_permissions,
+            &executable,
+            report.reported_by_recorder,
+        )?;
     }
     Ok(report.exit_code())
 }

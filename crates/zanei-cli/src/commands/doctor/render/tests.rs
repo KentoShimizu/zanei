@@ -85,3 +85,23 @@ fn mixed_denial_combines_targeted_automation_and_manual_guidance() {
     assert!(rendered.contains("click `+`"));
     assert!(rendered.contains("System Settings pane:"));
 }
+
+#[test]
+fn recorder_report_does_not_identify_the_diagnostic_executable_as_requester() {
+    for (capability, target) in [
+        (Capability::AutomateBrowser, "Chrome"),
+        (Capability::AutomateSafari, "Safari"),
+    ] {
+        let mut report = report_with_missing(&[capability]);
+        report.reported_by_recorder = true;
+        let rendered = super::render_human(
+            &report,
+            Path::new("/Applications/OtherCopy.app/Contents/MacOS/zanei"),
+            false,
+            true,
+        );
+        assert!(!rendered.contains("OtherCopy.app"));
+        assert!(rendered.contains("app/executable running the recorder"));
+        assert!(rendered.contains(&format!("switch its `{target}` toggle ON")));
+    }
+}

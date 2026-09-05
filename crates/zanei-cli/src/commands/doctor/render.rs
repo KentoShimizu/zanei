@@ -115,7 +115,10 @@ pub(super) fn render_human(
             .iter()
             .filter(|capability| capability.is_browser_automation())
         {
-            output.push_str(&automation_guidance(*capability, permission_target));
+            output.push_str(&automation_guidance(
+                *capability,
+                (!report.reported_by_recorder).then_some(permission_target),
+            ));
         }
     }
 
@@ -216,10 +219,11 @@ pub(super) fn render_human(
     output
 }
 
-// Interactive walkthrough for `doctor --fix`: one pane at a time, with the app
-// or executable path already on the clipboard and its target revealed in Finder,
-// so granting needs no outside knowledge of how macOS permission lists work.
-pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Result<(), CliError> {
+pub(super) fn guide_granting(
+    missing: &[Capability],
+    executable: &Path,
+    reported_by_recorder: bool,
+) -> Result<(), CliError> {
     use std::io::{BufRead, Write};
 
     let permission_target = permission_target_path(executable);
@@ -251,7 +255,13 @@ pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Resul
             pane_title(permission)
         );
         if permission.is_browser_automation() {
-            print!("{}", automation_guidance(*permission, permission_target));
+            print!(
+                "{}",
+                automation_guidance(
+                    *permission,
+                    (!reported_by_recorder).then_some(permission_target),
+                )
+            );
         } else {
             if bundled {
                 println!(
@@ -355,11 +365,17 @@ fn has_manual_permission_missing(missing: &[Capability]) -> bool {
         .any(|capability| !capability.is_browser_automation())
 }
 
-fn automation_guidance(capability: Capability, recorder: &Path) -> String {
+fn automation_guidance(capability: Capability, recorder: Option<&Path>) -> String {
+    let requester = match recorder {
+        Some(path) => format!("recorder app/executable `{}`", path.display()),
+        None => {
+            "app/executable running the recorder (which may differ from this diagnostic command)"
+                .to_owned()
+        }
+    };
     format!(
-        "Automation ({}): In System Settings → Privacy & Security → Automation, find the recorder app/executable `{}` and switch its `{}` toggle ON.\n",
+        "Automation ({}): In System Settings → Privacy & Security → Automation, find the {requester} and switch its `{}` toggle ON.\n",
         automation_target(capability),
-        recorder.display(),
         automation_target(capability),
     )
 }
