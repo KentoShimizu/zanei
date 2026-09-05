@@ -33,7 +33,9 @@ pub(crate) fn request_missing_permissions(
                 request_input_monitoring();
                 Ok(())
             }
-            Capability::AutomateBrowser => unreachable!("automation is requested by use"),
+            Capability::AutomateBrowser | Capability::AutomateSafari => {
+                unreachable!("browser automation is requested by use")
+            }
         },
         thread::sleep,
         PERMISSION_DECISION_POLL_INTERVAL,
@@ -120,12 +122,18 @@ fn probe_permissions_with<E>(
     } else {
         PermissionStatus::NotDetermined
     };
-    Ok(DaemonCapabilities::new(
+    let capabilities = DaemonCapabilities::new(
         required.clone(),
         capability_state(accessibility),
         capability_state(input_monitoring),
         capability_state(automation),
-    ))
+    );
+    Ok(if required.contains(&Capability::AutomateSafari) {
+        capabilities
+            .with_automate_safari(capability_state(status_for(&Capability::AutomateSafari)?))
+    } else {
+        capabilities
+    })
 }
 
 const fn capability_state(status: PermissionStatus) -> CapabilityState {
@@ -181,7 +189,9 @@ mod tests {
                             PermissionStatus::Granted
                         }
                     }
-                    Capability::AutomateBrowser => panic!("automation must not be probed"),
+                    Capability::AutomateBrowser | Capability::AutomateSafari => {
+                        panic!("automation must not be probed")
+                    }
                 })
             },
             |permission| {
@@ -220,7 +230,9 @@ mod tests {
                 let checks = match permission {
                     Capability::ReadAccessibilityTree => &accessibility_checks,
                     Capability::ObserveInput => &input_checks,
-                    Capability::AutomateBrowser => panic!("automation must not be probed"),
+                    Capability::AutomateBrowser | Capability::AutomateSafari => {
+                        panic!("automation must not be probed")
+                    }
                 };
                 checks.set(checks.get() + 1);
                 Ok::<_, ()>(match checks.get() {
@@ -280,7 +292,9 @@ mod tests {
                             PermissionStatus::Granted
                         }
                     }
-                    Capability::AutomateBrowser => panic!("automation must not be probed"),
+                    Capability::AutomateBrowser | Capability::AutomateSafari => {
+                        panic!("automation must not be probed")
+                    }
                 })
             },
             |permission| {
@@ -352,7 +366,9 @@ mod tests {
         let snapshot = probe_permissions_with(&required, |permission| match permission {
             Capability::ReadAccessibilityTree => Ok::<_, ()>(PermissionStatus::Granted),
             Capability::ObserveInput => Ok(PermissionStatus::Denied),
-            Capability::AutomateBrowser => Ok(PermissionStatus::NotDetermined),
+            Capability::AutomateBrowser | Capability::AutomateSafari => {
+                Ok(PermissionStatus::NotDetermined)
+            }
         })
         .expect("probe snapshot");
 
@@ -375,10 +391,89 @@ mod tests {
             Capability::ReadAccessibilityTree | Capability::ObserveInput => {
                 Ok::<_, ()>(PermissionStatus::Denied)
             }
-            Capability::AutomateBrowser => Ok(PermissionStatus::NotDetermined),
+            Capability::AutomateBrowser | Capability::AutomateSafari => {
+                Ok(PermissionStatus::NotDetermined)
+            }
         })
         .expect("probe snapshot");
 
         assert!(snapshot.ready());
+    }
+
+    #[test]
+    fn probes_required_safari_without_requesting_it() {
+        let required = BTreeSet::from([Capability::AutomateSafari]);
+        let probed = RefCell::new(Vec::new());
+        let snapshot = probe_permissions_with(&required, |permission| {
+            probed.borrow_mut().push(*permission);
+            Ok::<_, ()>(PermissionStatus::NotDetermined)
+        })
+        .expect("probe Safari capability");
+
+        assert_eq!(
+            *probed.borrow(),
+            [
+                Capability::ReadAccessibilityTree,
+                Capability::ObserveInput,
+                Capability::AutomateSafari,
+            ]
+        );
+        assert_eq!(
+            snapshot.state(Capability::AutomateSafari),
+            CapabilityState::Deferred
+        );
+        assert!(snapshot.ready());
+    }
+
+    #[test]
+    fn unrequired_safari_is_never_probed_or_requested() {
+        let required = BTreeSet::from([Capability::ReadAccessibilityTree]);
+        let probed = RefCell::new(Vec::new());
+        let requested = RefCell::new(Vec::new());
+        let snapshot = probe_permissions_with(&required, |permission| {
+            probed.borrow_mut().push(*permission);
+            Ok::<_, ()>(PermissionStatus::Granted)
+        })
+        .expect("probe shared capabilities");
+
+        assert!(snapshot.state(Capability::AutomateSafari) == CapabilityState::Deferred);
+        assert!(!probed.borrow().contains(&Capability::AutomateSafari));
+
+        request_missing_permissions_with(
+            &required,
+            |_| Ok::<_, ()>(PermissionStatus::Granted),
+            |permission| {
+                requested.borrow_mut().push(*permission);
+                Ok(())
+            },
+            |_| panic!("granted permission must not be requested"),
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        )
+        .expect("request shared permissions");
+        assert!(!requested.borrow().contains(&Capability::AutomateSafari));
+    }
+
+    #[test]
+    fn probes_chrome_and_safari_automation_as_independent_targets() {
+        let required = BTreeSet::from([Capability::AutomateBrowser, Capability::AutomateSafari]);
+        let snapshot = probe_permissions_with(&required, |permission| match permission {
+            Capability::ReadAccessibilityTree | Capability::ObserveInput => {
+                Ok::<_, ()>(PermissionStatus::Granted)
+            }
+            Capability::AutomateBrowser => Ok(PermissionStatus::Denied),
+            Capability::AutomateSafari => Ok(PermissionStatus::Granted),
+        })
+        .expect("probe browser capabilities");
+
+        assert_eq!(
+            snapshot.state(Capability::AutomateBrowser),
+            CapabilityState::ActionRequired
+        );
+        assert_eq!(
+            snapshot.state(Capability::AutomateSafari),
+            CapabilityState::Available
+        );
+        assert!(!snapshot.ready());
     }
 }
