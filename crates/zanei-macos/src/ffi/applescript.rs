@@ -1,5 +1,6 @@
 //! In-process AppleScript execution with all Objective-C pointers kept private.
 
+use crate::permission::SAFARI_BUNDLE_ID;
 use std::{
     ffi::{CStr, c_char, c_void},
     ptr::NonNull,
@@ -17,12 +18,10 @@ with timeout of 1 second
     if not (running of application id "{bundle_id}") then return {"not_running"}
     tell application id "{bundle_id}"
         if (count of windows) is 0 then return {"no_window"}
-
         set current_window to front window
         set current_mode to (mode of current_window) as text
         if current_mode is "incognito" then return {"incognito"}
         if current_mode is not "normal" then return {"unsupported_mode", current_mode}
-
         set current_tab to active tab of current_window
         return {"snapshot", (id of current_window) as text, name of current_window, (id of current_tab) as text, URL of current_tab, title of current_tab}
     end tell
@@ -36,12 +35,10 @@ with timeout of 1 second
     if not (running of application id "{bundle_id}") then return {"not_running"}
     tell application id "{bundle_id}"
         if not (exists window id "{window_id}") then return {"no_window"}
-
         set current_window to window id "{window_id}"
         set current_mode to (mode of current_window) as text
         if current_mode is "incognito" then return {"incognito"}
         if current_mode is not "normal" then return {"unsupported_mode", current_mode}
-
         set current_tab to active tab of current_window
         return {"snapshot", (id of current_window) as text, name of current_window, (id of current_tab) as text, URL of current_tab, title of current_tab}
     end tell
@@ -49,13 +46,41 @@ end timeout
 end using terms from
 "#;
 
-const SNAPSHOT_ITEM_COUNT: isize = 6;
-const STATUS_ITEM_COUNT: isize = 1;
-const UNSUPPORTED_MODE_ITEM_COUNT: isize = 2;
+const SAFARI_FRONT_WINDOW_SCRIPT_TEMPLATE: &str = r#"
+using terms from application "{application_path}"
+with timeout of 1 second
+    if not (running of application id "{bundle_id}") then return {"not_running"}
+    tell application id "{bundle_id}"
+        if (count of windows) is 0 then return {"no_window"}
+        set current_window to front window
+        set current_tab to current tab of current_window
+        return {"snapshot", (id of current_window) as text, name of current_window, URL of current_tab, name of current_tab}
+    end tell
+end timeout
+end using terms from
+"#;
+
+const SAFARI_TARGET_WINDOW_SCRIPT_TEMPLATE: &str = r#"
+using terms from application "{application_path}"
+with timeout of 1 second
+    if not (running of application id "{bundle_id}") then return {"not_running"}
+    tell application id "{bundle_id}"
+        if not (exists window id "{window_id}") then return {"no_window"}
+        set current_window to window id "{window_id}"
+        set current_tab to current tab of current_window
+        return {"snapshot", (id of current_window) as text, name of current_window, URL of current_tab, name of current_tab}
+    end tell
+end timeout
+end using terms from
+"#;
+
+const SNAPSHOT_ITEM_COUNT: usize = 6;
+const SAFARI_SNAPSHOT_ITEM_COUNT: usize = 5;
+const STATUS_ITEM_COUNT: usize = 1;
+const UNSUPPORTED_MODE_ITEM_COUNT: usize = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AppleScriptWindowId(String);
-
 impl AppleScriptWindowId {
     fn from_response(value: String) -> Self {
         Self(value)
@@ -70,7 +95,13 @@ impl AppleScriptWindowId {
         Self(value.to_owned())
     }
 }
-
+// Safari is intentionally not wired into the Chrome worker until Z07e.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BrowserTarget {
+    Chrome,
+    Safari,
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Snapshot {
     pub(crate) window_id: AppleScriptWindowId,
@@ -79,15 +110,22 @@ pub(crate) struct Snapshot {
     pub(crate) url: String,
     pub(crate) tab_title: Option<String>,
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SafariSnapshot {
+    pub(crate) window_id: AppleScriptWindowId,
+    pub(crate) window_title: Option<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) tab_title: Option<String>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Observation {
-    Snapshot(Snapshot),
+    ChromeSnapshot(Snapshot),
+    SafariSnapshot(SafariSnapshot),
     Incognito,
     NoWindow,
     NotRunning,
 }
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AppleScriptError {
     #[error("Objective-C class {0} is unavailable")]
@@ -96,6 +134,8 @@ pub(crate) enum AppleScriptError {
     Allocation(&'static str),
     #[error("Google Chrome is not installed")]
     ChromeUnavailable,
+    #[error("Safari is not installed")]
+    SafariUnavailable,
     #[error("AppleScript compilation failed (code {code:?})")]
     Compile { code: Option<i64> },
     #[error("AppleScript execution failed (code {code:?})")]
@@ -105,7 +145,6 @@ pub(crate) enum AppleScriptError {
     #[error("Chrome returned an unsupported window mode")]
     UnsupportedMode,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum AppleScriptResponseError {
     #[error("empty descriptor list")]
@@ -123,18 +162,18 @@ pub(crate) enum AppleScriptResponseError {
     #[error("string contains a NUL byte")]
     StringContainsNul,
 }
-
 pub(crate) struct AppleScriptClient {
+    target: BrowserTarget,
     application_path: String,
     front_window_script: RetainedObject,
 }
-
 impl AppleScriptClient {
-    pub(crate) fn new() -> Result<Self, AppleScriptError> {
+    pub(crate) fn new(target: BrowserTarget) -> Result<Self, AppleScriptError> {
         let _pool = AutoreleasePool::new()?;
-        let application_path = chrome_application_path()?;
-        let front_window_script = compile_script(&front_window_source(&application_path))?;
+        let application_path = application_path(target)?;
+        let front_window_script = compile_script(&front_window_source(target, &application_path))?;
         Ok(Self {
+            target,
             application_path,
             front_window_script,
         })
@@ -142,7 +181,7 @@ impl AppleScriptClient {
 
     pub(crate) fn query(&mut self) -> Result<Observation, AppleScriptError> {
         let _pool = AutoreleasePool::new()?;
-        execute_script(&self.front_window_script)
+        execute_script(self.target, &self.front_window_script)
     }
 
     pub(crate) fn query_window(
@@ -150,48 +189,68 @@ impl AppleScriptClient {
         window_id: &AppleScriptWindowId,
     ) -> Result<Observation, AppleScriptError> {
         let _pool = AutoreleasePool::new()?;
-        let script = compile_script(&target_window_source(&self.application_path, window_id))?;
-        execute_script(&script)
+        let script = compile_script(&target_window_source(
+            self.target,
+            &self.application_path,
+            window_id,
+        ))?;
+        execute_script(self.target, &script)
     }
 }
-
-fn chrome_application_path() -> Result<String, AppleScriptError> {
+fn application_path(target: BrowserTarget) -> Result<String, AppleScriptError> {
     let class = class(c"NSWorkspace", "NSWorkspace")?;
     let workspace = send_object(class, c"sharedWorkspace");
-    let bundle_id = autoreleased_string(CHROME_BUNDLE_ID)?;
+    let bundle_id = autoreleased_string(bundle_id(target))?;
     let url = send_object_with_object(
         workspace,
         c"URLForApplicationWithBundleIdentifier:",
         bundle_id,
     );
     let path = send_object(url, c"path");
-    object_string(path).ok_or(AppleScriptError::ChromeUnavailable)
+    object_string(path).ok_or(match target {
+        BrowserTarget::Chrome => AppleScriptError::ChromeUnavailable,
+        BrowserTarget::Safari => AppleScriptError::SafariUnavailable,
+    })
 }
-
-fn front_window_source(application_path: &str) -> String {
-    render_script_template(FRONT_WINDOW_SCRIPT_TEMPLATE, application_path)
+fn bundle_id(target: BrowserTarget) -> &'static str {
+    match target {
+        BrowserTarget::Chrome => CHROME_BUNDLE_ID,
+        BrowserTarget::Safari => SAFARI_BUNDLE_ID,
+    }
 }
-
-fn target_window_source(application_path: &str, window_id: &AppleScriptWindowId) -> String {
+fn front_window_source(target: BrowserTarget, application_path: &str) -> String {
+    let template = match target {
+        BrowserTarget::Chrome => FRONT_WINDOW_SCRIPT_TEMPLATE,
+        BrowserTarget::Safari => SAFARI_FRONT_WINDOW_SCRIPT_TEMPLATE,
+    };
+    render_script_template(template, target, application_path)
+}
+fn target_window_source(
+    target: BrowserTarget,
+    application_path: &str,
+    window_id: &AppleScriptWindowId,
+) -> String {
     let escaped_window_id = escape_applescript_string(window_id.as_str());
-    TARGET_WINDOW_SCRIPT_TEMPLATE
+    let template = match target {
+        BrowserTarget::Chrome => TARGET_WINDOW_SCRIPT_TEMPLATE,
+        BrowserTarget::Safari => SAFARI_TARGET_WINDOW_SCRIPT_TEMPLATE,
+    };
+    template
         .split("{window_id}")
-        .map(|segment| render_script_template(segment, application_path))
+        .map(|segment| render_script_template(segment, target, application_path))
         .collect::<Vec<_>>()
         .join(&escaped_window_id)
 }
 
-fn render_script_template(template: &str, application_path: &str) -> String {
+fn render_script_template(template: &str, target: BrowserTarget, application_path: &str) -> String {
     let escaped_path = escape_applescript_string(application_path);
     template
-        .replace("{bundle_id}", CHROME_BUNDLE_ID)
+        .replace("{bundle_id}", bundle_id(target))
         .replace("{application_path}", &escaped_path)
 }
-
 fn escape_applescript_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
-
 fn compile_script(source: &str) -> Result<RetainedObject, AppleScriptError> {
     let source = autoreleased_string(source)?;
     let class = class(c"NSAppleScript", "NSAppleScript")?;
@@ -206,8 +265,10 @@ fn compile_script(source: &str) -> Result<RetainedObject, AppleScriptError> {
     }
     Ok(script)
 }
-
-fn execute_script(script: &RetainedObject) -> Result<Observation, AppleScriptError> {
+fn execute_script(
+    target: BrowserTarget,
+    script: &RetainedObject,
+) -> Result<Observation, AppleScriptError> {
     let mut error_info = std::ptr::null_mut();
     let reply = send_object_with_object_pointer(
         script.as_ptr(),
@@ -219,29 +280,48 @@ fn execute_script(script: &RetainedObject) -> Result<Observation, AppleScriptErr
             code: error_code(error_info),
         });
     }
-    parse_reply(reply)
+    parse_reply(target, reply)
 }
-
-fn parse_reply(reply: Object) -> Result<Observation, AppleScriptError> {
+fn parse_reply(target: BrowserTarget, reply: Object) -> Result<Observation, AppleScriptError> {
     let item_count = send_isize(reply, c"numberOfItems");
-    if item_count < STATUS_ITEM_COUNT {
+    if item_count < STATUS_ITEM_COUNT as isize {
         return Err(AppleScriptError::InvalidResponse(
             AppleScriptResponseError::EmptyDescriptorList,
         ));
     }
-    let status = required_item_string(reply, 1)?;
-    match status.as_str() {
-        "snapshot" => parse_snapshot(reply, item_count).map(Observation::Snapshot),
-        "incognito" => parse_status(item_count, Observation::Incognito),
-        "no_window" => parse_status(item_count, Observation::NoWindow),
-        "not_running" => parse_status(item_count, Observation::NotRunning),
-        "unsupported_mode" => {
-            if item_count != UNSUPPORTED_MODE_ITEM_COUNT {
+    let items = (1..=item_count)
+        .map(|index| item_string(reply, index))
+        .collect::<Vec<_>>();
+    parse_items(target, items)
+}
+fn parse_items(
+    target: BrowserTarget,
+    items: Vec<Option<String>>,
+) -> Result<Observation, AppleScriptError> {
+    let status =
+        items
+            .first()
+            .and_then(Option::as_deref)
+            .ok_or(AppleScriptError::InvalidResponse(
+                AppleScriptResponseError::RequiredItemNotText,
+            ))?;
+    match status {
+        "snapshot" => match target {
+            BrowserTarget::Chrome => parse_chrome_snapshot(&items).map(Observation::ChromeSnapshot),
+            BrowserTarget::Safari => parse_safari_snapshot(&items).map(Observation::SafariSnapshot),
+        },
+        "incognito" if target == BrowserTarget::Chrome => {
+            parse_status(items.len(), Observation::Incognito)
+        }
+        "no_window" => parse_status(items.len(), Observation::NoWindow),
+        "not_running" => parse_status(items.len(), Observation::NotRunning),
+        "unsupported_mode" if target == BrowserTarget::Chrome => {
+            if items.len() != UNSUPPORTED_MODE_ITEM_COUNT {
                 return Err(AppleScriptError::InvalidResponse(
                     AppleScriptResponseError::UnsupportedModeLength,
                 ));
             }
-            let _ = required_item_string(reply, 2)?;
+            let _ = required_item(&items, 1)?;
             Err(AppleScriptError::UnsupportedMode)
         }
         _ => Err(AppleScriptError::InvalidResponse(
@@ -249,9 +329,8 @@ fn parse_reply(reply: Object) -> Result<Observation, AppleScriptError> {
         )),
     }
 }
-
 fn parse_status(
-    item_count: isize,
+    item_count: usize,
     observation: Observation,
 ) -> Result<Observation, AppleScriptError> {
     if item_count == STATUS_ITEM_COUNT {
@@ -262,26 +341,43 @@ fn parse_status(
         ))
     }
 }
-
-fn parse_snapshot(reply: Object, item_count: isize) -> Result<Snapshot, AppleScriptError> {
-    if item_count != SNAPSHOT_ITEM_COUNT {
+fn parse_chrome_snapshot(items: &[Option<String>]) -> Result<Snapshot, AppleScriptError> {
+    if items.len() != SNAPSHOT_ITEM_COUNT {
         return Err(AppleScriptError::InvalidResponse(
             AppleScriptResponseError::SnapshotLength,
         ));
     }
     Ok(Snapshot {
-        window_id: AppleScriptWindowId::from_response(required_item_string(reply, 2)?),
-        window_title: item_string(reply, 3),
-        tab_key: required_item_string(reply, 4)?,
-        url: required_item_string(reply, 5)?,
-        tab_title: item_string(reply, 6),
+        window_id: AppleScriptWindowId::from_response(required_item(items, 1)?),
+        window_title: optional_item(items, 2),
+        tab_key: required_item(items, 3)?,
+        url: required_item(items, 4)?,
+        tab_title: optional_item(items, 5),
     })
 }
-
-fn required_item_string(reply: Object, index: isize) -> Result<String, AppleScriptError> {
-    item_string(reply, index).ok_or(AppleScriptError::InvalidResponse(
-        AppleScriptResponseError::RequiredItemNotText,
-    ))
+fn parse_safari_snapshot(items: &[Option<String>]) -> Result<SafariSnapshot, AppleScriptError> {
+    if items.len() != SAFARI_SNAPSHOT_ITEM_COUNT {
+        return Err(AppleScriptError::InvalidResponse(
+            AppleScriptResponseError::SnapshotLength,
+        ));
+    }
+    Ok(SafariSnapshot {
+        window_id: AppleScriptWindowId::from_response(required_item(items, 1)?),
+        window_title: optional_item(items, 2),
+        url: optional_item(items, 3),
+        tab_title: optional_item(items, 4),
+    })
+}
+fn required_item(items: &[Option<String>], index: usize) -> Result<String, AppleScriptError> {
+    items
+        .get(index)
+        .and_then(Clone::clone)
+        .ok_or(AppleScriptError::InvalidResponse(
+            AppleScriptResponseError::RequiredItemNotText,
+        ))
+}
+fn optional_item(items: &[Option<String>], index: usize) -> Option<String> {
+    items.get(index).cloned().flatten()
 }
 
 fn item_string(reply: Object, index: isize) -> Option<String> {
@@ -481,94 +577,8 @@ fn send_void(receiver: Object, method: &CStr) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn front_window_source_leaves_frontmost_authority_to_focus_context() {
-        let source = front_window_source("/Applications/Google Chrome.app");
-
-        assert!(!source.contains("frontmost is false"));
-        assert!(source.contains("set current_window to front window"));
-    }
-
-    #[test]
-    fn sources_address_chrome_by_bundle_id_without_an_application_alias() {
-        let application_path = "/Applications/Google Chrome.app";
-        let window_id = AppleScriptWindowId::for_test("window-4321");
-
-        for source in [
-            front_window_source(application_path),
-            target_window_source(application_path, &window_id),
-        ] {
-            assert!(source.contains(
-                "if not (running of application id \"com.google.Chrome\") then return {\"not_running\"}"
-            ));
-            assert!(source.contains("tell application id \"com.google.Chrome\""));
-            assert!(!source.contains("path to application id"));
-            assert!(!source.contains("application chromeApp"));
-        }
-    }
-
-    #[test]
-    fn sources_keep_every_privacy_and_status_return_path() {
-        let application_path = "/Applications/Google Chrome.app";
-        let window_id = AppleScriptWindowId::for_test("window-4321");
-        let front = front_window_source(application_path);
-        let target = target_window_source(application_path, &window_id);
-
-        assert!(front.contains("if (count of windows) is 0 then return {\"no_window\"}"));
-        assert!(
-            target
-                .contains("if not (exists window id \"window-4321\") then return {\"no_window\"}")
-        );
-        for source in [&front, &target] {
-            assert!(
-                source.contains("if current_mode is \"incognito\" then return {\"incognito\"}")
-            );
-            assert!(source.contains(
-                "if current_mode is not \"normal\" then return {\"unsupported_mode\", current_mode}"
-            ));
-            assert!(source.contains(
-                "return {\"snapshot\", (id of current_window) as text, name of current_window, (id of current_tab) as text, URL of current_tab, title of current_tab}"
-            ));
-        }
-    }
-
-    #[test]
-    fn targeted_source_reads_only_the_chrome_reported_window_identity() {
-        let window_id = AppleScriptWindowId::for_test("window-4321");
-
-        let source = target_window_source("/Applications/Google Chrome.app", &window_id);
-
-        assert!(source.contains("if not (exists window id \"window-4321\")"));
-        assert!(source.contains("set current_window to window id \"window-4321\""));
-        assert!(!source.contains("every window"));
-        assert!(!source.contains("front window"));
-    }
-
-    #[test]
-    fn targeted_source_escapes_opaque_window_identity_as_one_string_literal() {
-        let window_id = AppleScriptWindowId::for_test("window-\\\" & return {\"private\"} & \"");
-
-        let source = target_window_source("/Applications/Google Chrome.app", &window_id);
-
-        let escaped = "window-\\\\\\\" & return {\\\"private\\\"} & \\\"";
-        assert_eq!(source.matches(escaped).count(), 2);
-        assert!(!source.contains("window id \"window-\" & return"));
-    }
-
-    #[test]
-    fn targeted_source_does_not_reinterpret_markers_in_values() {
-        let application_path = "/Applications/{window_id}/Google Chrome.app";
-        let window_id = AppleScriptWindowId::for_test("window-{application_path}");
-
-        let source = target_window_source(application_path, &window_id);
-
-        assert_eq!(source.matches(application_path).count(), 1);
-        assert_eq!(source.matches(window_id.as_str()).count(), 2);
-    }
-}
+#[path = "applescript/tests.rs"]
+mod tests;
 
 #[link(name = "objc")]
 unsafe extern "C" {
