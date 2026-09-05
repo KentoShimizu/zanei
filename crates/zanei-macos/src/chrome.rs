@@ -33,7 +33,7 @@ use zanei_core::schema::BrowserTransition;
 use crate::{
     ffi::applescript::{
         AppleScriptClient, AppleScriptError, AppleScriptResponseError, AppleScriptWindowId,
-        Observation as NativeObservation, Snapshot as NativeSnapshot,
+        BrowserTarget, Observation as NativeObservation, Snapshot as NativeSnapshot,
     },
     focus_context::{FocusContext, FocusTransition, FocusTransitionReceiver},
 };
@@ -245,8 +245,13 @@ impl ChromeApi for SystemChromeApi {
         };
         let window_id = query.window_id();
         Ok(match observation {
-            NativeObservation::Snapshot(snapshot) => {
+            NativeObservation::ChromeSnapshot(snapshot) => {
                 ChromeObservation::Snapshot(ChromeSnapshot::from_native(snapshot, window_id))
+            }
+            NativeObservation::SafariSnapshot(_) => {
+                return Err(ChromeFailure::from(AppleScriptError::InvalidResponse(
+                    AppleScriptResponseError::UnknownStatus,
+                )));
             }
             NativeObservation::Incognito => ChromeObservation::Incognito { window_id },
             NativeObservation::NoWindow => ChromeObservation::NoWindow,
@@ -257,7 +262,7 @@ impl ChromeApi for SystemChromeApi {
 
 impl SystemChromeApi {
     fn client(&mut self) -> Result<&mut AppleScriptClient, ChromeFailure> {
-        self.get_or_initialize_client(AppleScriptClient::new)
+        self.get_or_initialize_client(|| AppleScriptClient::new(BrowserTarget::Chrome))
     }
 }
 
@@ -308,7 +313,8 @@ impl From<AppleScriptError> for ChromeFailure {
             }
             AppleScriptError::ClassUnavailable(_)
             | AppleScriptError::Allocation(_)
-            | AppleScriptError::ChromeUnavailable => {
+            | AppleScriptError::ChromeUnavailable
+            | AppleScriptError::SafariUnavailable => {
                 Self::Query(ChromeQueryFailure::RuntimeUnavailable)
             }
             AppleScriptError::InvalidResponse(error) => Self::Parse(match error {
