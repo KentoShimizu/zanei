@@ -1,9 +1,11 @@
 //! Ephemeral binding between an observed event and the surface it came from.
 
+use std::sync::Arc;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CaptureContext {
-    /// The complete URL observed for the surface. Website policy derives its host from this.
-    pub url: Option<String>,
+    /// Complete URL shared across input events; website policy derives its host from this.
+    pub url: Option<Arc<str>>,
     /// Browser/window identity used to keep delayed observations attached to their source.
     pub surface: Option<Box<CaptureSurface>>,
 }

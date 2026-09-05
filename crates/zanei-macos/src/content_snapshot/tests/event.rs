@@ -30,7 +30,7 @@ fn raw_event_matches_the_v3_content_snapshot_contract() {
         "日本語 alice@example.com".to_owned(),
         None,
         CaptureContext {
-            url: Some("https://example.com/path".to_owned()),
+            url: Some("https://example.com/path".into()),
             surface: None,
         },
         time::OffsetDateTime::UNIX_EPOCH,

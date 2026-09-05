@@ -16,7 +16,10 @@ use crate::ffi::applescript::AppleScriptWindowId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ChromeWindowState {
-    Normal { url: String, tab_id: Option<String> },
+    Normal {
+        url: Arc<str>,
+        tab_id: Option<String>,
+    },
     Incognito,
 }
 
@@ -107,7 +110,13 @@ impl ChromeEligibilityPublisher {
             ChromeEligibilityObservation::Normal { window_id, url } => {
                 let key = window_id.map(|window_id| (pid, window_id));
                 let tab_id = tab_id.map(str::to_owned);
-                (key, Some(ChromeWindowState::Normal { url, tab_id }))
+                (
+                    key,
+                    Some(ChromeWindowState::Normal {
+                        url: url.into(),
+                        tab_id,
+                    }),
+                )
             }
             ChromeEligibilityObservation::Incognito { window_id } => (
                 window_id.map(|window_id| (pid, window_id)),
@@ -522,6 +531,23 @@ mod tests {
 
         publisher.observe(7, normal(11, "about:blank"));
         assert!(!tracker.allows_text(7, Some(11)));
+    }
+
+    #[test]
+    fn long_urls_keep_one_shared_buffer_across_capture_decisions() {
+        let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
+        let url = format!("https://example.com/{}", "a".repeat(128 * 1024));
+        publisher.observe(7, normal(11, &url));
+        let first = tracker.decision(PrivacyScope::TextContent, 7, Some(11));
+        let original = first.capture_context().url.unwrap();
+        assert_eq!(&*original, url);
+        // Repeated observations and high-frequency inputs must not copy the URL body.
+        publisher.observe(7, normal(11, &url));
+        for _ in 0..100 {
+            let next = tracker.decision(PrivacyScope::TextContent, 7, Some(11));
+            assert!(next.is_allowed());
+            assert!(Arc::ptr_eq(&original, &next.capture_context().url.unwrap()));
+        }
     }
 
     #[test]

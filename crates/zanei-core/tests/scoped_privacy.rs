@@ -208,14 +208,14 @@ fn coalescing_never_crosses_window_or_website_host_context() {
 fn coalescing_never_crosses_complete_bound_context() {
     let mut normalizer = Normalizer::new();
     let mut first = raw_input(1, "same.example");
-    first.capture_context.url = Some("https://same.example/first".to_owned());
+    first.capture_context.url = Some("https://same.example/first".into());
     first.capture_context.surface = Some(Box::new(CaptureSurface {
         cg_window_id: Some(1),
         applescript_window_id: Some("window-a".to_owned()),
         tab_id: Some("tab-a".to_owned()),
     }));
     let mut second = raw_input(1, "same.example");
-    second.capture_context.url = Some("https://same.example/second".to_owned());
+    second.capture_context.url = Some("https://same.example/second".into());
     second.capture_context.surface = Some(Box::new(CaptureSurface {
         cg_window_id: Some(1),
         applescript_window_id: Some("window-a".to_owned()),
@@ -284,7 +284,7 @@ fn normalized_for(data: EventData, website_host: Option<&str>, app: App) -> Norm
             },
         },
         capture_context: CaptureContext {
-            url: website_host.map(|host| format!("https://{host}/")),
+            url: website_host.map(|host| format!("https://{host}/").into()),
             surface: None,
         },
     }
@@ -330,7 +330,7 @@ fn raw_input(window_id: i64, website_host: &str) -> RawEvent {
         element: None,
         data: input_text("x"),
         capture_context: CaptureContext {
-            url: Some(format!("https://{website_host}/")),
+            url: Some(format!("https://{website_host}/").into()),
             surface: None,
         },
     }

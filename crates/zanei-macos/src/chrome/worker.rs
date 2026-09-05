@@ -484,7 +484,7 @@ fn record_failure(
 
 fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
     let capture_context = zanei_core::schema::CaptureContext {
-        url: Some(navigation.snapshot.url.clone()),
+        url: Some(navigation.snapshot.url.as_str().into()),
         surface: Some(Box::new(zanei_core::schema::CaptureSurface {
             cg_window_id: navigation.snapshot.window_id,
             applescript_window_id: Some(
