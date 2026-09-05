@@ -16,6 +16,7 @@ pub use failure::{
 pub use observer::ChromeObserver;
 
 use std::{
+    collections::BTreeSet,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -101,7 +102,14 @@ impl ChromeCollector {
 
     #[must_use]
     pub fn failure_state(&self) -> ChromeFailureState {
-        self.metrics.failure.state()
+        self.metrics
+            .failure
+            .state(&self.eligibility.query_targets())
+    }
+
+    /// Selects the browser adapters this collector may query. Policy restrictions still apply.
+    pub fn set_query_targets(&self, targets: BTreeSet<BrowserTarget>) {
+        self.eligibility.set_query_targets(targets);
     }
 
     fn stop_worker(&mut self) {
@@ -231,12 +239,12 @@ trait ChromeApi {
 }
 
 struct SystemChromeApi<C = AppleScriptClient> {
-    client: Option<C>,
+    client: Option<(BrowserTarget, C)>,
 }
 
 impl ChromeApi for SystemChromeApi {
     fn query(&mut self, query: &ChromeQuery) -> Result<ChromeObservation, ChromeFailure> {
-        let client = self.client()?;
+        let client = self.client(query.target())?;
         let observation = match query {
             ChromeQuery::FrontWindow { .. } => client.query()?,
             ChromeQuery::Window {
@@ -249,10 +257,14 @@ impl ChromeApi for SystemChromeApi {
             NativeObservation::ChromeSnapshot(snapshot) => {
                 ChromeObservation::Snapshot(ChromeSnapshot::from_native(snapshot, window_id))
             }
-            NativeObservation::SafariSnapshot(_) => {
-                return Err(ChromeFailure::from(AppleScriptError::InvalidResponse(
-                    AppleScriptResponseError::UnknownStatus,
-                )));
+            NativeObservation::SafariSnapshot(snapshot) => {
+                ChromeObservation::Snapshot(ChromeSnapshot {
+                    window_id,
+                    applescript_window_id: snapshot.window_id,
+                    window_title: snapshot.window_title,
+                    page: BrowserPage::Safari { url: snapshot.url },
+                    tab_title: snapshot.tab_title,
+                })
             }
             NativeObservation::Incognito => ChromeObservation::Incognito { window_id },
             NativeObservation::NoWindow => ChromeObservation::NoWindow,
@@ -262,21 +274,28 @@ impl ChromeApi for SystemChromeApi {
 }
 
 impl SystemChromeApi {
-    fn client(&mut self) -> Result<&mut AppleScriptClient, ChromeFailure> {
-        self.get_or_initialize_client(|| AppleScriptClient::new(BrowserTarget::Chrome))
+    fn client(&mut self, target: BrowserTarget) -> Result<&mut AppleScriptClient, ChromeFailure> {
+        self.get_or_initialize_client(target, || AppleScriptClient::new(target))
     }
 }
 
 impl<C> SystemChromeApi<C> {
     fn get_or_initialize_client(
         &mut self,
+        target: BrowserTarget,
         initialize: impl FnOnce() -> Result<C, AppleScriptError>,
     ) -> Result<&mut C, ChromeFailure> {
-        if self.client.is_none() {
-            self.client = Some(initialize().map_err(ChromeFailure::from)?);
+        if self
+            .client
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != target)
+        {
+            self.client = None;
+            self.client = Some((target, initialize().map_err(ChromeFailure::from)?));
         }
         self.client
             .as_mut()
+            .map(|(_, client)| client)
             .ok_or(ChromeFailure::Query(ChromeQueryFailure::RuntimeUnavailable))
     }
 
@@ -285,7 +304,7 @@ impl<C> SystemChromeApi<C> {
         &mut self,
         result: Result<C, AppleScriptError>,
     ) -> Result<&mut C, ChromeFailure> {
-        self.get_or_initialize_client(|| result)
+        self.get_or_initialize_client(BrowserTarget::Chrome, || result)
     }
 }
 
@@ -339,10 +358,12 @@ impl From<AppleScriptError> for ChromeFailure {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ChromeQuery {
     FrontWindow {
+        target: BrowserTarget,
         pid: i64,
         window_id: Option<i64>,
     },
     Window {
+        target: BrowserTarget,
         pid: i64,
         window_id: i64,
         applescript_window_id: AppleScriptWindowId,
@@ -350,6 +371,12 @@ enum ChromeQuery {
 }
 
 impl ChromeQuery {
+    const fn target(&self) -> BrowserTarget {
+        match self {
+            Self::FrontWindow { target, .. } | Self::Window { target, .. } => *target,
+        }
+    }
+
     const fn pid(&self) -> i64 {
         match self {
             Self::FrontWindow { pid, .. } | Self::Window { pid, .. } => *pid,
@@ -387,9 +414,35 @@ struct ChromeSnapshot {
     window_id: Option<i64>,
     applescript_window_id: AppleScriptWindowId,
     window_title: Option<String>,
-    tab_key: String,
-    url: String,
+    page: BrowserPage,
     tab_title: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BrowserPage {
+    Chrome { tab_key: String, url: String },
+    Safari { url: Option<String> },
+}
+
+impl BrowserPage {
+    fn url(&self) -> Option<&str> {
+        match self {
+            Self::Chrome { url, .. } => Some(url),
+            Self::Safari { url } => url.as_deref(),
+        }
+    }
+    fn tab_key(&self) -> Option<&str> {
+        match self {
+            Self::Chrome { tab_key, .. } => Some(tab_key),
+            Self::Safari { .. } => None,
+        }
+    }
+    const fn target(&self) -> BrowserTarget {
+        match self {
+            Self::Chrome { .. } => BrowserTarget::Chrome,
+            Self::Safari { .. } => BrowserTarget::Safari,
+        }
+    }
 }
 
 impl ChromeSnapshot {
@@ -398,8 +451,10 @@ impl ChromeSnapshot {
             window_id,
             applescript_window_id: value.window_id,
             window_title: value.window_title,
-            tab_key: value.tab_key,
-            url: value.url,
+            page: BrowserPage::Chrome {
+                tab_key: value.tab_key,
+                url: value.url,
+            },
             tab_title: value.tab_title,
         }
     }

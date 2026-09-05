@@ -8,7 +8,7 @@ use crate::workspace::ApplicationInfo;
 
 pub(super) fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEvent {
     let capture_context = zanei_core::schema::CaptureContext {
-        url: Some(navigation.snapshot.url.as_str().into()),
+        url: Some(navigation.url.as_str().into()),
         surface: Some(Box::new(zanei_core::schema::CaptureSurface {
             cg_window_id: navigation.snapshot.window_id,
             applescript_window_id: Some(
@@ -18,7 +18,7 @@ pub(super) fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEve
                     .as_str()
                     .to_owned(),
             ),
-            tab_id: Some(navigation.snapshot.tab_key.clone()),
+            tab_id: navigation.snapshot.page.tab_key().map(str::to_owned),
         })),
     };
     RawEvent {
@@ -37,9 +37,12 @@ pub(super) fn raw_event(app: &ApplicationInfo, navigation: Navigation) -> RawEve
         }),
         element: None,
         data: EventData::BrowserNavigate(BrowserNavigateData {
-            url: navigation.snapshot.url.into(),
+            url: navigation.url.into(),
             tab_title: navigation.snapshot.tab_title,
-            mode: BrowserMode::Normal,
+            mode: match navigation.snapshot.page {
+                crate::chrome::BrowserPage::Chrome { .. } => BrowserMode::Normal,
+                crate::chrome::BrowserPage::Safari { .. } => BrowserMode::Unknown,
+            },
             transition: navigation.transition,
         }),
         capture_context,

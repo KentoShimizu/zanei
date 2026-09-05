@@ -21,6 +21,12 @@ pub enum BrowserTarget {
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl BrowserTarget {
+    pub(crate) fn from_bundle_id(bundle_id: Option<&str>) -> Option<Self> {
+        [Self::Chrome, Self::Safari]
+            .into_iter()
+            .find(|target| Some(target.bundle_id()) == bundle_id)
+    }
+
     pub const fn bundle_id(self) -> &'static str {
         match self {
             Self::Chrome => CHROME_BUNDLE_ID,
@@ -56,21 +62,13 @@ pub fn required_browser_targets(
     capture: &CaptureConfig,
     filter: &FilterConfig,
 ) -> BTreeSet<BrowserTarget> {
-    if let Some(policy) = filter.capture_policy.as_ref() {
-        if policy.browser.mode == BrowserMode::Off {
-            return BTreeSet::new();
-        }
+    if filter.capture_policy.is_some() {
         if !browser_consumer_required(capture) {
             return BTreeSet::new();
         }
         return [BrowserTarget::Chrome, BrowserTarget::Safari]
             .into_iter()
-            .filter(|target| {
-                policy
-                    .allowed_apps
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(target.display_name()))
-            })
+            .filter(|target| browser_query_allowed(*target, filter))
             .collect();
     }
 
@@ -97,6 +95,19 @@ pub fn required_browser_targets(
         .into_iter()
         .chain(privacy.then_some(BrowserTarget::Chrome))
         .collect()
+}
+
+pub(crate) fn browser_query_allowed(target: BrowserTarget, filter: &FilterConfig) -> bool {
+    match filter.capture_policy.as_ref() {
+        Some(policy) => {
+            policy.browser.mode != BrowserMode::Off
+                && policy
+                    .allowed_apps
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(target.display_name()))
+        }
+        None => target == BrowserTarget::Chrome,
+    }
 }
 
 fn browser_consumer_required(capture: &CaptureConfig) -> bool {

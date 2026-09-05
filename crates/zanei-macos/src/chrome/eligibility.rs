@@ -1,7 +1,7 @@
 //! Versioned browser window eligibility shared by text and snapshot capture.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::{Arc, RwLock, RwLockWriteGuard},
     time::Instant,
 };
@@ -15,7 +15,10 @@ use zanei_core::{
     schema::{App, CaptureContext, CaptureSurface},
 };
 
-use crate::{browser_context::BrowserTarget, ffi::applescript::AppleScriptWindowId};
+use crate::{
+    browser_context::{BrowserTarget, browser_query_allowed},
+    ffi::applescript::AppleScriptWindowId,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum BrowserWindowState {
@@ -58,6 +61,7 @@ struct WindowRecord {
 struct EligibilityState {
     filter: FilterConfig,
     filter_revision: u64,
+    query_targets: BTreeSet<BrowserTarget>,
     windows: HashMap<(i32, i64), WindowRecord>,
     next_version: u64,
 }
@@ -135,8 +139,39 @@ impl ChromeEligibilityPublisher {
         );
     }
 
-    pub(crate) fn filter_revision(&self) -> Option<u64> {
-        self.state.read().ok().map(|state| state.filter_revision)
+    pub(crate) fn query_revision(&self, target: BrowserTarget) -> Option<u64> {
+        let state = self.state.read().ok()?;
+        (state.query_targets.contains(&target) && browser_query_allowed(target, &state.filter))
+            .then_some(state.filter_revision)
+    }
+
+    pub(crate) fn query_targets(&self) -> BTreeSet<BrowserTarget> {
+        self.state
+            .read()
+            .map(|state| {
+                state
+                    .query_targets
+                    .iter()
+                    .copied()
+                    .filter(|target| browser_query_allowed(*target, &state.filter))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_query_targets(&self, targets: BTreeSet<BrowserTarget>) {
+        let Ok(mut state) = self.state.write() else {
+            return;
+        };
+        if state.query_targets != targets {
+            state.query_targets = targets;
+            state.filter_revision += 1;
+            let now = Instant::now();
+            let keys: Vec<_> = state.windows.keys().copied().collect();
+            for key in keys {
+                mark_record_unavailable(&mut state, key, now);
+            }
+        }
     }
 
     pub(crate) fn publication(&self, revision: u64) -> Option<EligibilityPublication<'_>> {
@@ -395,6 +430,7 @@ pub fn chrome_eligibility_channel(
     let state = Arc::new(RwLock::new(EligibilityState {
         filter,
         filter_revision: 0,
+        query_targets: BTreeSet::from([BrowserTarget::Chrome]),
         windows: HashMap::new(),
         next_version: 0,
     }));
