@@ -6,6 +6,7 @@
 //! it sets the file aside (see [`retired`]) and readers merge it back in.
 
 mod append_sequence;
+mod context_page;
 mod error;
 mod event_metadata;
 mod event_row;
@@ -26,6 +27,11 @@ mod writer;
 use rusqlite::Connection;
 
 pub use append_sequence::AppendHead;
+pub use context_page::{
+    ContextCursor, ContextGap, ContextGapReason, ContextObservation, ContextPage, ContextPageError,
+    ContextPageRequest, ContextPageResult, ContextRange, ContextText, MAX_CONTEXT_PAGE_ROWS,
+    MAX_CONTEXT_TEXT_BYTES,
+};
 pub use error::{LockedReason, StoreError, StoreFailureKind};
 pub use event_metadata::{EventMetadata, MetadataFilter};
 pub use key::{STORE_KEY_BYTES, StoreFormat, StoreKey};
