@@ -1,5 +1,6 @@
 //! Configuration loading and shared CLI value parsing.
 
+pub mod capture_policy;
 mod edit;
 mod scalar_file;
 mod time_expression;
@@ -13,6 +14,7 @@ use std::time::{Duration as StdDuration, SystemTime};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use capture_policy::CapturePolicyConfig;
 pub use edit::{
     ConfigSetError, FilterEdit, FilterEditResult, FilterList, FilterScope, ScalarEditResult,
     apply_scalar_edit, edit_filter, save,
@@ -128,6 +130,8 @@ impl Default for CaptureConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FilterConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_policy: Option<CapturePolicyConfig>,
     pub exclude_apps: Vec<String>,
     pub include_only_apps: Vec<String>,
     pub exclude_websites: Vec<String>,
@@ -140,6 +144,7 @@ pub struct FilterConfig {
 impl Default for FilterConfig {
     fn default() -> Self {
         Self {
+            capture_policy: None,
             exclude_apps: DEFAULT_EXCLUDED_APPS.map(str::to_owned).to_vec(),
             include_only_apps: Vec::new(),
             exclude_websites: Vec::new(),
