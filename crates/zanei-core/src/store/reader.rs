@@ -10,11 +10,12 @@ use crate::DaemonCapabilities;
 
 use super::RetiredPlaintext;
 use super::{
-    COLLECTOR_FAILURES_STORE_SCHEMA_VERSION, CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION,
-    DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode, HEARTBEAT_STALE_AFTER_SECONDS,
-    LEGACY_STORE_SCHEMA_VERSION, PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION, QueryFilter,
-    QueryResult, RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreFormat,
-    StoreKey, StoreStatus, file_uri, retention_cutoff, retired_plaintext_stores, store_uri, unlock,
+    CAPABILITIES_STORE_SCHEMA_VERSION, COLLECTOR_FAILURES_STORE_SCHEMA_VERSION,
+    CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION, DAEMON_IDENTITY_STORE_SCHEMA_VERSION, DaemonMode,
+    HEARTBEAT_STALE_AFTER_SECONDS, LEGACY_STORE_SCHEMA_VERSION,
+    PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION, QueryFilter, QueryResult,
+    RETENTION_STORE_SCHEMA_VERSION, STORE_SCHEMA_VERSION, StoreError, StoreFormat, StoreKey,
+    StoreStatus, file_uri, retention_cutoff, retired_plaintext_stores, store_uri, unlock,
 };
 
 const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
@@ -23,8 +24,8 @@ const BUSY_TIMEOUT_MILLISECONDS: u64 = 5_000;
 const MAX_ATTACHED_RETIRED: usize = 9;
 
 pub struct StoreReader {
-    connection: Connection,
-    schema_version: i64,
+    pub(super) connection: Connection,
+    pub(super) schema_version: i64,
     format: StoreFormat,
     /// Set-aside plaintext stores attached read-only as `retired0`, `retired1`, …
     retired: Vec<RetiredPlaintext>,
@@ -309,7 +310,7 @@ impl StoreReader {
                  collector_failures_json, NULL \
                  FROM daemon_state WHERE id = 1"
             }
-            STORE_SCHEMA_VERSION => {
+            CAPABILITIES_STORE_SCHEMA_VERSION | STORE_SCHEMA_VERSION => {
                 "SELECT pid, started_at, instance_id, mode, heartbeat_at, retention_hours, \
                  paused_until, events_captured, events_dropped, last_event_ts, degraded_json, \
                  collector_failures_json, last_known_capabilities_json \
@@ -337,11 +338,11 @@ impl StoreReader {
             })
             .optional()?;
 
-        let capabilities = (self.schema_version == STORE_SCHEMA_VERSION)
+        let capabilities = (self.schema_version >= CAPABILITIES_STORE_SCHEMA_VERSION)
             .then(|| read_daemon_capabilities(&transaction))
             .transpose()?
             .flatten();
-        let last_known_capabilities = if self.schema_version == STORE_SCHEMA_VERSION {
+        let last_known_capabilities = if self.schema_version >= CAPABILITIES_STORE_SCHEMA_VERSION {
             state
                 .as_ref()
                 .and_then(|state| state.last_known_capabilities_json.as_deref())
@@ -492,6 +493,7 @@ fn readable_schema_version(connection: &Connection) -> Result<i64, StoreError> {
             | COLLECTOR_FAILURES_STORE_SCHEMA_VERSION
             | PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION
             | CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION
+            | CAPABILITIES_STORE_SCHEMA_VERSION
             | STORE_SCHEMA_VERSION
     ) {
         Ok(version)

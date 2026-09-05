@@ -1,3 +1,5 @@
+mod append_sequence;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -899,12 +901,12 @@ fn timestamp(value: &str) -> OffsetDateTime {
     OffsetDateTime::parse(value, &Rfc3339).expect("valid test timestamp")
 }
 
-struct TestDatabase {
+pub(super) struct TestDatabase {
     path: PathBuf,
 }
 
 impl TestDatabase {
-    fn new(label: &str) -> Self {
+    pub(super) fn new(label: &str) -> Self {
         let id = NEXT_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "zanei-store-{label}-{}-{id}.sqlite",
@@ -913,7 +915,7 @@ impl TestDatabase {
         Self { path }
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         &self.path
     }
 }

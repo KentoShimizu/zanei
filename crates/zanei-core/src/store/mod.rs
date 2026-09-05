@@ -5,6 +5,7 @@
 //! encryption existed stay readable. The recorder never rewrites such a store:
 //! it sets the file aside (see [`retired`]) and readers merge it back in.
 
+mod append_sequence;
 mod error;
 mod event_metadata;
 mod event_row;
@@ -24,6 +25,7 @@ mod writer;
 
 use rusqlite::Connection;
 
+pub use append_sequence::AppendHead;
 pub use error::{LockedReason, StoreError, StoreFailureKind};
 pub use event_metadata::{EventMetadata, MetadataFilter};
 pub use key::{STORE_KEY_BYTES, StoreFormat, StoreKey};
@@ -46,7 +48,8 @@ const RETENTION_STORE_SCHEMA_VERSION: i64 = 3;
 const COLLECTOR_FAILURES_STORE_SCHEMA_VERSION: i64 = 4;
 const PERMISSIONS_SNAPSHOT_STORE_SCHEMA_VERSION: i64 = 5;
 const CONTENT_SNAPSHOT_STORE_SCHEMA_VERSION: i64 = 6;
-const STORE_SCHEMA_VERSION: i64 = 7;
+const CAPABILITIES_STORE_SCHEMA_VERSION: i64 = 7;
+const STORE_SCHEMA_VERSION: i64 = 8;
 
 /// SQLCipher file-format generation pinned so a future library default cannot
 /// silently make existing stores unreadable.
@@ -56,7 +59,8 @@ const SQLCIPHER_COMPATIBILITY: i64 = 4;
 /// same text serves the live store and plaintext snapshots.
 pub(super) const STORE_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
+    append_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
     ts TEXT NOT NULL,
     mono_ns INTEGER NOT NULL,
     source TEXT NOT NULL,
@@ -73,6 +77,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(type, ts);
 CREATE INDEX IF NOT EXISTS idx_events_bundle_ts ON events(bundle_id, ts);
+
+CREATE TABLE IF NOT EXISTS store_identity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    identity TEXT NOT NULL DEFAULT (lower(hex(randomblob(16))))
+);
+INSERT OR IGNORE INTO store_identity(id) VALUES (1);
 
 CREATE TABLE IF NOT EXISTS daemon_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -101,7 +111,7 @@ CREATE TABLE IF NOT EXISTS meta (
     schema_version INTEGER NOT NULL
 );
 INSERT INTO meta(schema_version)
-SELECT 7 WHERE NOT EXISTS (SELECT 1 FROM meta);
+SELECT 8 WHERE NOT EXISTS (SELECT 1 FROM meta);
 ";
 
 /// The instant before which events are outside a `retention_hours` window.
