@@ -31,8 +31,8 @@ use super::{
     permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
     pipeline::{Pipeline, SharedStoreWriter},
     runtime_support::{
-        ShutdownSignals, StdinEofWatcher, ensure_store_parent, record_writer,
-        restrict_store_permissions,
+        RUNTIME_POLL_INTERVAL, ShutdownSignals, StdinEofWatcher, ensure_store_parent,
+        record_writer, restrict_store_permissions, wait_for_record_shutdown,
     },
     shutdown::shutdown_daemon,
 };
@@ -52,7 +52,6 @@ pub(super) use permission::{
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const PAUSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETENTION_PURGE_INTERVAL: time::Duration = time::Duration::minutes(10);
-const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PERMISSION_REQUEST_TIMEOUT_MESSAGE: &str =
     "permission request timed out before macOS reported a decision";
 const PERMISSION_REQUEST_WORKER_STOPPED_MESSAGE: &str =
@@ -74,7 +73,13 @@ pub fn run_daemon(
     config_path: &Path,
     store_path: &Path,
     mode: DaemonMode,
+    exit_on_stdin_eof: bool,
 ) -> Result<(), DaemonError> {
+    let parent_stdin = if exit_on_stdin_eof {
+        Some(StdinEofWatcher::start_required()?)
+    } else {
+        None
+    };
     let config = Config::load(config_path)?;
     let mut config_watcher = ConfigWatcher::new(config_path.to_owned())?;
     let executable_guard =
@@ -151,7 +156,7 @@ pub fn run_daemon(
             pending_permission_request: None,
             executable_guard,
         }
-        .run();
+        .run(parent_stdin.as_ref());
 
         shutdown_daemon(
             loop_result,
@@ -336,7 +341,7 @@ struct ActiveDaemon<'a> {
 }
 
 impl ActiveDaemon<'_> {
-    fn run(mut self) -> Result<(), DaemonError> {
+    fn run(mut self, parent_stdin: Option<&StdinEofWatcher>) -> Result<(), DaemonError> {
         let signals = ShutdownSignals::install()?;
         *self.paused =
             normalize_pause_request(self.writer, self.last_status.paused_until.as_deref())?;
@@ -350,16 +355,27 @@ impl ActiveDaemon<'_> {
         }
         self.poll_permission_request();
         self.publish_heartbeat()?;
-        self.run_loop(signals.stop_flag())
+        self.run_loop(signals.stop_flag(), parent_stdin)
     }
 
-    fn run_loop(&mut self, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
+    fn run_loop(
+        &mut self,
+        stop: Arc<AtomicBool>,
+        parent_stdin: Option<&StdinEofWatcher>,
+    ) -> Result<(), DaemonError> {
         let mut last_heartbeat = Instant::now();
         let mut last_pause_poll = Instant::now();
         let mut last_config_poll = Instant::now();
         let mut retention_purge_deadline = OffsetDateTime::now_utc() + RETENTION_PURGE_INTERVAL;
 
         while !stop.load(Ordering::Relaxed) {
+            if let Some(watcher) = parent_stdin {
+                match watcher.try_result() {
+                    Some(Ok(())) => break,
+                    Some(Err(error)) => return Err(DaemonError::Stdin(error)),
+                    None => {}
+                }
+            }
             self.poll_permission_request();
             self.sync_store_intake()?;
             if last_pause_poll.elapsed() >= PAUSE_POLL_INTERVAL {
@@ -522,28 +538,6 @@ fn ensure_pipeline_running(
     } else {
         Ok(())
     }
-}
-
-fn wait_for_record_shutdown(
-    pipeline: &Pipeline,
-    collectors: &mut CollectorSet,
-) -> Result<(), DaemonError> {
-    let signals = ShutdownSignals::install()?;
-    let stop = signals.stop_flag();
-    let stdin = StdinEofWatcher::start()?;
-    collectors.start(pipeline.sender());
-
-    while !stop.load(Ordering::Relaxed) {
-        if let Some(watcher) = stdin.as_ref() {
-            match watcher.try_result() {
-                Some(Ok(())) => break,
-                Some(Err(error)) => return Err(DaemonError::Stdin(error)),
-                None => {}
-            }
-        }
-        thread::sleep(RUNTIME_POLL_INTERVAL);
-    }
-    Ok(())
 }
 
 fn normalize_pause_request(
