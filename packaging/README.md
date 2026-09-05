@@ -4,6 +4,22 @@ Zanei ships as a background-only macOS app bundle. `Zanei.app/Contents/MacOS/zan
 
 Release artifacts use Developer ID signing, notarization, and stapling. `make-app.sh` performs the same bundle assembly and signing locally; it does not notarize.
 
+The bundle includes `Zanei.icns`, generated from the website's `docs/public/favicon.svg`, and declares it through `CFBundleIconFile` for macOS app and permission-list icons. To regenerate it after changing the favicon, use `rsvg-convert` (librsvg) and macOS `iconutil`:
+
+```bash
+icon_directory=$(mktemp -d)
+mkdir "$icon_directory/Zanei.iconset"
+for size in 16 32 128 256 512; do
+  rsvg-convert -w "$size" -h "$size" docs/public/favicon.svg \
+    -o "$icon_directory/Zanei.iconset/icon_${size}x${size}.png"
+  rsvg-convert -w "$((size * 2))" -h "$((size * 2))" docs/public/favicon.svg \
+    -o "$icon_directory/Zanei.iconset/icon_${size}x${size}@2x.png"
+done
+iconutil -c icns "$icon_directory/Zanei.iconset" -o packaging/Zanei.icns
+```
+
+Normal builds use the checked-in ICNS and do not require librsvg.
+
 ## LaunchAgent registration
 
 Run `zanei start` to start background recording. The CLI generates the current LaunchAgent plist at `$HOME/Library/LaunchAgents/dev.zanei.agent.plist` and registers it with `launchd`. The generated plist uses the resolved Zanei executable together with the active config, store, and log paths. The CLI implementation is the canonical source for launchd settings; packaging does not provide a separate plist template.
