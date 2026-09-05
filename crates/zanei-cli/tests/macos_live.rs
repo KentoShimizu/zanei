@@ -57,8 +57,10 @@ fn keychain_store_key_round_trips_and_deletes() {
     use zanei_core::store::{KeyStore, KeyStoreError, KeyStoreInteraction, StoreKey};
     use zanei_macos::store_key::KeychainStoreKey;
 
-    let item =
-        KeychainStoreKey::with_service(format!("dev.zanei.store.test-{}", std::process::id()));
+    let item = KeychainStoreKey::with_service(
+        format!("dev.zanei.store.test-{}", std::process::id()),
+        "Zanei test store key",
+    );
     assert!(
         item.load(KeyStoreInteraction::NoPrompt)
             .expect("load absent item")

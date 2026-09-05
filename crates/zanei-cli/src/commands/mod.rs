@@ -39,6 +39,17 @@ pub(crate) fn run_with_app_directory(
     cli: Cli,
     app_directory: &dyn AppDirectory,
 ) -> Result<u8, CliError> {
+    let key_environment =
+        crate::store_access::initialize_key_environment().map_err(CliError::InvalidValue)?;
+    if key_environment.uses_custom_keychain_identity()
+        && (matches!(&cli.command, Command::Start(args) if !args.foreground)
+            || matches!(&cli.command, Command::Daemon))
+    {
+        return Err(CliError::InvalidValue(
+            "custom Keychain identity requires `zanei start --foreground`; launchd does not inherit it"
+                .to_owned(),
+        ));
+    }
     let paths = Paths::resolve(cli.config, cli.store)?;
     if cli.verbose > 0 {
         eprintln!(
