@@ -1755,3 +1755,108 @@ fn recorder_starts_despite_a_set_aside_store_it_cannot_purge() {
     signal_child(&mut child, "TERM");
     assert!(wait_for_child(&mut child).success());
 }
+
+#[test]
+fn initialization_signals_are_handled_before_store_ownership_is_published() {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    for (signal, valid_key) in [("INT", true), ("TERM", true), ("TERM", false)] {
+        let directory = TempDir::new().expect("blocked initialization fixture");
+        let config = directory.path().join("config.toml");
+        let store = directory.path().join("store.sqlite");
+        let key_fifo = directory.path().join("blocked.key");
+        fs::write(&config, "[capture]\nsources = []\n").expect("config");
+        assert!(
+            ProcessCommand::new("/usr/bin/mkfifo")
+                .args(["-m", "600"])
+                .arg(&key_fifo)
+                .status()
+                .expect("key FIFO")
+                .success()
+        );
+        let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_zanei"))
+            .env(STORE_KEY_FILE_ENV, &key_fifo)
+            .arg("--config")
+            .arg(&config)
+            .arg("--store")
+            .arg(&store)
+            .arg("__daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("start blocked daemon");
+        let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
+        // A nonblocking writer opens only once the recorder has reached its key read,
+        // after publishing ownership but before opening SQLite or starting collectors.
+        let mut key_writer = loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(
+                    rustix::fs::OFlags::NONBLOCK
+                        .bits()
+                        .try_into()
+                        .expect("nonblocking flag"),
+                )
+                .open(&key_fifo)
+            {
+                Ok(writer) => break writer,
+                Err(error)
+                    if error.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) => {}
+                Err(error) => {
+                    stop_child(&mut child);
+                    panic!("open key FIFO: {error}");
+                }
+            }
+            if Instant::now() >= deadline || child.try_wait().expect("startup status").is_some() {
+                stop_child(&mut child);
+                panic!("recorder did not reach blocked initialization");
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        };
+        signal_child(&mut child, signal);
+        let key = if valid_key {
+            "ab".repeat(32)
+        } else {
+            "invalid-key".to_owned()
+        };
+        let released = key_writer.write_all(key.as_bytes());
+        drop(key_writer);
+        let status = wait_for_child(&mut child);
+        assert!(
+            released.is_ok(),
+            "daemon must remain alive while initialization is blocked"
+        );
+        assert_eq!(
+            status.success(),
+            valid_key,
+            "initialization result after SIG{signal}: {status}"
+        );
+        assert!(
+            status.code().is_some(),
+            "signal must not terminate the recorder"
+        );
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory.path().join("store.sqlite.lock"))
+            .expect("ownership file");
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .expect("initialization exit must release ownership");
+        if valid_key {
+            let key = zanei_core::store::StoreKey::from_hex(&key).expect("fixture key");
+            let status = StoreReader::open_with_key(&store, Some(&key))
+                .expect("stopped store")
+                .status()
+                .expect("stopped status");
+            assert_eq!(status.pid, None);
+            assert_eq!(status.heartbeat_at, None);
+        } else {
+            assert!(
+                !store.exists(),
+                "failed key loading must not create a store"
+            );
+        }
+    }
+}

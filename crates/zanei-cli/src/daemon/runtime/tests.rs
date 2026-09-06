@@ -463,3 +463,94 @@ fn continuously_existing_executable_does_not_trigger_shutdown() {
     }
     assert_eq!(notifications, 0);
 }
+
+#[test]
+fn stop_during_blocking_initialization_skips_startup_and_uses_shutdown_cleanup() {
+    let directory = TempDir::new().expect("initialization fixture");
+    let store_path = directory.path().join("store.sqlite");
+    let writer = StoreWriter::open(&store_path).expect("writer");
+    let reader = StoreReader::open(&store_path).expect("reader");
+    let stop = Arc::new(AtomicBool::new(false));
+    let (entered, entered_rx) = mpsc::sync_channel(1);
+    let (release, release_rx) = mpsc::sync_channel(1);
+    let owner = StoreOwner::new(DaemonMode::Launchd, "2026-09-06T00:00:00Z".to_owned());
+    let state = super::initial_heartbeat(&owner, 48, &reader.status().expect("status"));
+    let initial_heartbeat_at = state.heartbeat_at.clone();
+    let initialization_stop = Arc::clone(&stop);
+    let initialization_store = store_path.clone();
+    let expected_pid = state.pid;
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            entered_rx.recv().expect("initialization entered");
+            assert_eq!(
+                StoreReader::open(&initialization_store)
+                    .expect("initialization reader")
+                    .status()
+                    .expect("published status")
+                    .pid,
+                expected_pid
+            );
+            initialization_stop.store(true, Ordering::Relaxed);
+            release.send(()).expect("release initialization");
+        });
+        initialize_permission_dependent_runtime(&writer, &state, || {
+            entered.send(()).expect("announce initialization");
+            release_rx.recv().expect("initialization release");
+            Ok(())
+        })
+        .expect("initialize");
+    });
+    let writer = Arc::new(Mutex::new(writer));
+    let config = Config::from_toml("[capture]\nsources = []\n").expect("config");
+    let mut config_watcher =
+        ConfigWatcher::new(directory.path().join("config.toml")).expect("watcher");
+    let mut collectors = CollectorSet::new(&config);
+    let mut pipeline = Pipeline::store(&config, Arc::clone(&writer)).expect("pipeline");
+    let mut paused = false;
+    let mut degraded = BTreeMap::new();
+    let base_collector_failures = BTreeMap::new();
+    let result = ActiveDaemon {
+        store_path: &store_path,
+        config_watcher: &mut config_watcher,
+        active_retention_hours: 48,
+        pending_retention_hours: None,
+        writer: &writer,
+        reader: &reader,
+        pipeline: &pipeline,
+        collectors: &mut collectors,
+        owner: &owner,
+        base_dropped: 0,
+        base_collector_failures: &base_collector_failures,
+        paused: &mut paused,
+        intake_suspended: false,
+        degraded: &mut degraded,
+        last_status: reader.status().expect("initial status"),
+        last_capabilities: None,
+        initial_input_monitoring_status: None,
+        permission_request_worker: None,
+        pending_permission_request: None,
+        executable_guard: ExecutableGuard::new(directory.path().join("zanei")),
+    }
+    .run(stop, None);
+    pipeline.flush().expect("flush before inspecting startup");
+    let status = reader.status().expect("status before cleanup");
+    assert_eq!(status.heartbeat_at, initial_heartbeat_at);
+    assert_eq!(
+        status.capabilities, None,
+        "startup must not publish readiness"
+    );
+    shutdown_daemon(
+        result,
+        &writer,
+        &reader,
+        &mut collectors,
+        &mut pipeline,
+        0,
+        &base_collector_failures,
+    )
+    .expect("normal shutdown cleanup");
+    let status = reader.status().expect("stopped status");
+    assert_eq!(status.pid, None);
+    assert_eq!(status.instance_id, None);
+    assert_eq!(status.heartbeat_at, None);
+}
