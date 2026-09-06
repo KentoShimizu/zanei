@@ -13,6 +13,7 @@ use std::{
 use crate::{
     CapturePolicy, InputAuthorizations, SecureInputProbe,
     ax::health::{AxFailure, AxFailureKind, AxFailurePhase, AxFailurePublisher, AxRecoverySite},
+    browser_context::BrowserTarget,
     secure_input::SecureInputProbeError,
 };
 use time::OffsetDateTime;
@@ -129,7 +130,7 @@ impl NativeAx {
             ),
         );
         if self.observe_chrome_loads
-            && app.bundle_id.as_deref() == Some(zanei_core::privacy::CHROME_BUNDLE_ID)
+            && BrowserTarget::from_bundle_id(app.bundle_id.as_deref()).is_some()
         {
             self.track_native(
                 pid,
