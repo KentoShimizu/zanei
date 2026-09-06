@@ -24,8 +24,8 @@ use super::{
     cf::{add_current_run_loop_source, run_loop_tick, string_value},
     create_observer,
     element::{
-        create_application, element_at_position, element_role, element_snapshot, set_timeout,
-        window_snapshot,
+        create_application, element_at_position, element_role, initial_snapshot::element_snapshot,
+        set_timeout, window_snapshot,
     },
     native_error,
     observer::AppObserver,
@@ -341,7 +341,7 @@ impl NativeAx {
             }
         };
         match element_snapshot(element.as_ptr(), |window| {
-            observer.text_content_allowed(window)
+            observer.text_content_decision(window)
         }) {
             Ok(hit) => {
                 self.failures

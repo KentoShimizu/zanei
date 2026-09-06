@@ -75,6 +75,7 @@ impl FocusedValueContext {
         self.element.subrole = None;
         self.element.value = None;
         self.element.value_len = None;
+        self.element.capture_decision = None;
         self.field_class = field_class;
         self.capture
             .transition_class(pid, self.generation, field_class, authorizations);
@@ -95,6 +96,12 @@ impl FocusedValueContext {
             .then(|| snapshot.value.clone())
             .flatten();
         self.element.value_len = snapshot.value_len;
+        self.element.capture_decision = self
+            .element
+            .value
+            .as_ref()
+            .and(capture_decision.clone())
+            .map(Box::new);
         self.field_class = snapshot.field_class;
         ValueObservation {
             pid,
@@ -111,12 +118,12 @@ impl FocusedValueContext {
         let mut element = self.element.clone();
         element.value = emission.element_value;
         element.value_len = emission.value_len;
+        element.capture_decision = emission.capture_decision.map(Box::new);
         NativeAxEvent::UiValueChanged(Box::new(NativeUiValueEvent {
             pid,
             window: self.window.clone(),
             element,
             text: emission.text,
-            capture_decision: emission.capture_decision,
             observed_at: self.observed_at.unwrap_or_else(OffsetDateTime::now_utc),
         }))
     }
