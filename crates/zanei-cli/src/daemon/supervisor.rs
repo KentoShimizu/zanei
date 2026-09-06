@@ -186,8 +186,9 @@ impl CollectorSet {
             &mut self.start_errors,
             now,
         )?;
-        supervise_collector(
+        supervise_browser_collector(
             &mut self.chrome,
+            &self.browser_targets,
             sender,
             permissions,
             &mut self.start_errors,
@@ -455,14 +456,44 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
     errors: &mut BTreeMap<String, String>,
     now: Instant,
 ) -> Result<(), DaemonError> {
+    let restart_allowed = managed.as_ref().is_some_and(|managed| {
+        let required = managed.collector.worker_capabilities();
+        permissions.map_or(required.is_empty(), |capabilities| {
+            capabilities_available(&required, capabilities)
+        })
+    });
+    supervise_collector_inner(managed, sender, permissions, errors, now, restart_allowed)
+}
+
+pub(super) fn supervise_browser_collector<C: ManagedCollector>(
+    managed: &mut Option<Managed<C>>,
+    targets: &BTreeSet<zanei_macos::browser_context::BrowserTarget>,
+    sender: &SyncSender<RawEvent>,
+    permissions: Option<&DaemonCapabilities>,
+    errors: &mut BTreeMap<String, String>,
+    now: Instant,
+) -> Result<(), DaemonError> {
+    let restart_allowed = permissions.is_some_and(|capabilities| {
+        targets.iter().any(|target| {
+            let required = BTreeSet::from([target.capability()]);
+            capabilities.ready_for(&required) == Some(true)
+        })
+    });
+    supervise_collector_inner(managed, sender, permissions, errors, now, restart_allowed)
+}
+
+fn supervise_collector_inner<C: ManagedCollector>(
+    managed: &mut Option<Managed<C>>,
+    sender: &SyncSender<RawEvent>,
+    permissions: Option<&DaemonCapabilities>,
+    errors: &mut BTreeMap<String, String>,
+    now: Instant,
+    restart_allowed: bool,
+) -> Result<(), DaemonError> {
     let Some(managed) = managed.as_mut() else {
         return Ok(());
     };
     let required = managed.collector.worker_capabilities();
-    let granted = permissions.map_or(required.is_empty(), |capabilities| {
-        capabilities_available(&required, capabilities)
-    });
-
     if managed.running && managed.relay.as_ref().is_some_and(Relay::is_finished) {
         managed.collector.stop_worker();
         managed.running = false;
@@ -483,7 +514,9 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
                 "collector relay stopped unexpectedly"
             }
         };
-        managed.restart = managed.restart.exited_unexpectedly(now, granted, reason);
+        managed.restart = managed
+            .restart
+            .exited_unexpectedly(now, restart_allowed, reason);
     }
 
     if managed.running {
@@ -500,8 +533,9 @@ pub(super) fn supervise_collector<C: ManagedCollector>(
     if permissions.is_none() && !required.is_empty() {
         return Ok(());
     }
-    if managed.restart.ready(now, granted) {
-        start_managed(managed, sender, errors, now, granted);
+
+    if managed.restart.ready(now, restart_allowed) {
+        start_managed(managed, sender, errors, now, restart_allowed);
     }
     Ok(())
 }
