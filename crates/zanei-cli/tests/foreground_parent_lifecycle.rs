@@ -249,6 +249,79 @@ fn launchd_mode_does_not_treat_stdin_eof_as_a_shutdown_request() {
     assert!(wait_for_exit(&mut child).success());
 }
 
+#[test]
+fn isolated_standalone_and_embedded_instances_survive_each_others_restart() {
+    for embedded_first in [false, true] {
+        let standalone = Fixture::new();
+        let embedded = Fixture::new();
+        let standalone_config = fs::read(&standalone.config).unwrap();
+        let standalone_key = fs::read(&standalone.key_file).unwrap();
+        let embedded_key = fs::read(&embedded.key_file).unwrap();
+        let start_standalone = || standalone.spawn(&["start", "--foreground"]);
+        let start_embedded = || embedded.spawn(&["start", "--foreground", "--exit-on-stdin-eof"]);
+        let (mut ordinary, mut managed) = if embedded_first {
+            let mut managed = start_embedded();
+            wait_for_running(&mut managed, &embedded.store, &embedded.key);
+            (start_standalone(), managed)
+        } else {
+            let mut ordinary = start_standalone();
+            wait_for_running(&mut ordinary, &standalone.store, &standalone.key);
+            (ordinary, start_embedded())
+        };
+        wait_for_running(&mut ordinary, &standalone.store, &standalone.key);
+        wait_for_running(&mut managed, &embedded.store, &embedded.key);
+        assert!(StoreReader::open_with_key(&standalone.store, Some(&embedded.key)).is_err());
+        assert!(StoreReader::open_with_key(&embedded.store, Some(&standalone.key)).is_err());
+
+        drop(managed.stdin.take());
+        assert!(wait_for_exit(&mut managed).success());
+        assert_eq!(read_status(&embedded.store, &embedded.key).pid, None);
+        assert_eq!(
+            read_status(&standalone.store, &standalone.key).pid,
+            Some(i64::from(ordinary.id()))
+        );
+        assert!(ordinary.try_wait().unwrap().is_none());
+        managed = start_embedded();
+        wait_for_running(&mut managed, &embedded.store, &embedded.key);
+
+        // Address stop to the ordinary instance's store, never the global launch agent.
+        let status = Command::new(env!("CARGO_BIN_EXE_zanei"))
+            .env("ZANEI_STORE_KEY_FILE", &standalone.key_file)
+            .arg("--config")
+            .arg(&standalone.config)
+            .arg("--store")
+            .arg(&standalone.store)
+            .arg("stop")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("stop isolated ordinary instance");
+        assert!(status.success());
+        assert!(wait_for_exit(&mut ordinary).success());
+        assert_eq!(
+            read_status(&embedded.store, &embedded.key).pid,
+            Some(i64::from(managed.id()))
+        );
+        assert!(managed.try_wait().unwrap().is_none());
+        ordinary = start_standalone();
+        wait_for_running(&mut ordinary, &standalone.store, &standalone.key);
+        assert_eq!(fs::read(&standalone.config).unwrap(), standalone_config);
+        assert_eq!(fs::read(&standalone.key_file).unwrap(), standalone_key);
+        assert_eq!(fs::read(&embedded.key_file).unwrap(), embedded_key);
+
+        drop(managed.stdin.take());
+        assert!(wait_for_exit(&mut managed).success());
+        assert!(
+            Command::new("/bin/kill")
+                .args(["-TERM", &ordinary.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(wait_for_exit(&mut ordinary).success());
+    }
+}
+
 fn wait_for_running(child: &mut ChildGuard, store: &Path, key: &StoreKey) {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
