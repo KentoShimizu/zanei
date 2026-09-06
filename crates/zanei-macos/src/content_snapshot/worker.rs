@@ -76,9 +76,14 @@ pub(super) fn run_worker_with_scanner<F>(
     health: SharedHealth,
     state: &mut SnapshotState,
     focus_context: FocusContext,
-    scan_window: F,
+    mut scan_window: F,
 ) where
-    F: Fn(i32, i64, &AtomicBool) -> Result<Option<SnapshotWalkOutput>, ScanError>,
+    F: FnMut(
+        i32,
+        i64,
+        &AtomicBool,
+        &mut dyn FnMut(Option<String>) -> bool,
+    ) -> Result<Option<SnapshotWalkOutput>, ScanError>,
 {
     debug_assert_eq!(std::thread::current().name(), Some("zanei-content"));
     let mut scheduler = SnapshotScheduler::default();
@@ -127,7 +132,7 @@ pub(super) fn run_worker_with_scanner<F>(
                     health: &health,
                     focus_context: &focus_context,
                     quarantine: &mut quarantine,
-                    scan_window: &scan_window,
+                    scan_window: &mut scan_window,
                 },
             );
             if stop.load(Ordering::Acquire) {
@@ -187,16 +192,21 @@ struct CandidateContext<'a, F> {
     health: &'a SharedHealth,
     focus_context: &'a FocusContext,
     quarantine: &'a mut TextQuarantine,
-    scan_window: &'a F,
+    scan_window: &'a mut F,
 }
 
 fn process_candidate<F>(
-    candidate: ScheduledSnapshot,
+    mut candidate: ScheduledSnapshot,
     taken_at: CandidateTime,
     state: &mut SnapshotState,
     context: CandidateContext<'_, F>,
 ) where
-    F: Fn(i32, i64, &AtomicBool) -> Result<Option<SnapshotWalkOutput>, ScanError>,
+    F: FnMut(
+        i32,
+        i64,
+        &AtomicBool,
+        &mut dyn FnMut(Option<String>) -> bool,
+    ) -> Result<Option<SnapshotWalkOutput>, ScanError>,
 {
     let CandidateContext {
         policy,
@@ -241,16 +251,6 @@ fn process_candidate<F>(
             false,
             None,
         );
-        return;
-    }
-    let initial_decision = policy.decision(
-        PrivacyScope::ContentSnapshot,
-        &candidate.target.app.raw_app(),
-        Some(key.window_id),
-        candidate.target.window.title.as_deref(),
-    );
-    if !initial_decision.is_allowed() {
-        trace_candidate(&candidate, "app_scope", 0, Duration::ZERO, 0, false, None);
         return;
     }
     if !policy.secure_input_allows() {
@@ -301,7 +301,26 @@ fn process_candidate<F>(
         trace_candidate(&candidate, "pid", 0, Duration::ZERO, 0, false, None);
         return;
     };
-    let output = match scan_window(pid, key.window_id, stop) {
+    let (scan_result, read_decision) = {
+        let mut read_decision = None;
+        let mut read_allowed = |title: Option<String>| {
+            candidate.target.window.title = title.clone();
+            let decision = policy.decision(
+                PrivacyScope::ContentSnapshot,
+                &candidate.target.app.raw_app(),
+                Some(key.window_id),
+                title.as_deref(),
+            );
+            let allowed = decision.is_allowed();
+            read_decision = Some(decision);
+            allowed
+        };
+        (
+            scan_window(pid, key.window_id, stop, &mut read_allowed),
+            read_decision,
+        )
+    };
+    let output = match scan_result {
         Ok(Some(output)) => output,
         Ok(None) => {
             trace_candidate(&candidate, "stale", 0, Duration::ZERO, 0, false, None);
@@ -311,6 +330,18 @@ fn process_candidate<F>(
             record_scan_failure(state, health, key.pid, now, &candidate, &error);
             return;
         }
+    };
+    let Some(read_decision) = read_decision.as_ref() else {
+        trace_candidate(
+            &candidate,
+            "window_policy_unavailable",
+            0,
+            Duration::ZERO,
+            0,
+            false,
+            None,
+        );
+        return;
     };
     health.failures.fetch_add(
         u64::try_from(output.degraded_nodes).expect("degraded node count must fit u64"),
@@ -337,7 +368,7 @@ fn process_candidate<F>(
         key,
         hash,
         policy,
-        &initial_decision,
+        read_decision,
         taken_at.wall,
         save_at,
         state,

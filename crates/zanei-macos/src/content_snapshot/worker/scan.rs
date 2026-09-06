@@ -6,7 +6,8 @@ use zanei_core::schema::ContentSnapshotCutoff;
 
 use crate::{
     content_snapshot::{
-        SnapshotAxApplication, SnapshotAxElement, SnapshotAxError, SnapshotWalkOutput,
+        SnapshotAttribute, SnapshotAttributeValue, SnapshotAxApplication, SnapshotAxElement,
+        SnapshotAxError, SnapshotWalkOutput,
         budget::WalkBudget,
         walker::{InstantWalkClock, SnapshotNode, WalkClock, walk_snapshot},
     },
@@ -19,9 +20,16 @@ pub(super) fn scan(
     pid: i32,
     expected_window_id: i64,
     stop: &AtomicBool,
+    read_allowed: &mut dyn FnMut(Option<String>) -> bool,
 ) -> Result<Option<SnapshotWalkOutput>, ScanError> {
     let application = SnapshotAxApplication::new(pid)?;
-    scan_application(application, expected_window_id, stop, window_id_for_frame)
+    scan_application(
+        application,
+        expected_window_id,
+        stop,
+        window_id_for_frame,
+        read_allowed,
+    )
 }
 
 pub(in crate::content_snapshot) trait SnapshotApplication {
@@ -36,6 +44,7 @@ pub(in crate::content_snapshot) trait SnapshotWindow:
 {
     fn frame(&self) -> Result<Option<crate::ffi::ax::AxFrame>, SnapshotAxError>;
     fn window_number(&self) -> Result<Option<i64>, SnapshotAxError>;
+    fn title(&self) -> Result<Option<String>, SnapshotAxError>;
 }
 
 impl SnapshotApplication for SnapshotAxApplication {
@@ -62,6 +71,19 @@ impl SnapshotWindow for SnapshotAxElement {
     fn window_number(&self) -> Result<Option<i64>, SnapshotAxError> {
         SnapshotAxElement::window_number(self)
     }
+
+    fn title(&self) -> Result<Option<String>, SnapshotAxError> {
+        let value = self
+            .copy_multiple(&[SnapshotAttribute::Title])?
+            .into_iter()
+            .next()
+            .expect("AX title result count")?;
+        match value {
+            None => Ok(None),
+            Some(SnapshotAttributeValue::Text(value)) => Ok(Some(value)),
+            Some(_) => unreachable!("AX title result type"),
+        }
+    }
 }
 
 pub(in crate::content_snapshot) fn scan_application<A>(
@@ -69,6 +91,7 @@ pub(in crate::content_snapshot) fn scan_application<A>(
     expected_window_id: i64,
     stop: &AtomicBool,
     resolve_bounds: impl Fn(i64, crate::ffi::ax::AxFrame) -> Option<i64>,
+    read_allowed: &mut dyn FnMut(Option<String>) -> bool,
 ) -> Result<Option<SnapshotWalkOutput>, ScanError>
 where
     A: SnapshotApplication,
@@ -94,7 +117,7 @@ where
             &mut ax_calls,
         )? {
             WindowResolution::Match(window, frame) => {
-                return walk_window(window, frame, stop, &clock, ax_calls).map(Some);
+                return scan_window(window, frame, stop, &clock, &mut ax_calls, read_allowed);
             }
             WindowResolution::Cutoff(output) => return Ok(Some(output)),
             WindowResolution::Miss => {}
@@ -116,13 +139,35 @@ where
             &mut ax_calls,
         )? {
             WindowResolution::Match(window, frame) => {
-                return walk_window(window, frame, stop, &clock, ax_calls).map(Some);
+                return scan_window(window, frame, stop, &clock, &mut ax_calls, read_allowed);
             }
             WindowResolution::Cutoff(output) => return Ok(Some(output)),
             WindowResolution::Miss => {}
         }
     }
     Ok(None)
+}
+
+fn scan_window<W>(
+    window: W,
+    frame: crate::ffi::ax::AxFrame,
+    stop: &AtomicBool,
+    clock: &impl WalkClock,
+    ax_calls: &mut usize,
+    read_allowed: &mut dyn FnMut(Option<String>) -> bool,
+) -> Result<Option<SnapshotWalkOutput>, ScanError>
+where
+    W: SnapshotWindow,
+{
+    let title = window.title()?;
+    *ax_calls = ax_calls.saturating_add(1);
+    if let Some(output) = initial_time_cutoff(clock, *ax_calls) {
+        return Ok(Some(output));
+    }
+    if !read_allowed(title) {
+        return Ok(None);
+    }
+    walk_window(window, frame, stop, clock, *ax_calls).map(Some)
 }
 
 enum WindowResolution<W> {
@@ -203,5 +248,5 @@ pub(in crate::content_snapshot) fn test_live_scan(
     pid: i32,
     window_id: i64,
 ) -> Result<Option<SnapshotWalkOutput>, String> {
-    scan(pid, window_id, &AtomicBool::new(false)).map_err(|error| error.to_string())
+    scan(pid, window_id, &AtomicBool::new(false), &mut |_| true).map_err(|error| error.to_string())
 }
