@@ -21,7 +21,8 @@ use crate::{
         state::{SnapshotState, SnapshotWindowKey},
         tests::walker::FakeNode,
         worker::{
-            SnapshotApplication, run_worker_with_scanner, scan_application,
+            run_worker_with_scanner,
+            scan::{SnapshotApplication, scan_application},
             seed_scheduler_from_focus, service_controls,
         },
     },

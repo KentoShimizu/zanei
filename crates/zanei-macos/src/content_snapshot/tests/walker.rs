@@ -116,7 +116,7 @@ impl FakeNode {
     }
 }
 
-impl crate::content_snapshot::worker::SnapshotWindow for FakeNode {
+impl crate::content_snapshot::worker::scan::SnapshotWindow for FakeNode {
     fn frame(
         &self,
     ) -> Result<Option<crate::ffi::ax::AxFrame>, crate::content_snapshot::SnapshotAxError> {
