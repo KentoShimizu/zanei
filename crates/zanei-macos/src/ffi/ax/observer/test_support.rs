@@ -96,6 +96,7 @@ impl AppObserver {
                             title: None,
                             value: None,
                             value_len: None,
+                            capture_decision: None,
                         },
                         false,
                         None,
@@ -129,5 +130,62 @@ impl AppObserver {
 
     pub(in crate::ffi::ax) fn fake_failure_state(&self) -> crate::ax::AxFailureState {
         self.failures.state()
+    }
+}
+
+#[test]
+fn classification_preserves_static_body_origin_and_drops_it_with_body() {
+    use crate::{ffi::ax::element::ValueFieldSnapshot, text_capture::input_authorization_channel};
+    let mut observer = AppObserver::fake_with_unknown_focused_target();
+    let decision = observer.capture_policy.decision(
+        zanei_core::privacy::PrivacyScope::TextContent,
+        &observer.app,
+        None,
+        None,
+    );
+    let context = &mut observer
+        .focused_target
+        .current_mut()
+        .expect("target")
+        .context;
+    context.element.role = Some("AXStaticText".to_owned());
+    context.element.value = Some("retained body".to_owned());
+    context.element.capture_decision = Some(Box::new(decision.clone()));
+    context.field_class = FieldClass::KnownSafeNonText;
+    let (_, mut authorizations) = input_authorization_channel();
+    for role in ["AXStaticText", "AXTextArea"] {
+        let class = crate::focused_field::field_class(Some(role), None);
+        assert!(
+            observer
+                .refresh_current_field_class_with(
+                    ValueFieldSnapshot {
+                        role: Some(role.to_owned()),
+                        subrole: None,
+                        field_class: class,
+                        registration_class: Some(class),
+                        failure: None,
+                    },
+                    &mut authorizations,
+                    || Ok(()),
+                    || Ok(()),
+                )
+                .is_ok(),
+            "reclassification"
+        );
+        let super::super::NativeAxEvent::UiFocused {
+            element: Some(element),
+            ..
+        } = observer.focus_event(time::OffsetDateTime::UNIX_EPOCH)
+        else {
+            panic!("focus event")
+        };
+        assert_eq!(
+            element.value.as_deref(),
+            (role == "AXStaticText").then_some("retained body")
+        );
+        assert_eq!(
+            element.capture_decision.as_deref(),
+            (role == "AXStaticText").then_some(&decision)
+        );
     }
 }

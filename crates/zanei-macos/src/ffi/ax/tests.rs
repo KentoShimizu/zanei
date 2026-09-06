@@ -10,7 +10,10 @@ use zanei_core::schema::FieldKind;
 use super::{
     NativeAxError, NativeAxEvent, NativeAxObservation, NativeElement, TargetKind,
     cf::cf_string,
-    element::{ValueFieldSnapshot, focused_element_is_excluded, gated_value, value_length},
+    element::{
+        ValueFieldSnapshot, gated_value, initial_snapshot::focused_element_is_excluded,
+        value_length,
+    },
     native_error,
     observer::{
         AppObserver,
@@ -553,6 +556,7 @@ fn detached_value_context_resolves_after_late_confirmation() {
             title: None,
             value: None,
             value_len: Some(2),
+            capture_decision: None,
         },
         capture,
         generation: 1,
@@ -585,6 +589,7 @@ fn detached_context_without_pending_value_is_cleaned_up() {
             title: None,
             value: None,
             value_len: Some(1),
+            capture_decision: None,
         },
         capture: ValueCapture::new(
             true,
@@ -739,6 +744,7 @@ fn failed_focus_clears_current_and_defers_previous_value() {
             title: None,
             value: None,
             value_len: Some(2),
+            capture_decision: None,
         },
         capture,
         generation: 1,
@@ -853,6 +859,7 @@ fn value_and_focus_out_reads_bind_actual_title_and_discard_previous_surface() {
                     title: None,
                     value: None,
                     value_len: None,
+                    capture_decision: None,
                 },
                 true,
                 had_prior_body.then(|| "old".to_owned()),
@@ -976,7 +983,7 @@ fn value_and_focus_out_reads_bind_actual_title_and_discard_previous_surface() {
                 panic!("value event")
             };
             assert_eq!(event.window, titled_window(actual));
-            assert_eq!(event.capture_decision, decision);
+            assert_eq!(event.element.capture_decision.as_deref(), decision.as_ref());
             assert_eq!(
                 event.text, None,
                 "old authorization must not authorize another surface"
@@ -1162,6 +1169,7 @@ fn dirty_title_changes_preserve_input_but_other_surfaces_reset_it() {
                 title: None,
                 value: None,
                 value_len: None,
+                capture_decision: None,
             },
             true,
             Some("A".to_owned()),
@@ -1249,4 +1257,97 @@ fn post_read_dirty_marker_keeps_body_and_read_decision_with_latest_raw_title() {
         assert_eq!(decision, Some(expected_decision));
         assert_eq!(window, titled_window(Some(after)));
     }
+}
+
+#[test]
+fn refreshed_static_body_and_delayed_text_keep_their_own_decisions() {
+    use super::element::value_snapshot_with;
+    use crate::{
+        CapturePolicy,
+        chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
+    };
+    use zanei_core::{config::FilterConfig, privacy::PrivacyScope, schema::App};
+    let filter = FilterConfig::default();
+    let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
+    let policy = CapturePolicy::new(tracker, filter, None);
+    let app = App {
+        name: "Google Chrome".to_owned(),
+        bundle_id: Some("com.google.Chrome".to_owned()),
+        pid: Some(7),
+    };
+    let mut decisions = Vec::new();
+    for url in ["https://old.example/", "https://new.example/"] {
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: url.to_owned(),
+            },
+        );
+        decisions.push(policy.decision(PrivacyScope::TextContent, &app, Some(11), None));
+    }
+    let now = Instant::now();
+    let (input, mut authorizations) = input_authorization_channel();
+    let mut context = FocusedValueContext::new(
+        None,
+        NativeElement {
+            role: Some("AXTextArea".to_owned()),
+            subrole: None,
+            title: None,
+            value: None,
+            value_len: None,
+            capture_decision: None,
+        },
+        true,
+        Some("A".to_owned()),
+        1,
+        FieldClass::KnownText(FieldKind::Text),
+    );
+    input.prepare(7, 1, now).expect("input").confirm();
+    let observation = context.observation(
+        7,
+        now,
+        time::OffsetDateTime::UNIX_EPOCH,
+        value_snapshot_with(
+            fake_field_snapshot(Some("AXTextArea")),
+            true,
+            || Ok(Some("Ax".to_owned())),
+            || Ok(Some(2)),
+        ),
+        Some(decisions[0].clone()),
+    );
+    context.capture.observe(observation, &mut authorizations);
+    let delayed = context
+        .capture
+        .flush_pending(&mut authorizations)
+        .expect("authorized text");
+    assert_eq!(delayed.text.as_deref(), Some("x"));
+    context.observation(
+        7,
+        now,
+        time::OffsetDateTime::UNIX_EPOCH,
+        value_snapshot_with(
+            fake_field_snapshot(Some("AXStaticText")),
+            true,
+            || Ok(Some("new static body".to_owned())),
+            || Ok(Some(15)),
+        ),
+        Some(decisions[1].clone()),
+    );
+    assert_eq!(context.element.value.as_deref(), Some("new static body"));
+    assert_eq!(
+        context.element.capture_decision.as_deref(),
+        Some(&decisions[1])
+    );
+    let NativeAxEvent::UiValueChanged(event) = context.value_event(7, delayed) else {
+        panic!("value event")
+    };
+    assert_eq!(event.text.as_deref(), Some("x"));
+    assert_eq!(
+        event.element.capture_decision.as_deref(),
+        Some(&decisions[0])
+    );
+    context.suppress(7, FieldClass::SecureText, &mut authorizations);
+    assert!(context.element.value.is_none());
+    assert!(context.element.capture_decision.is_none());
 }

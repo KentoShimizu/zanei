@@ -80,6 +80,7 @@ fn element(role: &str, subrole: Option<&str>) -> NativeElement {
         title: None,
         value: None,
         value_len: Some(3),
+        capture_decision: None,
     }
 }
 
@@ -122,7 +123,6 @@ fn ui_events_derive_field_kind_from_the_ax_snapshot() {
                 window: Some(window()),
                 element: element("AXIncrementor", None),
                 text: Some("1".to_owned()),
-                capture_decision: None,
                 observed_at: time::OffsetDateTime::UNIX_EPOCH,
             },
         )))
@@ -170,9 +170,11 @@ fn chrome_ui_value_keeps_its_read_decision_for_output() {
             NativeUiValueEvent {
                 pid: 7,
                 window: Some(window()),
-                element: element("AXTextField", None),
+                element: NativeElement {
+                    capture_decision: Some(Box::new(incognito_decision.clone())),
+                    ..element("AXTextField", None)
+                },
                 text: Some("private".to_owned()),
-                capture_decision: Some(incognito_decision.clone()),
                 observed_at: time::OffsetDateTime::UNIX_EPOCH,
             },
         )))
@@ -202,9 +204,11 @@ fn chrome_ui_value_keeps_its_read_decision_for_output() {
             NativeUiValueEvent {
                 pid: 7,
                 window: Some(window()),
-                element: element("AXTextField", None),
+                element: NativeElement {
+                    capture_decision: Some(Box::new(normal_decision.clone())),
+                    ..element("AXTextField", None)
+                },
                 text: Some("normal".to_owned()),
-                capture_decision: Some(normal_decision.clone()),
                 observed_at: time::OffsetDateTime::UNIX_EPOCH,
             },
         )))

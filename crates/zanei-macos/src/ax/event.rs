@@ -139,7 +139,6 @@ impl AxEventBuilder {
                     window,
                     element,
                     text,
-                    capture_decision,
                     observed_at,
                 } = *event;
                 let value_len = element.value_len;
@@ -157,7 +156,6 @@ impl AxEventBuilder {
                     }),
                     observed_at,
                 )
-                .map(|event| event.with_read_decision(capture_decision))
             }
             NativeAxEvent::PageLoaded { .. } => None,
         }
@@ -186,7 +184,7 @@ impl AxEventBuilder {
         pid: i32,
         event_type: &str,
         window: Option<NativeWindow>,
-        element: Option<NativeElement>,
+        mut element: Option<NativeElement>,
         data: EventData,
         observed_at: time::OffsetDateTime,
     ) -> Option<AxEvent> {
@@ -215,6 +213,10 @@ impl AxEventBuilder {
                 window.title.as_deref(),
             )
             .capture_context();
+        let read_decision = element
+            .as_mut()
+            .and_then(|element| element.capture_decision.take())
+            .map(|decision| *decision);
         let event = RawEvent {
             observed_at: Some(observed_at),
             source: "macos.ax".to_owned(),
@@ -241,6 +243,6 @@ impl AxEventBuilder {
             pid,
             event_type
         );
-        Some(AxEvent::new(event))
+        Some(AxEvent::new(event).with_read_decision(read_decision))
     }
 }
