@@ -65,7 +65,7 @@ fn representative_presets_and_known_limits_are_shared_for_chrome_and_safari() {
 }
 
 #[test]
-fn ide_title_rules_match_pantaray_including_example_exceptions() {
+fn ide_title_rules_handle_decorations_and_example_exceptions() {
     let fixture = fixtures();
     for editor in ["Cursor", "Visual Studio Code", "Code"] {
         for (title, expected) in &fixture.ide_cases {

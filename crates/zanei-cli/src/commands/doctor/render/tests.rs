@@ -41,12 +41,12 @@ fn browser_automation_denial_uses_target_toggle_without_diagnostic_path() {
     ] {
         let rendered = super::render_human(
             &report_with_missing(&[capability]),
-            Path::new("/Applications/Pantaray.app/Contents/MacOS/recorder"),
+            Path::new("/Applications/Example.app/Contents/MacOS/recorder"),
             false,
             false,
         );
         assert!(rendered.contains(&format!("Automation ({target})")));
-        assert!(!rendered.contains("/Applications/Pantaray.app"));
+        assert!(!rendered.contains("/Applications/Example.app"));
         assert!(rendered.contains(&format!("switch its `{target}` toggle ON")));
         for forbidden in ["click `+`", "Command-V", "Finder", "stop && start"] {
             assert!(
