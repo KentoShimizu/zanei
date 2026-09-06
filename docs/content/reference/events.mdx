@@ -72,7 +72,7 @@ The current event types. The **Permission** column shows what must be granted fo
 | `ui.value` | `macos.ax` | Element value changed; newly added input is opt-in and never includes the full free-text value | Accessibility |
 | `input.key` | `macos.eventtap` | Key / shortcut. Default: fact of typing + field type; content is opt-in | Accessibility + Input Monitoring |
 | `input.scroll` | `macos.eventtap` | Scrolling | Accessibility + Input Monitoring |
-| `browser.navigate` | `macos.applescript` | URL / tab change. **Chrome only, currently**; Incognito always excluded | Accessibility + Automation |
+| `browser.navigate` | `macos.applescript` | URL / tab change. Chrome and Safari; Chrome Incognito excluded | Accessibility + Automation |
 | `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | Clipboard use; content is opt-in | Accessibility + Input Monitoring |
 | `content.snapshot` | `macos.ax` | Accessibility text shown in the visible part of the frontmost window; separate opt-in | Accessibility |
 
@@ -178,7 +178,7 @@ Timeline output never includes snapshot bodies. Each session reports how many sn
 
 ## Browser URL capture
 
-`browser.navigate` (URL capture) currently supports Chrome only. Chromium exposes each window's mode (`normal` / `incognito`) via AppleScript. Incognito windows produce no URL events, and their text-content-derived bodies remain null without a configuration knob. The shared event contract also permits `mode: "unknown"` for browser observations whose privacy mode cannot be determined; such observations are never treated as `normal`.
+`browser.navigate` (URL capture) supports Chrome and Safari. The same browser capture path is used for standalone and embedded recording. Chromium exposes each window's mode (`normal` / `incognito`) via AppleScript. Incognito windows produce no URL events, and their text-content-derived bodies remain null without a configuration knob. The shared event contract also permits `mode: "unknown"` for browser observations whose privacy mode cannot be determined; such observations are never treated as `normal`.
 
 Navigations are observed when the tab, window, title, or page load changes. An in-page navigation that changes neither the title nor focus may not produce `browser.navigate`.
 
@@ -186,7 +186,7 @@ Navigations are observed when the tab, window, title, or page load changes. An i
 | --- | --- | --- |
 | **Google Chrome** | ✅ Supported | `mode` suppresses Incognito URL events and text-content bodies |
 | Brave / Edge / Vivaldi (Chromium family) | ❌ Not supported — the collector only launches for Chrome's bundle ID | No URL capture, so no private-window handling applies |
-| **Safari** | ❌ Not supported | No private-mode property; menu-diff heuristics are brittle, so not attempted |
+| **Safari** | ✅ Supported | `mode: "unknown"`; private-window exclusion is not guaranteed |
 | **Firefox** | ❌ Not supported | AppleScript has no URL API |
 | **Arc** | ❌ Not supported (unverified) | Chromium-based but limited AppleScript support |
 
@@ -194,7 +194,7 @@ Navigations are observed when the tab, window, title, or page load changes. An i
 Chrome Incognito and website-filtered windows keep text-content-derived bodies null, but still produce `window.title` and interaction metadata like other windows. Browsers without URL capture have no private-mode body suppression. To suppress Chrome titles too, exclude the browser itself with `zanei filter exclude-app add com.google.Chrome` (see [filters](/guides/filters)).
 :::
 
-Safari/Firefox support may come later if a reliable private-mode detection mechanism exists.
+Safari URL capture and website filtering do not require an embedding-specific configuration. App and site exclusions apply to Safari, and its default text-content and snapshot exclusions remain in place. Enabling Safari content capture can include private-window text because Safari does not expose a reliable private-mode signal. URL capture requires Safari Automation permission for the recorder process. Firefox URL capture remains unsupported.
 
 ## Two layers of data
 

@@ -59,12 +59,12 @@ const CONFIG_OPTION_COMMENTS: [ConfigOptionComment; 18] = [
     ConfigOptionComment {
         section: "filter",
         key: "exclude_websites",
-        description: "Website hosts denied for Chrome URL events and text-content bodies.",
+        description: "Website hosts denied for Chrome and Safari URL events and text-content bodies.",
     },
     ConfigOptionComment {
         section: "filter",
         key: "include_only_websites",
-        description: "When non-empty, capture Chrome URL events and text-content bodies only for these hosts.",
+        description: "When non-empty, capture Chrome and Safari URL events and text-content bodies only for these hosts.",
     },
     ConfigOptionComment {
         section: "filter",
@@ -84,12 +84,12 @@ const CONFIG_OPTION_COMMENTS: [ConfigOptionComment; 18] = [
     ConfigOptionComment {
         section: "filter.text_content",
         key: "exclude_websites",
-        description: "Chrome hosts whose typed and clipboard bodies stay null.",
+        description: "Chrome and Safari hosts whose typed and clipboard bodies stay null.",
     },
     ConfigOptionComment {
         section: "filter.text_content",
         key: "include_only_websites",
-        description: "When non-empty, retain typed bodies only for these Chrome hosts.",
+        description: "When non-empty, retain typed bodies only for these Chrome and Safari hosts.",
     },
     ConfigOptionComment {
         section: "filter.content_snapshot",
@@ -104,12 +104,12 @@ const CONFIG_OPTION_COMMENTS: [ConfigOptionComment; 18] = [
     ConfigOptionComment {
         section: "filter.content_snapshot",
         key: "exclude_websites",
-        description: "Chrome hosts where content snapshots are not created.",
+        description: "Chrome and Safari hosts where content snapshots are not created.",
     },
     ConfigOptionComment {
         section: "filter.content_snapshot",
         key: "include_only_websites",
-        description: "When non-empty, create snapshots only for these Chrome hosts.",
+        description: "When non-empty, create snapshots only for these Chrome and Safari hosts.",
     },
     ConfigOptionComment {
         section: "output",
@@ -437,10 +437,10 @@ mod tests {
             Config::default()
         );
         assert!(template.contains(
-            "# Website hosts denied for Chrome URL events and text-content bodies.\nexclude_websites ="
+            "# Website hosts denied for Chrome and Safari URL events and text-content bodies.\nexclude_websites ="
         ));
         assert!(template.contains(
-            "# When non-empty, capture Chrome URL events and text-content bodies only for these hosts.\ninclude_only_websites ="
+            "# When non-empty, capture Chrome and Safari URL events and text-content bodies only for these hosts.\ninclude_only_websites ="
         ));
     }
 

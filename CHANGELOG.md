@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Safari URL capture and website filtering use the shared browser capture path
+  for standalone and embedded recording. Existing app/site exclusions and
+  default Safari content exclusions remain in effect. Safari privacy mode is
+  unknown; private-window exclusion is not guaranteed.
+
 ## 0.4.0 — 2026-08-26
 
 Privacy defaults, event and diagnostic schemas, agent setup, and AX health

@@ -22,7 +22,7 @@ There are two ways to narrow by app, and they do different things:
 zanei filter show                                          # all three scopes and their modes
 zanei filter exclude-app add 1Password                     # all events
 zanei filter text-content exclude-app add Slack             # bodies only; facts remain
-zanei filter text-content only-site add github.com           # Chrome typed/copied bodies only on this site
+zanei filter text-content only-site add github.com           # Chrome/Safari typed/copied bodies only on this site
 zanei filter content-snapshot only-app add Terminal          # snapshots only from this app
 zanei filter content-snapshot exclude-site add mail.google.com
 ```
@@ -33,8 +33,8 @@ The command shape is `zanei filter [<scope>] <list> add|remove [VALUE]`. Omit `<
 | --- | --- | --- |
 | `exclude-app` | `exclude_apps` | Exclude these apps |
 | `only-app` | `include_only_apps` | When non-empty, include only these apps |
-| `exclude-site` | `exclude_websites` | Exclude these Chrome URL hosts |
-| `only-site` | `include_only_websites` | When non-empty, include only these Chrome URL hosts |
+| `exclude-site` | `exclude_websites` | Exclude these browser URL hosts |
+| `only-site` | `include_only_websites` | When non-empty, include only these browser URL hosts |
 
 For each app or site axis, a non-empty `include_only_*` list selects only mode; an empty one selects exclude mode. `exclude_*` always wins in either mode. The daemon reloads all three scopes at roughly 2-second intervals, so changes apply within a few seconds without a restart.
 
@@ -48,13 +48,13 @@ The order is fixed:
 
 1. Built-in app exclusions.
 2. `[filter]` app rules, which discard every attributed event for a rejected app.
-3. `[filter]` website rules, which discard matching Chrome URL events and suppress typed/copied bodies and snapshots for that window.
+3. `[filter]` website rules, which discard matching browser URL events and suppress typed/copied bodies and snapshots for that window.
 4. `[filter.text_content]` app and website rules. Outside this scope, `input.key.text`, `ui.value.data.text`, clipboard `text`/`size_bytes`, and `element.value` are null, but the event and non-content facts remain as if `capture.text_content` were false there.
 5. `[filter.content_snapshot]` app and website rules. Outside this scope, no `content.snapshot` event is created.
 
-Website rules work only for Chrome because it is the only supported browser that exposes both URL and private-window mode. Other browsers are controlled only by app rules.
+Website rules apply to Chrome and Safari, using the same scopes for standalone and embedded recording. Other browsers are controlled by app rules. Safari private-window exclusion is not guaranteed; its default content exclusions remain unchanged.
 
-Admitting Chrome on a filter reload starts Chrome tracking without a recorder restart; excluding it again stops that tracking. The macOS Automation prompt appears when Chrome is first admitted and the permission is first needed.
+Admitting a supported browser on a filter reload starts its tracking without a recorder restart; excluding it again stops that tracking. The macOS Automation prompt appears when that browser is first admitted and the permission is first needed.
 
 ## Choosing apps
 
@@ -88,7 +88,7 @@ Adding one of these browsers with `only-app`, or removing it from `exclude-app`,
 ## Matching
 
 - **Apps** — match by `bundle_id` (recommended; display names can change). An app that has a `bundle_id` is matched only by it; a display-name entry applies only to events whose app has no `bundle_id`. Matching is case-insensitive.
-- **Sites** — dot-boundary suffix match on the Chrome URL host: `example.com` also covers `api.example.com`, but not `evil-example.com`. There is no Public Suffix List handling — an entry like `com` matches every `.com` host, so prefer full domain names.
+- **Sites** — dot-boundary suffix match on the browser URL host: `example.com` also covers `api.example.com`, but not `evil-example.com`. There is no Public Suffix List handling — an entry like `com` matches every `.com` host, so prefer full domain names.
 - **Precedence** — if `include_only_*` is non-empty, an event is captured only if it is in that list and not in `exclude_*`. If empty, everything not excluded is captured.
 - **App-level exclusion is total for attributed events** — it drops all event types that can be attributed to that app (`ui.*`, `input.*`, `window.*`, ...). An unattributed clipboard change may remain under `app.name: "Unknown"`.
 

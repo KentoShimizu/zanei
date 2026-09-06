@@ -141,6 +141,10 @@ required permission is missing. In that combination, stdout is therefore not JSO
     "automate_browser": {
       "state": "deferred", "required": true,
       "detail": { "platform": "macos", "permission": "automation", "status": "not_determined", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation", "target_bundle_id": "com.google.Chrome" }
+    },
+    "automate_safari": {
+      "state": "deferred", "required": true,
+      "detail": { "platform": "macos", "permission": "automation", "status": "not_determined", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation", "target_bundle_id": "com.apple.Safari" }
     }
   },
   "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" },
@@ -539,14 +543,14 @@ zanei filter content-snapshot exclude-app add FutureApp --unverified
 | --- | --- | --- |
 | `exclude-app` | `exclude_apps` | Exclude these apps; active in both exclude and only mode |
 | `only-app` | `include_only_apps` | A non-empty list selects only these apps |
-| `exclude-site` | `exclude_websites` | Exclude these Chrome URL hosts; active in both modes |
-| `only-site` | `include_only_websites` | A non-empty list selects only these Chrome URL hosts |
+| `exclude-site` | `exclude_websites` | Exclude these Chrome and Safari URL hosts; active in both modes |
+| `only-site` | `include_only_websites` | A non-empty list selects only these Chrome and Safari URL hosts |
 
 - Every app-list `add` accepts a display name or bundle ID, resolves it against [`zanei apps`](#apps), and saves the bundle ID when available. An unresolved value is not saved and exits with code 2, with a close candidate when available. `--unverified` explicitly saves an unresolved value with a warning.
 - `add` with no value opens a numbered, recently-used-first selector. Non-TTY use and `--quiet` require a value; omission exits with code 2. `remove` resolves against the current list, including entries for apps no longer installed.
 - `filter show` displays all three scopes, each apps/sites mode and count, resolved names, and `(not installed)` for unresolved entries. It also lists hard-coded built-in exclusions separately.
 - Both content scopes default to excluding Safari, Firefox, Brave, Edge, Vivaldi, and Arc. Adding one with `only-app` or removing it from `exclude-app` warns unless `--quiet` is set, because private-window detection is unavailable. The defaults are editable.
-- Site rules work only for Chrome. Changes apply on the next configuration-watch cycle, normally within 2 seconds; no restart is required.
+- Site rules apply to Chrome and Safari. Changes apply on the next configuration-watch cycle, normally within 2 seconds; no restart is required.
 
 The exact evaluation order and the fields removed by each scope are in the [filters guide](/guides/filters).
 

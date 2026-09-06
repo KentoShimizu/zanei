@@ -17,11 +17,11 @@ description: プライバシー・ブラウザ対応・データアクセス・�
 
 ## どのアプリから content snapshot を取得できますか？
 
-macOS Accessibility で有用なテキストを公開する app だけです。対応範囲は app と UI 実装によって異なります。`zanei apps` は選択候補を表示しますが、読み取り可能な text の存在を保証しません。snapshot は前面ウィンドウの可視範囲で、document 全体ではありません。private window を確実に判定できないため、Safari・Firefox・Brave・Edge・Vivaldi・Arc は既定で snapshot scope 外です。website filter は Chrome だけに効き、他の browser は app scope だけで制御します。
+macOS Accessibility で有用なテキストを公開する app だけです。対応範囲は app と UI 実装によって異なります。`zanei apps` は選択候補を表示しますが、読み取り可能な text の存在を保証しません。snapshot は前面ウィンドウの可視範囲で、document 全体ではありません。private window を確実に判定できないため、Safari・Firefox・Brave・Edge・Vivaldi・Arc は既定で snapshot scope 外です。サイトフィルタはChromeとSafariに適用します。他のbrowserはapp scopeで制御します。
 
 ## どのブラウザの URL が取れますか？Safari は？
 
-現在は Chrome のみです。Chromium の AppleScript インターフェースが返す window mode を使い、incognito の URL イベントと本文を抑止します。Safari と Firefox には信頼できる同等の手段がないため、URL 捕捉は実装していません。詳細とブラウザ別の表は[イベントリファレンス](/ja/reference/events#ブラウザの-url-捕捉)へ。
+単体利用・組み込み利用の両方でChromeとSafariに対応します。Chromeのwindow modeでincognitoのURLイベントと本文を抑止します。Safariのプライベート状態は不明として扱い、プライベート閲覧の除外は保証しません。FirefoxのURL取得は未実装です。詳細とブラウザ別の表は[イベントリファレンス](/ja/reference/events#ブラウザの-url-捕捉)へ。
 
 ## 特定のアプリやサイトを記録から外すには？
 

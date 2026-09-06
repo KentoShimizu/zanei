@@ -594,7 +594,7 @@ fn removing_chrome_preserves_every_other_failure_origin() {
         .filter
         .content_snapshot
         .exclude_apps
-        .push(CHROME_BUNDLE_ID.to_owned());
+        .extend([CHROME_BUNDLE_ID.to_owned(), "com.apple.Safari".to_owned()]);
     collectors.replace_filter(config.filter);
 
     assert!(collectors.chrome.is_none());

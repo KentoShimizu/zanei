@@ -181,12 +181,23 @@ mod tests {
         }) {
             let metadata_only = kind.ends_with("_metadata");
             let scenarios: &[&str] = if bundle_id == SAFARI_BUNDLE_ID && !metadata_only {
-                &["same", "url_changed", "to_app_owned", "to_standalone"]
+                &[
+                    "same",
+                    "url_changed",
+                    "ordinary_same",
+                    "ordinary_changed",
+                    "to_app_owned",
+                    "to_standalone",
+                ]
             } else {
                 &["same", "url_changed"]
             };
             for scenario in scenarios {
-                let filter = if bundle_id == SAFARI_BUNDLE_ID && *scenario != "to_app_owned" {
+                let filter = if bundle_id == SAFARI_BUNDLE_ID
+                    && !matches!(
+                        *scenario,
+                        "to_app_owned" | "ordinary_same" | "ordinary_changed"
+                    ) {
                     safari_filter()
                 } else {
                     standalone_filter(bundle_id)
@@ -204,10 +215,10 @@ mod tests {
                 }
                 let read_decision =
                     policy.decision(PrivacyScope::TextContent, &app.raw_app(), Some(11), None);
-                assert!(read_decision.is_allowed());
+                assert_eq!(read_decision.is_allowed(), *scenario != "to_app_owned");
 
                 match *scenario {
-                    "url_changed" => {
+                    "url_changed" | "ordinary_changed" => {
                         publisher.observe(7, browser_observation(bundle_id, "https://v2.example/"))
                     }
                     "to_app_owned" => {
@@ -223,10 +234,10 @@ mod tests {
                         assert!(current.chrome_version().is_some());
                     }
                     "to_standalone" => policy.replace_filter(standalone_filter(bundle_id)),
-                    "same" => {}
+                    "same" | "ordinary_same" => {}
                     _ => unreachable!(),
                 }
-                if *scenario == "url_changed" {
+                if matches!(*scenario, "url_changed" | "ordinary_changed") {
                     assert_ne!(
                         read_decision.chrome_version(),
                         policy
@@ -301,7 +312,7 @@ mod tests {
                 if *scenario == "to_app_owned" {
                     let event = receiver
                         .try_recv()
-                        .expect("stale generic metadata is emitted");
+                        .expect("unobserved body leaves metadata only");
                     assert_eq!(event_body(&event), None, "{kind}, {scenario}");
                     assert_eq!(event.capture_context.url, None);
                     continue;
@@ -310,7 +321,7 @@ mod tests {
                     let event = receiver.try_recv().expect("metadata is immediate");
                     assert_eq!(
                         event.capture_context.url.as_deref(),
-                        Some(if *scenario == "url_changed" {
+                        Some(if matches!(*scenario, "url_changed" | "ordinary_changed") {
                             "https://v2.example/"
                         } else {
                             "https://v1.example/"
@@ -319,33 +330,29 @@ mod tests {
                     assert!(event.element.and_then(|element| element.value).is_none());
                     continue;
                 }
-                assert!(receiver.try_recv().is_err(), "body remains quarantined");
                 if *scenario == "to_standalone" {
-                    publisher.observe(
-                        7,
-                        ChromeEligibilityObservation::Unavailable {
-                            window_id: Some(11),
-                        },
-                    );
-                } else {
-                    publisher.observe(
-                        7,
-                        browser_observation(
-                            bundle_id,
-                            if *scenario == "url_changed" {
-                                "https://v2.example/"
-                            } else {
-                                "https://v1.example/"
-                            },
-                        ),
-                    );
+                    let event = receiver.try_recv().expect("reload suppresses stale body");
+                    assert_eq!(event_body(&event), None);
+                    continue;
                 }
+                assert!(receiver.try_recv().is_err(), "body remains quarantined");
+                publisher.observe(
+                    7,
+                    browser_observation(
+                        bundle_id,
+                        if matches!(*scenario, "url_changed" | "ordinary_changed") {
+                            "https://v2.example/"
+                        } else {
+                            "https://v1.example/"
+                        },
+                    ),
+                );
                 output.release_due();
 
                 let event = receiver.try_recv().expect("metadata event is released");
                 assert_eq!(
                     event_body(&event),
-                    (*scenario == "same").then_some("private"),
+                    matches!(*scenario, "same" | "ordinary_same").then_some("private"),
                     "{kind}, {scenario}"
                 );
                 assert_eq!(

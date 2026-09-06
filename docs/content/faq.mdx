@@ -17,11 +17,11 @@ No. Zanei does not use screenshots, OCR, screen recording, or screen-capture API
 
 ## Which apps can it read content snapshots from?
 
-Only apps that expose useful text through macOS Accessibility. Coverage varies by app and UI implementation; `zanei apps` lists candidates to choose from, but does not guarantee that an app exposes readable text. Snapshots cover the visible part of the frontmost window, not a document's complete contents. Safari, Firefox, Brave, Edge, Vivaldi, and Arc are excluded from snapshots by default because their private windows cannot be identified reliably. Website filters work only for Chrome; other browsers can be controlled only by app scope.
+Only apps that expose useful text through macOS Accessibility. Coverage varies by app and UI implementation; `zanei apps` lists candidates to choose from, but does not guarantee that an app exposes readable text. Snapshots cover the visible part of the frontmost window, not a document's complete contents. Safari, Firefox, Brave, Edge, Vivaldi, and Arc are excluded from snapshots by default because their private windows cannot be identified reliably. Website filters apply to Chrome and Safari. Other browsers can be controlled by app scope.
 
 ## Which browsers can it capture URLs from?
 
-Currently Chrome only. Chromium's AppleScript interface reports each window's mode. Zanei uses that state to omit Incognito URL events and text-content bodies. Safari and Firefox offer no reliable equivalent, so URL capture for them is not implemented. Details and the per-browser table: [event reference](/reference/events#browser-url-capture).
+Chrome and Safari are supported for both standalone and embedded recording. Chrome's window mode lets Zanei omit Incognito URL events and text-content bodies. Safari reports an unknown privacy mode, so private-window exclusion is not guaranteed. Firefox URL capture is not implemented. Details and the per-browser table: [event reference](/reference/events#browser-url-capture).
 
 ## How do I keep an app or site out of the record?
 

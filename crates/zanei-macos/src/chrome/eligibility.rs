@@ -430,7 +430,7 @@ pub fn chrome_eligibility_channel(
     let state = Arc::new(RwLock::new(EligibilityState {
         filter,
         filter_revision: 0,
-        query_targets: BTreeSet::from([BrowserTarget::Chrome]),
+        query_targets: BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari]),
         windows: HashMap::new(),
         next_version: 0,
     }));
@@ -505,24 +505,20 @@ fn browser_is_allowed(
     url: Option<&str>,
     filter: &FilterConfig,
 ) -> bool {
+    let app = App {
+        name: target.display_name().to_owned(),
+        bundle_id: Some(target.bundle_id().to_owned()),
+        pid: None,
+    };
+    let host = url.and_then(website_host);
     match filter.capture_policy.as_ref() {
-        Some(policy) => matches!(
-            evaluate_capture_policy(
-                policy,
-                &App {
-                    name: target.display_name().to_owned(),
-                    bundle_id: Some(target.bundle_id().to_owned()),
-                    pid: None,
-                },
-                None,
-                url,
-            ),
-            CapturePolicyDecision::Allow
-        ),
-        None if target == BrowserTarget::Chrome => {
-            host_is_allowed_for(scope, url.and_then(website_host).as_deref(), filter)
+        Some(policy) => {
+            matches!(
+                evaluate_capture_policy(policy, &app, None, url),
+                CapturePolicyDecision::Allow
+            ) && (host.is_none() || host_is_allowed_for(scope, host.as_deref(), filter))
         }
-        None => false,
+        None => host_is_allowed_for(scope, host.as_deref(), filter),
     }
 }
 

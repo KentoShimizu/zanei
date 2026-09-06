@@ -548,7 +548,8 @@ mod tests {
                 CapabilityState::Available,
                 CapabilityState::Available,
                 CapabilityState::Available,
-            ),
+            )
+            .with_automate_safari(CapabilityState::Available),
             false,
         )
     }

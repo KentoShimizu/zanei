@@ -274,112 +274,81 @@ fn dropped_snapshot_does_not_deduplicate_identical_settle_on_return() {
 }
 
 #[test]
-fn safari_snapshot_delivery_obeys_confirmation_mode() {
+fn safari_snapshot_delivery_requires_confirmation_with_either_policy() {
     let key = SnapshotWindowKey {
         pid: 7,
         window_id: 11,
     };
 
-    let now = Instant::now();
-    let standalone = standalone_safari_filter();
-    let (_, tracker) = chrome_eligibility_channel(standalone.clone());
-    let policy = CapturePolicy::new(tracker, standalone, None);
-    let candidate = safari_candidate(now);
-    let decision = policy.decision(
-        PrivacyScope::ContentSnapshot,
-        &candidate.target.app.raw_app(),
-        Some(11),
-        candidate.target.window.title.as_deref(),
-    );
-    let mut state = SnapshotState::new(now);
-    let health = SharedHealth::default();
-    let (sender, events) = sync_channel(1);
-    let mut quarantine = TextQuarantine::new(ChromeObserver::new());
-    emit(
-        candidate,
-        snapshot_output("standalone"),
-        key,
-        SnapshotState::text_hash("standalone"),
-        &policy,
-        &decision,
-        time::OffsetDateTime::UNIX_EPOCH,
-        now,
-        &mut state,
-        &sender,
-        &health,
-        &mut quarantine,
-    );
-    let event = events.try_recv().expect("standalone Safari is immediate");
-    let EventData::ContentSnapshot(data) = event.data else {
-        panic!("content.snapshot")
-    };
-    assert_eq!(data.text.as_deref(), Some("standalone"));
-
-    let now = Instant::now();
-    let filter = app_owned_safari_filter();
-    let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
-    publisher.observe_at(
-        7,
-        safari_observation("https://same.example/path"),
-        now - Duration::from_millis(1),
-    );
-    let policy = CapturePolicy::new(tracker, filter, None);
-    let candidate = safari_candidate(now);
-    let decision = policy.decision(
-        PrivacyScope::ContentSnapshot,
-        &candidate.target.app.raw_app(),
-        Some(11),
-        candidate.target.window.title.as_deref(),
-    );
-    let text = "app-owned";
-    let mut state = SnapshotState::new(now);
-    let health = SharedHealth::default();
-    let (sender, events) = sync_channel(1);
-    let mut quarantine = TextQuarantine::new(ChromeObserver::new());
-    emit(
-        candidate,
-        snapshot_output(text),
-        key,
-        SnapshotState::text_hash(text),
-        &policy,
-        &decision,
-        time::OffsetDateTime::UNIX_EPOCH,
-        now,
-        &mut state,
-        &sender,
-        &health,
-        &mut quarantine,
-    );
-    assert!(events.try_recv().is_err(), "app-owned Safari is held");
-    let reserved = state.daily_bytes(now);
-    publisher.observe_at(
-        7,
-        safari_observation("https://same.example/path"),
-        now + Duration::from_millis(1),
-    );
-    emit_released(
-        quarantine.release(now + Duration::from_millis(2), &policy),
-        &sender,
-        &health,
-        &mut state,
-    );
-    let event = events.try_recv().expect("same Safari URL is released");
-    let EventData::ContentSnapshot(data) = &event.data else {
-        panic!("content.snapshot")
-    };
-    assert_eq!(data.text.as_deref(), Some(text));
-    assert_eq!(
-        event.capture_context.url.as_deref(),
-        Some("https://same.example/path")
-    );
-    assert_eq!(state.daily_bytes(now), reserved, "release reserves once");
+    for filter in [standalone_safari_filter(), app_owned_safari_filter()] {
+        let now = Instant::now();
+        let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
+        publisher.observe_at(
+            7,
+            safari_observation("https://same.example/path"),
+            now - Duration::from_millis(1),
+        );
+        let policy = CapturePolicy::new(tracker, filter, None);
+        let candidate = safari_candidate(now);
+        let decision = policy.decision(
+            PrivacyScope::ContentSnapshot,
+            &candidate.target.app.raw_app(),
+            Some(11),
+            candidate.target.window.title.as_deref(),
+        );
+        let text = "confirmed snapshot";
+        let mut state = SnapshotState::new(now);
+        let health = SharedHealth::default();
+        let (sender, events) = sync_channel(1);
+        let mut quarantine = TextQuarantine::new(ChromeObserver::new());
+        emit(
+            candidate,
+            snapshot_output(text),
+            key,
+            SnapshotState::text_hash(text),
+            &policy,
+            &decision,
+            time::OffsetDateTime::UNIX_EPOCH,
+            now,
+            &mut state,
+            &sender,
+            &health,
+            &mut quarantine,
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "Safari snapshot is held until URL confirmation"
+        );
+        let reserved = state.daily_bytes(now);
+        publisher.observe_at(
+            7,
+            safari_observation("https://same.example/path"),
+            now + Duration::from_millis(1),
+        );
+        emit_released(
+            quarantine.release(now + Duration::from_millis(2), &policy),
+            &sender,
+            &health,
+            &mut state,
+        );
+        let event = events.try_recv().expect("same Safari URL is released");
+        let EventData::ContentSnapshot(data) = &event.data else {
+            panic!("content.snapshot")
+        };
+        assert_eq!(data.text.as_deref(), Some(text));
+        assert_eq!(
+            event.capture_context.url.as_deref(),
+            Some("https://same.example/path")
+        );
+        assert_eq!(state.daily_bytes(now), reserved, "release reserves once");
+    }
 
     let now = Instant::now();
     let standalone = standalone_safari_filter();
     let (publisher, tracker) = chrome_eligibility_channel(standalone.clone());
     let policy = CapturePolicy::new(tracker, standalone, None);
     let candidate = safari_candidate(now);
-    let generic = policy.decision(
+    let unobserved = policy.decision(
         PrivacyScope::ContentSnapshot,
         &candidate.target.app.raw_app(),
         Some(11),
@@ -401,11 +370,11 @@ fn safari_snapshot_delivery_obeys_confirmation_mode() {
     let mut quarantine = TextQuarantine::new(ChromeObserver::new());
     emit(
         candidate,
-        snapshot_output("stale generic"),
+        snapshot_output("unobserved"),
         key,
-        SnapshotState::text_hash("stale generic"),
+        SnapshotState::text_hash("unobserved"),
         &policy,
-        &generic,
+        &unobserved,
         time::OffsetDateTime::UNIX_EPOCH,
         now,
         &mut state,

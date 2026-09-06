@@ -22,7 +22,7 @@ description: どのアプリ・サイトを記録するかを決める許可/不
 zanei filter show                                          # 3 scope と mode を表示
 zanei filter exclude-app add 1Password                     # 全 event
 zanei filter text-content exclude-app add Slack             # 本文のみ除外。事実は残る
-zanei filter text-content only-site add github.com           # Chrome の入力・clipboard 本文をこの site だけに限定
+zanei filter text-content only-site add github.com           # Chrome/Safari の入力・clipboard 本文をこの site だけに限定
 zanei filter content-snapshot only-app add Terminal          # snapshot をこの app だけに限定
 zanei filter content-snapshot exclude-site add mail.google.com
 ```
@@ -33,8 +33,8 @@ zanei filter content-snapshot exclude-site add mail.google.com
 | --- | --- | --- |
 | `exclude-app` | `exclude_apps` | 指定 app を除外 |
 | `only-app` | `include_only_apps` | 非空なら指定 app だけを含める |
-| `exclude-site` | `exclude_websites` | 指定した Chrome URL host を除外 |
-| `only-site` | `include_only_websites` | 非空なら指定した Chrome URL host だけを含める |
+| `exclude-site` | `exclude_websites` | 指定した browser URL host を除外 |
+| `only-site` | `include_only_websites` | 非空なら指定した browser URL host だけを含める |
 
 app / site の各軸で `include_only_*` が非空なら only mode、空なら exclude mode です。`exclude_*` はどちらの mode でも常に優先します。デーモンは 3 scope を約 2 秒間隔で reload するため、変更は数秒以内に再起動なしで反映されます。
 
@@ -48,13 +48,13 @@ app / site の各軸で `include_only_*` が非空なら only mode、空なら e
 
 1. 組み込みの app 除外。
 2. `[filter]` の app rule。対象外 app に帰属するすべての event を破棄。
-3. `[filter]` の website rule。一致する Chrome URL event を破棄し、その window の入力・clipboard 本文と snapshot を抑止。
+3. `[filter]` の website rule。一致する browser URL event を破棄し、その window の入力・clipboard 本文と snapshot を抑止。
 4. `[filter.text_content]` の app / website rule。scope 外では `input.key.text`・`ui.value.data.text`・clipboard の `text` / `size_bytes`・`element.value` を null にし、event と内容以外の事実は残す。その window だけ `capture.text_content = false` と同じ形。
 5. `[filter.content_snapshot]` の app / website rule。scope 外では `content.snapshot` event を生成しない。
 
-website rule は URL と private-window mode を取得できる Chrome だけに効きます。他の browser は app rule だけで制御します。
+サイトルールはChromeとSafariに適用し、単体利用と組み込み利用で同じscopeを使います。他のbrowserはapp ruleで制御します。Safariのプライベート閲覧の除外は保証せず、本文の既定除外は維持します。
 
-filter reload で Chrome を対象に加えると、recorder の再起動なしで Chrome tracking が始まり、再び除外すると停止します。macOS の Automation prompt は Chrome を初めて対象に加え、その権限が初めて必要になった時点で表示されます。
+filter reloadで対応browserを対象に加えると、recorderの再起動なしでそのbrowserの追跡が始まり、再び除外すると停止します。macOSのAutomation確認は、そのbrowserを初めて対象に加え、権限が必要になった時点で表示されます。
 
 ## アプリを選ぶ
 
@@ -88,7 +88,7 @@ private window を確実に判定できないため、両方の content scope �
 ## マッチング
 
 - **アプリ** — `bundle_id` で照合します（推奨。表示名は変わり得ます）。`bundle_id` を持つアプリは `bundle_id` だけで照合され、表示名のエントリは `bundle_id` を持たないイベントにのみ効きます。大文字小文字は区別しません。
-- **サイト** — Chrome URL host のドット境界サフィックスで一致します。`example.com` は `api.example.com` にも一致しますが、`evil-example.com` には一致しません。Public Suffix List は扱わないため、`com` のような指定は全 `.com` ホストに一致します。完全なドメイン名を指定してください。
+- **サイト** — browser URL host のドット境界サフィックスで一致します。`example.com` は `api.example.com` にも一致しますが、`evil-example.com` には一致しません。Public Suffix List は扱わないため、`com` のような指定は全 `.com` ホストに一致します。完全なドメイン名を指定してください。
 - **優先順位** — `include_only_*` が非空なら「そのリストにあり、かつ `exclude_*` にない」ものだけ捕捉。空なら「`exclude_*` にない」ものすべてを捕捉します。
 - **帰属できたイベントに対するアプリ単位の除外は全面的** — そのアプリに帰属できたすべてのイベント型（`ui.*`・`input.*`・`window.*`・…）を落とします。帰属不能な clipboard 変化は `app.name: "Unknown"` として残り得ます。
 
