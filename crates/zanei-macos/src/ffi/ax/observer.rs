@@ -26,7 +26,9 @@ use super::{
     add_notification,
     cf::{CfRef, OwnedCf, remove_current_run_loop_source},
     element::{
-        FocusedElementSnapshot, cf_equal, copy_element, focused_element_snapshot, window_snapshot,
+        cf_equal, copy_element,
+        initial_snapshot::{FocusedElementSnapshot, focused_element_snapshot},
+        window_snapshot,
     },
     remove_notification,
     value_context::{FocusedValueContext, after_target_preparation},
@@ -209,7 +211,7 @@ impl AppObserver {
             .map(|element| {
                 focused_element_snapshot(
                     element.as_ptr(),
-                    |window| self.text_content_allowed(window),
+                    |window| self.text_content_decision(window),
                     secure_input,
                 )
             })
@@ -539,11 +541,6 @@ impl AppObserver {
     pub(in crate::ffi::ax) fn recover(&self, site: AxRecoverySite) {
         self.failures
             .recover(Some(i64::from(self.context.pid)), site);
-    }
-
-    pub(super) fn text_content_allowed(&self, window: Option<&super::NativeWindow>) -> bool {
-        self.text_content_decision(window)
-            .is_some_and(|decision| decision.is_allowed())
     }
 
     pub(super) fn text_content_decision(

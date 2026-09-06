@@ -8,11 +8,13 @@ use crate::{
 };
 
 use super::{
-    AX_ERROR_ATTRIBUTE_UNSUPPORTED, NativeAxError, NativeElement, NativeWindow,
+    AX_ERROR_ATTRIBUTE_UNSUPPORTED, NativeAxError, NativeWindow,
     cf::*,
     native_error,
     types::{decode_point, decode_size},
 };
+
+pub(super) mod initial_snapshot;
 
 const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 0.5;
 const AX_ERROR_SUCCESS: i32 = 0;
@@ -20,13 +22,6 @@ const AX_ERROR_NO_VALUE: i32 = -25_212;
 const AX_VALUE_ATTRIBUTE: &str = "AXValue";
 const AX_NUMBER_OF_CHARACTERS_ATTRIBUTE: &str = "AXNumberOfCharacters";
 const MAX_STATIC_TEXT_VALUE_CHARS: usize = 256;
-
-pub(super) struct FocusedElementSnapshot {
-    pub(super) window: Option<NativeWindow>,
-    pub(super) element: NativeElement,
-    pub(super) text_baseline: Option<String>,
-    pub(super) field_class: FieldClass,
-}
 
 pub(super) struct ValueSnapshot {
     pub(super) value: Option<String>,
@@ -43,106 +38,6 @@ pub(super) struct ValueFieldSnapshot {
     pub(super) field_class: FieldClass,
     pub(super) registration_class: Option<FieldClass>,
     pub(super) failure: Option<NativeAxError>,
-}
-
-pub(super) fn element_snapshot(
-    element: CfRef,
-    capture_text_content: impl FnOnce(Option<&NativeWindow>) -> bool,
-) -> Result<Option<(Option<NativeWindow>, NativeElement)>, NativeAxError> {
-    let subrole = copy_string(element, "AXSubrole")?;
-    let role = copy_string(element, "AXRole")?;
-    let field_class = field_class(role.as_deref(), subrole.as_deref());
-    if field_class == FieldClass::SecureText {
-        return Ok(None);
-    }
-    let window = copy_element(element, "AXWindow")?
-        .map(|window| window_snapshot(window.as_ptr()))
-        .transpose()?
-        .flatten();
-    let capture_text_content = capture_text_content(window.as_ref());
-    let value = gated_value(capture_text_content, field_class, role.as_deref(), || {
-        copy_string(element, "AXValue")
-    })?;
-    let character_count = match field_class {
-        FieldClass::KnownText(_) | FieldClass::KnownSafeNonText => {
-            copy_attribute(element, "AXNumberOfCharacters")?
-                .and_then(|value| i64_value(value.as_ptr()))
-        }
-        FieldClass::SecureText | FieldClass::Unknown => None,
-    };
-    let value_len = value_length(character_count, value.as_deref());
-    Ok(Some((
-        window,
-        NativeElement {
-            role,
-            subrole,
-            title: copy_string(element, "AXTitle")?,
-            value,
-            value_len,
-        },
-    )))
-}
-
-pub(super) fn focused_element_snapshot(
-    element: CfRef,
-    capture_text_content: impl FnOnce(Option<&NativeWindow>) -> bool,
-    secure_input: bool,
-) -> Result<Option<FocusedElementSnapshot>, NativeAxError> {
-    let subrole = copy_string(element, "AXSubrole")?;
-    let role = copy_string(element, "AXRole")?;
-    let native_field_class = field_class(role.as_deref(), subrole.as_deref());
-    if focused_element_is_excluded(native_field_class) {
-        return Ok(None);
-    }
-    let field_class = observed_field_class(role.as_deref(), subrole.as_deref(), secure_input);
-    let window = copy_element(element, "AXWindow")?
-        .map(|window| window_snapshot(window.as_ptr()))
-        .transpose()?
-        .flatten();
-    let capture_text_content = capture_text_content(window.as_ref());
-    let (value, text_baseline) = match field_class {
-        FieldClass::KnownText(_) => {
-            let baseline = capture_text_content
-                .then(|| copy_string(element, AX_VALUE_ATTRIBUTE))
-                .transpose()?
-                .flatten();
-            (None, baseline)
-        }
-        FieldClass::KnownSafeNonText => (
-            gated_value(capture_text_content, field_class, role.as_deref(), || {
-                copy_string(element, AX_VALUE_ATTRIBUTE)
-            })?,
-            None,
-        ),
-        FieldClass::SecureText | FieldClass::Unknown => (None, None),
-    };
-    let character_count = match field_class {
-        FieldClass::KnownText(_) | FieldClass::KnownSafeNonText => {
-            copy_attribute(element, AX_NUMBER_OF_CHARACTERS_ATTRIBUTE)?
-                .and_then(|value| i64_value(value.as_ptr()))
-        }
-        FieldClass::SecureText | FieldClass::Unknown => None,
-    };
-    let value_len = value_length(
-        character_count,
-        value.as_deref().or(text_baseline.as_deref()),
-    );
-    Ok(Some(FocusedElementSnapshot {
-        window,
-        element: NativeElement {
-            role,
-            subrole,
-            title: copy_string(element, "AXTitle")?,
-            value,
-            value_len,
-        },
-        text_baseline,
-        field_class,
-    }))
-}
-
-pub(super) const fn focused_element_is_excluded(field_class: FieldClass) -> bool {
-    matches!(field_class, FieldClass::SecureText)
 }
 
 pub(super) fn capture_value_snapshot(

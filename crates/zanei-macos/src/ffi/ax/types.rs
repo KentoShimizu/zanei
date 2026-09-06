@@ -40,6 +40,7 @@ pub(crate) struct NativeElement {
     pub(crate) title: Option<String>,
     pub(crate) value: Option<String>,
     pub(crate) value_len: Option<u64>,
+    pub(crate) capture_decision: Option<Box<CaptureDecision>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,7 +49,6 @@ pub(crate) struct NativeUiValueEvent {
     pub(crate) window: Option<NativeWindow>,
     pub(crate) element: NativeElement,
     pub(crate) text: Option<String>,
-    pub(crate) capture_decision: Option<CaptureDecision>,
     pub(crate) observed_at: OffsetDateTime,
 }
 

@@ -375,6 +375,7 @@ impl AppObserver {
         if field_class != FieldClass::KnownSafeNonText {
             target.context.element.value = None;
             target.context.element.value_len = None;
+            target.context.element.capture_decision = None;
         }
         target.context.capture.transition_class(
             self.context.pid,
