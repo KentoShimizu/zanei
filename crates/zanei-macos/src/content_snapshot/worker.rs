@@ -247,6 +247,7 @@ fn process_candidate<F>(
         PrivacyScope::ContentSnapshot,
         &candidate.target.app.raw_app(),
         Some(key.window_id),
+        candidate.target.window.title.as_deref(),
     );
     if !initial_decision.is_allowed() {
         trace_candidate(&candidate, "app_scope", 0, Duration::ZERO, 0, false, None);

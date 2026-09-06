@@ -316,7 +316,7 @@ fn eventtap_chrome_body_without_version_is_suppressed() {
         bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
         pid: Some(501),
     };
-    let decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let decision = policy.decision(PrivacyScope::TextContent, &app, Some(11), None);
     assert!(!decision.is_allowed());
     assert_eq!(decision.chrome_version(), None);
     let event = RawEvent {
@@ -371,7 +371,7 @@ fn v3_2_send_time_decision_overrides_stale_allow() {
         pid: Some(context.app.pid),
     };
     let policy = capture_policy();
-    let earlier = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let earlier = policy.decision(PrivacyScope::TextContent, &app, Some(11), None);
     let event = raw_event(
         "input.key",
         &context,
@@ -411,7 +411,8 @@ fn v3_2_send_time_decision_overrides_stale_allow() {
     assert_eq!(data.text, None);
 
     let clipboard_policy = capture_policy();
-    let clipboard_decision = clipboard_policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let clipboard_decision =
+        clipboard_policy.decision(PrivacyScope::TextContent, &app, Some(11), None);
     let mut clipboard = ClipboardTracker::new(1);
     let observed_at = ClipboardObservationTime {
         monotonic: Instant::now(),
@@ -456,7 +457,7 @@ fn v3_2_send_time_decision_overrides_stale_allow() {
 
     let deny_then_allow = capture_policy();
     deny_test_app_text(&deny_then_allow);
-    let earlier_deny = deny_then_allow.decision(PrivacyScope::TextContent, &app, Some(11));
+    let earlier_deny = deny_then_allow.decision(PrivacyScope::TextContent, &app, Some(11), None);
     deny_then_allow.replace_filter(FilterConfig::default());
     assert!(
         !deny_then_allow
@@ -464,6 +465,7 @@ fn v3_2_send_time_decision_overrides_stale_allow() {
                 PrivacyScope::TextContent,
                 &app,
                 Some(11),
+                None,
                 Some(&earlier_deny),
             )
             .is_allowed()

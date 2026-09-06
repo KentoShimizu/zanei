@@ -46,7 +46,12 @@ pub(super) fn raw_event(
         pid: Some(context.app.pid),
     };
     let capture_context = capture_policy
-        .decision(PrivacyScope::TextContent, &app, window.id)
+        .decision(
+            PrivacyScope::TextContent,
+            &app,
+            window.id,
+            window.title.as_deref(),
+        )
         .capture_context();
     Some(RawEvent {
         observed_at: Some(observed_at),
