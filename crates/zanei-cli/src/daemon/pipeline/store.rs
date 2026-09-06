@@ -3,13 +3,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use zanei_core::{schema::Event, store::DaemonState};
+use zanei_core::{
+    privacy::{PendingEvent, PrivacyFilter},
+    schema::Event,
+    store::DaemonState,
+};
 
 use super::super::DaemonError;
 use super::SharedStoreWriter;
 
-/// A batch is flushed before its serialized representation can grow beyond
-/// 4 MiB, bounding retained memory while the SQLite store is unavailable.
+/// Flush when events plus their original policy selectors reach 4 MiB.
+/// The current normalization group can cross this threshold; backoff stops further intake.
 pub(crate) const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 const RETRY_DELAYS: [Duration; 5] = [
@@ -51,7 +55,7 @@ impl StorePersistence for LockedStore {
 
 pub(super) struct StoreDestination {
     writer: Box<dyn StorePersistence>,
-    batch: Vec<Event>,
+    batch: Vec<PendingEvent>,
     batch_bytes: usize,
     latest_state: Option<DaemonState>,
     state_dirty: bool,
@@ -79,18 +83,27 @@ impl StoreDestination {
         }
     }
 
-    pub(super) fn write(&mut self, event: Event) -> Result<bool, DaemonError> {
-        let event_bytes = serde_json::to_vec(&event)
-            .map_err(|error| {
-                DaemonError::Store(zanei_core::store::StoreError::InvalidJson {
-                    field: "pipeline batch event",
-                    source: error,
-                })
-            })?
-            .len();
+    pub(super) fn write(&mut self, event: PendingEvent) -> Result<bool, DaemonError> {
+        let event_bytes = event.retained_bytes().map_err(|error| {
+            DaemonError::Store(zanei_core::store::StoreError::InvalidJson {
+                field: "pipeline batch event",
+                source: error,
+            })
+        })?;
         self.batch_bytes = self.batch_bytes.saturating_add(event_bytes);
         self.batch.push(event);
         Ok(self.batch_bytes >= MAX_BATCH_BYTES)
+    }
+
+    pub(super) fn replace_filter(&mut self, filter: &PrivacyFilter) -> Result<(), DaemonError> {
+        let batch = std::mem::take(&mut self.batch);
+        self.batch_bytes = 0;
+        for event in batch {
+            if let Some(event) = filter.reprocess(event) {
+                self.write(event)?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn batch_len(&self) -> usize {
@@ -147,7 +160,12 @@ impl StoreDestination {
             .state_dirty
             .then_some(self.latest_state.as_ref())
             .flatten();
-        match self.writer.persist(&self.batch, state) {
+        let events: Vec<_> = self
+            .batch
+            .iter()
+            .map(|pending| pending.event().clone())
+            .collect();
+        match self.writer.persist(&events, state) {
             Ok(_) => {
                 self.batch.clear();
                 self.batch_bytes = 0;
@@ -343,8 +361,8 @@ mod tests {
         }
     }
 
-    fn event(_label: &str) -> Event {
-        Event {
+    fn event(_label: &str) -> zanei_core::privacy::PendingEvent {
+        let event = Event {
             version: 1,
             id: "evt_01J00000000000000000000000".to_owned(),
             ts: "2026-08-17T00:00:00Z".to_owned(),
@@ -363,6 +381,12 @@ mod tests {
                 applied: false,
                 rules: Vec::new(),
             },
-        }
+        };
+        zanei_core::privacy::PrivacyFilter::new(Default::default())
+            .process_pending(zanei_core::normalize::NormalizedEvent::new(
+                event,
+                Default::default(),
+            ))
+            .expect("allowed event")
     }
 }

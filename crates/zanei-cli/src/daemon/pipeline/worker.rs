@@ -13,8 +13,7 @@ use std::{
 use zanei_collector::RawEvent;
 use zanei_core::{
     normalize::{NormalizedEvent, Normalizer},
-    privacy::PrivacyFilter,
-    schema::Event,
+    privacy::{PendingEvent, PrivacyFilter},
     sink::{Sink, StreamSink},
     store::DaemonState,
 };
@@ -92,15 +91,21 @@ impl Worker {
             }
             self.destination.retry_if_due(Instant::now());
             self.sync_store_degraded()?;
-            if self.destination.accepts_intake() {
-                for acknowledge in self.flush_waiters.drain(..) {
-                    let _ = acknowledge.send(());
-                }
-                if self.shutdown_requested {
-                    return Ok(());
-                }
-            } else {
+            if !self.destination.accepts_intake() {
                 thread::sleep(CONTROL_POLL_INTERVAL);
+                continue;
+            }
+            if self.shutdown_requested || !self.flush_waiters.is_empty() {
+                let drained = self.drain_raw()?;
+                self.flush_all()?;
+                if drained && self.destination.accepts_intake() {
+                    for acknowledge in self.flush_waiters.drain(..) {
+                        let _ = acknowledge.send(());
+                    }
+                    if self.shutdown_requested {
+                        return Ok(());
+                    }
+                }
                 continue;
             }
 
@@ -112,8 +117,7 @@ impl Worker {
                 Ok(raw) => self.process(raw)?,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.flush_all()?;
-                    return Ok(());
+                    self.shutdown_requested = true;
                 }
             }
             if self.last_flush.elapsed() >= self.batch_interval {
@@ -125,21 +129,30 @@ impl Worker {
     fn handle_control(&mut self, control: Control) -> Result<(), DaemonError> {
         match control {
             Control::Flush(acknowledge) => {
-                self.drain_raw()?;
-                self.flush_all()?;
-                if self.destination.accepts_intake() {
-                    let _ = acknowledge.send(());
-                } else {
-                    self.flush_waiters.push(acknowledge);
-                }
+                self.flush_waiters.push(acknowledge);
             }
             Control::ReplaceFilterAndFlush {
                 filter,
                 acknowledge,
             } => {
+                // Pending normalization has not crossed privacy yet. Apply both revisions
+                // before persistence so a relaxation cannot restore an old suppressed body.
+                let pending = self.normalizer.flush();
+                let pending: Vec<_> = pending
+                    .into_iter()
+                    .filter_map(|event| self.filter.process_pending(event))
+                    .filter_map(|event| filter.reprocess(event))
+                    .collect();
                 self.filter = filter;
-                self.drain_raw()?;
-                self.flush_all()?;
+                if let Destination::Store(store) = &mut self.destination {
+                    store.replace_filter(&self.filter)?;
+                }
+                for event in pending {
+                    self.destination.write(event)?;
+                }
+                self.destination.flush(Instant::now())?;
+                self.sync_store_degraded()?;
+                // This acknowledges policy application, including during store backoff.
                 let _ = acknowledge.send(());
             }
             Control::Heartbeat(state) => {
@@ -152,19 +165,24 @@ impl Worker {
                 self.sync_store_degraded()?;
             }
             Control::Shutdown => {
-                self.drain_raw()?;
-                self.flush_all()?;
                 self.shutdown_requested = true;
             }
         }
         Ok(())
     }
 
-    fn drain_raw(&mut self) -> Result<(), DaemonError> {
-        while let Ok(raw) = self.raw_receiver.try_recv() {
+    fn drain_raw(&mut self) -> Result<bool, DaemonError> {
+        // Bound each control turn and stop immediately when persistence enters backoff.
+        for _ in 0..MAX_BATCH_EVENTS {
+            if !self.destination.accepts_intake() {
+                return Ok(false);
+            }
+            let Ok(raw) = self.raw_receiver.try_recv() else {
+                return Ok(true);
+            };
             self.process(raw)?;
         }
-        Ok(())
+        Ok(false)
     }
 
     fn process(&mut self, raw: RawEvent) -> Result<(), DaemonError> {
@@ -185,7 +203,7 @@ impl Worker {
 
     fn write_events(&mut self, events: Vec<NormalizedEvent>) -> Result<(), DaemonError> {
         for event in events {
-            let event = self.filter.process(event);
+            let event = self.filter.process_pending(event);
             if let Some(event) = event {
                 self.destination.write(event)?;
             }
@@ -251,11 +269,11 @@ impl Worker {
 }
 
 impl Destination {
-    fn write(&mut self, event: Event) -> Result<(), DaemonError> {
+    fn write(&mut self, event: PendingEvent) -> Result<(), DaemonError> {
         match self {
             Self::Store(store) => store.write(event).map(|_| ()),
             Self::Stream(sink) => {
-                sink.write(&event)?;
+                sink.write(event.event())?;
                 sink.flush().map_err(DaemonError::from)
             }
         }
@@ -311,3 +329,7 @@ impl Destination {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "policy_transition.rs"]
+mod policy_transition;

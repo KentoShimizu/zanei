@@ -23,20 +23,19 @@ fn rule_marker(rule: RedactorKind) -> &'static str {
 
 pub(crate) fn redact_event(mut event: Event, configured_rules: &[RedactorKind]) -> Event {
     let mut seen = HashSet::with_capacity(configured_rules.len());
-    let mut fired = event
-        .is_truncated()
-        .then(|| Event::SIZE_LIMIT_RULE.to_owned())
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mut fired = event.redaction.rules.clone();
 
     for &rule in configured_rules {
-        if seen.insert(rule) && apply_rule_to_event(&mut event, rule) {
+        if seen.insert(rule)
+            && apply_rule_to_event(&mut event, rule)
+            && !fired.iter().any(|fired| fired == rule_name(rule))
+        {
             fired.push(rule_name(rule).to_owned());
         }
     }
 
     event.redaction = Redaction {
-        applied: !fired.is_empty(),
+        applied: event.redaction.applied || !fired.is_empty(),
         rules: fired,
     };
     event
@@ -209,20 +208,12 @@ mod tests {
     }
 
     #[test]
-    fn event_without_matches_has_consistent_empty_redaction() {
-        let mut event = browser_event("https://example.com", Some("Public"), None);
-        event.redaction = Redaction {
-            applied: true,
-            rules: vec!["stale".to_owned()],
-        };
+    fn reapplying_rules_keeps_prior_redaction_without_duplicates() {
+        let event = browser_event("https://example.com", Some("alice@example.com"), None);
         let redacted = redact_event(event, &[RedactorKind::Email]);
-        assert_eq!(
-            redacted.redaction,
-            Redaction {
-                applied: false,
-                rules: Vec::new(),
-            }
-        );
+        let repeated = redact_event(redacted.clone(), &[RedactorKind::Email]);
+        assert_eq!(repeated, redacted);
+        assert_eq!(repeated.redaction.rules, ["email"]);
     }
 
     #[test]
