@@ -55,7 +55,7 @@ impl FakeValueNotifications {
     }
 }
 
-fn fake_field_snapshot(role: Option<&str>) -> ValueFieldSnapshot {
+pub(in crate::ffi::ax) fn fake_field_snapshot(role: Option<&str>) -> ValueFieldSnapshot {
     ValueFieldSnapshot {
         role: role.map(str::to_owned),
         subrole: None,
@@ -770,7 +770,7 @@ fn failed_focus_clears_current_and_defers_previous_value() {
     assert_eq!(event.text.as_deref(), Some("x"));
 }
 
-fn ide_policy(missing: &str) -> crate::CapturePolicy {
+pub(in crate::ffi::ax) fn ide_policy(missing: &str) -> crate::CapturePolicy {
     use zanei_core::config::capture_policy::{
         BrowserMode, BrowserPolicy, CapturePolicyConfig, IdePolicy, PolicyAction,
     };
@@ -804,7 +804,7 @@ fn ide_policy(missing: &str) -> crate::CapturePolicy {
     crate::CapturePolicy::new(chrome, filter, None)
 }
 
-fn ide_app() -> zanei_core::schema::App {
+pub(in crate::ffi::ax) fn ide_app() -> zanei_core::schema::App {
     zanei_core::schema::App {
         name: "Cursor".to_owned(),
         bundle_id: Some("com.todesktop.230313mzl4w4u92".to_owned()),
@@ -812,7 +812,7 @@ fn ide_app() -> zanei_core::schema::App {
     }
 }
 
-fn titled_window(title: Option<&str>) -> Option<super::NativeWindow> {
+pub(in crate::ffi::ax) fn titled_window(title: Option<&str>) -> Option<super::NativeWindow> {
     Some(super::NativeWindow {
         id: Some(11),
         title: title.map(str::to_owned),
@@ -838,6 +838,8 @@ fn value_and_focus_out_reads_bind_actual_title_and_discard_previous_surface() {
             (Some("main.rs"), None, "disabled", true),
             (Some("main.rs"), Some(".env"), "disabled", true),
             (Some(".env"), Some("main.rs"), "disabled", true),
+            (Some("main.rs"), Some("main.rs"), "post_changed", true),
+            (Some("main.rs"), Some("main.rs"), "post_error", true),
         ] {
             let now = Instant::now();
             let (publisher, mut authorizations) = input_authorization_channel();
@@ -873,6 +875,8 @@ fn value_and_focus_out_reads_bind_actual_title_and_discard_previous_surface() {
                 );
             }
             let reads = Cell::new(0);
+            let window_reads = Cell::new(0);
+            let post_rejected = matches!(missing, "post_changed" | "post_error");
             let policy = ide_policy(missing);
             let (snapshot, decision) = capture_value_snapshot_with(
                 &mut context.window,
@@ -884,7 +888,14 @@ fn value_and_focus_out_reads_bind_actual_title_and_discard_previous_surface() {
                         .capture
                         .transition_class(7, 1, FieldClass::Unknown, &mut authorizations)
                 },
-                || Ok(titled_window(actual)),
+                || {
+                    window_reads.set(window_reads.get() + 1);
+                    match (reads.get(), missing) {
+                        (1, "post_changed") => Ok(titled_window(Some(".env"))),
+                        (1, "post_error") => Err(native_error("AXWindow", -25_204)),
+                        _ => Ok(titled_window(actual)),
+                    }
+                },
                 |allowed| {
                     value_snapshot_with(
                         fake_field_snapshot(Some("AXTextArea")),
@@ -898,16 +909,39 @@ fn value_and_focus_out_reads_bind_actual_title_and_discard_previous_surface() {
                 },
             );
             assert_eq!(reads.get(), usize::from(allowed));
-            assert_eq!(snapshot.value.as_deref(), allowed.then_some("current body"));
-            assert_eq!(context.window, titled_window(actual));
+            assert_eq!(window_reads.get(), 1 + usize::from(allowed));
+            assert_eq!(
+                snapshot.value.as_deref(),
+                (allowed && !post_rejected).then_some("current body")
+            );
+            let expected_window = match missing {
+                "post_changed" => titled_window(Some(".env")),
+                "post_error" => None,
+                _ => titled_window(actual),
+            };
+            assert_eq!(context.window, expected_window);
+            if post_rejected {
+                assert_eq!(snapshot.value_len, None);
+                assert_eq!(snapshot.failure.is_some(), missing == "post_error");
+                assert!(!authorizations.matching_for_test(7, 1, now));
+            }
             assert_eq!(
                 decision.as_ref().map(crate::CaptureDecision::is_allowed),
-                Some(allowed)
+                (!post_rejected).then_some(allowed)
             );
             assert!(
                 context.capture.flush_pending(&mut authorizations).is_none(),
                 "old body must not be rebound to current title"
             );
+            if focus_out && snapshot.failure.is_some() {
+                assert!(matches!(
+                    context
+                        .capture
+                        .resolve_unreadable_focus_change(&mut authorizations),
+                    crate::text_capture::FocusChangeCapture::Emit(None)
+                ));
+                continue;
+            }
             let observation = context.observation(
                 7,
                 now + VALUE_DEBOUNCE,
@@ -929,6 +963,10 @@ fn value_and_focus_out_reads_bind_actual_title_and_discard_previous_surface() {
                         .observe(observation, &mut authorizations)
                         .is_none()
                 );
+            }
+            if post_rejected {
+                assert!(context.capture.flush_pending(&mut authorizations).is_none());
+                continue;
             }
             let emission = context
                 .capture
@@ -1171,5 +1209,44 @@ fn dirty_title_changes_preserve_input_but_other_surfaces_reset_it() {
             "{old:?} -> {current:?}"
         );
         assert_eq!(event.window, acquired);
+    }
+}
+
+#[test]
+fn post_read_dirty_marker_keeps_body_and_read_decision_with_latest_raw_title() {
+    use super::element::{capture_value_snapshot_with, value_snapshot_with};
+    for (before, after) in [("main.rs", "● main.rs"), ("• main.rs", "main.rs")] {
+        let policy = ide_policy("block");
+        let app = ide_app();
+        let mut window = titled_window(Some(before));
+        let expected_decision = policy.decision(
+            zanei_core::privacy::PrivacyScope::TextContent,
+            &app,
+            Some(11),
+            Some(before),
+        );
+        let read = Cell::new(false);
+        let (snapshot, decision) = capture_value_snapshot_with(
+            &mut window,
+            &policy,
+            &app,
+            true,
+            || panic!("dirty marker must preserve input authorization"),
+            || Ok(titled_window(Some(if read.get() { after } else { before }))),
+            |allowed| {
+                value_snapshot_with(
+                    fake_field_snapshot(Some("AXTextArea")),
+                    allowed,
+                    || {
+                        read.set(true);
+                        Ok(Some("edited".to_owned()))
+                    },
+                    || Ok(Some(6)),
+                )
+            },
+        );
+        assert_eq!(snapshot.value.as_deref(), Some("edited"));
+        assert_eq!(decision, Some(expected_decision));
+        assert_eq!(window, titled_window(Some(after)));
     }
 }

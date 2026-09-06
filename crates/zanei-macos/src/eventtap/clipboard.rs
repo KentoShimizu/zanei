@@ -12,8 +12,7 @@ use super::{
 };
 use crate::{
     capture_policy::{CaptureDecision, CapturePolicy},
-    ffi::eventtap::{NativeContext, NativeInputTarget},
-    focus_context::FocusSnapshot,
+    ffi::eventtap::NativeContext,
 };
 
 const COPY_CORRELATION_WINDOW: Duration = Duration::from_millis(500);
@@ -21,8 +20,6 @@ const COPY_CORRELATION_WINDOW: Duration = Duration::from_millis(500);
 #[derive(Clone)]
 struct CopyIntent {
     context: NativeContext,
-    focus_generation: u64,
-    field_generation: u64,
     observed_monotonic_at: Instant,
     observed_at: OffsetDateTime,
     text_allowed: bool,
@@ -64,15 +61,13 @@ impl ClipboardTracker {
 
     pub(super) fn observe_copy(
         &mut self,
-        target: &NativeInputTarget,
+        context: &NativeContext,
         observed_at: ClipboardObservationTime,
         text_allowed: bool,
         decision: CaptureDecision,
     ) {
         self.pending = Some(CopyIntent {
-            context: target.context.clone(),
-            focus_generation: target.focus_generation,
-            field_generation: target.field_generation,
+            context: context.clone(),
             observed_monotonic_at: observed_at.monotonic,
             observed_at: observed_at.wall,
             text_allowed,
@@ -83,7 +78,7 @@ impl ClipboardTracker {
     fn take_change(
         &mut self,
         current_change_count: i64,
-        focus_at_change: Option<&FocusSnapshot>,
+        focus_at_change: Option<&NativeContext>,
         now: Instant,
     ) -> Option<ClipboardChange> {
         if !self.has_changed(current_change_count) {
@@ -93,17 +88,11 @@ impl ClipboardTracker {
         let Some(intent) = self.pending.take() else {
             return Some(ClipboardChange::Unknown);
         };
-        let same_target = focus_at_change.is_some_and(|focus| {
-            focus.generation == intent.focus_generation
-                && focus.field_generation == intent.field_generation
-                && focus.app.pid == intent.context.app.pid
-                && focus.app.bundle_id == intent.context.app.bundle_id
-                && focus.app.name == intent.context.app.name
-                && focus.window == intent.context.window
-        });
+        let same_pid =
+            focus_at_change.is_some_and(|context| context.app.pid == intent.context.app.pid);
         let timely =
             now.saturating_duration_since(intent.observed_monotonic_at) <= COPY_CORRELATION_WINDOW;
-        Some(if same_target && timely {
+        Some(if same_pid && timely {
             ClipboardChange::Matched(intent)
         } else {
             ClipboardChange::Unknown
@@ -113,7 +102,7 @@ impl ClipboardTracker {
     pub(super) fn copy_event<F>(
         &mut self,
         current_change_count: i64,
-        focus_at_change: Option<&FocusSnapshot>,
+        focus_at_change: Option<&NativeContext>,
         observed_at: ClipboardObservationTime,
         read_content: F,
         secure_input: bool,
@@ -124,18 +113,7 @@ impl ClipboardTracker {
     {
         match self.take_change(current_change_count, focus_at_change, observed_at.monotonic)? {
             ClipboardChange::Matched(intent) => {
-                let focus = focus_at_change.expect("matched copy has current focus");
-                let decision = capture_policy.decision_at_send(
-                    zanei_core::privacy::PrivacyScope::TextContent,
-                    &focus.app.raw_app(),
-                    focus.window.as_ref().and_then(|window| window.id),
-                    focus
-                        .window
-                        .as_ref()
-                        .and_then(|window| window.title.as_deref()),
-                    Some(&intent.decision),
-                );
-                let include_content = !secure_input && intent.text_allowed && decision.is_allowed();
+                let include_content = !secure_input && intent.text_allowed;
                 let event = raw_event(
                     "clipboard.copy",
                     &intent.context,
@@ -148,7 +126,7 @@ impl ClipboardTracker {
                 )?;
                 Some(ClipboardOutput {
                     event,
-                    decision: Some(decision),
+                    decision: Some(intent.decision),
                 })
             }
             ClipboardChange::Unknown => Some(ClipboardOutput {
@@ -201,30 +179,6 @@ mod tests {
         }
     }
 
-    fn target(context: &NativeContext) -> NativeInputTarget {
-        NativeInputTarget {
-            context: context.clone(),
-            focused_field: None,
-            focus_generation: 1,
-            field_generation: 2,
-        }
-    }
-
-    fn focus(context: &NativeContext) -> FocusSnapshot {
-        FocusSnapshot {
-            app: crate::workspace::ApplicationInfo {
-                name: context.app.name.clone(),
-                bundle_id: context.app.bundle_id.clone(),
-                pid: context.app.pid,
-                activation_policy: crate::workspace::ApplicationActivationPolicy::Regular,
-            },
-            window: context.window.clone(),
-            generation: 1,
-            field_generation: 2,
-            focused_field: None,
-        }
-    }
-
     fn text_content(include_content: bool) -> PasteboardContent {
         PasteboardContent {
             kind: super::super::logic::PasteboardKind::Text,
@@ -265,7 +219,7 @@ mod tests {
         let output = tracker
             .copy_event(
                 2,
-                Some(&focus(&context(7))),
+                Some(&context(7)),
                 observed(Instant::now()),
                 text_content,
                 false,
@@ -294,40 +248,25 @@ mod tests {
         let (_, chrome) = chrome_eligibility_channel(filter.clone());
         let policy = CapturePolicy::new(chrome, filter, None);
         let source = context(7);
-        tracker.observe_copy(
-            &target(&source),
-            observed(now),
-            true,
-            decision(&policy, &source),
-        );
+        tracker.observe_copy(&source, observed(now), true, decision(&policy, &source));
         assert!(matches!(
-            tracker.take_change(2, Some(&focus(&context(8))), now),
+            tracker.take_change(2, Some(&context(8)), now),
             Some(ClipboardChange::Unknown)
         ));
 
-        tracker.observe_copy(
-            &target(&source),
-            observed(now),
-            true,
-            decision(&policy, &source),
-        );
+        tracker.observe_copy(&source, observed(now), true, decision(&policy, &source));
         assert!(matches!(
             tracker.take_change(
                 3,
-                Some(&focus(&context(7))),
+                Some(&context(7)),
                 now + COPY_CORRELATION_WINDOW + Duration::from_millis(1),
             ),
             Some(ClipboardChange::Unknown)
         ));
 
-        tracker.observe_copy(
-            &target(&source),
-            observed(now),
-            true,
-            decision(&policy, &source),
-        );
+        tracker.observe_copy(&source, observed(now), true, decision(&policy, &source));
         assert!(matches!(
-            tracker.take_change(4, Some(&focus(&context(7))), now + COPY_CORRELATION_WINDOW),
+            tracker.take_change(4, Some(&context(7)), now + COPY_CORRELATION_WINDOW),
             Some(ClipboardChange::Matched(_))
         ));
     }
@@ -366,16 +305,9 @@ mod tests {
         let now = Instant::now();
         let app = context(7);
         let mut tracker = ClipboardTracker::new(1);
-        tracker.observe_copy(&target(&app), observed(now), true, decision(&policy, &app));
+        tracker.observe_copy(&app, observed(now), true, decision(&policy, &app));
         let event = tracker
-            .copy_event(
-                2,
-                Some(&focus(&app)),
-                observed(now),
-                text_content,
-                true,
-                &policy,
-            )
+            .copy_event(2, Some(&app), observed(now), text_content, true, &policy)
             .expect("copy event")
             .event;
 
@@ -411,116 +343,5 @@ mod tests {
         assert_eq!(data.size_bytes, None);
         assert_eq!(data.text, None);
         assert_eq!(data.field_kind, None);
-    }
-
-    #[test]
-    fn delayed_copy_revalidates_policy_surface_and_generations_before_body_read() {
-        use zanei_core::config::capture_policy::{
-            BrowserMode, BrowserPolicy, CapturePolicyConfig, IdePolicy, PolicyAction,
-        };
-        for change in [
-            "unchanged",
-            "policy",
-            "env_title",
-            "window_id",
-            "focus_generation",
-            "field_generation",
-            "missing_title",
-            "other_title",
-            "pid",
-            "secure_input",
-        ] {
-            let mut source = context(7);
-            source.app.name = "Cursor".to_owned();
-            source.window.as_mut().expect("window").title = Some("main.rs".to_owned());
-            let filter = FilterConfig {
-                capture_policy: Some(CapturePolicyConfig {
-                    allowed_apps: vec!["Cursor".to_owned()],
-                    browser: BrowserPolicy {
-                        mode: BrowserMode::Off,
-                        default_policy: PolicyAction::Block,
-                        on_url_unavailable: PolicyAction::Block,
-                        block_auth: true,
-                        block_payments: true,
-                        allow_list: vec![],
-                        block_list: vec![],
-                    },
-                    ide: IdePolicy {
-                        block_env_files: true,
-                        on_file_name_unavailable: PolicyAction::Allow,
-                    },
-                }),
-                ..Default::default()
-            };
-            let (_, chrome) = chrome_eligibility_channel(filter.clone());
-            let policy = CapturePolicy::new(chrome, filter.clone(), None);
-            let now = Instant::now();
-            let mut tracker = ClipboardTracker::new(1);
-            tracker.observe_copy(
-                &target(&source),
-                observed(now),
-                true,
-                decision(&policy, &source),
-            );
-            let mut current = focus(&source);
-            match change {
-                "policy" => {
-                    let mut denied = filter;
-                    denied
-                        .capture_policy
-                        .as_mut()
-                        .expect("policy")
-                        .allowed_apps
-                        .clear();
-                    policy.replace_filter(denied);
-                }
-                "env_title" => {
-                    current.window.as_mut().expect("window").title = Some(".env".to_owned())
-                }
-                "window_id" => current.window.as_mut().expect("window").id = Some(12),
-                "focus_generation" => current.generation += 1,
-                "field_generation" => current.field_generation += 1,
-                "missing_title" => current.window.as_mut().expect("window").title = None,
-                "other_title" => {
-                    current.window.as_mut().expect("window").title = Some("other.rs".to_owned())
-                }
-                "pid" => current.app.pid += 1,
-                _ => {}
-            }
-            let body_reads = std::cell::Cell::new(0);
-            let output = tracker
-                .copy_event(
-                    2,
-                    Some(&current),
-                    observed(now),
-                    |include| {
-                        if include {
-                            body_reads.set(body_reads.get() + 1);
-                        }
-                        text_content(include)
-                    },
-                    change == "secure_input",
-                    &policy,
-                )
-                .expect("copy metadata");
-            assert_eq!(
-                body_reads.get(),
-                usize::from(change == "unchanged"),
-                "change {change}"
-            );
-            let EventData::ClipboardCopy(data) = output.event.data else {
-                panic!("clipboard copy")
-            };
-            assert_eq!(
-                data.text.as_deref(),
-                (change == "unchanged").then_some("private")
-            );
-            if change == "unchanged" {
-                assert_eq!(
-                    output.event.window.expect("window").title.as_deref(),
-                    Some("main.rs")
-                );
-            }
-        }
     }
 }

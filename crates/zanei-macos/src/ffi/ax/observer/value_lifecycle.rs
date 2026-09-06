@@ -39,6 +39,38 @@ impl AppObserver {
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
+        self.value_changed_events_with(
+            notification_at,
+            observed_at,
+            secure_input,
+            authorizations,
+            |element, window, policy, app, enabled, secure, changed| {
+                capture_value_snapshot(element, window, policy, app, enabled, secure, changed)
+            },
+            Self::reconcile_current_value_notification,
+        )
+    }
+
+    fn value_changed_events_with(
+        &mut self,
+        notification_at: Instant,
+        observed_at: OffsetDateTime,
+        secure_input: bool,
+        authorizations: &mut InputAuthorizations,
+        capture: impl FnOnce(
+            crate::ffi::ax::cf::CfRef,
+            &mut Option<crate::ffi::ax::NativeWindow>,
+            &crate::CapturePolicy,
+            &zanei_core::schema::App,
+            bool,
+            bool,
+            &mut dyn FnMut(),
+        ) -> (
+            crate::ffi::ax::element::ValueSnapshot,
+            Option<crate::CaptureDecision>,
+        ),
+        reconcile: impl FnOnce(&mut Self, FieldClass) -> bool,
+    ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
         let failures = self.failures.clone();
         let degraded = self.degraded.clone();
         let pid = i64::from(self.context.pid);
@@ -63,14 +95,14 @@ impl AppObserver {
             }
             let context = &mut target.context;
             let previous_class = context.field_class;
-            let (snapshot, capture_decision) = capture_value_snapshot(
+            let (snapshot, capture_decision) = capture(
                 target.element.as_ptr(),
                 &mut context.window,
                 &self.capture_policy,
                 &self.app,
                 self.capture_text_content,
                 secure_input,
-                || {
+                &mut || {
                     context.capture.transition_class(
                         self.context.pid,
                         context.generation,
@@ -79,8 +111,10 @@ impl AppObserver {
                     )
                 },
             );
-            let registration_class =
-                (!secure_input && snapshot.failure.is_none()).then_some(snapshot.field_class);
+            let registration_class = (!secure_input
+                && snapshot.failure.is_none()
+                && (!self.capture_text_content || capture_decision.is_some()))
+            .then_some(snapshot.field_class);
             crate::trace::trace!(
                 "component=ax phase=value action=observe pid={} target_generation={} field_class={} value_len={} degraded={}",
                 self.context.pid,
@@ -115,7 +149,7 @@ impl AppObserver {
         };
         let mut events = Vec::new();
         if let Some(field_class) = registration_class {
-            self.reconcile_current_value_notification(field_class);
+            reconcile(self, field_class);
         }
         if class_changed {
             events.push(self.focus_event(observed_at));
@@ -546,3 +580,7 @@ fn track_snapshot(
         failures.recover(Some(pid), site);
     }
 }
+
+#[cfg(test)]
+#[path = "value_lifecycle/tests.rs"]
+mod tests;

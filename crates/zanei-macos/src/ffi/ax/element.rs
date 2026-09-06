@@ -152,7 +152,7 @@ pub(super) fn capture_value_snapshot(
     app: &zanei_core::schema::App,
     capture_enabled: bool,
     secure_input: bool,
-    surface_changed: impl FnOnce(),
+    surface_changed: impl FnMut(),
 ) -> (ValueSnapshot, Option<crate::CaptureDecision>) {
     capture_value_snapshot_with(
         window,
@@ -175,17 +175,18 @@ pub(super) fn capture_value_snapshot_with(
     policy: &crate::CapturePolicy,
     app: &zanei_core::schema::App,
     capture_enabled: bool,
-    surface_changed: impl FnOnce(),
-    read_window: impl FnOnce() -> Result<Option<NativeWindow>, NativeAxError>,
+    mut surface_changed: impl FnMut(),
+    mut read_window: impl FnMut() -> Result<Option<NativeWindow>, NativeAxError>,
     read_value: impl FnOnce(bool) -> ValueSnapshot,
 ) -> (ValueSnapshot, Option<crate::CaptureDecision>) {
     if !capture_enabled {
         return (read_value(false), None);
     }
-    if matches!(
+    let is_ide = matches!(
         app.name.trim().to_lowercase().as_str(),
         "cursor" | "visual studio code" | "code"
-    ) {
+    );
+    if is_ide {
         match read_window() {
             Ok(current) => {
                 if !same_value_surface(window.as_ref(), current.as_ref()) {
@@ -210,6 +211,27 @@ pub(super) fn capture_value_snapshot_with(
         window.as_ref().and_then(|window| window.title.as_deref()),
     );
     let snapshot = read_value(decision.is_allowed());
+    if is_ide && decision.is_allowed() {
+        let failure = match read_window() {
+            Ok(current) if same_value_surface(window.as_ref(), current.as_ref()) => {
+                *window = current;
+                return (snapshot, Some(decision));
+            }
+            Ok(current) => {
+                *window = current;
+                None
+            }
+            Err(error) => {
+                *window = None;
+                Some(error)
+            }
+        };
+        surface_changed();
+        return (
+            suppressed_value_snapshot(FieldClass::Unknown, None, None, failure),
+            None,
+        );
+    }
     (snapshot, Some(decision))
 }
 
