@@ -177,7 +177,8 @@ mod tests {
                 url: "https://v1.example/".to_owned(),
             },
         );
-        let read_decision = policy.decision(PrivacyScope::TextContent, &app.raw_app(), Some(11));
+        let read_decision =
+            policy.decision(PrivacyScope::TextContent, &app.raw_app(), Some(11), None);
         assert!(read_decision.is_allowed());
 
         publisher.observe(
@@ -187,7 +188,8 @@ mod tests {
                 url: "https://v2.example/".to_owned(),
             },
         );
-        let send_decision = policy.decision(PrivacyScope::TextContent, &app.raw_app(), Some(11));
+        let send_decision =
+            policy.decision(PrivacyScope::TextContent, &app.raw_app(), Some(11), None);
         assert_ne!(
             read_decision.chrome_version(),
             send_decision.chrome_version()

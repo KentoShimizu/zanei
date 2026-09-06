@@ -47,6 +47,7 @@ pub(super) fn emit(
         PrivacyScope::ContentSnapshot,
         &candidate.target.app.raw_app(),
         Some(key.window_id),
+        candidate.target.window.title.as_deref(),
         Some(earlier_decision),
     );
     if !decision.is_allowed() {

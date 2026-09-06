@@ -329,13 +329,18 @@ pub(super) fn early_text_read_allowed(
         return false;
     }
     let window_id = target.context.window.as_ref().and_then(|window| window.id);
+    let window_title = target
+        .context
+        .window
+        .as_ref()
+        .and_then(|window| window.title.as_deref());
     let app = zanei_core::schema::App {
         name: target.context.app.name.clone(),
         bundle_id: target.context.app.bundle_id.clone(),
         pid: Some(target.context.app.pid),
     };
     capture_policy
-        .input_decision(&app, window_id, target.focused_field)
+        .input_decision(&app, window_id, window_title, target.focused_field)
         .is_allowed()
 }
 
@@ -406,6 +411,10 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             let focused_field = target.focused_field;
             let field_kind = focused_field.and_then(|field| field.field_kind());
             let window_id = context.window.as_ref().and_then(|window| window.id);
+            let window_title = context
+                .window
+                .as_ref()
+                .and_then(|window| window.title.as_deref());
             let app = zanei_core::schema::App {
                 name: context.app.name.clone(),
                 bundle_id: context.app.bundle_id.clone(),
@@ -414,9 +423,10 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             let generation_matches = target.focus_generation == focus_context.generation()
                 && target.field_generation == focus_context.field_generation();
             let window_decision =
-                capture_policy.decision(PrivacyScope::TextContent, &app, window_id);
+                capture_policy.decision(PrivacyScope::TextContent, &app, window_id, window_title);
             let window_text_allowed = generation_matches && window_decision.is_allowed();
-            let input_decision = capture_policy.input_decision(&app, window_id, focused_field);
+            let input_decision =
+                capture_policy.input_decision(&app, window_id, window_title, focused_field);
             let input_text_allowed =
                 capture_text_content && generation_matches && input_decision.is_allowed();
             let key_event = raw_event(

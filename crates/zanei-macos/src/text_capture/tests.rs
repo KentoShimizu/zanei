@@ -68,7 +68,7 @@ fn aggregation_window_version_change_discards_earlier_fragments() {
             url: "https://v1.example/".to_owned(),
         },
     );
-    let first_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let first_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11), None);
     let (publisher, mut authorizations) = input_authorization_channel();
     let authorization = publisher
         .prepare(7, 1, now)
@@ -90,7 +90,7 @@ fn aggregation_window_version_change_discards_earlier_fragments() {
             url: "https://v2.example/".to_owned(),
         },
     );
-    let second_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let second_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11), None);
     assert_ne!(
         first_decision.chrome_version(),
         second_decision.chrome_version()
@@ -125,7 +125,7 @@ fn aggregation_window_denial_discards_the_pending_body() {
             url: "https://denied.example/".to_owned(),
         },
     );
-    let first_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let first_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11), None);
     let (publisher, mut authorizations) = input_authorization_channel();
     let authorization = publisher
         .prepare(7, 1, now)
@@ -147,7 +147,7 @@ fn aggregation_window_denial_discards_the_pending_body() {
         },
         ..FilterConfig::default()
     });
-    let denied_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11));
+    let denied_decision = policy.decision(PrivacyScope::TextContent, &app, Some(11), None);
     assert!(!denied_decision.is_allowed());
     assert_eq!(
         first_decision.chrome_version(),

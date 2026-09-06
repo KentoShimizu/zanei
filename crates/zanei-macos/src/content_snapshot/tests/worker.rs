@@ -119,6 +119,7 @@ fn filter_reload_rearms_focused_target_and_clears_pid_backoff() {
                 PrivacyScope::ContentSnapshot,
                 &target.app.raw_app(),
                 target.window.id,
+                target.window.title.as_deref(),
             )
             .is_allowed()
     );
@@ -136,6 +137,7 @@ fn filter_reload_rearms_focused_target_and_clears_pid_backoff() {
                 PrivacyScope::ContentSnapshot,
                 &target.app.raw_app(),
                 target.window.id,
+                target.window.title.as_deref(),
             )
             .is_allowed()
     );
