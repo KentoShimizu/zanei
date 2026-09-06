@@ -4,8 +4,8 @@ use zanei_core::normalize::{NormalizedEvent, Normalizer};
 use zanei_core::privacy::PrivacyFilter;
 use zanei_core::schema::{
     App, CaptureContext, CaptureSurface, ClipboardCopyData, ClipboardOrigin, ClipboardPasteData,
-    ContentKind, Element, Event, EventData, FieldKind, InputKeyData, InputKeyKind, RawEvent,
-    Redaction, UiValueData, Window,
+    ContentKind, ContentSnapshotData, ContentSnapshotTrigger, Element, Event, EventData, FieldKind,
+    InputKeyData, InputKeyKind, RawEvent, Redaction, UiValueData, Window,
 };
 
 #[test]
@@ -90,50 +90,56 @@ fn global_and_scoped_app_and_host_rules_run_in_privacy_order() {
             .is_none()
     );
 
-    let scoped_host = PrivacyFilter::new(FilterConfig {
-        text_content: ScopedFilterConfig {
-            exclude_apps: Vec::new(),
-            exclude_websites: vec!["private.example".to_owned()],
-            ..ScopedFilterConfig::default()
-        },
-        ..FilterConfig::default()
-    });
-    let event = scoped_host
-        .process(normalized_for(
-            input_text("secret"),
-            Some("api.private.example"),
-            chrome_app(),
-        ))
-        .expect("host scope keeps the event");
-    let EventData::InputKey(data) = event.data else {
-        panic!("expected input.key");
-    };
-    assert_eq!(data.text, None);
+    for browser in [chrome_app(), safari_app()] {
+        let scoped_host = PrivacyFilter::new(FilterConfig {
+            text_content: ScopedFilterConfig {
+                exclude_apps: Vec::new(),
+                exclude_websites: vec!["private.example".to_owned()],
+                ..ScopedFilterConfig::default()
+            },
+            ..FilterConfig::default()
+        });
+        let event = scoped_host
+            .process(normalized_for(
+                input_text("secret"),
+                Some("api.private.example"),
+                browser.clone(),
+            ))
+            .expect("host scope keeps the event");
+        let EventData::InputKey(data) = event.data else {
+            panic!("expected input.key");
+        };
+        assert_eq!(data.text, None);
 
-    let globally_denied_host = PrivacyFilter::new(FilterConfig {
-        exclude_websites: vec!["private.example".to_owned()],
-        text_content: ScopedFilterConfig {
-            exclude_apps: Vec::new(),
-            ..ScopedFilterConfig::default()
-        },
-        ..FilterConfig::default()
-    });
-    let event = globally_denied_host
-        .process(normalized_for(
-            input_text("secret"),
-            Some("private.example"),
-            chrome_app(),
-        ))
-        .expect("global website policy nulls non-browser text rather than hiding the fact");
-    let EventData::InputKey(data) = event.data else {
-        panic!("expected input.key");
-    };
-    assert_eq!(data.text, None);
+        let globally_denied_host = PrivacyFilter::new(FilterConfig {
+            exclude_websites: vec!["private.example".to_owned()],
+            text_content: ScopedFilterConfig {
+                exclude_apps: Vec::new(),
+                ..ScopedFilterConfig::default()
+            },
+            ..FilterConfig::default()
+        });
+        let event = globally_denied_host
+            .process(normalized_for(
+                input_text("secret"),
+                Some("private.example"),
+                browser.clone(),
+            ))
+            .expect("global website policy nulls non-browser text rather than hiding the fact");
+        let EventData::InputKey(data) = event.data else {
+            panic!("expected input.key");
+        };
+        assert_eq!(data.text, None);
+    }
 }
 
 #[test]
 fn snapshot_scope_api_and_redaction_use_the_same_context() {
     let filter = PrivacyFilter::new(FilterConfig {
+        text_content: ScopedFilterConfig {
+            exclude_apps: Vec::new(),
+            ..ScopedFilterConfig::default()
+        },
         content_snapshot: ScopedFilterConfig {
             exclude_apps: Vec::new(),
             exclude_websites: vec!["private.example".to_owned()],
@@ -142,27 +148,51 @@ fn snapshot_scope_api_and_redaction_use_the_same_context() {
         redactors: vec![RedactorKind::Email],
         ..FilterConfig::default()
     });
-    let app = chrome_app();
-    assert!(filter.content_snapshot_is_allowed(&app, Some("public.example")));
-    assert!(!filter.content_snapshot_is_allowed(&app, Some("private.example")));
-    assert!(!filter.content_snapshot_is_allowed(&app, None));
+    for app in [chrome_app(), safari_app()] {
+        assert!(filter.content_snapshot_is_allowed(&app, Some("public.example")));
+        assert!(!filter.content_snapshot_is_allowed(&app, Some("private.example")));
+        assert!(!filter.content_snapshot_is_allowed(&app, None));
+        for (host, allowed) in [
+            (Some("public.example"), true),
+            (Some("private.example"), false),
+            (None, false),
+        ] {
+            let result = filter.process(normalized_for(
+                EventData::ContentSnapshot(ContentSnapshotData::new(
+                    Some("snapshot body".to_owned()),
+                    13,
+                    None,
+                    ContentSnapshotTrigger::Settle,
+                )),
+                host,
+                app.clone(),
+            ));
+            assert_eq!(result.is_some(), allowed);
+            if let Some(event) = result {
+                let EventData::ContentSnapshot(data) = event.data else {
+                    panic!("snapshot event");
+                };
+                assert_eq!(data.text.as_deref(), Some("snapshot body"));
+            }
+        }
 
-    let redacted = filter
-        .process(normalized_for(
-            EventData::UiValue(UiValueData {
-                field_kind: Some(FieldKind::Email),
-                value_len: Some(17),
-                text: Some("alice@example.com".to_owned()),
-            }),
-            Some("public.example"),
-            chrome_app(),
-        ))
-        .expect("event passes");
-    let EventData::UiValue(data) = redacted.data else {
-        panic!("expected ui.value");
-    };
-    assert_eq!(data.text.as_deref(), Some("[REDACTED:email]"));
-    assert_eq!(redacted.redaction.rules, ["email"]);
+        let redacted = filter
+            .process(normalized_for(
+                EventData::UiValue(UiValueData {
+                    field_kind: Some(FieldKind::Email),
+                    value_len: Some(17),
+                    text: Some("alice@example.com".to_owned()),
+                }),
+                Some("public.example"),
+                app.clone(),
+            ))
+            .expect("event passes");
+        let EventData::UiValue(data) = redacted.data else {
+            panic!("expected ui.value");
+        };
+        assert_eq!(data.text.as_deref(), Some("[REDACTED:email]"));
+        assert_eq!(redacted.redaction.rules, ["email"]);
+    }
 }
 
 #[test]
@@ -333,5 +363,13 @@ fn raw_input(window_id: i64, website_host: &str) -> RawEvent {
             url: Some(format!("https://{website_host}/").into()),
             surface: None,
         },
+    }
+}
+
+fn safari_app() -> App {
+    App {
+        name: "Safari".to_owned(),
+        bundle_id: Some("com.apple.Safari".to_owned()),
+        pid: Some(7),
     }
 }

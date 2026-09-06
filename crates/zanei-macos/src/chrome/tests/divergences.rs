@@ -471,6 +471,7 @@ fn restart_seeds_current_safari_focus_after_target_set_change() {
     focus_context.activate(safari_focus.app.clone(), safari_focus.window.clone());
 
     let (eligibility, _) = chrome_eligibility_channel(both_browser_filter());
+    eligibility.set_query_targets(BTreeSet::from([BrowserTarget::Chrome]));
     assert_eq!(
         eligibility.query_targets(),
         BTreeSet::from([BrowserTarget::Chrome])
@@ -1052,7 +1053,10 @@ fn browser_queries_require_both_configuration_and_current_policy() {
             BrowserTarget::Safari,
         ),
         (
-            FilterConfig::default(),
+            FilterConfig {
+                exclude_apps: vec!["com.apple.Safari".to_owned()],
+                ..FilterConfig::default()
+            },
             BTreeSet::from([BrowserTarget::Safari]),
             BrowserTarget::Safari,
         ),
@@ -1329,7 +1333,7 @@ fn safari_window_and_url_changes_never_assert_known_tab_transitions() {
 }
 
 #[test]
-fn standalone_safari_focus_leaves_chrome_and_return_emits_again() {
+fn default_browser_focus_queries_safari_and_returning_chrome() {
     let (publisher, _) = chrome_eligibility_channel(FilterConfig::default());
     let (sender, events) = sync_channel(4);
     let metrics = ChromeMetrics::default();
@@ -1337,6 +1341,10 @@ fn standalone_safari_focus_leaves_chrome_and_return_emits_again() {
     let snapshot = browser_snapshot(BrowserTarget::Chrome, Some("https://allowed.example"));
     let mut api = FakeApi::new([
         Ok(ChromeObservation::Snapshot(snapshot.clone())),
+        Ok(ChromeObservation::Snapshot(browser_snapshot(
+            BrowserTarget::Safari,
+            Some("https://allowed.example"),
+        ))),
         Ok(ChromeObservation::Snapshot(snapshot)),
     ]);
     for (index, target) in [
@@ -1363,17 +1371,17 @@ fn standalone_safari_focus_leaves_chrome_and_return_emits_again() {
             &metrics,
             &publisher,
         );
-        if target == BrowserTarget::Chrome {
-            assert!(events.try_recv().is_ok());
-        } else {
-            assert!(events.try_recv().is_err());
-        }
+        assert!(events.try_recv().is_ok());
     }
     assert_eq!(
         api.queries
             .iter()
             .map(ChromeQuery::target)
             .collect::<Vec<_>>(),
-        [BrowserTarget::Chrome, BrowserTarget::Chrome]
+        [
+            BrowserTarget::Chrome,
+            BrowserTarget::Safari,
+            BrowserTarget::Chrome
+        ]
     );
 }

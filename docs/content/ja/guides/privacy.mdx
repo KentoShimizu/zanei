@@ -83,7 +83,7 @@ redactor は氏名・電話番号・FAX 番号・住所を削除しません。�
 ## 制限
 
 - **Chrome 以外の private window。** Safari・Firefox・Brave・Edge・Vivaldi・Arc には、Zanei が利用できる信頼できる private-window signal がありません。そのため `[filter.text_content]` と `[filter.content_snapshot]` の両方で既定除外します。この既定値は編集できますが、外すと private window の本文を記録し得ます。ウィンドウタイトルは全 event の `[filter]` scope で別に扱うため、タイトルも抑止するにはそこで browser を除外します。Safari の例：`zanei filter exclude-app add com.apple.Safari`。
-- **website scope は Chrome のみ。** Zanei が URL と window mode を取得できる browser は Chrome だけです。他の browser に website rule は効かず、app scope だけで制御します。
+- **サイトscope。** サイトルールはChromeと、未リリースの開発版ではSafariにも適用します。SafariのURLフィルタはプライベート閲覧の識別を意味しません。他のbrowserはapp scopeで制御します。
 - **Chrome incognito・除外サイトのウィンドウタイトル。** 本文は null のままですが、Accessibility はタイトルを `window.title` イベントとして記録し得ます。タイトルも抑止するには Chrome 自体を除外してください：`zanei filter exclude-app add com.google.Chrome`。
 - **シェルを持つ agent。** シェルアクセスを持つ agent は、host の承認ポリシーに従い、CLI 経由で記録設定・フィルタ・保存済み記録を変更できます。同梱の skill は、ユーザーの明示的な依頼なしにこれらを変更しないよう指示しています。
 - **あなたとして `zanei` を実行できるプロセス。** 暗号化が守るのはファイルのコピーであって、CLI ではありません。あなたのユーザーとして動くプロセスはデータを読めます。`zanei export` を実行できる、シェルを持つ agent もその一つです。root や、プロセスメモリを読めるものも同様です。ディスクごと盗まれた場合の保護は Zanei ではなく FileVault の役割です。

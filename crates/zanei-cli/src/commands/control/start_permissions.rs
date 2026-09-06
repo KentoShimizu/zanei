@@ -171,6 +171,7 @@ mod tests {
             CapabilityState::Available,
             CapabilityState::Available,
         )
+        .with_automate_safari(CapabilityState::Available)
     }
 
     fn denied_permissions() -> DaemonCapabilities {
@@ -180,5 +181,6 @@ mod tests {
             CapabilityState::Available,
             CapabilityState::Available,
         )
+        .with_automate_safari(CapabilityState::Available)
     }
 }

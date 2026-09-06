@@ -334,6 +334,7 @@ fn permissions_come_from_the_concrete_collectors_selected_by_config() {
         [
             Capability::ReadAccessibilityTree,
             Capability::AutomateBrowser,
+            Capability::AutomateSafari,
         ]
         .into_iter()
         .collect()
@@ -418,12 +419,12 @@ fn content_snapshot_permission_matrix_honors_global_and_scoped_app_rules() {
         .push("com.google.Chrome".to_owned());
     assert_eq!(
         CollectorSet::new(&config).required_capabilities(),
-        BTreeSet::from([accessibility])
+        BTreeSet::from([accessibility, Capability::AutomateSafari])
     );
 }
 
 #[test]
-fn browser_source_honors_global_chrome_scope_at_startup() {
+fn browser_source_keeps_safari_when_global_scope_excludes_chrome() {
     let mut config = zanei_core::config::Config::default();
     config.capture.sources = vec![CaptureSource::Browser];
 
@@ -440,11 +441,17 @@ fn browser_source_honors_global_chrome_scope_at_startup() {
         config.filter = filter;
         let collectors = CollectorSet::new(&config);
 
-        assert!(required_browser_targets(&config.capture, &config.filter).is_empty());
-        assert!(collectors.chrome.is_none());
+        assert_eq!(
+            required_browser_targets(&config.capture, &config.filter),
+            BTreeSet::from([BrowserTarget::Safari])
+        );
+        assert!(collectors.chrome.is_some());
         assert_eq!(
             collectors.required_capabilities(),
-            BTreeSet::from([Capability::ReadAccessibilityTree])
+            BTreeSet::from([
+                Capability::ReadAccessibilityTree,
+                Capability::AutomateSafari
+            ])
         );
     }
 }
@@ -453,10 +460,10 @@ fn browser_source_honors_global_chrome_scope_at_startup() {
 fn global_filter_reload_reconciles_browser_chrome_topology_without_applescript() {
     let mut config = zanei_core::config::Config::default();
     config.capture.sources = vec![CaptureSource::Browser];
-    config
-        .filter
-        .exclude_apps
-        .push("com.google.Chrome".to_owned());
+    config.filter.exclude_apps.extend([
+        "com.google.Chrome".to_owned(),
+        "com.apple.Safari".to_owned(),
+    ]);
     let mut collectors = CollectorSet::new(&config);
     assert!(collectors.chrome.is_none());
 
@@ -526,7 +533,7 @@ fn app_owned_browser_targets_follow_topology_and_reload() {
     standalone.capture.sources = vec![CaptureSource::Browser];
     assert_eq!(
         CollectorSet::new(&standalone).browser_targets,
-        BTreeSet::from([BrowserTarget::Chrome])
+        BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari])
     );
 
     let mut config = zanei_core::config::Config::default();
@@ -555,7 +562,7 @@ fn app_owned_browser_targets_follow_topology_and_reload() {
     collectors.replace_filter(FilterConfig::default());
     assert_eq!(
         collectors.browser_targets,
-        BTreeSet::from([BrowserTarget::Chrome])
+        BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari])
     );
 
     collectors.replace_filter(app_owned_filter(BrowserMode::Off, &["Safari"]));

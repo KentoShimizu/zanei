@@ -14,8 +14,7 @@ pub use matcher::{BUILT_IN_EXCLUDED_APP_NAMES, BUILT_IN_EXCLUDED_BUNDLE_IDS};
 use matcher::{app_is_allowed, extract_url_host, host_is_allowed};
 use redactor::redact_event;
 
-/// Chrome is the only browser whose window mode and URL Zanei can read, so website
-/// scope rules apply to it alone.
+/// Bundle identity of the supported Chrome browser.
 pub const CHROME_BUNDLE_ID: &str = "com.google.Chrome";
 
 /// Selects one of the three independently configured privacy scopes.
@@ -207,7 +206,10 @@ fn website_scope_is_allowed(
     host: Option<&str>,
     config: &FilterConfig,
 ) -> bool {
-    if app.bundle_id.as_deref() != Some(CHROME_BUNDLE_ID) {
+    if !matches!(
+        app.bundle_id.as_deref(),
+        Some(CHROME_BUNDLE_ID | "com.apple.Safari")
+    ) {
         return true;
     }
     host_is_allowed_for(scope, host, config)
@@ -269,16 +271,16 @@ mod tests {
             ..FilterConfig::default()
         });
 
-        assert!(
-            filter
-                .process(normalized(browser_event("https://api.example.com/path")))
-                .is_none()
-        );
-        assert!(
-            filter
-                .process(normalized(browser_event("https://evil-example.com")))
-                .is_some()
-        );
+        for bundle_id in [CHROME_BUNDLE_ID, "com.apple.Safari"] {
+            for (url, allowed) in [
+                ("https://api.example.com/path", false),
+                ("https://evil-example.com", true),
+            ] {
+                let mut event = browser_event(url);
+                event.app.bundle_id = Some(bundle_id.to_owned());
+                assert_eq!(filter.process(normalized(event)).is_some(), allowed);
+            }
+        }
     }
 
     #[test]

@@ -255,7 +255,7 @@ fn safari_policy(on_url_unavailable: PolicyAction) -> FilterConfig {
 }
 
 #[test]
-fn safari_url_unknown_uses_app_policy_and_standalone_safari_is_denied() {
+fn safari_url_is_shared_and_unknown_url_uses_optional_policy() {
     let (publisher, tracker) = chrome_eligibility_channel(FilterConfig::default());
     publisher.observe(
         7,
@@ -264,7 +264,7 @@ fn safari_url_unknown_uses_app_policy_and_standalone_safari_is_denied() {
             url: Some("https://example.com".to_owned()),
         },
     );
-    assert!(!tracker.allows_url_events(7, Some(11)));
+    assert!(tracker.allows_url_events(7, Some(11)));
 
     tracker.replace_filter(safari_policy(PolicyAction::Allow));
     publisher.observe(

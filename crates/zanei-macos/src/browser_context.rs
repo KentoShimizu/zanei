@@ -62,42 +62,36 @@ pub fn required_browser_targets(
     capture: &CaptureConfig,
     filter: &FilterConfig,
 ) -> BTreeSet<BrowserTarget> {
-    if filter.capture_policy.is_some() {
-        if !browser_consumer_required(capture) {
-            return BTreeSet::new();
-        }
-        return [BrowserTarget::Chrome, BrowserTarget::Safari]
-            .into_iter()
-            .filter(|target| browser_query_allowed(*target, filter))
-            .collect();
-    }
-
-    // Preserve the standalone Chrome activation contract. Safari has no
-    // standalone URL policy and therefore is never required in this mode.
-    let chrome = App {
-        name: BrowserTarget::Chrome.display_name().to_owned(),
-        bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
-        pid: None,
-    };
-    let captures_ui_or_input = capture
-        .sources
-        .iter()
-        .any(|source| matches!(source, CaptureSource::Ui | CaptureSource::Input));
-    let captures_browser = capture.sources.contains(&CaptureSource::Browser)
-        && app_is_allowed_for(PrivacyScope::AllEvents, &chrome, filter);
-    let privacy = captures_ui_or_input
-        && capture.text_content
-        && app_is_allowed_for(PrivacyScope::TextContent, &chrome, filter)
-        || capture.content_snapshot
-            && app_is_allowed_for(PrivacyScope::ContentSnapshot, &chrome, filter);
-    captures_browser
-        .then_some(BrowserTarget::Chrome)
+    [BrowserTarget::Chrome, BrowserTarget::Safari]
         .into_iter()
-        .chain(privacy.then_some(BrowserTarget::Chrome))
+        .filter(|target| {
+            let app = App {
+                name: target.display_name().to_owned(),
+                bundle_id: Some(target.bundle_id().to_owned()),
+                pid: None,
+            };
+            browser_query_allowed(*target, filter)
+                && (capture.sources.contains(&CaptureSource::Browser)
+                    || capture.text_content
+                        && capture.sources.iter().any(|source| {
+                            matches!(source, CaptureSource::Ui | CaptureSource::Input)
+                        })
+                        && app_is_allowed_for(PrivacyScope::TextContent, &app, filter)
+                    || capture.content_snapshot
+                        && app_is_allowed_for(PrivacyScope::ContentSnapshot, &app, filter))
+        })
         .collect()
 }
 
 pub(crate) fn browser_query_allowed(target: BrowserTarget, filter: &FilterConfig) -> bool {
+    let app = App {
+        name: target.display_name().to_owned(),
+        bundle_id: Some(target.bundle_id().to_owned()),
+        pid: None,
+    };
+    if !app_is_allowed_for(PrivacyScope::AllEvents, &app, filter) {
+        return false;
+    }
     match filter.capture_policy.as_ref() {
         Some(policy) => {
             policy.browser.mode != BrowserMode::Off
@@ -106,18 +100,8 @@ pub(crate) fn browser_query_allowed(target: BrowserTarget, filter: &FilterConfig
                     .iter()
                     .any(|name| name.eq_ignore_ascii_case(target.display_name()))
         }
-        None => target == BrowserTarget::Chrome,
+        None => true,
     }
-}
-
-fn browser_consumer_required(capture: &CaptureConfig) -> bool {
-    capture.sources.contains(&CaptureSource::Browser)
-        || capture.content_snapshot
-        || (capture.text_content
-            && capture
-                .sources
-                .iter()
-                .any(|source| matches!(source, CaptureSource::Ui | CaptureSource::Input)))
 }
 
 #[cfg(test)]
@@ -195,10 +179,10 @@ mod tests {
             text_content: true,
             content_snapshot: true,
         };
-        let targets = required_browser_targets(
-            &capture,
-            &app_policy(BrowserMode::Rules, &["Google Chrome", "Safari"]),
-        );
+        let mut filter = app_policy(BrowserMode::Rules, &["Google Chrome", "Safari"]);
+        filter.text_content.exclude_apps.clear();
+        filter.content_snapshot.exclude_apps.clear();
+        let targets = required_browser_targets(&capture, &filter);
         assert_eq!(
             targets,
             BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari])
@@ -206,11 +190,11 @@ mod tests {
     }
 
     #[test]
-    fn standalone_preserves_chrome_only_activation() {
+    fn default_capture_requires_both_browser_adapters() {
         let capture = CaptureConfig::default();
         assert_eq!(
             required_browser_targets(&capture, &FilterConfig::default()),
-            BTreeSet::from([BrowserTarget::Chrome])
+            BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari])
         );
     }
 }

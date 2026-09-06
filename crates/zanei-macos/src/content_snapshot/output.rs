@@ -10,7 +10,7 @@ use std::{
 
 use time::OffsetDateTime;
 use zanei_collector::RawEvent;
-use zanei_core::privacy::{CHROME_BUNDLE_ID, PrivacyScope};
+use zanei_core::privacy::PrivacyScope;
 use zanei_core::schema::{
     CaptureContext, ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotTrigger, EventData,
     Window,
@@ -22,6 +22,7 @@ use super::{
     state::{SaveBlock, SnapshotState, SnapshotWindowKey},
 };
 use crate::{
+    browser_context::BrowserTarget,
     capture_policy::{CaptureDecision, CapturePolicy},
     text_capture::{ChromeWindowKey, ReleasedEvent, TextQuarantine},
 };
@@ -55,7 +56,7 @@ pub(super) fn emit(
         return;
     }
     let chrome_version = decision.chrome_version();
-    if candidate.target.app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID)
+    if BrowserTarget::from_bundle_id(candidate.target.app.bundle_id.as_deref()).is_some()
         && chrome_version.is_none()
     {
         trace_metrics(&candidate, "chrome_version", metrics);

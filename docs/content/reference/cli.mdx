@@ -546,7 +546,7 @@ zanei filter content-snapshot exclude-app add FutureApp --unverified
 - `add` with no value opens a numbered, recently-used-first selector. Non-TTY use and `--quiet` require a value; omission exits with code 2. `remove` resolves against the current list, including entries for apps no longer installed.
 - `filter show` displays all three scopes, each apps/sites mode and count, resolved names, and `(not installed)` for unresolved entries. It also lists hard-coded built-in exclusions separately.
 - Both content scopes default to excluding Safari, Firefox, Brave, Edge, Vivaldi, and Arc. Adding one with `only-app` or removing it from `exclude-app` warns unless `--quiet` is set, because private-window detection is unavailable. The defaults are editable.
-- Site rules work only for Chrome. Changes apply on the next configuration-watch cycle, normally within 2 seconds; no restart is required.
+- Site rules apply to Chrome and, in the unreleased development version, Safari. Changes apply on the next configuration-watch cycle, normally within 2 seconds; no restart is required.
 
 The exact evaluation order and the fields removed by each scope are in the [filters guide](/guides/filters).
 

@@ -72,7 +72,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `ui.value` | `macos.ax` | 要素値の変化。新たに増えた入力内容のみ opt-in で記録し、自由入力の全体値は記録しない | アクセシビリティ |
 | `input.key` | `macos.eventtap` | キー / ショートカット。既定は「入力の事実 + フィールド種別」。内容は opt-in | アクセシビリティ + 入力監視 |
 | `input.scroll` | `macos.eventtap` | スクロール | アクセシビリティ + 入力監視 |
-| `browser.navigate` | `macos.applescript` | URL / タブの変化。**現在は Chrome のみ**。incognito は常に除外 | アクセシビリティ + オートメーション |
+| `browser.navigate` | `macos.applescript` | URL / タブの変化。ChromeとSafari（未リリース）に対応。Chrome incognitoは除外 | アクセシビリティ + オートメーション |
 | `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | クリップボード操作。内容は opt-in | アクセシビリティ + 入力監視 |
 | `content.snapshot` | `macos.ax` | 前面ウィンドウの可視範囲に表示された Accessibility text。既定では記録せず、設定で有効化 | アクセシビリティ |
 
@@ -178,7 +178,7 @@ timeline は snapshot 本文を inline しません。各 session は snapshot �
 
 ## ブラウザの URL 捕捉
 
-`browser.navigate`（URL 捕捉）は現在 Chrome のみ対応します。Chromium は AppleScript でウィンドウのモード（`normal` / `incognito`）を返します。incognito は URL イベントを生成せず、本文も設定なしで null のままです。共有イベント契約では、プライバシーモードを判定できない観測を `mode: "unknown"` で表せます。この観測を `normal` として扱うことはありません。
+`browser.navigate`（URL 捕捉）はChromeに対応し、未リリースの開発版ではSafariにも対応します。単体利用と組み込み利用で同じブラウザ収集経路を使います。Chromium は AppleScript でウィンドウのモード（`normal` / `incognito`）を返します。incognito は URL イベントを生成せず、本文も設定なしで null のままです。共有イベント契約では、プライバシーモードを判定できない観測を `mode: "unknown"` で表せます。この観測を `normal` として扱うことはありません。
 
 navigation はタブ・ウィンドウ・タイトル・ページ読み込みの変化時に観測します。タイトルもフォーカスも変化しないページ内 navigation では `browser.navigate` が生成されない場合があります。
 
@@ -186,7 +186,7 @@ navigation はタブ・ウィンドウ・タイトル・ページ読み込みの
 | --- | --- | --- |
 | **Google Chrome** | ✅ 対応 | `mode` で incognito の URL イベントと本文を抑止 |
 | Brave / Edge / Vivaldi（Chromium 系） | ❌ 非対応 — collector は Chrome の bundle ID でのみ起動します | URL 捕捉自体がないため、プライベートウィンドウの扱いも発生しません |
-| **Safari** | ❌ 非対応 | プライベート判定プロパティなし。メニュー差分ヒューリスティックは脆いため不採用 |
+| **Safari** | ✅ 未リリースの開発版で対応 | `mode: "unknown"`。プライベート閲覧の除外は保証しない |
 | **Firefox** | ❌ 非対応 | AppleScript に URL 取得 API が存在しない |
 | **Arc** | ❌ 非対応（要検証） | Chromium 系だが AppleScript 対応が限定的 |
 
@@ -194,7 +194,7 @@ navigation はタブ・ウィンドウ・タイトル・ページ読み込みの
 Chrome incognito・サイト除外中は本文が null のままですが、他の window と同様に `window.title` と操作 metadata は記録されます。URL 捕捉に非対応の browser には private-mode の本文抑止がありません。Chrome のタイトルも抑止するには browser 自体を `zanei filter exclude-app add com.google.Chrome` で除外してください（[フィルタ](/ja/guides/filters)参照）。
 :::
 
-Safari / Firefox 対応は、信頼できるプライベートモード判定手段があれば将来検討します。
+SafariのURL取得とサイトフィルタに、組み込み専用の設定は不要です。Safariにもアプリ・サイトの除外設定を適用し、入力本文・snapshotの既定除外は維持します。Safariはプライベート閲覧を確実に識別できないため、本文収集を有効にするとプライベート閲覧の本文も含まれ得ます。URL取得にはrecorderプロセスへのSafari Automation権限が必要です。FirefoxのURL取得は引き続き非対応です。
 
 ## データの 2 層
 

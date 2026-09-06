@@ -3,11 +3,14 @@
 use time::OffsetDateTime;
 use zanei_collector::RawEvent;
 use zanei_core::{
-    privacy::{CHROME_BUNDLE_ID, PrivacyScope, suppress_text_content},
+    privacy::{PrivacyScope, suppress_text_content},
     schema::EventData,
 };
 
-use crate::capture_policy::{CaptureDecision, CapturePolicy};
+use crate::{
+    browser_context::BrowserTarget,
+    capture_policy::{CaptureDecision, CapturePolicy},
+};
 
 use super::ChromeWindowKey;
 
@@ -46,7 +49,7 @@ pub(crate) fn route_text_body(
         return TextBodyRoute::Send(event);
     }
     let Some(version) = decision.chrome_version() else {
-        if event.app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID) {
+        if BrowserTarget::from_bundle_id(event.app.bundle_id.as_deref()).is_some() {
             suppress_text_content(&mut event.data, &mut event.element);
         }
         return TextBodyRoute::Send(event);
@@ -183,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn safari_routes_generic_or_confirmed_body_without_crossing_modes() {
+    fn safari_suppresses_unobserved_body_and_quarantines_confirmed_body() {
         let mut standalone = FilterConfig::default();
         standalone.text_content.exclude_apps.clear();
         let (publisher, tracker) = chrome_eligibility_channel(standalone.clone());
@@ -199,12 +202,9 @@ mod tests {
             &policy,
             Some(&earlier),
         ) else {
-            panic!("standalone Safari remains a generic body")
+            panic!("unobserved Safari body must be suppressed")
         };
-        assert_eq!(
-            event.element.and_then(|element| element.value),
-            Some("private".to_owned())
-        );
+        assert_eq!(event.element.and_then(|element| element.value), None);
 
         policy.replace_filter(safari_filter());
         publisher.observe(
@@ -227,7 +227,7 @@ mod tests {
             &policy,
             Some(&earlier),
         ) else {
-            panic!("generic body cannot acquire a current confirmation version")
+            panic!("unobserved body cannot acquire a current confirmation version")
         };
         assert_eq!(stale.element.and_then(|element| element.value), None);
 

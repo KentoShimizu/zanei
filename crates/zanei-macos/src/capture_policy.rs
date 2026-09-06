@@ -118,13 +118,7 @@ impl CapturePolicy {
     ) -> CaptureDecision {
         let filter = self.filter.read().ok();
         let browser_target = BrowserTarget::from_bundle_id(app.bundle_id.as_deref());
-        let uses_browser_tracker = browser_target.is_some_and(|target| {
-            target == BrowserTarget::Chrome
-                || filter
-                    .as_deref()
-                    .is_some_and(|filter| filter.capture_policy.is_some())
-        });
-        let (browser_allowed, capture_context, browser_version) = if uses_browser_tracker {
+        let (browser_allowed, capture_context, browser_version) = if browser_target.is_some() {
             app.pid.map_or_else(
                 || (false, CaptureContext::default(), None),
                 |pid| {
@@ -299,52 +293,75 @@ mod tests {
     }
 
     #[test]
-    fn app_owned_safari_uses_tracker_for_both_body_scopes() {
-        for scope in [PrivacyScope::TextContent, PrivacyScope::ContentSnapshot] {
-            let filter = safari_filter(BrowserMode::AllSites, PolicyAction::Block);
-            let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
-            let policy = CapturePolicy::new(tracker, filter, None);
-            let decide = || policy.decision(scope, &safari_app(), Some(11), None);
+    fn safari_uses_shared_tracker_and_site_rules_for_all_scopes() {
+        for scope in [
+            PrivacyScope::AllEvents,
+            PrivacyScope::TextContent,
+            PrivacyScope::ContentSnapshot,
+        ] {
+            for optional_policy in [false, true] {
+                let mut filter = safari_filter(BrowserMode::AllSites, PolicyAction::Block);
+                if optional_policy {
+                    filter
+                        .capture_policy
+                        .as_mut()
+                        .unwrap()
+                        .browser
+                        .block_list
+                        .clear();
+                } else {
+                    filter.capture_policy = None;
+                }
+                let denied_sites = match scope {
+                    PrivacyScope::AllEvents => &mut filter.exclude_websites,
+                    PrivacyScope::TextContent => &mut filter.text_content.exclude_websites,
+                    PrivacyScope::ContentSnapshot => &mut filter.content_snapshot.exclude_websites,
+                };
+                denied_sites.push("denied.example".to_owned());
+                let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
+                let policy = CapturePolicy::new(tracker, filter, None);
+                let decide = || policy.decision(scope, &safari_app(), Some(11), None);
 
-            assert!(!decide().is_allowed(), "{scope:?}: unobserved");
-            publisher.observe(
-                7,
-                ChromeEligibilityObservation::Safari {
-                    window_id: Some(11),
-                    url: Some("https://allowed.example/path".to_owned()),
-                },
-            );
-            let allowed = decide();
-            assert!(allowed.is_allowed(), "{scope:?}: fresh URL");
-            assert!(allowed.chrome_version().is_some());
-            assert_eq!(
-                allowed.capture_context().url.as_deref(),
-                Some("https://allowed.example/path")
-            );
+                assert!(!decide().is_allowed(), "{scope:?}: unobserved");
+                publisher.observe(
+                    7,
+                    ChromeEligibilityObservation::Safari {
+                        window_id: Some(11),
+                        url: Some("https://allowed.example/path".to_owned()),
+                    },
+                );
+                let allowed = decide();
+                assert!(allowed.is_allowed(), "{scope:?}: fresh URL");
+                assert!(allowed.chrome_version().is_some());
+                assert_eq!(
+                    allowed.capture_context().url.as_deref(),
+                    Some("https://allowed.example/path")
+                );
 
-            publisher.observe(
-                7,
-                ChromeEligibilityObservation::Safari {
-                    window_id: Some(11),
-                    url: Some("https://denied.example/path".to_owned()),
-                },
-            );
-            assert!(!decide().is_allowed(), "{scope:?}: blocked URL");
-            publisher.observe(
-                7,
-                ChromeEligibilityObservation::Safari {
-                    window_id: Some(11),
-                    url: None,
-                },
-            );
-            assert!(!decide().is_allowed(), "{scope:?}: URL unavailable");
-            publisher.observe(
-                7,
-                ChromeEligibilityObservation::Unavailable {
-                    window_id: Some(11),
-                },
-            );
-            assert!(!decide().is_allowed(), "{scope:?}: unavailable observation");
+                publisher.observe(
+                    7,
+                    ChromeEligibilityObservation::Safari {
+                        window_id: Some(11),
+                        url: Some("https://denied.example/path".to_owned()),
+                    },
+                );
+                assert!(!decide().is_allowed(), "{scope:?}: blocked URL");
+                publisher.observe(
+                    7,
+                    ChromeEligibilityObservation::Safari {
+                        window_id: Some(11),
+                        url: None,
+                    },
+                );
+                assert!(!decide().is_allowed(), "{scope:?}: URL unavailable");
+                publisher.observe(
+                    7,
+                    ChromeEligibilityObservation::Unavailable {
+                        window_id: Some(11),
+                    },
+                );
+                assert!(!decide().is_allowed(), "{scope:?}: unavailable observation");
+            }
         }
     }
 
@@ -428,14 +445,14 @@ mod tests {
     }
 
     #[test]
-    fn safari_send_revalidation_does_not_cross_confirmation_modes() {
+    fn safari_send_revalidation_preserves_read_time_denial_across_policy_reload() {
         let mut standalone = FilterConfig::default();
         standalone.text_content.exclude_apps.clear();
         let (publisher, tracker) = chrome_eligibility_channel(standalone.clone());
         let policy = CapturePolicy::new(tracker, standalone, None);
-        let generic = policy.decision(PrivacyScope::TextContent, &safari_app(), Some(11), None);
-        assert!(generic.is_allowed());
-        assert_eq!(generic.chrome_version(), None);
+        let unobserved = policy.decision(PrivacyScope::TextContent, &safari_app(), Some(11), None);
+        assert!(!unobserved.is_allowed());
+        assert_eq!(unobserved.chrome_version(), None);
 
         policy.replace_filter(safari_filter(BrowserMode::AllSites, PolicyAction::Allow));
         publisher.observe(
@@ -453,7 +470,7 @@ mod tests {
             &safari_app(),
             Some(11),
             None,
-            Some(&generic),
+            Some(&unobserved),
         );
         assert!(!at_send.is_allowed());
         assert_eq!(at_send.chrome_version(), None);
@@ -469,7 +486,7 @@ mod tests {
             None,
             Some(&app_owned),
         );
-        assert!(at_send.is_allowed());
+        assert!(!at_send.is_allowed());
         assert_eq!(at_send.chrome_version(), app_owned.chrome_version());
         assert_eq!(at_send.capture_context(), app_owned.capture_context());
     }
