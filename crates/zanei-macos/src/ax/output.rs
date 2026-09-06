@@ -98,12 +98,16 @@ mod tests {
 
     use time::OffsetDateTime;
     use zanei_core::{
-        config::FilterConfig,
+        config::{
+            CapturePolicyConfig, FilterConfig,
+            capture_policy::{BrowserMode, BrowserPolicy, IdePolicy, PolicyAction},
+        },
         privacy::{CHROME_BUNDLE_ID, PrivacyScope},
         schema::{App, Element, EventData, FieldKind, UiValueData, Window},
     };
 
     use super::*;
+    use crate::permission::SAFARI_BUNDLE_ID;
     use crate::{
         ax::event::AxEventBuilder,
         chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
@@ -161,43 +165,68 @@ mod tests {
 
     #[test]
     fn all_ax_bodies_are_bound_to_their_read_time_version() {
-        for kind in [
+        let browsers = [
+            ("Google Chrome", CHROME_BUNDLE_ID),
+            ("Safari", SAFARI_BUNDLE_ID),
+        ];
+        let kinds = [
             "focus",
             "click",
             "value",
             "focus_metadata",
             "click_metadata",
-        ] {
+        ];
+        for (name, bundle_id, kind) in browsers.into_iter().flat_map(|(name, bundle_id)| {
+            kinds.into_iter().map(move |kind| (name, bundle_id, kind))
+        }) {
             let metadata_only = kind.ends_with("_metadata");
-            for changed in [false, true] {
-                let filter = FilterConfig::default();
+            let scenarios: &[&str] = if bundle_id == SAFARI_BUNDLE_ID && !metadata_only {
+                &["same", "url_changed", "to_app_owned", "to_standalone"]
+            } else {
+                &["same", "url_changed"]
+            };
+            for scenario in scenarios {
+                let filter = if bundle_id == SAFARI_BUNDLE_ID && *scenario != "to_app_owned" {
+                    safari_filter()
+                } else {
+                    standalone_filter(bundle_id)
+                };
                 let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
                 let policy = CapturePolicy::new(tracker, filter, None);
                 let app = ApplicationInfo {
-                    name: "Google Chrome".to_owned(),
-                    bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
+                    name: name.to_owned(),
+                    bundle_id: Some(bundle_id.to_owned()),
                     pid: 7,
                     activation_policy: ApplicationActivationPolicy::Regular,
                 };
-                publisher.observe(
-                    7,
-                    ChromeEligibilityObservation::Normal {
-                        window_id: Some(11),
-                        url: "https://v1.example/".to_owned(),
-                    },
-                );
+                if *scenario != "to_app_owned" {
+                    publisher.observe(7, browser_observation(bundle_id, "https://v1.example/"));
+                }
                 let read_decision =
                     policy.decision(PrivacyScope::TextContent, &app.raw_app(), Some(11), None);
                 assert!(read_decision.is_allowed());
 
-                if changed {
-                    publisher.observe(
-                        7,
-                        ChromeEligibilityObservation::Normal {
-                            window_id: Some(11),
-                            url: "https://v2.example/".to_owned(),
-                        },
-                    );
+                match *scenario {
+                    "url_changed" => {
+                        publisher.observe(7, browser_observation(bundle_id, "https://v2.example/"))
+                    }
+                    "to_app_owned" => {
+                        policy.replace_filter(safari_filter());
+                        publisher.observe(7, browser_observation(bundle_id, "https://v2.example/"));
+                        let current = policy.decision(
+                            PrivacyScope::TextContent,
+                            &app.raw_app(),
+                            Some(11),
+                            None,
+                        );
+                        assert!(current.is_allowed());
+                        assert!(current.chrome_version().is_some());
+                    }
+                    "to_standalone" => policy.replace_filter(standalone_filter(bundle_id)),
+                    "same" => {}
+                    _ => unreachable!(),
+                }
+                if *scenario == "url_changed" {
                     assert_ne!(
                         read_decision.chrome_version(),
                         policy
@@ -269,11 +298,19 @@ mod tests {
                     AxOutput::new(&sender, &dropped, policy.clone(), ChromeObserver::new());
 
                 output.send(event);
+                if *scenario == "to_app_owned" {
+                    let event = receiver
+                        .try_recv()
+                        .expect("stale generic metadata is emitted");
+                    assert_eq!(event_body(&event), None, "{kind}, {scenario}");
+                    assert_eq!(event.capture_context.url, None);
+                    continue;
+                }
                 if metadata_only {
                     let event = receiver.try_recv().expect("metadata is immediate");
                     assert_eq!(
                         event.capture_context.url.as_deref(),
-                        Some(if changed {
+                        Some(if *scenario == "url_changed" {
                             "https://v2.example/"
                         } else {
                             "https://v1.example/"
@@ -283,32 +320,33 @@ mod tests {
                     continue;
                 }
                 assert!(receiver.try_recv().is_err(), "body remains quarantined");
-                publisher.observe(
-                    7,
-                    ChromeEligibilityObservation::Normal {
-                        window_id: Some(11),
-                        url: if changed {
-                            "https://v2.example/"
-                        } else {
-                            "https://v1.example/"
-                        }
-                        .to_owned(),
-                    },
-                );
+                if *scenario == "to_standalone" {
+                    publisher.observe(
+                        7,
+                        ChromeEligibilityObservation::Unavailable {
+                            window_id: Some(11),
+                        },
+                    );
+                } else {
+                    publisher.observe(
+                        7,
+                        browser_observation(
+                            bundle_id,
+                            if *scenario == "url_changed" {
+                                "https://v2.example/"
+                            } else {
+                                "https://v1.example/"
+                            },
+                        ),
+                    );
+                }
                 output.release_due();
 
                 let event = receiver.try_recv().expect("metadata event is released");
-                let body = match &event.data {
-                    EventData::UiValue(data) => data.text.as_deref(),
-                    _ => event
-                        .element
-                        .as_ref()
-                        .and_then(|element| element.value.as_deref()),
-                };
                 assert_eq!(
-                    body,
-                    (!changed).then_some("private"),
-                    "{kind}, changed={changed}"
+                    event_body(&event),
+                    (*scenario == "same").then_some("private"),
+                    "{kind}, {scenario}"
                 );
                 assert_eq!(
                     event.capture_context.url.as_deref(),
@@ -316,5 +354,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn event_body(event: &RawEvent) -> Option<&str> {
+        match &event.data {
+            EventData::UiValue(data) => data.text.as_deref(),
+            _ => event
+                .element
+                .as_ref()
+                .and_then(|element| element.value.as_deref()),
+        }
+    }
+
+    fn standalone_filter(bundle_id: &str) -> FilterConfig {
+        let mut filter = FilterConfig::default();
+        if bundle_id == SAFARI_BUNDLE_ID {
+            filter.text_content.exclude_apps.clear();
+        }
+        filter
+    }
+
+    fn browser_observation(bundle_id: &str, url: &str) -> ChromeEligibilityObservation {
+        if bundle_id == SAFARI_BUNDLE_ID {
+            ChromeEligibilityObservation::Safari {
+                window_id: Some(11),
+                url: Some(url.to_owned()),
+            }
+        } else {
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: url.to_owned(),
+            }
+        }
+    }
+
+    fn safari_filter() -> FilterConfig {
+        let mut filter = FilterConfig {
+            capture_policy: Some(CapturePolicyConfig {
+                allowed_apps: vec!["Safari".to_owned()],
+                browser: BrowserPolicy {
+                    mode: BrowserMode::AllSites,
+                    default_policy: PolicyAction::Allow,
+                    on_url_unavailable: PolicyAction::Block,
+                    block_auth: false,
+                    block_payments: false,
+                    allow_list: Vec::new(),
+                    block_list: Vec::new(),
+                },
+                ide: IdePolicy {
+                    block_env_files: false,
+                    on_file_name_unavailable: PolicyAction::Allow,
+                },
+            }),
+            ..FilterConfig::default()
+        };
+        filter.text_content.exclude_apps.clear();
+        filter
     }
 }

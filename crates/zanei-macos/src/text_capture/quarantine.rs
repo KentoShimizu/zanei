@@ -1,4 +1,4 @@
-//! Confirm-then-write quarantine for Chrome-dependent bodies.
+//! Confirm-then-write quarantine for browser-dependent bodies.
 
 use std::time::{Duration, Instant};
 
@@ -545,4 +545,7 @@ mod tests {
         );
         assert!(quarantine.is_empty());
     }
+
+    #[path = "safari.rs"]
+    mod safari;
 }

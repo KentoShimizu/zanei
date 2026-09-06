@@ -7,10 +7,7 @@ use std::{
 
 use zanei_core::{
     config::FilterConfig,
-    privacy::{
-        CHROME_BUNDLE_ID, CapturePolicyDecision, PrivacyScope, app_is_allowed_for,
-        evaluate_capture_policy,
-    },
+    privacy::{CapturePolicyDecision, PrivacyScope, app_is_allowed_for, evaluate_capture_policy},
     schema::{App, CaptureContext},
 };
 
@@ -120,9 +117,14 @@ impl CapturePolicy {
         window_title: Option<&str>,
     ) -> CaptureDecision {
         let filter = self.filter.read().ok();
-        let is_chrome = app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID);
-        let is_known_browser = BrowserTarget::from_bundle_id(app.bundle_id.as_deref()).is_some();
-        let (chrome_allowed, capture_context, chrome_version) = if is_chrome {
+        let browser_target = BrowserTarget::from_bundle_id(app.bundle_id.as_deref());
+        let uses_browser_tracker = browser_target.is_some_and(|target| {
+            target == BrowserTarget::Chrome
+                || filter
+                    .as_deref()
+                    .is_some_and(|filter| filter.capture_policy.is_some())
+        });
+        let (browser_allowed, capture_context, browser_version) = if uses_browser_tracker {
             app.pid.map_or_else(
                 || (false, CaptureContext::default(), None),
                 |pid| {
@@ -140,7 +142,7 @@ impl CapturePolicy {
         let app_allowed = filter.as_deref().is_some_and(|filter| {
             app_is_allowed_for(scope, app, filter)
                 && filter.capture_policy.as_ref().is_none_or(|policy| {
-                    is_known_browser
+                    browser_target.is_some()
                         || matches!(
                             evaluate_capture_policy(policy, app, window_title, None),
                             CapturePolicyDecision::Allow
@@ -148,9 +150,9 @@ impl CapturePolicy {
                 })
         });
         CaptureDecision {
-            allowed: app_allowed && chrome_allowed,
+            allowed: app_allowed && browser_allowed,
             capture_context,
-            chrome_version,
+            chrome_version: browser_version,
         }
     }
 
@@ -168,6 +170,8 @@ impl CapturePolicy {
         let mut current = self.decision(scope, app, window_id, window_title);
         if let Some(earlier) = earlier {
             current.allowed &= earlier.allowed;
+            current.allowed &=
+                !(current.chrome_version.is_some() && earlier.chrome_version.is_none());
             current.chrome_version = earlier.chrome_version;
             current.capture_context = earlier.capture_context();
         }
@@ -213,13 +217,23 @@ impl CapturePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chrome::{ChromeEligibilityObservation, chrome_eligibility_channel};
+    use crate::{
+        chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
+        permission::SAFARI_BUNDLE_ID,
+    };
     use std::{
         sync::{
             Barrier,
             atomic::{AtomicBool, Ordering},
         },
         thread,
+    };
+    use zanei_core::{
+        config::{
+            CapturePolicyConfig,
+            capture_policy::{BrowserMode, BrowserPolicy, BrowserUrlRule, IdePolicy, PolicyAction},
+        },
+        privacy::CHROME_BUNDLE_ID,
     };
 
     #[test]
@@ -282,5 +296,219 @@ mod tests {
             !mixed_allow,
             "both complete policy revisions deny this body"
         );
+    }
+
+    #[test]
+    fn app_owned_safari_uses_tracker_for_both_body_scopes() {
+        for scope in [PrivacyScope::TextContent, PrivacyScope::ContentSnapshot] {
+            let filter = safari_filter(BrowserMode::AllSites, PolicyAction::Block);
+            let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
+            let policy = CapturePolicy::new(tracker, filter, None);
+            let decide = || policy.decision(scope, &safari_app(), Some(11), None);
+
+            assert!(!decide().is_allowed(), "{scope:?}: unobserved");
+            publisher.observe(
+                7,
+                ChromeEligibilityObservation::Safari {
+                    window_id: Some(11),
+                    url: Some("https://allowed.example/path".to_owned()),
+                },
+            );
+            let allowed = decide();
+            assert!(allowed.is_allowed(), "{scope:?}: fresh URL");
+            assert!(allowed.chrome_version().is_some());
+            assert_eq!(
+                allowed.capture_context().url.as_deref(),
+                Some("https://allowed.example/path")
+            );
+
+            publisher.observe(
+                7,
+                ChromeEligibilityObservation::Safari {
+                    window_id: Some(11),
+                    url: Some("https://denied.example/path".to_owned()),
+                },
+            );
+            assert!(!decide().is_allowed(), "{scope:?}: blocked URL");
+            publisher.observe(
+                7,
+                ChromeEligibilityObservation::Safari {
+                    window_id: Some(11),
+                    url: None,
+                },
+            );
+            assert!(!decide().is_allowed(), "{scope:?}: URL unavailable");
+            publisher.observe(
+                7,
+                ChromeEligibilityObservation::Unavailable {
+                    window_id: Some(11),
+                },
+            );
+            assert!(!decide().is_allowed(), "{scope:?}: unavailable observation");
+        }
+    }
+
+    #[test]
+    fn app_owned_safari_respects_url_unavailable_off_and_app_scopes() {
+        for scope in [PrivacyScope::TextContent, PrivacyScope::ContentSnapshot] {
+            let filter = safari_filter(BrowserMode::AllSites, PolicyAction::Allow);
+            let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
+            let policy = CapturePolicy::new(tracker, filter, None);
+            publisher.observe(
+                7,
+                ChromeEligibilityObservation::Safari {
+                    window_id: Some(11),
+                    url: None,
+                },
+            );
+            assert!(
+                policy
+                    .decision(scope, &safari_app(), Some(11), None)
+                    .is_allowed(),
+                "{scope:?}: configured URL-unavailable allow"
+            );
+
+            let off = safari_filter(BrowserMode::Off, PolicyAction::Allow);
+            let mut global_exclude = safari_filter(BrowserMode::AllSites, PolicyAction::Allow);
+            global_exclude
+                .exclude_apps
+                .push(SAFARI_BUNDLE_ID.to_owned());
+            let mut global_include = safari_filter(BrowserMode::AllSites, PolicyAction::Allow);
+            global_include
+                .include_only_apps
+                .push("dev.example.Other".to_owned());
+            let mut scoped_exclude = safari_filter(BrowserMode::AllSites, PolicyAction::Allow);
+            let mut scoped_include = safari_filter(BrowserMode::AllSites, PolicyAction::Allow);
+            match scope {
+                PrivacyScope::TextContent => {
+                    scoped_exclude
+                        .text_content
+                        .exclude_apps
+                        .push(SAFARI_BUNDLE_ID.to_owned());
+                    scoped_include
+                        .text_content
+                        .include_only_apps
+                        .push("dev.example.Other".to_owned());
+                }
+                PrivacyScope::ContentSnapshot => {
+                    scoped_exclude
+                        .content_snapshot
+                        .exclude_apps
+                        .push(SAFARI_BUNDLE_ID.to_owned());
+                    scoped_include
+                        .content_snapshot
+                        .include_only_apps
+                        .push("dev.example.Other".to_owned());
+                }
+                PrivacyScope::AllEvents => unreachable!(),
+            }
+            for (case, denied) in [
+                ("off", off),
+                ("global exclude", global_exclude),
+                ("global include", global_include),
+                ("scoped exclude", scoped_exclude),
+                ("scoped include", scoped_include),
+            ] {
+                policy.replace_filter(denied);
+                publisher.observe(
+                    7,
+                    ChromeEligibilityObservation::Safari {
+                        window_id: Some(11),
+                        url: Some("https://allowed.example/path".to_owned()),
+                    },
+                );
+                assert!(
+                    !policy
+                        .decision(scope, &safari_app(), Some(11), None)
+                        .is_allowed(),
+                    "{scope:?}: {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn safari_send_revalidation_does_not_cross_confirmation_modes() {
+        let mut standalone = FilterConfig::default();
+        standalone.text_content.exclude_apps.clear();
+        let (publisher, tracker) = chrome_eligibility_channel(standalone.clone());
+        let policy = CapturePolicy::new(tracker, standalone, None);
+        let generic = policy.decision(PrivacyScope::TextContent, &safari_app(), Some(11), None);
+        assert!(generic.is_allowed());
+        assert_eq!(generic.chrome_version(), None);
+
+        policy.replace_filter(safari_filter(BrowserMode::AllSites, PolicyAction::Allow));
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Safari {
+                window_id: Some(11),
+                url: Some("https://allowed.example/path".to_owned()),
+            },
+        );
+        let current = policy.decision(PrivacyScope::TextContent, &safari_app(), Some(11), None);
+        assert!(current.is_allowed());
+        assert!(current.chrome_version().is_some());
+        let at_send = policy.decision_at_send(
+            PrivacyScope::TextContent,
+            &safari_app(),
+            Some(11),
+            None,
+            Some(&generic),
+        );
+        assert!(!at_send.is_allowed());
+        assert_eq!(at_send.chrome_version(), None);
+
+        let app_owned = current;
+        let mut standalone = FilterConfig::default();
+        standalone.text_content.exclude_apps.clear();
+        policy.replace_filter(standalone);
+        let at_send = policy.decision_at_send(
+            PrivacyScope::TextContent,
+            &safari_app(),
+            Some(11),
+            None,
+            Some(&app_owned),
+        );
+        assert!(at_send.is_allowed());
+        assert_eq!(at_send.chrome_version(), app_owned.chrome_version());
+        assert_eq!(at_send.capture_context(), app_owned.capture_context());
+    }
+
+    fn safari_app() -> App {
+        App {
+            name: "Safari".to_owned(),
+            bundle_id: Some(SAFARI_BUNDLE_ID.to_owned()),
+            pid: Some(7),
+        }
+    }
+
+    fn safari_filter(mode: BrowserMode, on_url_unavailable: PolicyAction) -> FilterConfig {
+        let mut filter = FilterConfig {
+            capture_policy: Some(CapturePolicyConfig {
+                allowed_apps: vec!["Safari".to_owned()],
+                browser: BrowserPolicy {
+                    mode,
+                    default_policy: PolicyAction::Allow,
+                    on_url_unavailable,
+                    block_auth: false,
+                    block_payments: false,
+                    allow_list: Vec::new(),
+                    block_list: vec![BrowserUrlRule {
+                        host: "denied.example".to_owned(),
+                        path_prefix: "/".to_owned(),
+                        match_subdomains: true,
+                    }],
+                },
+                ide: IdePolicy {
+                    block_env_files: false,
+                    on_file_name_unavailable: PolicyAction::Allow,
+                },
+            }),
+            exclude_apps: Vec::new(),
+            ..FilterConfig::default()
+        };
+        filter.text_content.exclude_apps.clear();
+        filter.content_snapshot.exclude_apps.clear();
+        filter
     }
 }
