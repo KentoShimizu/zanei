@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 use zanei_collector::Capability;
 
 use crate::{
-    content_snapshot::{SnapshotAxApplication, output::cutoff_trace_name, worker::test_live_scan},
+    content_snapshot::{
+        SnapshotAxApplication, output::cutoff_trace_name, worker::scan::test_live_scan,
+    },
     ffi::{
         window_list,
         workspace::{frontmost_application, running_applications},

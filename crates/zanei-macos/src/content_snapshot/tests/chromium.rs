@@ -21,7 +21,7 @@ use crate::{
     content_snapshot::{
         SharedHealth, SnapshotTrigger, SnapshotTriggerKind, snapshot_trigger_channel,
         state::SnapshotState,
-        worker::{SnapshotApplication, run_worker_with_scanner, scan_application},
+        worker::{run_worker_with_scanner, scan::SnapshotApplication, scan::scan_application},
     },
     focus_context::FocusContext,
     secure_input::secure_input_test_channel,
