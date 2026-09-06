@@ -8,7 +8,7 @@ use super::ConfigError;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePolicyConfig {
-    /// Display names, as used by Pantaray's allow-only settings. Empty denies all apps.
+    /// Allowed application display names. Empty denies all apps.
     pub allowed_apps: Vec<String>,
     pub browser: BrowserPolicy,
     pub ide: IdePolicy,
