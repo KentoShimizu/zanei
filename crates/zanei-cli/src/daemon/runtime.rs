@@ -90,6 +90,7 @@ pub fn run_daemon(
     let owner = StoreOwner::new(mode, started_at);
     // Ownership comes first: setting a plaintext store aside renames files, and
     // only the single recorder that owns the store may do that.
+    let signals = ShutdownSignals::install()?;
     let ownership = StoreOwnership::acquire(store_path, owner.clone())?;
     let (mut writer, reader) = open_encrypted_store(store_path)?;
     let initial_status = reader.status()?;
@@ -156,7 +157,7 @@ pub fn run_daemon(
             pending_permission_request: None,
             executable_guard,
         }
-        .run(parent_stdin.as_ref());
+        .run(signals.stop_flag(), parent_stdin.as_ref());
 
         shutdown_daemon(
             loop_result,
@@ -341,8 +342,15 @@ struct ActiveDaemon<'a> {
 }
 
 impl ActiveDaemon<'_> {
-    fn run(mut self, parent_stdin: Option<&StdinEofWatcher>) -> Result<(), DaemonError> {
-        let signals = ShutdownSignals::install()?;
+    fn run(
+        mut self,
+        stop: Arc<AtomicBool>,
+        parent_stdin: Option<&StdinEofWatcher>,
+    ) -> Result<(), DaemonError> {
+        // A stop received during initialization must reach the normal cleanup without capture.
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         *self.paused =
             normalize_pause_request(self.writer, self.last_status.paused_until.as_deref())?;
         configure_eventtap_start_gate(
@@ -355,7 +363,7 @@ impl ActiveDaemon<'_> {
         }
         self.poll_permission_request();
         self.publish_heartbeat()?;
-        self.run_loop(signals.stop_flag(), parent_stdin)
+        self.run_loop(stop, parent_stdin)
     }
 
     fn run_loop(
