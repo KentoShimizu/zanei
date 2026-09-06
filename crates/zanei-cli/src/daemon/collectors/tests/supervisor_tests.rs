@@ -1,7 +1,8 @@
 use super::*;
 use crate::daemon::collectors::{ProducerFailureOrigin, ProducerFailures};
-use crate::daemon::supervisor::add_restart_degradation;
+use crate::daemon::supervisor::{add_restart_degradation, supervise_browser_collector};
 use zanei_core::privacy::CHROME_BUNDLE_ID;
+use zanei_macos::browser_context::BrowserTarget;
 use zanei_macos::chrome::{ChromeFailure, ChromeFailureState, ChromeQueryFailure};
 
 struct FakeClock {
@@ -960,6 +961,174 @@ fn deferred_browser_automation_keeps_the_worker_stopped() {
 
     state.finish();
     wait_for_relay(&managed);
+}
+
+#[test]
+fn browser_restart_uses_any_target_and_waits_for_snapshot() {
+    assert_browser_restart(
+        BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari]),
+        Some(browser_permissions(
+            CapabilityState::Available,
+            Some(CapabilityState::ActionRequired),
+        )),
+        2,
+    );
+    assert_browser_restart(
+        BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari]),
+        Some(browser_permissions(
+            CapabilityState::ActionRequired,
+            Some(CapabilityState::Available),
+        )),
+        2,
+    );
+    assert_browser_restart(
+        BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari]),
+        Some(browser_permissions(
+            CapabilityState::Deferred,
+            Some(CapabilityState::ActionRequired),
+        )),
+        2,
+    );
+    assert_browser_restart(
+        BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari]),
+        Some(browser_permissions(
+            CapabilityState::ActionRequired,
+            Some(CapabilityState::Deferred),
+        )),
+        2,
+    );
+    assert_browser_restart(
+        BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari]),
+        Some(browser_permissions(
+            CapabilityState::ActionRequired,
+            Some(CapabilityState::ActionRequired),
+        )),
+        1,
+    );
+    assert_browser_restart(
+        BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari]),
+        None,
+        1,
+    );
+    assert_browser_restart(
+        BTreeSet::from([BrowserTarget::Safari]),
+        Some(DaemonCapabilities::new(
+            BTreeSet::from([Capability::AutomateSafari]),
+            CapabilityState::Available,
+            CapabilityState::Available,
+            CapabilityState::Available,
+        )),
+        1,
+    );
+}
+
+#[test]
+fn nonbrowser_restart_requires_all_capabilities_available() {
+    let state = Arc::new(FakeState::default());
+    let mut managed = Some(Managed::new(FakeCollector::new(
+        Arc::clone(&state),
+        BTreeSet::from([Capability::ReadAccessibilityTree, Capability::ObserveInput]),
+    )));
+    let (pipeline, _events) = mpsc::sync_channel(4);
+    let mut errors = BTreeMap::new();
+    let started = Instant::now();
+    start_collector(&mut managed, &pipeline, &mut errors, started);
+    state.finish();
+    wait_for_relay(&managed);
+
+    let partial = DaemonCapabilities::new(
+        BTreeSet::from([Capability::ReadAccessibilityTree, Capability::ObserveInput]),
+        CapabilityState::Available,
+        CapabilityState::Deferred,
+        CapabilityState::Available,
+    );
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&partial),
+        &mut errors,
+        started,
+    )
+    .expect("observe partial nonbrowser permissions");
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&partial),
+        &mut errors,
+        started + Duration::from_secs(60),
+    )
+    .expect("hold partial nonbrowser restart");
+    assert_eq!(state.starts.load(Ordering::Relaxed), 1);
+
+    supervise_collector(
+        &mut managed,
+        &pipeline,
+        Some(&granted_permissions()),
+        &mut errors,
+        started + Duration::from_secs(61),
+    )
+    .expect("restart after all nonbrowser permissions are available");
+    assert_eq!(state.starts.load(Ordering::Relaxed), 2);
+    state.finish();
+    wait_for_relay(&managed);
+}
+
+fn assert_browser_restart(
+    targets: BTreeSet<BrowserTarget>,
+    permissions: Option<DaemonCapabilities>,
+    expected_starts: usize,
+) {
+    let state = Arc::new(FakeState::default());
+    let mut managed = Some(Managed::new(FakeCollector::new(
+        Arc::clone(&state),
+        BTreeSet::from([Capability::AutomateBrowser]),
+    )));
+    let (pipeline, _events) = mpsc::sync_channel(4);
+    let mut errors = BTreeMap::new();
+    let started = Instant::now();
+    start_collector(&mut managed, &pipeline, &mut errors, started);
+    state.finish();
+    wait_for_relay(&managed);
+
+    supervise_browser_collector(
+        &mut managed,
+        &targets,
+        &pipeline,
+        permissions.as_ref(),
+        &mut errors,
+        started,
+    )
+    .expect("observe browser worker exit");
+    supervise_browser_collector(
+        &mut managed,
+        &targets,
+        &pipeline,
+        permissions.as_ref(),
+        &mut errors,
+        started + Duration::from_secs(60),
+    )
+    .expect("apply browser restart policy");
+    assert_eq!(state.starts.load(Ordering::Relaxed), expected_starts);
+    if expected_starts == 2 {
+        state.finish();
+        wait_for_relay(&managed);
+    }
+}
+
+fn browser_permissions(
+    chrome: CapabilityState,
+    safari: Option<CapabilityState>,
+) -> DaemonCapabilities {
+    let mut permissions = DaemonCapabilities::new(
+        BTreeSet::from([Capability::AutomateBrowser, Capability::AutomateSafari]),
+        CapabilityState::Available,
+        CapabilityState::Available,
+        chrome,
+    );
+    if let Some(safari) = safari {
+        permissions = permissions.with_automate_safari(safari);
+    }
+    permissions
 }
 
 #[test]
