@@ -345,13 +345,12 @@ impl AppObserver {
                         "skipped"
                     }
                 );
-                let capture_text_content = self.text_content_allowed(snapshot.window.as_ref());
                 Ok(Some(RegisteredFocusedTarget {
                     element,
                     context: FocusedValueContext::new(
                         snapshot.window,
                         snapshot.element,
-                        capture_text_content,
+                        self.capture_text_content,
                         snapshot.text_baseline,
                         generation,
                         snapshot.field_class,
