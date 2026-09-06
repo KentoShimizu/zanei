@@ -110,6 +110,19 @@ impl FakeNode {
         root.with_shared(&shared)
     }
 
+    pub(super) fn with_window_title(mut self, title: Option<&str>) -> Self {
+        self.content_attributes.title = title.map(str::to_owned);
+        self
+    }
+
+    pub(super) fn content_attribute_reads(&self) -> usize {
+        self.metrics.content_attribute_reads.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn value_reads(&self) -> usize {
+        self.metrics.value_reads.load(Ordering::Relaxed)
+    }
+
     fn tick(&self) {
         self.elapsed_micros
             .fetch_add(self.call_micros, Ordering::Relaxed);
@@ -125,6 +138,10 @@ impl crate::content_snapshot::worker::scan::SnapshotWindow for FakeNode {
 
     fn window_number(&self) -> Result<Option<i64>, crate::content_snapshot::SnapshotAxError> {
         Ok(self.window_number)
+    }
+
+    fn title(&self) -> Result<Option<String>, crate::content_snapshot::SnapshotAxError> {
+        Ok(self.content_attributes.title.clone())
     }
 }
 

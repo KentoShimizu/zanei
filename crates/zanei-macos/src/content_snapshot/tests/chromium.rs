@@ -107,7 +107,7 @@ fn chromium_profile_produces_snapshot_through_trigger_scheduler_and_worker() {
                 health,
                 &mut state,
                 focus_context,
-                move |_pid, expected_window_id, stop| {
+                move |_pid, expected_window_id, stop, read_allowed| {
                     observed_scan_calls.fetch_add(1, Ordering::Release);
                     scan_application(
                         ChromiumApplication,
@@ -118,6 +118,7 @@ fn chromium_profile_produces_snapshot_through_trigger_scheduler_and_worker() {
                             assert_eq!(frame.origin.x, 0.0);
                             Some(11)
                         },
+                        read_allowed,
                     )
                 },
             );
