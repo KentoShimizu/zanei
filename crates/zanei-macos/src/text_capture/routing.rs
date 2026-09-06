@@ -45,12 +45,15 @@ pub(crate) fn route_text_body(
         suppress_text_content(&mut event.data, &mut event.element);
         return TextBodyRoute::Send(event);
     }
-    if event.app.bundle_id.as_deref() != Some(CHROME_BUNDLE_ID) {
+    let Some(version) = decision.chrome_version() else {
+        if event.app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID) {
+            suppress_text_content(&mut event.data, &mut event.element);
+        }
         return TextBodyRoute::Send(event);
-    }
-    let Some((((version, pid), window_id), observed_at)) = decision
-        .chrome_version()
-        .zip(event.app.pid)
+    };
+    let Some(((pid, window_id), observed_at)) = event
+        .app
+        .pid
         .zip(event.window.as_ref().and_then(|window| window.id))
         .zip(event.observed_at)
     else {
@@ -100,7 +103,10 @@ fn element_body(event: &RawEvent) -> bool {
 mod tests {
     use time::OffsetDateTime;
     use zanei_core::{
-        config::FilterConfig,
+        config::{
+            CapturePolicyConfig, FilterConfig,
+            capture_policy::{BrowserMode, BrowserPolicy, IdePolicy, PolicyAction},
+        },
         privacy::CHROME_BUNDLE_ID,
         schema::{
             App, ClickButton, Element, EventData, FieldKind, UiClickData, UiFocusData, Window,
@@ -108,7 +114,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::chrome::{ChromeEligibilityObservation, chrome_eligibility_channel};
+    use crate::{
+        chrome::{ChromeEligibilityObservation, chrome_eligibility_channel},
+        permission::SAFARI_BUNDLE_ID,
+    };
 
     #[test]
     fn v3_1_ui_focus_click_bodies_route_through_suppression() {
@@ -171,6 +180,89 @@ mod tests {
             panic!("allowed Chrome UI body must be quarantined");
         };
         assert_eq!(Some(version), earlier.chrome_version());
+    }
+
+    #[test]
+    fn safari_routes_generic_or_confirmed_body_without_crossing_modes() {
+        let mut standalone = FilterConfig::default();
+        standalone.text_content.exclude_apps.clear();
+        let (publisher, tracker) = chrome_eligibility_channel(standalone.clone());
+        let policy = CapturePolicy::new(tracker, standalone, None);
+        let earlier = policy.decision(
+            PrivacyScope::TextContent,
+            &app(SAFARI_BUNDLE_ID),
+            Some(11),
+            Some("Window"),
+        );
+        let TextBodyRoute::Send(event) = route_text_body(
+            ui_event(SAFARI_BUNDLE_ID, ui_bodies()[0].clone()),
+            &policy,
+            Some(&earlier),
+        ) else {
+            panic!("standalone Safari remains a generic body")
+        };
+        assert_eq!(
+            event.element.and_then(|element| element.value),
+            Some("private".to_owned())
+        );
+
+        policy.replace_filter(safari_filter());
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Safari {
+                window_id: Some(11),
+                url: Some("https://allowed.example/path".to_owned()),
+            },
+        );
+        let current = policy.decision(
+            PrivacyScope::TextContent,
+            &app(SAFARI_BUNDLE_ID),
+            Some(11),
+            Some("Window"),
+        );
+        assert!(current.is_allowed());
+        assert!(current.chrome_version().is_some());
+        let TextBodyRoute::Send(stale) = route_text_body(
+            ui_event(SAFARI_BUNDLE_ID, ui_bodies()[0].clone()),
+            &policy,
+            Some(&earlier),
+        ) else {
+            panic!("generic body cannot acquire a current confirmation version")
+        };
+        assert_eq!(stale.element.and_then(|element| element.value), None);
+
+        assert!(matches!(
+            route_text_body(
+                ui_event(SAFARI_BUNDLE_ID, ui_bodies()[0].clone()),
+                &policy,
+                Some(&current),
+            ),
+            TextBodyRoute::Quarantine { .. }
+        ));
+    }
+
+    fn safari_filter() -> FilterConfig {
+        let mut filter = FilterConfig {
+            capture_policy: Some(CapturePolicyConfig {
+                allowed_apps: vec!["Safari".to_owned()],
+                browser: BrowserPolicy {
+                    mode: BrowserMode::AllSites,
+                    default_policy: PolicyAction::Allow,
+                    on_url_unavailable: PolicyAction::Block,
+                    block_auth: false,
+                    block_payments: false,
+                    allow_list: Vec::new(),
+                    block_list: Vec::new(),
+                },
+                ide: IdePolicy {
+                    block_env_files: false,
+                    on_file_name_unavailable: PolicyAction::Allow,
+                },
+            }),
+            ..FilterConfig::default()
+        };
+        filter.text_content.exclude_apps.clear();
+        filter
     }
 
     fn ui_bodies() -> [EventData; 2] {
