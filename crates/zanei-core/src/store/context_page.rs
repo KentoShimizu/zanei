@@ -265,12 +265,12 @@ fn validate_request(request: &ContextPageRequest) -> Result<(), ContextPageError
             })?;
         }
     }
-    if let (Some(start), Some(upper)) = (&request.cursor, &request.upper_bound) {
-        if start.store_identity != upper.store_identity || start.sequence > upper.sequence {
-            return Err(ContextPageError::InvalidRequest(
-                "cursor and upper bound do not match",
-            ));
-        }
+    if let (Some(start), Some(upper)) = (&request.cursor, &request.upper_bound)
+        && (start.store_identity != upper.store_identity || start.sequence > upper.sequence)
+    {
+        return Err(ContextPageError::InvalidRequest(
+            "cursor and upper bound do not match",
+        ));
     }
     Ok(())
 }

@@ -128,7 +128,7 @@ fn passes_luhn(digits: &[u8]) -> bool {
             }
         })
         .sum();
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 fn token_ranges(value: &str) -> Vec<Range<usize>> {

@@ -409,12 +409,10 @@ fn merge(pending: &mut Pending, incoming: NormalizedEvent) -> Result<(), Normali
                 .count
                 .checked_add(next.count)
                 .ok_or(NormalizeError::CountOverflow)?;
-            if !already_truncated {
-                if let Some(next_text) = &next.text {
-                    match &mut current.text {
-                        Some(current_text) => current_text.push_str(next_text),
-                        None => current.text = Some(next_text.clone()),
-                    }
+            if !already_truncated && let Some(next_text) = &next.text {
+                match &mut current.text {
+                    Some(current_text) => current_text.push_str(next_text),
+                    None => current.text = Some(next_text.clone()),
                 }
             }
         }
