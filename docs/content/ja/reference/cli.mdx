@@ -536,8 +536,8 @@ zanei filter content-snapshot exclude-app add FutureApp --unverified
 | --- | --- | --- |
 | `exclude-app` | `exclude_apps` | 指定 app を除外。exclude / only mode の両方で有効 |
 | `only-app` | `include_only_apps` | 非空なら指定 app だけを含める |
-| `exclude-site` | `exclude_websites` | 指定 Chrome URL host を除外。両 mode で有効 |
-| `only-site` | `include_only_websites` | 非空なら指定 Chrome URL host だけを含める |
+| `exclude-site` | `exclude_websites` | 指定 Chrome/Safari URL host を除外。両 mode で有効 |
+| `only-site` | `include_only_websites` | 非空なら指定 Chrome/Safari URL host だけを含める |
 
 - 全 app list の `add` は表示名または bundle ID を受け付け、[`zanei apps`](#apps) の候補に対して解決し、bundle ID があればそれを保存します。未解決値は保存せず code 2 で終了し、近い候補があれば提示します。`--unverified` は未解決値を warning 付きで明示保存します。
 - 値なしの `add` は recent 順の番号選択を開きます。非 TTY または `--quiet` では値が必須で、省略すると code 2 です。`remove` は現在の list 内で解決するため、uninstall 済み entry も消せます。

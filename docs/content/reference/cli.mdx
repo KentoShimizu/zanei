@@ -539,8 +539,8 @@ zanei filter content-snapshot exclude-app add FutureApp --unverified
 | --- | --- | --- |
 | `exclude-app` | `exclude_apps` | Exclude these apps; active in both exclude and only mode |
 | `only-app` | `include_only_apps` | A non-empty list selects only these apps |
-| `exclude-site` | `exclude_websites` | Exclude these Chrome URL hosts; active in both modes |
-| `only-site` | `include_only_websites` | A non-empty list selects only these Chrome URL hosts |
+| `exclude-site` | `exclude_websites` | Exclude these Chrome and Safari URL hosts; active in both modes |
+| `only-site` | `include_only_websites` | A non-empty list selects only these Chrome and Safari URL hosts |
 
 - Every app-list `add` accepts a display name or bundle ID, resolves it against [`zanei apps`](#apps), and saves the bundle ID when available. An unresolved value is not saved and exits with code 2, with a close candidate when available. `--unverified` explicitly saves an unresolved value with a warning.
 - `add` with no value opens a numbered, recently-used-first selector. Non-TTY use and `--quiet` require a value; omission exits with code 2. `remove` resolves against the current list, including entries for apps no longer installed.
