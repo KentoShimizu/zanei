@@ -570,6 +570,49 @@ fn app_owned_browser_targets_follow_topology_and_reload() {
     assert!(CollectorSet::new(&config).browser_targets.is_empty());
 }
 
+#[test]
+fn browser_target_change_rebuilds_worker_and_same_targets_keep_it() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    let mut collectors = CollectorSet::new(&config);
+    collectors
+        .chrome
+        .as_mut()
+        .expect("standalone Chrome collector")
+        .relay_dropped = 7;
+
+    collectors.replace_filter(app_owned_filter(BrowserMode::AllSites, &["Safari"]));
+    assert_eq!(
+        collectors.browser_targets,
+        BTreeSet::from([BrowserTarget::Safari])
+    );
+    assert_eq!(
+        collectors
+            .chrome
+            .as_ref()
+            .expect("rebuilt Safari collector")
+            .relay_dropped,
+        0
+    );
+    assert_eq!(collectors.health().dropped, 7);
+
+    collectors
+        .chrome
+        .as_mut()
+        .expect("Safari collector")
+        .relay_dropped = 5;
+    collectors.replace_filter(app_owned_filter(BrowserMode::Rules, &["Safari"]));
+    assert_eq!(
+        collectors
+            .chrome
+            .as_ref()
+            .expect("same-target Safari collector")
+            .relay_dropped,
+        5,
+        "same target changes update policy without rebuilding the worker"
+    );
+}
+
 fn app_owned_filter(mode: BrowserMode, allowed_apps: &[&str]) -> FilterConfig {
     FilterConfig {
         capture_policy: Some(CapturePolicyConfig {

@@ -265,9 +265,10 @@ impl CollectorSet {
     pub(crate) fn replace_filter(&mut self, filter: FilterConfig) {
         let browser_targets = required_browser_targets(&self.capture, &filter);
         let browser_required = !browser_targets.is_empty();
+        let browser_targets_changed = browser_targets != self.browser_targets;
         self.capture_policy.replace_filter(filter.clone());
-        if let Some(chrome) = &self.chrome {
-            chrome.collector.set_query_targets(browser_targets.clone());
+        if browser_targets_changed && self.chrome.is_some() {
+            self.remove_chrome_collector();
         }
         if let Some(ax) = &self.ax {
             ax.collector.replace_filter(filter.clone());
