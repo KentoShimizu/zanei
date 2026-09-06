@@ -204,6 +204,10 @@ mod tests {
             zanei_core::privacy::PrivacyScope::TextContent,
             &app,
             context.window.as_ref().and_then(|window| window.id),
+            context
+                .window
+                .as_ref()
+                .and_then(|window| window.title.as_deref()),
         )
     }
 
@@ -283,7 +287,11 @@ mod tests {
                 .decision(
                     zanei_core::privacy::PrivacyScope::TextContent,
                     &app,
-                    context.window.and_then(|window| window.id),
+                    context.window.as_ref().and_then(|window| window.id),
+                    context
+                        .window
+                        .as_ref()
+                        .and_then(|window| window.title.as_deref()),
                 )
                 .is_allowed()
         );
@@ -324,6 +332,7 @@ mod tests {
                     pid: Some(7),
                 },
                 Some(11),
+                None,
                 None,
             )
             .is_allowed();

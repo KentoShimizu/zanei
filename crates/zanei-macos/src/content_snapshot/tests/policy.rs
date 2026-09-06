@@ -1,8 +1,12 @@
 use std::{thread, time::Duration};
 
 use zanei_core::{
-    config::{FilterConfig, ScopedFilterConfig},
+    config::{
+        CapturePolicyConfig, FilterConfig, ScopedFilterConfig,
+        capture_policy::{BrowserMode, BrowserPolicy, IdePolicy, PolicyAction},
+    },
     privacy::PrivacyScope,
+    schema::App,
 };
 
 use crate::{
@@ -27,6 +31,53 @@ fn disconnected_probe() -> SecureInputProbe {
     let (probe, responder) = secure_input_test_channel();
     drop(responder);
     probe
+}
+
+fn title_policy(on_file_name_unavailable: PolicyAction) -> FilterConfig {
+    title_policy_with(true, on_file_name_unavailable)
+}
+
+fn title_policy_with(
+    block_env_files: bool,
+    on_file_name_unavailable: PolicyAction,
+) -> FilterConfig {
+    FilterConfig {
+        capture_policy: Some(CapturePolicyConfig {
+            allowed_apps: vec![
+                "Cursor".to_owned(),
+                "Notes".to_owned(),
+                "Google Chrome".to_owned(),
+            ],
+            browser: BrowserPolicy {
+                mode: BrowserMode::AllSites,
+                default_policy: PolicyAction::Allow,
+                on_url_unavailable: PolicyAction::Block,
+                block_auth: false,
+                block_payments: false,
+                allow_list: Vec::new(),
+                block_list: Vec::new(),
+            },
+            ide: IdePolicy {
+                block_env_files,
+                on_file_name_unavailable,
+            },
+        }),
+        ..FilterConfig::default()
+    }
+}
+
+fn app_named(name: &str) -> App {
+    App {
+        name: name.to_owned(),
+        bundle_id: None,
+        pid: Some(7),
+    }
+}
+
+fn title_policy_capture(on_file_name_unavailable: PolicyAction) -> CapturePolicy {
+    let filter = title_policy(on_file_name_unavailable);
+    let (_, tracker) = chrome_eligibility_channel(filter.clone());
+    CapturePolicy::new(tracker, filter, None)
 }
 
 fn secure_input_decision(enabled: bool) -> bool {
@@ -56,7 +107,12 @@ fn global_and_snapshot_app_scopes_are_both_required_and_reload_immediately() {
     );
     assert!(
         policy
-            .decision(PrivacyScope::ContentSnapshot, &target.raw_app(), Some(11))
+            .decision(
+                PrivacyScope::ContentSnapshot,
+                &target.raw_app(),
+                Some(11),
+                None,
+            )
             .is_allowed()
     );
 
@@ -66,7 +122,12 @@ fn global_and_snapshot_app_scopes_are_both_required_and_reload_immediately() {
     });
     assert!(
         !policy
-            .decision(PrivacyScope::ContentSnapshot, &target.raw_app(), Some(11))
+            .decision(
+                PrivacyScope::ContentSnapshot,
+                &target.raw_app(),
+                Some(11),
+                None,
+            )
             .is_allowed()
     );
 
@@ -79,7 +140,124 @@ fn global_and_snapshot_app_scopes_are_both_required_and_reload_immediately() {
     });
     assert!(
         !policy
-            .decision(PrivacyScope::ContentSnapshot, &target.raw_app(), Some(11))
+            .decision(
+                PrivacyScope::ContentSnapshot,
+                &target.raw_app(),
+                Some(11),
+                None,
+            )
+            .is_allowed()
+    );
+}
+
+#[test]
+fn title_policy_applies_to_general_apps_and_ide_titles() {
+    let policy = title_policy_capture(PolicyAction::Block);
+    let cursor = app_named("Cursor");
+    let notes = app_named("Notes");
+    let other = app_named("Other");
+
+    assert!(
+        policy
+            .decision(
+                PrivacyScope::TextContent,
+                &cursor,
+                Some(11),
+                Some("main.rs")
+            )
+            .is_allowed()
+    );
+    assert!(
+        !policy
+            .decision(PrivacyScope::TextContent, &cursor, Some(11), Some(".env"))
+            .is_allowed()
+    );
+    assert!(
+        policy
+            .decision(
+                PrivacyScope::TextContent,
+                &cursor,
+                Some(11),
+                Some(".env.example")
+            )
+            .is_allowed()
+    );
+    assert!(
+        !policy
+            .decision(PrivacyScope::TextContent, &cursor, Some(11), None)
+            .is_allowed()
+    );
+    let allow_missing_title = title_policy_capture(PolicyAction::Allow);
+    assert!(
+        allow_missing_title
+            .decision(PrivacyScope::TextContent, &cursor, Some(11), None)
+            .is_allowed()
+    );
+    assert!(
+        policy
+            .decision(PrivacyScope::TextContent, &notes, Some(11), None)
+            .is_allowed()
+    );
+    assert!(
+        !policy
+            .decision(PrivacyScope::TextContent, &other, Some(11), None)
+            .is_allowed()
+    );
+}
+
+#[test]
+fn title_policy_reload_and_read_deny_cannot_become_send_allow() {
+    let policy = title_policy_capture(PolicyAction::Block);
+    let cursor = app_named("Cursor");
+    let earlier = policy.decision(PrivacyScope::TextContent, &cursor, Some(11), Some(".env"));
+    assert!(!earlier.is_allowed());
+
+    policy.replace_filter(title_policy_with(false, PolicyAction::Allow));
+    assert!(
+        policy
+            .decision(PrivacyScope::TextContent, &cursor, Some(11), Some(".env"))
+            .is_allowed()
+    );
+    assert!(
+        !policy
+            .decision_at_send(
+                PrivacyScope::TextContent,
+                &cursor,
+                Some(11),
+                Some(".env"),
+                Some(&earlier),
+            )
+            .is_allowed()
+    );
+}
+
+#[test]
+fn chrome_tracker_and_unknown_field_rules_remain_independent_of_title_policy() {
+    let filter = title_policy(PolicyAction::Block);
+    let (publisher, tracker) = chrome_eligibility_channel(filter.clone());
+    let policy = CapturePolicy::new(tracker, filter, None);
+    let chrome = App {
+        name: "Google Chrome".to_owned(),
+        bundle_id: Some("com.google.Chrome".to_owned()),
+        pid: Some(7),
+    };
+    publisher.observe(
+        7,
+        ChromeEligibilityObservation::Normal {
+            window_id: Some(11),
+            url: "https://example.com".to_owned(),
+        },
+    );
+    assert!(
+        policy
+            .decision(PrivacyScope::TextContent, &chrome, Some(11), Some(".env"))
+            .is_allowed()
+    );
+
+    let cursor = app_named("Cursor");
+    assert!(
+        !policy
+            .input_decision(&cursor, Some(11), Some("main.rs"), None,)
             .is_allowed()
     );
 }
@@ -105,7 +283,12 @@ fn chrome_unknown_incognito_global_site_and_snapshot_site_fail_closed() {
 
     let allows = || {
         policy
-            .decision(PrivacyScope::ContentSnapshot, &chrome.raw_app(), Some(11))
+            .decision(
+                PrivacyScope::ContentSnapshot,
+                &chrome.raw_app(),
+                Some(11),
+                None,
+            )
             .is_allowed()
     };
     assert!(!allows());
@@ -142,7 +325,12 @@ fn chrome_unknown_incognito_global_site_and_snapshot_site_fail_closed() {
     assert!(allows());
     assert_eq!(
         policy
-            .decision(PrivacyScope::ContentSnapshot, &chrome.raw_app(), Some(11))
+            .decision(
+                PrivacyScope::ContentSnapshot,
+                &chrome.raw_app(),
+                Some(11),
+                None,
+            )
             .capture_context()
             .url
             .as_deref(),

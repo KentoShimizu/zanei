@@ -7,7 +7,10 @@ use std::{
 
 use zanei_core::{
     config::FilterConfig,
-    privacy::{CHROME_BUNDLE_ID, PrivacyScope, app_is_allowed_for},
+    privacy::{
+        CHROME_BUNDLE_ID, CapturePolicyDecision, PrivacyScope, app_is_allowed_for,
+        evaluate_capture_policy,
+    },
     schema::{App, CaptureContext},
 };
 
@@ -111,6 +114,7 @@ impl CapturePolicy {
         scope: PrivacyScope,
         app: &App,
         window_id: Option<i64>,
+        window_title: Option<&str>,
     ) -> CaptureDecision {
         let is_chrome = app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID);
         let (chrome_allowed, capture_context, chrome_version) = if is_chrome {
@@ -128,10 +132,18 @@ impl CapturePolicy {
         } else {
             (true, CaptureContext::default(), None)
         };
-        let app_allowed = self
-            .filter
-            .read()
-            .is_ok_and(|filter| app_is_allowed_for(scope, app, &filter));
+        let app_allowed = self.filter.read().is_ok_and(|filter| {
+            app_is_allowed_for(scope, app, &filter)
+                && filter.capture_policy.as_ref().is_none_or(|policy| {
+                    matches!(
+                        app.name.trim().to_lowercase().as_str(),
+                        "google chrome" | "safari"
+                    ) || matches!(
+                        evaluate_capture_policy(policy, app, window_title, None),
+                        CapturePolicyDecision::Allow
+                    )
+                })
+        });
         CaptureDecision {
             allowed: app_allowed && chrome_allowed,
             capture_context,
@@ -147,9 +159,10 @@ impl CapturePolicy {
         scope: PrivacyScope,
         app: &App,
         window_id: Option<i64>,
+        window_title: Option<&str>,
         earlier: Option<&CaptureDecision>,
     ) -> CaptureDecision {
-        let mut current = self.decision(scope, app, window_id);
+        let mut current = self.decision(scope, app, window_id, window_title);
         if let Some(earlier) = earlier {
             current.allowed &= earlier.allowed;
             current.chrome_version = earlier.chrome_version;
@@ -163,9 +176,10 @@ impl CapturePolicy {
         &self,
         app: &App,
         window_id: Option<i64>,
+        window_title: Option<&str>,
         focused_field: Option<FocusedField>,
     ) -> CaptureDecision {
-        let mut decision = self.decision(PrivacyScope::TextContent, app, window_id);
+        let mut decision = self.decision(PrivacyScope::TextContent, app, window_id, window_title);
         decision.allowed &= focused_field.is_some_and(|field| field.class.is_known_text());
         decision
     }

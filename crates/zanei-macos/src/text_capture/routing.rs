@@ -31,6 +31,10 @@ pub(crate) fn route_text_body(
         PrivacyScope::TextContent,
         &event.app,
         event.window.as_ref().and_then(|window| window.id),
+        event
+            .window
+            .as_ref()
+            .and_then(|window| window.title.as_deref()),
         earlier_decision,
     );
     event.capture_context = decision.capture_context();
@@ -143,8 +147,12 @@ mod tests {
             ));
         }
 
-        let earlier =
-            chrome_policy.decision(PrivacyScope::TextContent, &app(CHROME_BUNDLE_ID), Some(11));
+        let earlier = chrome_policy.decision(
+            PrivacyScope::TextContent,
+            &app(CHROME_BUNDLE_ID),
+            Some(11),
+            Some("Window"),
+        );
         publisher.observe(
             7,
             ChromeEligibilityObservation::Normal {

@@ -156,7 +156,15 @@ fn resolve_confirmed(mut held: HeldEvent, policy: &CapturePolicy) -> Option<Rele
         HeldBodyKind::Text => PrivacyScope::TextContent,
         HeldBodyKind::Snapshot { .. } => PrivacyScope::ContentSnapshot,
     };
-    let decision = policy.decision(scope, &held.event.app, Some(held.key.window_id));
+    let decision = policy.decision(
+        scope,
+        &held.event.app,
+        Some(held.key.window_id),
+        held.event
+            .window
+            .as_ref()
+            .and_then(|window| window.title.as_deref()),
+    );
     // Confirmation authorizes the held body; it cannot change where it originated.
     if !decision.is_allowed() && matches!(held.kind, HeldBodyKind::Snapshot { .. }) {
         return drop_snapshot(&held, "denied");

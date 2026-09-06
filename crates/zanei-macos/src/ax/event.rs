@@ -208,7 +208,12 @@ impl AxEventBuilder {
         };
         let capture_context = self
             .capture_policy
-            .decision(PrivacyScope::TextContent, &app.raw_app(), window.id)
+            .decision(
+                PrivacyScope::TextContent,
+                &app.raw_app(),
+                window.id,
+                window.title.as_deref(),
+            )
             .capture_context();
         let event = RawEvent {
             observed_at: Some(observed_at),

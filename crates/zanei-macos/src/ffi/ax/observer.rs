@@ -556,6 +556,7 @@ impl AppObserver {
                 PrivacyScope::TextContent,
                 &self.app,
                 window.and_then(|window| window.id),
+                window.and_then(|window| window.title.as_deref()),
             )
         })
     }

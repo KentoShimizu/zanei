@@ -61,6 +61,7 @@ fn v2_1_chrome_snapshot_without_version_is_dropped() {
         PrivacyScope::ContentSnapshot,
         &candidate.target.app.raw_app(),
         Some(11),
+        candidate.target.window.title.as_deref(),
     );
 
     emit(
@@ -123,6 +124,7 @@ fn snapshot_ts_quarantine_release_preserves_candidate_time_and_reservation() {
         PrivacyScope::ContentSnapshot,
         &candidate.target.app.raw_app(),
         Some(11),
+        candidate.target.window.title.as_deref(),
     );
     let observer = ChromeObserver::new();
     let mut quarantine = TextQuarantine::new(observer);
@@ -222,6 +224,7 @@ fn dropped_snapshot_does_not_deduplicate_identical_settle_on_return() {
         PrivacyScope::ContentSnapshot,
         &candidate.target.app.raw_app(),
         Some(11),
+        candidate.target.window.title.as_deref(),
     );
     let mut quarantine = TextQuarantine::new(ChromeObserver::new());
     let mut state = SnapshotState::new(now);

@@ -159,8 +159,12 @@ fn chrome_ui_value_keeps_its_read_decision_for_output() {
         7,
         ChromeEligibilityObservation::Incognito { window_id: Some(1) },
     );
-    let incognito_decision =
-        policy.decision(PrivacyScope::TextContent, &chrome_app.raw_app(), Some(1));
+    let incognito_decision = policy.decision(
+        PrivacyScope::TextContent,
+        &chrome_app.raw_app(),
+        Some(1),
+        None,
+    );
     let (incognito, bound_incognito_decision) = builder
         .event(NativeAxEvent::UiValueChanged(Box::new(
             NativeUiValueEvent {
@@ -187,8 +191,12 @@ fn chrome_ui_value_keeps_its_read_decision_for_output() {
             url: "https://example.com".to_owned(),
         },
     );
-    let normal_decision =
-        policy.decision(PrivacyScope::TextContent, &chrome_app.raw_app(), Some(1));
+    let normal_decision = policy.decision(
+        PrivacyScope::TextContent,
+        &chrome_app.raw_app(),
+        Some(1),
+        None,
+    );
     let (normal, bound_normal_decision) = builder
         .event(NativeAxEvent::UiValueChanged(Box::new(
             NativeUiValueEvent {
