@@ -100,9 +100,11 @@ impl CapturePolicy {
     }
 
     pub fn replace_filter(&self, filter: FilterConfig) {
-        self.chrome.replace_filter(filter.clone());
         match self.filter.write() {
-            Ok(mut current) => *current = filter,
+            Ok(mut current) => {
+                self.chrome.replace_filter(filter.clone());
+                *current = filter;
+            }
             Err(_) => crate::trace::trace!(
                 "component=capture_policy action=replace_filter result=poisoned"
             ),
@@ -117,6 +119,7 @@ impl CapturePolicy {
         window_id: Option<i64>,
         window_title: Option<&str>,
     ) -> CaptureDecision {
+        let filter = self.filter.read().ok();
         let is_chrome = app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID);
         let is_known_browser = BrowserTarget::from_bundle_id(app.bundle_id.as_deref()).is_some();
         let (chrome_allowed, capture_context, chrome_version) = if is_chrome {
@@ -134,8 +137,8 @@ impl CapturePolicy {
         } else {
             (true, CaptureContext::default(), None)
         };
-        let app_allowed = self.filter.read().is_ok_and(|filter| {
-            app_is_allowed_for(scope, app, &filter)
+        let app_allowed = filter.as_deref().is_some_and(|filter| {
+            app_is_allowed_for(scope, app, filter)
                 && filter.capture_policy.as_ref().is_none_or(|policy| {
                     is_known_browser
                         || matches!(
@@ -204,5 +207,80 @@ impl CapturePolicy {
     #[must_use]
     pub(crate) fn chrome_tracker(&self) -> ChromeEligibilityTracker {
         self.chrome.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chrome::{ChromeEligibilityObservation, chrome_eligibility_channel};
+    use std::{
+        sync::{
+            Barrier,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+    };
+
+    #[test]
+    fn concurrent_reload_never_combines_old_app_allow_with_new_host_allow() {
+        let app = App {
+            name: "Google Chrome".to_owned(),
+            bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
+            pid: Some(7),
+        };
+        let old = FilterConfig {
+            exclude_websites: vec!["example.com".to_owned()],
+            ..Default::default()
+        };
+        let new = FilterConfig {
+            exclude_apps: vec![CHROME_BUNDLE_ID.to_owned()],
+            ..Default::default()
+        };
+        let (publisher, chrome) = chrome_eligibility_channel(old.clone());
+        publisher.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: "https://example.com".to_owned(),
+            },
+        );
+        let policy = CapturePolicy::new(chrome, old.clone(), None);
+        assert!(
+            !policy
+                .decision(PrivacyScope::TextContent, &app, Some(11), None)
+                .is_allowed()
+        );
+        policy.replace_filter(new.clone());
+        assert!(
+            !policy
+                .decision(PrivacyScope::TextContent, &app, Some(11), None)
+                .is_allowed()
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let done = Arc::new(AtomicBool::new(false));
+        let writer_policy = policy.clone();
+        let writer_barrier = Arc::clone(&barrier);
+        let writer_done = Arc::clone(&done);
+        let writer = thread::spawn(move || {
+            writer_barrier.wait();
+            for _ in 0..2_000 {
+                writer_policy.replace_filter(old.clone());
+                writer_policy.replace_filter(new.clone());
+            }
+            writer_done.store(true, Ordering::Release);
+        });
+        barrier.wait();
+        let mut mixed_allow = false;
+        while !done.load(Ordering::Acquire) {
+            mixed_allow |= policy
+                .decision(PrivacyScope::TextContent, &app, Some(11), None)
+                .is_allowed();
+        }
+        writer.join().expect("reload writer");
+        assert!(
+            !mixed_allow,
+            "both complete policy revisions deny this body"
+        );
     }
 }
