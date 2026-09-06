@@ -16,6 +16,7 @@ use zanei_core::{
 
 use crate::{
     SecureInputProbe,
+    browser_context::BrowserTarget,
     chrome::ChromeEligibilityTracker,
     ffi::activity::{ActivityError, seconds_since_last_input},
     focused_field::FocusedField,
@@ -117,6 +118,7 @@ impl CapturePolicy {
         window_title: Option<&str>,
     ) -> CaptureDecision {
         let is_chrome = app.bundle_id.as_deref() == Some(CHROME_BUNDLE_ID);
+        let is_known_browser = BrowserTarget::from_bundle_id(app.bundle_id.as_deref()).is_some();
         let (chrome_allowed, capture_context, chrome_version) = if is_chrome {
             app.pid.map_or_else(
                 || (false, CaptureContext::default(), None),
@@ -135,13 +137,11 @@ impl CapturePolicy {
         let app_allowed = self.filter.read().is_ok_and(|filter| {
             app_is_allowed_for(scope, app, &filter)
                 && filter.capture_policy.as_ref().is_none_or(|policy| {
-                    matches!(
-                        app.name.trim().to_lowercase().as_str(),
-                        "google chrome" | "safari"
-                    ) || matches!(
-                        evaluate_capture_policy(policy, app, window_title, None),
-                        CapturePolicyDecision::Allow
-                    )
+                    is_known_browser
+                        || matches!(
+                            evaluate_capture_policy(policy, app, window_title, None),
+                            CapturePolicyDecision::Allow
+                        )
                 })
         });
         CaptureDecision {

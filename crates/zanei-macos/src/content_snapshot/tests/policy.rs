@@ -206,6 +206,34 @@ fn title_policy_applies_to_general_apps_and_ide_titles() {
 }
 
 #[test]
+fn browser_display_names_with_unrecognized_bundles_still_require_policy_identity() {
+    let mut filter = title_policy(PolicyAction::Block);
+    let capture_policy = filter.capture_policy.as_mut().expect("capture policy");
+    capture_policy.allowed_apps = vec!["Cursor".to_owned()];
+    capture_policy.browser.on_url_unavailable = PolicyAction::Allow;
+    let (_, tracker) = chrome_eligibility_channel(filter.clone());
+    let policy = CapturePolicy::new(tracker, filter, None);
+    for (name, bundle_id) in [
+        ("Google Chrome", Some("com.example.Chrome")),
+        ("Google Chrome", None),
+        ("Safari", Some("com.example.Safari")),
+        ("Safari", None),
+    ] {
+        let app = App {
+            name: name.to_owned(),
+            bundle_id: bundle_id.map(str::to_owned),
+            pid: Some(7),
+        };
+        assert!(
+            !policy
+                .decision(PrivacyScope::TextContent, &app, Some(11), None)
+                .is_allowed(),
+            "unrecognized {name} bundle must not bypass app-owned policy"
+        );
+    }
+}
+
+#[test]
 fn title_policy_reload_and_read_deny_cannot_become_send_allow() {
     let policy = title_policy_capture(PolicyAction::Block);
     let cursor = app_named("Cursor");
