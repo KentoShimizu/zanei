@@ -91,7 +91,7 @@ Validation runs after omitted settings are filled with their defaults. Only the 
 
 Capture-time filters apply **before** writing. There are three scopes: `[filter]` for all events, `[filter.text_content]` for typed/copied bodies, and `[filter.content_snapshot]` for snapshot events. For each app or website axis, a non-empty `include_only_*` list selects only mode; otherwise the scope uses exclude mode. `exclude_*` always wins.
 
-The evaluation order is built-in exclusions, `[filter]` apps and websites, `[filter.text_content]`, then `[filter.content_snapshot]`. Falling outside the text-content scope keeps the event and facts but sets body fields to null, as if `capture.text_content` were false in that window. Falling outside the snapshot scope prevents `content.snapshot` from being created. Website rules apply to Chrome and, in the unreleased development version, Safari. See the [filters guide](/guides/filters); manage lists with [`zanei filter`](/reference/cli#filter) rather than editing by hand.
+The evaluation order is built-in exclusions, `[filter]` apps and websites, `[filter.text_content]`, then `[filter.content_snapshot]`. Falling outside the text-content scope keeps the event and facts but sets body fields to null, as if `capture.text_content` were false in that window. Falling outside the snapshot scope prevents `content.snapshot` from being created. Website rules apply to Chrome and Safari. See the [filters guide](/guides/filters); manage lists with [`zanei filter`](/reference/cli#filter) rather than editing by hand.
 
 | Key | Default | Description |
 | --- | --- | --- |

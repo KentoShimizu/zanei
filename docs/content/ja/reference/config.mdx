@@ -91,7 +91,7 @@ egress に相当する設定はありません。外部送信という機能自�
 
 capture-time フィルタはストア書込**前に**適用されます。scope は 3 つです：全 event の `[filter]`、入力・clipboard 本文の `[filter.text_content]`、snapshot event の `[filter.content_snapshot]`。app / website の各軸では、`include_only_*` が非空なら only mode、空なら exclude mode です。`exclude_*` はどちらの mode でも常に優先します。
 
-評価順は組み込み除外、`[filter]` の app と website、`[filter.text_content]`、`[filter.content_snapshot]` です。text-content scope 外では event と事実を残して本文 field を null にし、その window だけ `capture.text_content = false` と同じ形にします。snapshot scope 外では `content.snapshot` 自体を生成しません。サイトルールはChromeと、未リリースの開発版ではSafariにも適用します。詳細は[フィルタガイド](/ja/guides/filters)を参照し、list は [`zanei filter`](/ja/reference/cli#filter) で管理してください。
+評価順は組み込み除外、`[filter]` の app と website、`[filter.text_content]`、`[filter.content_snapshot]` です。text-content scope 外では event と事実を残して本文 field を null にし、その window だけ `capture.text_content = false` と同じ形にします。snapshot scope 外では `content.snapshot` 自体を生成しません。サイトルールはChromeとSafariに適用します。詳細は[フィルタガイド](/ja/guides/filters)を参照し、list は [`zanei filter`](/ja/reference/cli#filter) で管理してください。
 
 | キー | 既定値 | 説明 |
 | --- | --- | --- |

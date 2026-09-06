@@ -18,7 +18,7 @@ description: Zanei が要求する TCC 権限の一覧、付与手順、zanei do
 - アプリの起動・終了・前面切替（`app.*`）は権限なしで記録できます。何も付与しなくても、アプリ単位の行動履歴は記録されます。
 - `input` と `browser` は、event を app と window に結び付ける単一の前面ウィンドウ識別に Accessibility を使います。event の検出自体には、それぞれ入力監視と Automation も使います。
 - 権限が必須になるのは、それを必要とする機能が有効な場合だけです。`capture.content_snapshot` は `capture.sources` から独立しており、`window` がなくても Accessibility が必要です。snapshot 単独では入力監視は不要です。
-- `browser` がない場合も、対象browserがtext-content scopeで許可され、`text_content` と `ui` / `input` が有効な場合、または有効なcontent-snapshot scopeで許可される場合は、そのbrowserへのAutomation権限が必要です。関連scopeがすべて除外するbrowserでは不要です。Safari対応は未リリースの開発版に含まれます。
+- `browser` がない場合も、対象browserがtext-content scopeで許可され、`text_content` と `ui` / `input` が有効な場合、または有効なcontent-snapshot scopeで許可される場合は、そのbrowserへのAutomation権限が必要です。関連scopeがすべて除外するbrowserでは不要です。
 
 ## 初回セットアップ
 

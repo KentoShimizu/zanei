@@ -543,7 +543,7 @@ zanei filter content-snapshot exclude-app add FutureApp --unverified
 - 値なしの `add` は recent 順の番号選択を開きます。非 TTY または `--quiet` では値が必須で、省略すると code 2 です。`remove` は現在の list 内で解決するため、uninstall 済み entry も消せます。
 - `filter show` は 3 scope、apps/sites の mode と件数、解決した表示名、未解決 entry の `(not installed)` を表示します。hard-coded の組み込み除外も別に表示します。
 - 両 content scope は Safari・Firefox・Brave・Edge・Vivaldi・Arc を既定で除外します。`only-app` に追加するとき、または `exclude-app` から外すときは、private-window 判定がないため `--quiet` 未指定なら warning を表示します。既定値は編集できます。
-- サイトルールはChromeと、未リリースの開発版ではSafariにも適用します。変更は次の設定監視 cycle（通常 2 秒以内）で反映され、再起動は不要です。
+- サイトルールはChromeとSafariに適用します。変更は次の設定監視 cycle（通常 2 秒以内）で反映され、再起動は不要です。
 
 評価順と各 scope が除外する field は[フィルタガイド](/ja/guides/filters)を参照してください。
 

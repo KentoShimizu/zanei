@@ -52,7 +52,7 @@ app / site の各軸で `include_only_*` が非空なら only mode、空なら e
 4. `[filter.text_content]` の app / website rule。scope 外では `input.key.text`・`ui.value.data.text`・clipboard の `text` / `size_bytes`・`element.value` を null にし、event と内容以外の事実は残す。その window だけ `capture.text_content = false` と同じ形。
 5. `[filter.content_snapshot]` の app / website rule。scope 外では `content.snapshot` event を生成しない。
 
-サイトルールはChromeと、未リリースの開発版ではSafariにも適用し、単体利用と組み込み利用で同じscopeを使います。他のbrowserはapp ruleで制御します。Safariのプライベート閲覧の除外は保証せず、本文の既定除外は維持します。
+サイトルールはChromeとSafariに適用し、単体利用と組み込み利用で同じscopeを使います。他のbrowserはapp ruleで制御します。Safariのプライベート閲覧の除外は保証せず、本文の既定除外は維持します。
 
 filter reloadで対応browserを対象に加えると、recorderの再起動なしでそのbrowserの追跡が始まり、再び除外すると停止します。macOSのAutomation確認は、そのbrowserを初めて対象に加え、権限が必要になった時点で表示されます。
 

@@ -52,7 +52,7 @@ The order is fixed:
 4. `[filter.text_content]` app and website rules. Outside this scope, `input.key.text`, `ui.value.data.text`, clipboard `text`/`size_bytes`, and `element.value` are null, but the event and non-content facts remain as if `capture.text_content` were false there.
 5. `[filter.content_snapshot]` app and website rules. Outside this scope, no `content.snapshot` event is created.
 
-Website rules apply to Chrome and, in the unreleased development version, Safari, using the same scopes for standalone and embedded recording. Other browsers are controlled by app rules. Safari private-window exclusion is not guaranteed; its default content exclusions remain unchanged.
+Website rules apply to Chrome and Safari, using the same scopes for standalone and embedded recording. Other browsers are controlled by app rules. Safari private-window exclusion is not guaranteed; its default content exclusions remain unchanged.
 
 Admitting a supported browser on a filter reload starts its tracking without a recorder restart; excluding it again stops that tracking. The macOS Automation prompt appears when that browser is first admitted and the permission is first needed.
 

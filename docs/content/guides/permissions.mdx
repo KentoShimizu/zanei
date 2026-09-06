@@ -18,7 +18,7 @@ Some properties worth knowing:
 - App launch, termination, and switching (`app.*`) require no permissions. With nothing granted, Zanei still records app-level activity.
 - `input` and `browser` use Accessibility for the single frontmost-window identity that binds their events to an app and window; their event detection still uses Input Monitoring and Automation respectively.
 - A permission counts as required only when a feature that needs it is enabled. `capture.content_snapshot` is independent from `capture.sources`: it requires Accessibility even when `window` is absent. Snapshot capture by itself does not require Input Monitoring.
-- Without `browser`, Automation for a supported browser is still required when that browser is allowed by the text-content scope with `text_content` and `ui` or `input`, or by an enabled content-snapshot scope. A browser excluded from all relevant scopes does not require Automation. Safari support is part of the unreleased development version.
+- Without `browser`, Automation for a supported browser is still required when that browser is allowed by the text-content scope with `text_content` and `ui` or `input`, or by an enabled content-snapshot scope. A browser excluded from all relevant scopes does not require Automation.
 
 ## First-time setup
 
