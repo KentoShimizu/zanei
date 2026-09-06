@@ -7,13 +7,19 @@ use std::time::Instant;
 use time::OffsetDateTime;
 
 use crate::schema::{
-    CaptureContext, Event, EventData, FieldKind, InputKeyKind, RawEvent, Redaction, ScrollDirection,
+    App, CaptureContext, Event, EventData, FieldKind, InputKeyKind, RawEvent, Redaction,
+    ScrollDirection,
 };
 
 pub(crate) use limits::enforce_size_limits;
 pub use limits::{
     CONTENT_SNAPSHOT_SAFETY_MAX_BYTES, TEXT_FIELD_MAX_BYTES, URL_TITLE_FIELD_MAX_BYTES,
 };
+
+// Flush coalescing candidates at the same scale as persistence batches. A single
+// incoming event may cross the byte threshold; no second event is retained above it.
+const MAX_PENDING_EVENTS: usize = 512;
+const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 
 const NANOS_PER_MILLISECOND: u32 = 1_000_000;
 const KEY_GAP_NS: u64 = 2_000_000_000;
@@ -43,6 +49,52 @@ pub enum NormalizeError {
 pub struct NormalizedEvent {
     pub event: Event,
     pub capture_context: CaptureContext,
+    pub(crate) selectors: PolicySelectors,
+}
+
+impl NormalizedEvent {
+    /// Binds original policy selectors before applying storage field-size limits.
+    #[must_use]
+    pub fn new(mut event: Event, capture_context: CaptureContext) -> Self {
+        let url = match &event.data {
+            EventData::BrowserNavigate(data) => data.url.as_deref().map(std::sync::Arc::from),
+            _ => capture_context.url.clone(),
+        };
+        let selectors = PolicySelectors {
+            app: App {
+                name: event.app.name.clone(),
+                bundle_id: event.app.bundle_id.clone(),
+                pid: None,
+            },
+            title: event
+                .window
+                .as_ref()
+                .and_then(|window| window.title.clone()),
+            url,
+        };
+        enforce_size_limits(&mut event);
+        Self {
+            event,
+            capture_context,
+            selectors,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PolicySelectors {
+    pub(crate) app: App,
+    pub(crate) title: Option<String>,
+    pub(crate) url: Option<std::sync::Arc<str>>,
+}
+
+impl PolicySelectors {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.app.name.len()
+            + self.app.bundle_id.as_ref().map_or(0, String::len)
+            + self.title.as_ref().map_or(0, String::len)
+            + self.url.as_ref().map_or(0, |url| url.len())
+    }
 }
 
 impl std::ops::Deref for NormalizedEvent {
@@ -122,6 +174,35 @@ impl Normalizer {
                 kind,
             });
         }
+        let pending_bytes = self.pending.iter().try_fold(0usize, |total, pending| {
+            let event = &pending.event;
+            let context = &event.capture_context;
+            let surface_bytes = context.surface.as_ref().map_or(0, |surface| {
+                surface
+                    .applescript_window_id
+                    .as_ref()
+                    .map_or(0, String::len)
+                    + surface.tab_id.as_ref().map_or(0, String::len)
+            });
+            // Count shared strings conservatively, including the coalescing key's copy.
+            let selectors = context.url.as_ref().map_or(0, |url| url.len())
+                + surface_bytes
+                + event.app.name.len()
+                + event.app.bundle_id.as_ref().map_or(0, String::len)
+                + event
+                    .window
+                    .as_ref()
+                    .and_then(|window| window.title.as_ref())
+                    .map_or(0, String::len);
+            serde_json::to_vec(&event.event).map(|bytes| {
+                total.saturating_add(
+                    bytes.len() + 2 * selectors + 2 * event.selectors.retained_bytes(),
+                )
+            })
+        })?;
+        if self.pending.len() >= MAX_PENDING_EVENTS || pending_bytes >= MAX_PENDING_BYTES {
+            emitted.extend(self.drain_pending());
+        }
         emitted.sort_by_key(|item| item.event.mono_ns);
         Ok(emitted)
     }
@@ -182,7 +263,7 @@ pub fn normalize(
             "unknown event type: {event_type}"
         )))
     })?;
-    let mut event = Event {
+    let event = Event {
         version,
         id: format!("evt_{id}"),
         ts: format_timestamp(wall_time),
@@ -198,12 +279,9 @@ pub fn normalize(
             rules: Vec::new(),
         },
     };
-    enforce_size_limits(&mut event);
-    serde_json::to_value(&event)?;
-    Ok(NormalizedEvent {
-        event,
-        capture_context,
-    })
+    let normalized = NormalizedEvent::new(event, capture_context);
+    serde_json::to_value(&normalized.event)?;
+    Ok(normalized)
 }
 
 #[must_use]
@@ -233,6 +311,7 @@ enum PendingKind {
         app: String,
         window: WindowKey,
         capture_context: CaptureContext,
+        selectors: PolicySelectors,
         field_kind: Option<FieldKind>,
         kind: InputKeyKind,
     },
@@ -240,6 +319,7 @@ enum PendingKind {
         app: String,
         window: WindowKey,
         capture_context: CaptureContext,
+        selectors: PolicySelectors,
         direction: ScrollDirection,
     },
     WindowTitle {
@@ -288,6 +368,7 @@ fn pending_kind(normalized: &NormalizedEvent) -> Option<PendingKind> {
                 app,
                 window,
                 capture_context: normalized.capture_context.clone(),
+                selectors: normalized.selectors.clone(),
                 field_kind: data.field_kind,
                 kind: data.kind,
             })
@@ -296,6 +377,7 @@ fn pending_kind(normalized: &NormalizedEvent) -> Option<PendingKind> {
             app,
             window,
             capture_context: normalized.capture_context.clone(),
+            selectors: normalized.selectors.clone(),
             direction: data.direction,
         }),
         EventData::WindowTitle(_) if event.window.is_some() => Some(PendingKind::WindowTitle {

@@ -5,7 +5,7 @@ mod matcher;
 mod redactor;
 
 use crate::config::FilterConfig;
-use crate::normalize::{NormalizedEvent, enforce_size_limits};
+use crate::normalize::{NormalizedEvent, PolicySelectors, enforce_size_limits};
 use crate::schema::{App, Element, Event, EventData};
 
 pub use capture_policy::{CaptureDeniedReason, CapturePolicyDecision, evaluate_capture_policy};
@@ -30,59 +30,98 @@ pub struct PrivacyFilter {
     config: FilterConfig,
 }
 
+/// An ephemeral persistence candidate. Selectors are never serialized into stored events.
+#[derive(Clone, Debug)]
+pub struct PendingEvent {
+    event: Event,
+    selectors: PolicySelectors,
+}
+
+impl PendingEvent {
+    #[must_use]
+    pub fn event(&self) -> &Event {
+        &self.event
+    }
+
+    #[must_use]
+    pub fn into_event(self) -> Event {
+        self.event
+    }
+
+    /// Serialized event bytes plus retained selector strings, including shared URLs.
+    pub fn retained_bytes(&self) -> Result<usize, serde_json::Error> {
+        Ok(serde_json::to_vec(&self.event)?.len() + self.selectors.retained_bytes())
+    }
+}
+
 impl PrivacyFilter {
     pub fn new(config: FilterConfig) -> Self {
         Self { config }
     }
 
-    /// Applies the capture-time privacy boundary.
-    ///
-    /// Browser events without a strict, hierarchical URL host are rejected rather than
-    /// bypassing website policy.
+    /// Applies the capture-time privacy boundary to an immediately consumed event.
     pub fn process(&self, normalized: NormalizedEvent) -> Option<Event> {
-        let NormalizedEvent {
+        self.process_pending(normalized)
+            .map(PendingEvent::into_event)
+    }
+
+    /// Retains only filtered content and the original selectors needed for policy reload.
+    pub fn process_pending(&self, normalized: NormalizedEvent) -> Option<PendingEvent> {
+        self.reprocess(PendingEvent {
+            event: normalized.event,
+            selectors: normalized.selectors,
+        })
+    }
+
+    /// Tightens a pending event without restoring its original body or redacted metadata.
+    pub fn reprocess(&self, pending: PendingEvent) -> Option<PendingEvent> {
+        let PendingEvent {
             mut event,
-            capture_context,
-        } = normalized;
-        if !app_is_allowed_for(PrivacyScope::AllEvents, &event.app, &self.config) {
+            selectors,
+        } = pending;
+        let app = &selectors.app;
+        if !app_is_allowed_for(PrivacyScope::AllEvents, app, &self.config) {
             return None;
         }
-
-        let website_host = if event.event_type.starts_with("browser.") {
-            Some(extract_url_host(browser_url(&event)?)?)
-        } else {
-            capture_context.url.as_deref().and_then(extract_url_host)
+        if let Some(policy) = &self.config.capture_policy
+            && evaluate_capture_policy(
+                policy,
+                app,
+                selectors.title.as_deref(),
+                selectors.url.as_deref(),
+            ) != CapturePolicyDecision::Allow
+        {
+            return None;
+        }
+        let host = selectors.url.as_deref().and_then(extract_url_host);
+        // The optional evaluator owns URL-unavailable behavior, matching native capture.
+        // Known hosts still obey every explicit legacy site rule. Standalone stays fail-closed.
+        let unavailable_allowed = self.config.capture_policy.is_some() && host.is_none();
+        let site_allowed = |scope| {
+            unavailable_allowed
+                || website_scope_is_allowed(scope, app, host.as_deref(), &self.config)
         };
-        let global_host_allowed = website_scope_is_allowed(
-            PrivacyScope::AllEvents,
-            &event.app,
-            website_host.as_deref(),
-            &self.config,
-        );
-        if event.event_type.starts_with("browser.") && !global_host_allowed {
+        let global_host_allowed = site_allowed(PrivacyScope::AllEvents);
+        if event.event_type.starts_with("browser.")
+            && (!global_host_allowed || host.is_none() && !unavailable_allowed)
+        {
             return None;
         }
-
         if !global_host_allowed
-            || !app_is_allowed_for(PrivacyScope::TextContent, &event.app, &self.config)
-            || !website_scope_is_allowed(
-                PrivacyScope::TextContent,
-                &event.app,
-                website_host.as_deref(),
-                &self.config,
-            )
+            || !app_is_allowed_for(PrivacyScope::TextContent, app, &self.config)
+            || !site_allowed(PrivacyScope::TextContent)
         {
             suppress_text_content(&mut event.data, &mut event.element);
         }
         if event.event_type.starts_with("content.")
-            && !self.content_snapshot_is_allowed(&event.app, website_host.as_deref())
+            && (!app_is_allowed_for(PrivacyScope::ContentSnapshot, app, &self.config)
+                || !site_allowed(PrivacyScope::ContentSnapshot))
         {
             return None;
         }
-
         event = redact_event(event, &self.config.redactors);
         enforce_size_limits(&mut event);
-        Some(event)
+        Some(PendingEvent { event, selectors })
     }
 
     /// Rechecks whether a snapshot may cross the capture-time privacy boundary.
@@ -213,13 +252,6 @@ fn website_scope_is_allowed(
         return true;
     }
     host_is_allowed_for(scope, host, config)
-}
-
-fn browser_url(event: &Event) -> Option<&str> {
-    match &event.data {
-        EventData::BrowserNavigate(data) => data.url.as_deref(),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -411,9 +443,6 @@ mod tests {
     }
 
     fn normalized(event: Event) -> NormalizedEvent {
-        NormalizedEvent {
-            event,
-            capture_context: crate::schema::CaptureContext::default(),
-        }
+        NormalizedEvent::new(event, crate::schema::CaptureContext::default())
     }
 }

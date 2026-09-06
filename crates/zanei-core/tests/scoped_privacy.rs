@@ -292,8 +292,8 @@ fn normalized(data: EventData, website_host: Option<&str>) -> NormalizedEvent {
 
 fn normalized_for(data: EventData, website_host: Option<&str>, app: App) -> NormalizedEvent {
     let event_type = data.event_type().to_owned();
-    NormalizedEvent {
-        event: Event {
+    NormalizedEvent::new(
+        Event {
             version: 1,
             id: "evt_01K00000000000000000002001".to_owned(),
             ts: "2026-08-23T00:00:00.000Z".to_owned(),
@@ -313,11 +313,11 @@ fn normalized_for(data: EventData, website_host: Option<&str>, app: App) -> Norm
                 rules: Vec::new(),
             },
         },
-        capture_context: CaptureContext {
+        CaptureContext {
             url: website_host.map(|host| format!("https://{host}/").into()),
             surface: None,
         },
-    }
+    )
 }
 
 fn input_text(text: &str) -> EventData {
