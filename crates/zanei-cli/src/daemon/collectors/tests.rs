@@ -10,11 +10,20 @@ use std::{
 };
 
 use zanei_collector::{Capability, RawEvent};
-use zanei_core::{CapabilityState, DaemonCapabilities, config::CaptureSource};
-use zanei_macos::permission::PermissionStatus;
+use zanei_core::{
+    CapabilityState, DaemonCapabilities,
+    config::{
+        CaptureSource, FilterConfig,
+        capture_policy::{
+            BrowserMode, BrowserPolicy, CapturePolicyConfig, IdePolicy, PolicyAction,
+        },
+    },
+};
+use zanei_macos::browser_context::BrowserTarget;
+use zanei_macos::{browser_context::required_browser_targets, permission::PermissionStatus};
 
 use super::{
-    CollectorSet, Managed, ManagedCollector, SourceGate, chrome_tracking_required, start_collector,
+    CollectorSet, Managed, ManagedCollector, SourceGate, start_collector,
     start_collector_if_allowed, supervise_collector,
 };
 use crate::{
@@ -370,7 +379,7 @@ fn text_content_chrome_automation_permission_matrix() {
         .text_content
         .exclude_apps
         .push("com.google.Chrome".to_owned());
-    assert!(!chrome_tracking_required(&config.capture, &config.filter));
+    assert!(required_browser_targets(&config.capture, &config.filter).is_empty());
     let excluded = CollectorSet::new(&config);
     assert!(excluded.chrome.is_none());
     assert_eq!(
@@ -431,7 +440,7 @@ fn browser_source_honors_global_chrome_scope_at_startup() {
         config.filter = filter;
         let collectors = CollectorSet::new(&config);
 
-        assert!(!chrome_tracking_required(&config.capture, &config.filter));
+        assert!(required_browser_targets(&config.capture, &config.filter).is_empty());
         assert!(collectors.chrome.is_none());
         assert_eq!(
             collectors.required_capabilities(),
@@ -471,12 +480,12 @@ fn filter_reload_reconciles_chrome_collector_topology_without_applescript() {
         .exclude_apps
         .push("com.google.Chrome".to_owned());
     let mut collectors = CollectorSet::new(&config);
-    assert!(!chrome_tracking_required(&config.capture, &config.filter));
+    assert!(required_browser_targets(&config.capture, &config.filter).is_empty());
     assert!(collectors.chrome.is_none());
 
     let mut admitted = config.filter.clone();
     admitted.content_snapshot.exclude_apps.clear();
-    assert!(chrome_tracking_required(&config.capture, &admitted));
+    assert!(!required_browser_targets(&config.capture, &admitted).is_empty());
     collectors.replace_filter(admitted);
     assert!(
         collectors.chrome.is_some(),
@@ -501,14 +510,129 @@ fn text_scope_reload_starts_chrome_tracking_when_chrome_becomes_allowed() {
         .exclude_apps
         .push("com.google.Chrome".to_owned());
     let mut collectors = CollectorSet::new(&config);
-    assert!(!chrome_tracking_required(&config.capture, &config.filter));
+    assert!(required_browser_targets(&config.capture, &config.filter).is_empty());
     assert!(collectors.chrome.is_none());
 
     let mut admitted = config.filter.clone();
     admitted.text_content.exclude_apps.clear();
-    assert!(chrome_tracking_required(&config.capture, &admitted));
+    assert!(!required_browser_targets(&config.capture, &admitted).is_empty());
     collectors.replace_filter(admitted);
     assert!(collectors.chrome.is_some());
+}
+
+#[test]
+fn app_owned_browser_targets_follow_topology_and_reload() {
+    let mut standalone = zanei_core::config::Config::default();
+    standalone.capture.sources = vec![CaptureSource::Browser];
+    assert_eq!(
+        CollectorSet::new(&standalone).browser_targets,
+        BTreeSet::from([BrowserTarget::Chrome])
+    );
+
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    config.filter = app_owned_filter(BrowserMode::AllSites, &["Google Chrome", "Safari"]);
+    let mut collectors = CollectorSet::new(&config);
+    assert_eq!(
+        collectors.browser_targets,
+        BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari])
+    );
+    assert_eq!(
+        collectors.required_capabilities(),
+        BTreeSet::from([
+            Capability::ReadAccessibilityTree,
+            Capability::AutomateBrowser,
+            Capability::AutomateSafari,
+        ])
+    );
+
+    collectors.replace_filter(app_owned_filter(BrowserMode::AllSites, &["Safari"]));
+    assert_eq!(
+        collectors.browser_targets,
+        BTreeSet::from([BrowserTarget::Safari])
+    );
+
+    collectors.replace_filter(FilterConfig::default());
+    assert_eq!(
+        collectors.browser_targets,
+        BTreeSet::from([BrowserTarget::Chrome])
+    );
+
+    collectors.replace_filter(app_owned_filter(BrowserMode::Off, &["Safari"]));
+    assert!(collectors.browser_targets.is_empty());
+    assert!(collectors.chrome.is_none());
+
+    config.capture.sources.clear();
+    config.filter = app_owned_filter(BrowserMode::AllSites, &["Google Chrome", "Safari"]);
+    assert!(CollectorSet::new(&config).browser_targets.is_empty());
+    config.capture.sources = vec![CaptureSource::Browser];
+    config.filter = app_owned_filter(BrowserMode::AllSites, &["Notes"]);
+    assert!(CollectorSet::new(&config).browser_targets.is_empty());
+}
+
+#[test]
+fn browser_target_change_rebuilds_worker_and_same_targets_keep_it() {
+    let mut config = zanei_core::config::Config::default();
+    config.capture.sources = vec![CaptureSource::Browser];
+    let mut collectors = CollectorSet::new(&config);
+    collectors
+        .chrome
+        .as_mut()
+        .expect("standalone Chrome collector")
+        .relay_dropped = 7;
+
+    collectors.replace_filter(app_owned_filter(BrowserMode::AllSites, &["Safari"]));
+    assert_eq!(
+        collectors.browser_targets,
+        BTreeSet::from([BrowserTarget::Safari])
+    );
+    assert_eq!(
+        collectors
+            .chrome
+            .as_ref()
+            .expect("rebuilt Safari collector")
+            .relay_dropped,
+        0
+    );
+    assert_eq!(collectors.health().dropped, 7);
+
+    collectors
+        .chrome
+        .as_mut()
+        .expect("Safari collector")
+        .relay_dropped = 5;
+    collectors.replace_filter(app_owned_filter(BrowserMode::Rules, &["Safari"]));
+    assert_eq!(
+        collectors
+            .chrome
+            .as_ref()
+            .expect("same-target Safari collector")
+            .relay_dropped,
+        5,
+        "same target changes update policy without rebuilding the worker"
+    );
+}
+
+fn app_owned_filter(mode: BrowserMode, allowed_apps: &[&str]) -> FilterConfig {
+    FilterConfig {
+        capture_policy: Some(CapturePolicyConfig {
+            allowed_apps: allowed_apps.iter().map(|name| (*name).to_owned()).collect(),
+            browser: BrowserPolicy {
+                mode,
+                default_policy: PolicyAction::Allow,
+                on_url_unavailable: PolicyAction::Block,
+                block_auth: false,
+                block_payments: false,
+                allow_list: Vec::new(),
+                block_list: Vec::new(),
+            },
+            ide: IdePolicy {
+                block_env_files: false,
+                on_file_name_unavailable: PolicyAction::Allow,
+            },
+        }),
+        ..FilterConfig::default()
+    }
 }
 
 mod supervisor_tests;

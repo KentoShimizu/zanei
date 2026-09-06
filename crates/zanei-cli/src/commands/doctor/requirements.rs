@@ -4,6 +4,7 @@ use zanei_collector::Capability;
 use zanei_core::config::{CaptureSource, Config};
 #[cfg(test)]
 use zanei_core::privacy::CHROME_BUNDLE_ID;
+use zanei_macos::browser_context::required_browser_targets;
 
 pub(super) fn required_capabilities(config: &Config) -> BTreeSet<Capability> {
     let sources = &config.capture.sources;
@@ -22,9 +23,11 @@ pub(super) fn required_capabilities(config: &Config) -> BTreeSet<Capability> {
     if capture_input || capture_ui {
         capabilities.insert(Capability::ObserveInput);
     }
-    if crate::daemon::chrome_tracking_required(&config.capture, &config.filter) {
-        capabilities.insert(Capability::AutomateBrowser);
-    }
+    capabilities.extend(
+        required_browser_targets(&config.capture, &config.filter)
+            .into_iter()
+            .map(|target| target.capability()),
+    );
     capabilities
 }
 

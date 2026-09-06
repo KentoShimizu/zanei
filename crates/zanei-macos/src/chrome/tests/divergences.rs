@@ -463,6 +463,98 @@ fn output_disconnect_remains_a_structural_worker_stop() {
     assert_eq!(metrics.dropped.load(Ordering::Relaxed), 1);
 }
 
+#[test]
+fn restart_seeds_current_safari_focus_after_target_set_change() {
+    let focus_context = FocusContext::new();
+    let mut safari_focus = chrome_focus(7);
+    safari_focus.app = browser_app(BrowserTarget::Safari);
+    focus_context.activate(safari_focus.app.clone(), safari_focus.window.clone());
+
+    let (eligibility, _) = chrome_eligibility_channel(both_browser_filter());
+    assert_eq!(
+        eligibility.query_targets(),
+        BTreeSet::from([BrowserTarget::Chrome])
+    );
+    let (sender, events) = sync_channel(1);
+    let metrics = ChromeMetrics::default();
+
+    let mut old_api = FakeApi::new([]);
+    let mut old_state = ChromeWorkerState::default();
+    assert!(handle_focus_transition(
+        FocusTransition {
+            previous: None,
+            current: focus_context.current(),
+            resynced: false,
+        },
+        Instant::now(),
+        &mut old_api,
+        &sender,
+        &mut old_state,
+        &metrics,
+        &eligibility,
+    ));
+    assert_eq!(old_api.query_count, 0);
+    assert_eq!(old_state.frontmost, None);
+
+    eligibility.set_query_targets(BTreeSet::from([BrowserTarget::Safari]));
+    let new_focus = focus_context.subscribe();
+    let (_new_observation_sender, new_observations) = sync_channel(1);
+    let new_focus_context = focus_context.clone();
+    let new_metrics = metrics.clone();
+    let new_eligibility = eligibility.clone();
+    let new_sender = sender.clone();
+    let new_stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&new_stop);
+    let initial_focus = focus_context.current().map(|focus| FocusTransition {
+        previous: None,
+        current: Some(focus),
+        resynced: false,
+    });
+    let worker = std::thread::spawn(move || {
+        let mut new_api = FakeApi::new([Ok(ChromeObservation::Snapshot(browser_snapshot(
+            BrowserTarget::Safari,
+            Some("https://allowed.example/reloaded"),
+        )))]);
+        let receivers = ChromeWorkerReceivers {
+            focus: &new_focus,
+            observations: &new_observations,
+            focus_context: &new_focus_context,
+        };
+        run_worker(
+            &mut new_api,
+            &receivers,
+            &new_sender,
+            &worker_stop,
+            &new_metrics,
+            &new_eligibility,
+            initial_focus,
+        );
+        new_api
+    });
+
+    let event = events.recv_timeout(Duration::from_secs(1));
+    new_stop.store(true, Ordering::Release);
+    let new_api = worker.join().expect("worker stopped");
+    let event = event.expect("seeded Safari navigation");
+
+    assert_eq!(
+        new_api.queries,
+        [ChromeQuery::FrontWindow {
+            target: BrowserTarget::Safari,
+            pid: 43,
+            window_id: Some(7),
+        }]
+    );
+    assert_eq!(
+        event.app.bundle_id.as_deref(),
+        Some(BrowserTarget::Safari.bundle_id())
+    );
+    let EventData::BrowserNavigate(data) = event.data else {
+        panic!("Safari navigation");
+    };
+    assert_eq!(data.url, "https://allowed.example/reloaded");
+}
+
 struct FocusChangingApi {
     focus_context: FocusContext,
 }
