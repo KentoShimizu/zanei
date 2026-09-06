@@ -10,10 +10,7 @@ use zanei_core::schema::FieldKind;
 use super::{
     NativeAxError, NativeAxEvent, NativeAxObservation, NativeElement, TargetKind,
     cf::cf_string,
-    element::{
-        VALUE_CHANGE_READ_SURFACE, ValueFieldSnapshot, focused_element_is_excluded, gated_value,
-        value_length,
-    },
+    element::{ValueFieldSnapshot, focused_element_is_excluded, gated_value, value_length},
     native_error,
     observer::{
         AppObserver,
@@ -80,14 +77,6 @@ fn refresh_fake_target(
         || fake_ax.add(),
         || fake_ax.remove(),
     )
-}
-
-#[test]
-fn value_change_reclassifies_before_reading_value_and_character_count() {
-    assert_eq!(
-        VALUE_CHANGE_READ_SURFACE,
-        ["AXRole", "AXSubrole", "AXValue", "AXNumberOfCharacters"]
-    );
 }
 
 #[test]
@@ -779,4 +768,408 @@ fn failed_focus_clears_current_and_defers_previous_value() {
         panic!("deferred previous value should resolve after late confirmation");
     };
     assert_eq!(event.text.as_deref(), Some("x"));
+}
+
+fn ide_policy(missing: &str) -> crate::CapturePolicy {
+    use zanei_core::config::capture_policy::{
+        BrowserMode, BrowserPolicy, CapturePolicyConfig, IdePolicy, PolicyAction,
+    };
+    let mut filter = zanei_core::config::FilterConfig {
+        capture_policy: Some(CapturePolicyConfig {
+            allowed_apps: vec!["Cursor".to_owned()],
+            browser: BrowserPolicy {
+                mode: BrowserMode::Off,
+                default_policy: PolicyAction::Block,
+                on_url_unavailable: PolicyAction::Block,
+                block_auth: true,
+                block_payments: true,
+                allow_list: vec![],
+                block_list: vec![],
+            },
+            ide: IdePolicy {
+                block_env_files: missing != "disabled",
+                on_file_name_unavailable: if missing == "allow" {
+                    PolicyAction::Allow
+                } else {
+                    PolicyAction::Block
+                },
+            },
+        }),
+        ..Default::default()
+    };
+    if missing == "standalone" {
+        filter.capture_policy = None;
+    }
+    let (_, chrome) = crate::chrome::chrome_eligibility_channel(filter.clone());
+    crate::CapturePolicy::new(chrome, filter, None)
+}
+
+fn ide_app() -> zanei_core::schema::App {
+    zanei_core::schema::App {
+        name: "Cursor".to_owned(),
+        bundle_id: Some("com.todesktop.230313mzl4w4u92".to_owned()),
+        pid: Some(7),
+    }
+}
+
+fn titled_window(title: Option<&str>) -> Option<super::NativeWindow> {
+    Some(super::NativeWindow {
+        id: Some(11),
+        title: title.map(str::to_owned),
+    })
+}
+
+#[test]
+fn value_and_focus_out_reads_bind_actual_title_and_discard_previous_surface() {
+    use super::element::{capture_value_snapshot_with, value_snapshot_with};
+    for focus_out in [false, true] {
+        for (old, actual, missing, allowed) in [
+            (Some("main.rs"), Some(".env"), "block", false),
+            (Some(".env"), Some("main.rs"), "block", true),
+            (Some(".env"), Some(".env.example"), "block", true),
+            (Some("main.rs"), None, "block", false),
+            (Some("main.rs"), None, "allow", true),
+            (Some("main.rs"), Some("next.rs"), "block", true),
+            (Some("main.rs"), Some("next.rs"), "standalone", true),
+            (Some("main.rs"), None, "standalone", true),
+            (Some("main.rs"), Some(".env"), "standalone", true),
+            (Some(".env"), Some("main.rs"), "standalone", true),
+            (Some("main.rs"), Some("next.rs"), "disabled", true),
+            (Some("main.rs"), None, "disabled", true),
+            (Some("main.rs"), Some(".env"), "disabled", true),
+            (Some(".env"), Some("main.rs"), "disabled", true),
+        ] {
+            let now = Instant::now();
+            let (publisher, mut authorizations) = input_authorization_channel();
+            let had_prior_body =
+                old != Some(".env") || matches!(missing, "standalone" | "disabled");
+            let mut context = FocusedValueContext::new(
+                titled_window(old),
+                NativeElement {
+                    role: Some("AXTextArea".to_owned()),
+                    subrole: None,
+                    title: None,
+                    value: None,
+                    value_len: None,
+                },
+                true,
+                had_prior_body.then(|| "old".to_owned()),
+                1,
+                FieldClass::KnownText(FieldKind::Text),
+            );
+            if had_prior_body {
+                publisher.prepare(7, 1, now).expect("reservation").confirm();
+                context.capture.observe(
+                    ValueObservation {
+                        pid: 7,
+                        target_generation: 1,
+                        notification_at: now,
+                        value: Some("old secret".to_owned()),
+                        value_len: Some(10),
+                        field_class: FieldClass::KnownText(FieldKind::Text),
+                        capture_decision: None,
+                    },
+                    &mut authorizations,
+                );
+            }
+            let reads = Cell::new(0);
+            let policy = ide_policy(missing);
+            let (snapshot, decision) = capture_value_snapshot_with(
+                &mut context.window,
+                &policy,
+                &ide_app(),
+                true,
+                || {
+                    context
+                        .capture
+                        .transition_class(7, 1, FieldClass::Unknown, &mut authorizations)
+                },
+                || Ok(titled_window(actual)),
+                |allowed| {
+                    value_snapshot_with(
+                        fake_field_snapshot(Some("AXTextArea")),
+                        allowed,
+                        || {
+                            reads.set(reads.get() + 1);
+                            Ok(Some("current body".to_owned()))
+                        },
+                        || Ok(Some(12)),
+                    )
+                },
+            );
+            assert_eq!(reads.get(), usize::from(allowed));
+            assert_eq!(snapshot.value.as_deref(), allowed.then_some("current body"));
+            assert_eq!(context.window, titled_window(actual));
+            assert_eq!(
+                decision.as_ref().map(crate::CaptureDecision::is_allowed),
+                Some(allowed)
+            );
+            assert!(
+                context.capture.flush_pending(&mut authorizations).is_none(),
+                "old body must not be rebound to current title"
+            );
+            let observation = context.observation(
+                7,
+                now + VALUE_DEBOUNCE,
+                time::OffsetDateTime::UNIX_EPOCH,
+                snapshot,
+                decision.clone(),
+            );
+            if focus_out {
+                assert!(matches!(
+                    context
+                        .capture
+                        .resolve_focus_change(observation, &mut authorizations),
+                    crate::text_capture::FocusChangeCapture::Emit(None)
+                ));
+            } else {
+                assert!(
+                    context
+                        .capture
+                        .observe(observation, &mut authorizations)
+                        .is_none()
+                );
+            }
+            let emission = context
+                .capture
+                .flush_pending(&mut authorizations)
+                .expect("current metadata");
+            let NativeAxEvent::UiValueChanged(event) = context.value_event(7, emission) else {
+                panic!("value event")
+            };
+            assert_eq!(event.window, titled_window(actual));
+            assert_eq!(event.capture_decision, decision);
+            assert_eq!(
+                event.text, None,
+                "old authorization must not authorize another surface"
+            );
+            if allowed {
+                let typed_at = now + VALUE_DEBOUNCE + Duration::from_millis(10);
+                publisher
+                    .prepare(7, 1, typed_at)
+                    .expect("new surface input")
+                    .confirm();
+                let (snapshot, decision) = capture_value_snapshot_with(
+                    &mut context.window,
+                    &policy,
+                    &ide_app(),
+                    true,
+                    || panic!("same surface must keep new authorization"),
+                    || Ok(titled_window(actual)),
+                    |allowed| {
+                        value_snapshot_with(
+                            fake_field_snapshot(Some("AXTextArea")),
+                            allowed,
+                            || Ok(Some("current body!".to_owned())),
+                            || Ok(Some(13)),
+                        )
+                    },
+                );
+                let observation = context.observation(
+                    7,
+                    typed_at,
+                    time::OffsetDateTime::UNIX_EPOCH,
+                    snapshot,
+                    decision,
+                );
+                context.capture.observe(observation, &mut authorizations);
+                let emission = context
+                    .capture
+                    .flush_pending(&mut authorizations)
+                    .expect("authorized new body");
+                let NativeAxEvent::UiValueChanged(event) = context.value_event(7, emission) else {
+                    panic!("value event")
+                };
+                assert_eq!(event.text.as_deref(), Some("!"));
+                assert_eq!(event.window, titled_window(actual));
+            }
+        }
+    }
+}
+
+#[test]
+fn value_read_preserves_secure_unknown_and_disabled_boundaries() {
+    use super::element::{capture_value_snapshot_with, value_snapshot_with};
+    for class in [
+        FieldClass::SecureText,
+        FieldClass::Unknown,
+        FieldClass::KnownText(FieldKind::Text),
+    ] {
+        for enabled in [false, true] {
+            let mut window = titled_window(Some(".env"));
+            let reads = Cell::new(0);
+            let (snapshot, _) = capture_value_snapshot_with(
+                &mut window,
+                &ide_policy("block"),
+                &ide_app(),
+                enabled,
+                || {},
+                || Ok(titled_window(Some("main.rs"))),
+                |allowed| {
+                    let mut field = fake_field_snapshot(Some("AXTextArea"));
+                    field.field_class = class;
+                    value_snapshot_with(
+                        field,
+                        allowed,
+                        || {
+                            reads.set(reads.get() + 1);
+                            Ok(Some("body".to_owned()))
+                        },
+                        || {
+                            assert!(
+                                class.is_known_text(),
+                                "secure/unknown must not read character count"
+                            );
+                            Ok(Some(4))
+                        },
+                    )
+                },
+            );
+            assert_eq!(reads.get(), usize::from(enabled && class.is_known_text()));
+            assert_eq!(snapshot.value.is_some(), enabled && class.is_known_text());
+        }
+    }
+}
+
+#[test]
+fn unavailable_ax_window_does_not_reuse_title_and_native_errors_do_not_read() {
+    use super::element::{capture_value_snapshot_with, value_snapshot_with};
+    for missing in ["allow", "block"] {
+        let mut window = titled_window(Some("main.rs"));
+        let (snapshot, decision) = capture_value_snapshot_with(
+            &mut window,
+            &ide_policy(missing),
+            &ide_app(),
+            true,
+            || {},
+            || Ok(None),
+            |allowed| {
+                value_snapshot_with(
+                    fake_field_snapshot(Some("AXTextArea")),
+                    allowed,
+                    || Ok(Some("body".to_owned())),
+                    || Ok(Some(4)),
+                )
+            },
+        );
+        assert!(window.is_none());
+        assert_eq!(snapshot.value.is_some(), missing == "allow");
+        assert_eq!(decision.expect("decision").is_allowed(), missing == "allow");
+        let (snapshot, decision) = capture_value_snapshot_with(
+            &mut window,
+            &ide_policy(missing),
+            &ide_app(),
+            true,
+            || {},
+            || Err(native_error("AXWindow", -25_204)),
+            |_| panic!("native failure must prevent value reads"),
+        );
+        assert!(snapshot.failure.is_some());
+        assert!(decision.is_none());
+    }
+}
+
+#[test]
+fn disallowed_app_does_not_acquire_value_body() {
+    use super::element::{capture_value_snapshot_with, value_snapshot_with};
+    let mut app = ide_app();
+    app.name = "Terminal".to_owned();
+    let mut window = titled_window(Some("main.rs"));
+    let (snapshot, decision) = capture_value_snapshot_with(
+        &mut window,
+        &ide_policy("block"),
+        &app,
+        true,
+        || {},
+        || panic!("non-IDE app does not require title acquisition"),
+        |allowed| {
+            value_snapshot_with(
+                fake_field_snapshot(Some("AXTextArea")),
+                allowed,
+                || panic!("disallowed app must not read body"),
+                || Ok(Some(12)),
+            )
+        },
+    );
+    assert!(snapshot.value.is_none());
+    assert!(!decision.expect("decision").is_allowed());
+}
+
+#[test]
+fn dirty_title_changes_preserve_input_but_other_surfaces_reset_it() {
+    use super::element::{capture_value_snapshot_with, value_snapshot_with};
+    for (old, current, old_id, current_id, kept) in [
+        ("main.rs - A", "● main.rs - A", Some(11), Some(11), true),
+        ("● main.rs - A", "main.rs - A", Some(11), Some(11), true),
+        ("main.rs - A", "• main.rs - A", Some(11), Some(11), true),
+        ("• main.rs - A", "main.rs - A", Some(11), Some(11), true),
+        ("main.rs - A", "● other.rs - A", Some(11), Some(11), false),
+        ("main.rs - A", "● main.rs - B", Some(11), Some(11), false),
+        ("main.rs - A", "● main.rs - A", Some(11), Some(12), false),
+        ("main.rs - A", "● main.rs - A", None, None, false),
+        ("main.rs - A", "main.rs - A", None, None, true),
+        ("main.rs - A", "● ● main.rs - A", Some(11), Some(11), false),
+        (" main.rs - A", "● main.rs - A", Some(11), Some(11), false),
+    ] {
+        let now = Instant::now();
+        let (publisher, mut authorizations) = input_authorization_channel();
+        let mut context = FocusedValueContext::new(
+            Some(super::NativeWindow {
+                id: old_id,
+                title: Some(old.to_owned()),
+            }),
+            NativeElement {
+                role: Some("AXTextArea".to_owned()),
+                subrole: None,
+                title: None,
+                value: None,
+                value_len: None,
+            },
+            true,
+            Some("A".to_owned()),
+            1,
+            FieldClass::KnownText(FieldKind::Text),
+        );
+        publisher.prepare(7, 1, now).expect("typed input").confirm();
+        let acquired = Some(super::NativeWindow {
+            id: current_id,
+            title: Some(current.to_owned()),
+        });
+        let (snapshot, decision) = capture_value_snapshot_with(
+            &mut context.window,
+            &ide_policy("block"),
+            &ide_app(),
+            true,
+            || {
+                context
+                    .capture
+                    .transition_class(7, 1, FieldClass::Unknown, &mut authorizations)
+            },
+            || Ok(acquired.clone()),
+            |allowed| {
+                value_snapshot_with(
+                    fake_field_snapshot(Some("AXTextArea")),
+                    allowed,
+                    || Ok(Some("Ax".to_owned())),
+                    || Ok(Some(2)),
+                )
+            },
+        );
+        let observation =
+            context.observation(7, now, time::OffsetDateTime::UNIX_EPOCH, snapshot, decision);
+        context.capture.observe(observation, &mut authorizations);
+        let emission = context
+            .capture
+            .flush_pending(&mut authorizations)
+            .expect("value metadata");
+        let NativeAxEvent::UiValueChanged(event) = context.value_event(7, emission) else {
+            panic!("value event")
+        };
+        assert_eq!(
+            event.text.as_deref(),
+            kept.then_some("x"),
+            "{old:?} -> {current:?}"
+        );
+        assert_eq!(event.window, acquired);
+    }
 }

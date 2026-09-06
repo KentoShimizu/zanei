@@ -197,7 +197,7 @@ pub(super) fn run(
         if let Some(clipboard) = clipboard.as_mut() {
             let change_before_events = pasteboard.change_count();
             if clipboard.has_changed(change_before_events) {
-                let context_before_events = focus_context.current().map(native_context);
+                let context_before_events = focus_context.current();
                 let copy = clipboard.copy_event(
                     change_before_events,
                     context_before_events.as_ref(),
@@ -277,7 +277,7 @@ pub(super) fn run(
         {
             let copy = clipboard.copy_event(
                 change_count,
-                context.as_ref(),
+                focus_context.current().as_ref(),
                 ClipboardObservationTime {
                     monotonic: Instant::now(),
                     wall: time::OffsetDateTime::now_utc(),
@@ -477,7 +477,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             }
             if is_copy_shortcut(&observation) {
                 clipboard.observe_copy(
-                    context,
+                    target,
                     ClipboardObservationTime {
                         monotonic: Instant::now(),
                         wall: observed_at,

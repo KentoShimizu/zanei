@@ -12,7 +12,7 @@ use crate::{
 use super::{AppObserver, value_registration::RegistrationError};
 use crate::ffi::ax::{
     NativeAxError, NativeAxEvent, add_notification,
-    element::{ValueFieldSnapshot, value_field_snapshot, value_snapshot},
+    element::{ValueFieldSnapshot, capture_value_snapshot, value_field_snapshot},
     remove_notification,
     value_context::{DeferredResolution, DeferredValueContext, classified_field_snapshot},
 };
@@ -42,13 +42,6 @@ impl AppObserver {
         let failures = self.failures.clone();
         let degraded = self.degraded.clone();
         let pid = i64::from(self.context.pid);
-        let capture_decision = self
-            .focused_target
-            .current()
-            .and_then(|target| self.text_content_decision(target.context.window.as_ref()));
-        let capture_text_content = capture_decision
-            .as_ref()
-            .is_some_and(crate::CaptureDecision::is_allowed);
         let (class_changed, registration_class, value_event) = {
             let Some(target) = self.focused_target.current_mut() else {
                 crate::trace::trace!(
@@ -70,8 +63,22 @@ impl AppObserver {
             }
             let context = &mut target.context;
             let previous_class = context.field_class;
-            let snapshot =
-                value_snapshot(target.element.as_ptr(), capture_text_content, secure_input);
+            let (snapshot, capture_decision) = capture_value_snapshot(
+                target.element.as_ptr(),
+                &mut context.window,
+                &self.capture_policy,
+                &self.app,
+                self.capture_text_content,
+                secure_input,
+                || {
+                    context.capture.transition_class(
+                        self.context.pid,
+                        context.generation,
+                        FieldClass::Unknown,
+                        authorizations,
+                    )
+                },
+            );
             let registration_class =
                 (!secure_input && snapshot.failure.is_none()).then_some(snapshot.field_class);
             crate::trace::trace!(
@@ -431,13 +438,6 @@ impl AppObserver {
         let failures = self.failures.clone();
         let degraded = self.degraded.clone();
         let pid = i64::from(self.context.pid);
-        let capture_decision = self
-            .focused_target
-            .current()
-            .and_then(|target| self.text_content_decision(target.context.window.as_ref()));
-        let capture_text_content = capture_decision
-            .as_ref()
-            .is_some_and(crate::CaptureDecision::is_allowed);
         let Some(target) = self.focused_target.current_mut() else {
             return FocusChangeResolution::Immediate(None);
         };
@@ -448,7 +448,22 @@ impl AppObserver {
             return FocusChangeResolution::Immediate(None);
         }
         let context = &mut target.context;
-        let snapshot = value_snapshot(target.element.as_ptr(), capture_text_content, secure_input);
+        let (snapshot, capture_decision) = capture_value_snapshot(
+            target.element.as_ptr(),
+            &mut context.window,
+            &self.capture_policy,
+            &self.app,
+            self.capture_text_content,
+            secure_input,
+            || {
+                context.capture.transition_class(
+                    self.context.pid,
+                    context.generation,
+                    FieldClass::Unknown,
+                    authorizations,
+                )
+            },
+        );
         if snapshot.failure.is_some() {
             track_snapshot(
                 &failures,

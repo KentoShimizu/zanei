@@ -418,12 +418,30 @@ fn v3_2_send_time_decision_overrides_stale_allow() {
         monotonic: Instant::now(),
         wall: time::OffsetDateTime::UNIX_EPOCH,
     };
-    clipboard.observe_copy(&context, observed_at, true, clipboard_decision.clone());
+    let copy_target = NativeInputTarget {
+        context: context.clone(),
+        focused_field: None,
+        focus_generation: 1,
+        field_generation: 2,
+    };
+    let copy_focus = crate::focus_context::FocusSnapshot {
+        app: crate::workspace::ApplicationInfo {
+            name: context.app.name.clone(),
+            bundle_id: context.app.bundle_id.clone(),
+            pid: context.app.pid,
+            activation_policy: crate::workspace::ApplicationActivationPolicy::Regular,
+        },
+        window: context.window.clone(),
+        generation: 1,
+        field_generation: 2,
+        focused_field: None,
+    };
+    clipboard.observe_copy(&copy_target, observed_at, true, clipboard_decision.clone());
     assert!(clipboard_decision.is_allowed());
     deny_test_app_text(&clipboard_policy);
     let output = clipboard.copy_event(
         2,
-        Some(&context),
+        Some(&copy_focus),
         observed_at,
         |include_content| PasteboardContent {
             kind: PasteboardKind::Text,
@@ -436,7 +454,7 @@ fn v3_2_send_time_decision_overrides_stale_allow() {
     let EventData::ClipboardCopy(data) = &output.as_ref().expect("copy output").event.data else {
         panic!("clipboard.copy");
     };
-    assert_eq!(data.text.as_deref(), Some("private"));
+    assert_eq!(data.text, None);
 
     assert_eq!(
         emit_clipboard(

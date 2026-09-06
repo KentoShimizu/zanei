@@ -21,14 +21,6 @@ const AX_VALUE_ATTRIBUTE: &str = "AXValue";
 const AX_NUMBER_OF_CHARACTERS_ATTRIBUTE: &str = "AXNumberOfCharacters";
 const MAX_STATIC_TEXT_VALUE_CHARS: usize = 256;
 
-#[cfg(test)]
-pub(super) const VALUE_CHANGE_READ_SURFACE: [&str; 4] = [
-    "AXRole",
-    "AXSubrole",
-    AX_VALUE_ATTRIBUTE,
-    AX_NUMBER_OF_CHARACTERS_ATTRIBUTE,
-];
-
 pub(super) struct FocusedElementSnapshot {
     pub(super) window: Option<NativeWindow>,
     pub(super) element: NativeElement,
@@ -153,13 +145,122 @@ pub(super) const fn focused_element_is_excluded(field_class: FieldClass) -> bool
     matches!(field_class, FieldClass::SecureText)
 }
 
+pub(super) fn capture_value_snapshot(
+    element: CfRef,
+    window: &mut Option<NativeWindow>,
+    policy: &crate::CapturePolicy,
+    app: &zanei_core::schema::App,
+    capture_enabled: bool,
+    secure_input: bool,
+    surface_changed: impl FnOnce(),
+) -> (ValueSnapshot, Option<crate::CaptureDecision>) {
+    capture_value_snapshot_with(
+        window,
+        policy,
+        app,
+        capture_enabled,
+        surface_changed,
+        || {
+            copy_element(element, "AXWindow")?
+                .map(|window| window_snapshot(window.as_ptr()))
+                .transpose()
+                .map(Option::flatten)
+        },
+        |allowed| value_snapshot(element, allowed, secure_input),
+    )
+}
+
+pub(super) fn capture_value_snapshot_with(
+    window: &mut Option<NativeWindow>,
+    policy: &crate::CapturePolicy,
+    app: &zanei_core::schema::App,
+    capture_enabled: bool,
+    surface_changed: impl FnOnce(),
+    read_window: impl FnOnce() -> Result<Option<NativeWindow>, NativeAxError>,
+    read_value: impl FnOnce(bool) -> ValueSnapshot,
+) -> (ValueSnapshot, Option<crate::CaptureDecision>) {
+    if !capture_enabled {
+        return (read_value(false), None);
+    }
+    if matches!(
+        app.name.trim().to_lowercase().as_str(),
+        "cursor" | "visual studio code" | "code"
+    ) {
+        match read_window() {
+            Ok(current) => {
+                if !same_value_surface(window.as_ref(), current.as_ref()) {
+                    surface_changed();
+                }
+                *window = current;
+            }
+            Err(error) => {
+                surface_changed();
+                *window = None;
+                return (
+                    suppressed_value_snapshot(FieldClass::Unknown, None, None, Some(error)),
+                    None,
+                );
+            }
+        }
+    }
+    let decision = policy.decision(
+        zanei_core::privacy::PrivacyScope::TextContent,
+        app,
+        window.as_ref().and_then(|window| window.id),
+        window.as_ref().and_then(|window| window.title.as_deref()),
+    );
+    let snapshot = read_value(decision.is_allowed());
+    (snapshot, Some(decision))
+}
+
+fn same_value_surface(previous: Option<&NativeWindow>, current: Option<&NativeWindow>) -> bool {
+    if previous == current {
+        return true;
+    }
+    let (Some(previous), Some(current)) = (previous, current) else {
+        return false;
+    };
+    let (Some(previous_id), Some(current_id), Some(previous_title), Some(current_title)) = (
+        previous.id,
+        current.id,
+        previous.title.as_deref(),
+        current.title.as_deref(),
+    ) else {
+        return false;
+    };
+    // A leading dirty marker changes on edits; preserve the full remaining title and window ID.
+    fn without_dirty(title: &str) -> &str {
+        title
+            .strip_prefix("● ")
+            .or_else(|| title.strip_prefix("• "))
+            .unwrap_or(title)
+    }
+    previous_id == current_id && without_dirty(previous_title) == without_dirty(current_title)
+}
+
 /// Reads only the mutable value surface used by `AXValueChanged` handling.
 pub(super) fn value_snapshot(
     element: CfRef,
     capture_text_content: bool,
     secure_input: bool,
 ) -> ValueSnapshot {
-    let classification = value_field_snapshot(element, secure_input);
+    value_snapshot_with(
+        value_field_snapshot(element, secure_input),
+        capture_text_content,
+        || copy_string(element, AX_VALUE_ATTRIBUTE),
+        || {
+            copy_attribute(element, AX_NUMBER_OF_CHARACTERS_ATTRIBUTE)
+                .map(|value| value.and_then(|value| i64_value(value.as_ptr())))
+        },
+    )
+}
+
+pub(super) fn value_snapshot_with(
+    classification: ValueFieldSnapshot,
+    capture_text_content: bool,
+    read_value: impl FnOnce() -> Result<Option<String>, NativeAxError>,
+    read_count: impl FnOnce() -> Result<Option<i64>, NativeAxError>,
+) -> ValueSnapshot {
     if classification.failure.is_some()
         || matches!(
             classification.field_class,
@@ -180,15 +281,14 @@ pub(super) fn value_snapshot(
         ..
     } = classification;
     let value = match match field_class {
-        FieldClass::KnownText(_) if capture_text_content => {
-            copy_string(element, AX_VALUE_ATTRIBUTE)
-        }
+        FieldClass::KnownText(_) if capture_text_content => read_value(),
         FieldClass::KnownText(_) => Ok(None),
-        FieldClass::KnownSafeNonText => {
-            gated_value(capture_text_content, field_class, role.as_deref(), || {
-                copy_string(element, AX_VALUE_ATTRIBUTE)
-            })
-        }
+        FieldClass::KnownSafeNonText => gated_value(
+            capture_text_content,
+            field_class,
+            role.as_deref(),
+            read_value,
+        ),
         FieldClass::SecureText | FieldClass::Unknown => Ok(None),
     } {
         Ok(value) => value,
@@ -197,14 +297,13 @@ pub(super) fn value_snapshot(
             return suppressed_value_snapshot(FieldClass::Unknown, role, subrole, Some(error));
         }
     };
-    let character_count = match copy_attribute(element, AX_NUMBER_OF_CHARACTERS_ATTRIBUTE) {
+    let character_count = match read_count() {
         Ok(character_count) => character_count,
         Err(error) => {
             trace_value_read_error(AX_NUMBER_OF_CHARACTERS_ATTRIBUTE, &error);
             return suppressed_value_snapshot(FieldClass::Unknown, role, subrole, Some(error));
         }
     };
-    let character_count = character_count.and_then(|value| i64_value(value.as_ptr()));
     ValueSnapshot {
         value_len: value_length(character_count, value.as_deref()),
         value,
