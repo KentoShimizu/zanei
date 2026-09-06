@@ -7,7 +7,7 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 const APPLE_EVENTS_USAGE_DESCRIPTION: &str =
-    "Zanei reads Chrome URLs and window types to record browser activity.";
+    "Zanei reads Chrome and Safari URLs to record browser activity.";
 
 #[test]
 fn make_app_creates_the_signed_bundle_contract() {

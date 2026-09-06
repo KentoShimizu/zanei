@@ -41,7 +41,8 @@ use crate::{
 };
 
 const COLLECTOR_NAME: &str = "chrome";
-const REQUIRED_CAPABILITIES: [Capability; 1] = [Capability::AutomateBrowser];
+const REQUIRED_CAPABILITIES: [Capability; 2] =
+    [Capability::AutomateBrowser, Capability::AutomateSafari];
 use failure::ChromeFailurePublisher;
 use observer::ObservationTrigger;
 use worker::{ChromeWorkerReceivers, run_worker};

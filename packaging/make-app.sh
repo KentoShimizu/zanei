@@ -86,7 +86,7 @@ main() {
   <key>LSUIElement</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Zanei reads Chrome URLs and window types to record browser activity.</string>
+  <string>Zanei reads Chrome and Safari URLs to record browser activity.</string>
 </dict>
 </plist>
 EOF
