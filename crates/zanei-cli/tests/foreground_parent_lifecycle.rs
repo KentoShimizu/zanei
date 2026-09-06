@@ -325,14 +325,12 @@ fn isolated_standalone_and_embedded_instances_survive_each_others_restart() {
 fn wait_for_running(child: &mut ChildGuard, store: &Path, key: &StoreKey) {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
-        if store.exists() {
-            if let Ok(status) =
+        if store.exists()
+            && let Ok(status) =
                 StoreReader::open_with_key(store, Some(key)).and_then(|reader| reader.status())
-            {
-                if status.pid.is_some() {
-                    return;
-                }
-            }
+            && status.pid.is_some()
+        {
+            return;
         }
         if let Some(status) = child.try_wait().expect("poll foreground startup") {
             panic!("foreground daemon exited before becoming ready: {status}");

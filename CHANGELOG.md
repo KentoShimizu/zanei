@@ -1,11 +1,38 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-09-07
 
+Isolated embedding, bounded context reads, and shared browser capture are now
+available, with tighter capture-time privacy checks.
+
+- Embedded recorders can use separate configuration, stores, and Keychain
+  identities with explicit prompt policy, without sharing the standalone
+  recorder's key. `start --foreground --exit-on-stdin-eof` ties recording to the
+  parent process's stdin lifetime. Shutdown signals are handled during startup
+  as well as normal recording.
+- Store schema v8 adds a persistent store identity and committed append positions.
+  Upgrading copies retained events into a new append history; this baseline does
+  not reconstruct their original commit order. Existing timestamp queries remain
+  available. The migration is forward-only; keep a pre-upgrade backup for rollback.
+- `context-read` accepts one bounded JSON request on stdin. Context pages use
+  store-bound cursors and a fixed append upper bound; evidence reads return
+  bounded UTF-8 ranges with source provenance. Retention/deletion gaps and
+  incompatible stores are explicit outcomes, not empty successful pages.
 - Safari URL capture and website filtering use the shared browser capture path
-  for standalone and embedded recording. Existing app/site exclusions and
-  default Safari content exclusions remain in effect. Safari privacy mode is
-  unknown; private-window exclusion is not guaranteed.
+  for standalone and embedded recording. Browser observations are bound to full
+  URLs, windows, and tabs, and Safari has independent Automation capability
+  reporting and recovery guidance. Existing app/site exclusions and default
+  Safari content exclusions remain in effect. Safari privacy mode is unknown;
+  private-window exclusion is not guaranteed.
+- App-owned capture policies restrict permitted applications and content before
+  collection. Browser publication and pending events are checked against current
+  policy after reload. AX snapshots, value changes, and delayed copy reads use
+  the actual window/focus context and retain read provenance; stale surface or
+  policy approval cannot authorize later captured text.
+- The packaged macOS app now includes the website logo as its app icon.
+- Source builds now declare Rust 1.88 as the minimum, matching locked dependencies
+  including `time` and ICU. Prebuilt macOS releases are unaffected by this build
+  prerequisite.
 
 ## 0.4.0 — 2026-08-26
 

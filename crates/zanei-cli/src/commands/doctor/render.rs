@@ -120,15 +120,13 @@ pub(super) fn render_human(
     }
 
     if !has_non_automation_missing {
-        if !report.missing_permissions.is_empty() {
-            if let Some(pane) = report.missing_permissions.iter().find_map(|capability| {
-                report
-                    .capabilities
-                    .get(*capability)
-                    .map(|report| report.detail.settings_url)
-            }) {
-                output.push_str(&format!("System Settings pane: {pane}\n"));
-            }
+        if let Some(pane) = report.missing_permissions.iter().find_map(|capability| {
+            report
+                .capabilities
+                .get(*capability)
+                .map(|report| report.detail.settings_url)
+        }) {
+            output.push_str(&format!("System Settings pane: {pane}\n"));
         }
         output.push('\n');
         if report.missing_permissions.is_empty() {
