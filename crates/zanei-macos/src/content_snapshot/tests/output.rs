@@ -459,7 +459,7 @@ fn standalone_safari_filter() -> FilterConfig {
 fn app_owned_safari_filter() -> FilterConfig {
     let mut filter = FilterConfig {
         capture_policy: Some(CapturePolicyConfig {
-            allowed_apps: vec!["Safari".to_owned()],
+            allowed_apps: Some(vec!["Safari".to_owned()]),
             browser: BrowserPolicy {
                 mode: BrowserMode::AllSites,
                 default_policy: PolicyAction::Allow,

@@ -1,4 +1,6 @@
 //! Pure policy evaluation for the accepted browser/AX/pipeline consumers.
+//! App selection is owned by `filter.exclude_apps` / `filter.include_only_apps` unless the
+//! policy pins an explicit `allowed_apps` list; this evaluator owns the browser and IDE rules.
 //! This does not acquire a surface, verify its freshness, or replace Secure Input/private guards.
 //! Chrome private browsing is rejected by its eligibility owner; Safari private state remains
 //! Unknown and is never converted to Normal here. An explicitly bound Safari URL may still use
@@ -44,10 +46,12 @@ pub fn evaluate_capture_policy(
         return Deny(Reason::ProtectedApp);
     }
     let name = app.name.trim().to_lowercase();
-    if !policy
-        .allowed_apps
-        .iter()
-        .any(|allowed| allowed.to_lowercase() == name)
+    // Absent `allowed_apps` leaves app selection to the caller's `filter` app lists,
+    // which every caller applies before this evaluator runs.
+    if let Some(allowed_apps) = &policy.allowed_apps
+        && !allowed_apps
+            .iter()
+            .any(|allowed| allowed.to_lowercase() == name)
     {
         return Deny(Reason::AppNotAllowed);
     }

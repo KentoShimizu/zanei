@@ -782,7 +782,7 @@ pub(in crate::ffi::ax) fn ide_policy(missing: &str) -> crate::CapturePolicy {
     };
     let mut filter = zanei_core::config::FilterConfig {
         capture_policy: Some(CapturePolicyConfig {
-            allowed_apps: vec!["Cursor".to_owned()],
+            allowed_apps: Some(vec!["Cursor".to_owned()]),
             browser: BrowserPolicy {
                 mode: BrowserMode::Off,
                 default_policy: PolicyAction::Block,

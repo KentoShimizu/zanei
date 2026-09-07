@@ -597,7 +597,7 @@ fn publication_filter() -> FilterConfig {
     };
     FilterConfig {
         capture_policy: Some(zanei_core::config::CapturePolicyConfig {
-            allowed_apps: vec!["Google Chrome".to_owned()],
+            allowed_apps: Some(vec!["Google Chrome".to_owned()]),
             browser: BrowserPolicy {
                 mode: BrowserMode::Rules,
                 default_policy: PolicyAction::Allow,
@@ -872,7 +872,11 @@ fn denied_url_is_not_published_or_used_as_the_next_navigation_origin() {
 fn both_browser_filter() -> FilterConfig {
     let mut filter = publication_filter();
     let policy = filter.capture_policy.as_mut().unwrap();
-    policy.allowed_apps.push("Safari".to_owned());
+    policy
+        .allowed_apps
+        .as_mut()
+        .expect("allow list")
+        .push("Safari".to_owned());
     policy.browser.on_url_unavailable = zanei_core::config::capture_policy::PolicyAction::Allow;
     filter
 }
@@ -985,6 +989,8 @@ fn denied_browser_does_not_stop_or_get_hidden_by_other_browser_success() {
             .as_mut()
             .unwrap()
             .allowed_apps
+            .as_mut()
+            .expect("allow list")
             .retain(|name| name != blocked.display_name());
         capture.replace_filter(changed);
         assert_eq!(

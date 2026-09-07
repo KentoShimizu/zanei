@@ -43,11 +43,11 @@ fn title_policy_with(
 ) -> FilterConfig {
     FilterConfig {
         capture_policy: Some(CapturePolicyConfig {
-            allowed_apps: vec![
+            allowed_apps: Some(vec![
                 "Cursor".to_owned(),
                 "Notes".to_owned(),
                 "Google Chrome".to_owned(),
-            ],
+            ]),
             browser: BrowserPolicy {
                 mode: BrowserMode::AllSites,
                 default_policy: PolicyAction::Allow,
@@ -209,7 +209,7 @@ fn title_policy_applies_to_general_apps_and_ide_titles() {
 fn browser_display_names_with_unrecognized_bundles_still_require_policy_identity() {
     let mut filter = title_policy(PolicyAction::Block);
     let capture_policy = filter.capture_policy.as_mut().expect("capture policy");
-    capture_policy.allowed_apps = vec!["Cursor".to_owned()];
+    capture_policy.allowed_apps = Some(vec!["Cursor".to_owned()]);
     capture_policy.browser.on_url_unavailable = PolicyAction::Allow;
     let (_, tracker) = chrome_eligibility_channel(filter.clone());
     let policy = CapturePolicy::new(tracker, filter, None);

@@ -1,10 +1,12 @@
 use serde::Deserialize;
 use zanei_core::config::capture_policy::{BrowserMode, BrowserUrlRule, PolicyAction};
-use zanei_core::config::{CapturePolicyConfig, Config};
+use zanei_core::config::{CapturePolicyConfig, Config, FilterConfig};
+use zanei_core::normalize::NormalizedEvent;
 use zanei_core::privacy::{
-    CaptureDeniedReason as Reason, CapturePolicyDecision as Decision, evaluate_capture_policy,
+    CaptureDeniedReason as Reason, CapturePolicyDecision as Decision, PrivacyFilter,
+    evaluate_capture_policy,
 };
-use zanei_core::schema::App;
+use zanei_core::schema::{App, CaptureContext, EmptyData, Event, EventData, Redaction};
 
 #[derive(Deserialize)]
 struct Fixtures {
@@ -119,10 +121,96 @@ fn app_allow_only_does_not_become_allow_all_and_cannot_override_protected_apps()
         evaluate_capture_policy(&policy, &protected, None, None),
         Decision::Deny(Reason::ProtectedApp)
     );
-    policy.allowed_apps.clear();
+    policy.allowed_apps = Some(Vec::new());
     assert_eq!(
         evaluate_capture_policy(&policy, &app("Notes"), None, None),
         Decision::Deny(Reason::AppNotAllowed)
+    );
+}
+
+#[test]
+fn an_absent_allow_list_leaves_app_selection_to_the_filter_lists() {
+    let mut policy = fixtures().policy;
+    policy.allowed_apps = None;
+    for name in ["Notes", "Slack", "Other"] {
+        assert_eq!(
+            evaluate_capture_policy(&policy, &app(name), None, None),
+            Decision::Allow,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        evaluate_capture_policy(&policy, &app("1Password"), None, None),
+        Decision::Deny(Reason::ProtectedApp)
+    );
+    // The browser and IDE rules still apply to the apps the filter lists admit.
+    assert_eq!(
+        evaluate_capture_policy(&policy, &app("Cursor"), Some(".env"), None),
+        Decision::Deny(Reason::EnvFile)
+    );
+    assert_eq!(
+        evaluate_capture_policy(&policy, &app("Google Chrome"), None, None),
+        Decision::Deny(Reason::UrlUnavailable)
+    );
+}
+
+#[test]
+fn without_an_allow_list_exclude_and_include_only_apps_decide_what_is_recorded() {
+    let policy = || {
+        let mut policy = fixtures().policy;
+        policy.allowed_apps = None;
+        Some(policy)
+    };
+    let filter = |exclude: &[&str], include_only: &[&str]| FilterConfig {
+        capture_policy: policy(),
+        exclude_apps: exclude.iter().map(|name| (*name).to_owned()).collect(),
+        include_only_apps: include_only.iter().map(|name| (*name).to_owned()).collect(),
+        ..FilterConfig::default()
+    };
+
+    for (exclude, include_only, expected) in [
+        (&[][..], &[][..], &[("Notes", true), ("Slack", true)][..]),
+        (
+            &["Slack"][..],
+            &[][..],
+            &[("Notes", true), ("Slack", false)][..],
+        ),
+        (
+            &[][..],
+            &["Notes"][..],
+            &[("Notes", true), ("Slack", false)][..],
+        ),
+    ] {
+        let privacy = PrivacyFilter::new(filter(exclude, include_only));
+        for (name, recorded) in expected {
+            assert_eq!(
+                privacy.process(activation(name)).is_some(),
+                *recorded,
+                "{name} exclude={exclude:?} include_only={include_only:?}"
+            );
+        }
+    }
+    // An explicit allow list still overrides both lists exactly as before.
+    let mut pinned = filter(&[], &[]);
+    pinned.capture_policy.as_mut().expect("policy").allowed_apps = Some(vec!["Notes".to_owned()]);
+    let privacy = PrivacyFilter::new(pinned);
+    assert!(privacy.process(activation("Notes")).is_some());
+    assert!(privacy.process(activation("Slack")).is_none());
+}
+
+#[test]
+fn a_policy_without_an_allow_list_parses_and_is_serialized_without_the_key() {
+    let mut config = Config::default();
+    let mut policy = fixtures().policy;
+    policy.allowed_apps = None;
+    config.filter.capture_policy = Some(policy);
+    config.validate().expect("no allow list to validate");
+
+    let encoded = toml::to_string(&config).expect("generated config");
+    assert!(!encoded.contains("allowed_apps"));
+    assert_eq!(
+        Config::from_toml(&encoded).expect("validated round trip"),
+        config
     );
 }
 
@@ -297,7 +385,7 @@ fn incomplete_unknown_or_noncanonical_policy_never_silently_becomes_broad_allow(
     let mut config = Config::default();
     for apps in [vec![""], vec!["Notes", "notes"], vec![" Notes "]] {
         let mut policy = fixtures().policy;
-        policy.allowed_apps = apps.into_iter().map(str::to_owned).collect();
+        policy.allowed_apps = Some(apps.into_iter().map(str::to_owned).collect());
         config.filter.capture_policy = Some(policy);
         assert!(config.validate().is_err());
     }
@@ -314,4 +402,30 @@ fn incomplete_unknown_or_noncanonical_policy_never_silently_becomes_broad_allow(
         config.filter.capture_policy = Some(policy);
         assert!(config.validate().is_err(), "{host} {path}");
     }
+}
+
+fn activation(app_name: &str) -> NormalizedEvent {
+    NormalizedEvent::new(
+        Event {
+            version: 1,
+            id: "evt_01J00000000000000000000000".to_owned(),
+            ts: "2026-09-07T00:00:00.000Z".to_owned(),
+            mono_ns: 1,
+            source: "macos.workspace".to_owned(),
+            event_type: "app.activate".to_owned(),
+            app: App {
+                name: app_name.to_owned(),
+                bundle_id: None,
+                pid: Some(1),
+            },
+            window: None,
+            element: None,
+            data: EventData::AppActivate(EmptyData {}),
+            redaction: Redaction {
+                applied: false,
+                rules: Vec::new(),
+            },
+        },
+        CaptureContext::default(),
+    )
 }

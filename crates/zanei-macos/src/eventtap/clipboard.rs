@@ -435,7 +435,7 @@ mod tests {
             source.window.as_mut().expect("window").title = Some("main.rs".to_owned());
             let filter = FilterConfig {
                 capture_policy: Some(CapturePolicyConfig {
-                    allowed_apps: vec!["Cursor".to_owned()],
+                    allowed_apps: Some(vec!["Cursor".to_owned()]),
                     browser: BrowserPolicy {
                         mode: BrowserMode::Off,
                         default_policy: PolicyAction::Block,
@@ -466,12 +466,7 @@ mod tests {
             match change {
                 "policy" => {
                     let mut denied = filter;
-                    denied
-                        .capture_policy
-                        .as_mut()
-                        .expect("policy")
-                        .allowed_apps
-                        .clear();
+                    denied.capture_policy.as_mut().expect("policy").allowed_apps = Some(Vec::new());
                     policy.replace_filter(denied);
                 }
                 "env_title" => {

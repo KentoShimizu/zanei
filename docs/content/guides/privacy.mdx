@@ -74,6 +74,14 @@ The recorder stops creating snapshots after 128 MiB in a day. This is an in-memo
 - **Chrome Incognito** — Chromium reports the window mode over AppleScript. Incognito windows produce no URL events, and text-content bodies remain null. There is no configuration knob.
 - **Built-in app exclusions** — password managers and credential stores (for example `1Password`, `Keychain Access`) are excluded by a hard-coded layer that cannot be lifted, not even with `include_only_apps`. It is separate from the editable `exclude_apps` defaults in `config.toml`.
 
+## Embedded capture policies
+
+An application that embeds the recorder can add a [`[filter.capture_policy]`](/reference/config#filtercapture_policy) table to its own configuration. It narrows capture further: which browser URLs may be captured, and whether IDE `.env` files are blocked by window title.
+
+Which applications are recorded is not part of that table. It is decided by `filter.exclude_apps` and `filter.include_only_apps` — the same lists [`zanei filter`](/reference/cli#filter) manages — whether you run the recorder standalone or inside an embedding application. So `zanei filter exclude-app add Slack` keeps Slack out of the store in both cases, and one `only-app` entry switches to recording only the apps you listed.
+
+A policy may also pin its own `allowed_apps` list, which is applied in addition to those two lists rather than instead of them. In every case the built-in exclusions above still cannot be lifted, and every filter, redactor, and retention rule on this page applies unchanged.
+
 ## Redaction
 
 For values that are captured, redactors replace recognizable matches for enabled rules. The defaults are credit-card numbers and tokens (`redactors = ["credit_card", "token"]`). Email redaction remains available and works as before when you add `"email"` to the `filter.redactors` array, but it is not enabled by default because an email address is an addressing identifier, not a secret.

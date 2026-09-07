@@ -8,8 +8,10 @@ use super::ConfigError;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePolicyConfig {
-    /// Allowed application display names. Empty denies all apps.
-    pub allowed_apps: Vec<String>,
+    /// Allowed application display names. Empty denies all apps. Absent leaves app
+    /// selection to `filter.exclude_apps` / `filter.include_only_apps` alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_apps: Option<Vec<String>>,
     pub browser: BrowserPolicy,
     pub ide: IdePolicy,
 }
@@ -58,10 +60,9 @@ pub struct IdePolicy {
 
 impl CapturePolicyConfig {
     pub(super) fn validate(&self) -> Result<(), ConfigError> {
-        super::validation::nonempty_unique(
-            "filter.capture_policy.allowed_apps",
-            &self.allowed_apps,
-        )?;
+        if let Some(allowed_apps) = &self.allowed_apps {
+            super::validation::nonempty_unique("filter.capture_policy.allowed_apps", allowed_apps)?;
+        }
         for rule in self
             .browser
             .allow_list

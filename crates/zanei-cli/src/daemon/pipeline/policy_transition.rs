@@ -108,7 +108,7 @@ fn policy(names: &[&str]) -> FilterConfig {
     config.text_content.exclude_apps.clear();
     config.content_snapshot.exclude_apps.clear();
     config.capture_policy = Some(CapturePolicyConfig {
-        allowed_apps: names.iter().map(|name| (*name).to_owned()).collect(),
+        allowed_apps: Some(names.iter().map(|name| (*name).to_owned()).collect()),
         browser: BrowserPolicy {
             mode: BrowserMode::AllSites,
             default_policy: PolicyAction::Block,

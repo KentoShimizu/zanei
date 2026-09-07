@@ -93,12 +93,14 @@ pub(crate) fn browser_query_allowed(target: BrowserTarget, filter: &FilterConfig
         return false;
     }
     match filter.capture_policy.as_ref() {
+        // Without an explicit `allowed_apps` list the `filter` check above is the app gate.
         Some(policy) => {
             policy.browser.mode != BrowserMode::Off
-                && policy
-                    .allowed_apps
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(target.display_name()))
+                && policy.allowed_apps.as_ref().is_none_or(|allowed_apps| {
+                    allowed_apps
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(target.display_name()))
+                })
         }
         None => true,
     }
@@ -115,7 +117,7 @@ mod tests {
     fn app_policy(mode: BrowserMode, allowed_apps: &[&str]) -> FilterConfig {
         FilterConfig {
             capture_policy: Some(CapturePolicyConfig {
-                allowed_apps: allowed_apps.iter().map(|name| (*name).to_owned()).collect(),
+                allowed_apps: Some(allowed_apps.iter().map(|name| (*name).to_owned()).collect()),
                 browser: BrowserPolicy {
                     mode,
                     default_policy: PolicyAction::Allow,
@@ -187,6 +189,29 @@ mod tests {
             targets,
             BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari])
         );
+    }
+
+    #[test]
+    fn a_policy_without_an_allow_list_queries_every_browser_the_filter_admits() {
+        let capture = CaptureConfig {
+            sources: vec![CaptureSource::Browser],
+            ..CaptureConfig::default()
+        };
+        let mut filter = app_policy(BrowserMode::Rules, &[]);
+        filter.capture_policy.as_mut().expect("policy").allowed_apps = None;
+        assert_eq!(
+            required_browser_targets(&capture, &filter),
+            BTreeSet::from([BrowserTarget::Chrome, BrowserTarget::Safari])
+        );
+
+        filter.exclude_apps = vec![BrowserTarget::Safari.bundle_id().to_owned()];
+        assert_eq!(
+            required_browser_targets(&capture, &filter),
+            BTreeSet::from([BrowserTarget::Chrome])
+        );
+
+        filter.capture_policy.as_mut().expect("policy").browser.mode = BrowserMode::Off;
+        assert!(required_browser_targets(&capture, &filter).is_empty());
     }
 
     #[test]
