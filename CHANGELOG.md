@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-09-07
 
 - `filter.capture_policy.allowed_apps` is now optional. When it is absent, which
   applications are recorded is decided only by `filter.exclude_apps` and

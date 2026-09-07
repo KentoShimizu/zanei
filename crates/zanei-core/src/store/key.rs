@@ -44,7 +44,7 @@ impl StoreKey {
             return Err(StoreError::InvalidKey("expected 64 hexadecimal characters"));
         }
         let mut bytes = Zeroizing::new([0_u8; STORE_KEY_BYTES]);
-        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = hex_value(pair[0]);
             let low = hex_value(pair[1]);
             let (Some(high), Some(low)) = (high, low) else {
