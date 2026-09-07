@@ -74,6 +74,14 @@ recorder は 1 日の snapshot 本文が 128 MiB に達すると新しい snapsh
 - **Chrome シークレットウィンドウ** — Chromium は AppleScript でウィンドウモードを返します。incognito は URL イベントを生成せず、本文も記録しません。設定項目はありません。
 - **組み込みの除外アプリ** — パスワードマネージャ・資格情報ストア（`1Password`・`Keychain Access` 等）は固定の層で除外され、`include_only_apps` でも解除できません。`config.toml` の `exclude_apps` に見える編集可能な既定値とは別の層です。
 
+## 組み込みアプリの capture policy
+
+recorder を組み込むアプリケーションは、自身の設定に [`[filter.capture_policy]`](/ja/reference/config#filtercapture_policy) テーブルを追加できます。これが絞り込むのは、どの browser URL を捕捉してよいか、そして window title から判定した IDE の `.env` ファイルを拒否するかどうかです。
+
+どのアプリケーションを記録するかはこのテーブルの担当ではありません。standalone でも組み込みでも、決めるのは `filter.exclude_apps` と `filter.include_only_apps`、つまり [`zanei filter`](/ja/reference/cli#filter) が管理するのと同じ list です。したがって `zanei filter exclude-app add Slack` はどちらの場合も Slack をストアから排除し、`only-app` を 1 つ追加すればその list のアプリだけを記録する形に切り替わります。
+
+policy が独自の `allowed_apps` を固定することもできますが、それは上の 2 つの list の代わりではなく、後段に追加で適用されます。いずれの場合も上記の組み込み除外は解除できず、このページのフィルタ・redactor・保持期間のルールはそのまま適用されます。
+
 ## Redaction
 
 捕捉された値について、redactor は有効なルールに一致する検出可能な値を置換します。既定はクレジットカード番号とトークンです（`redactors = ["credit_card", "token"]`）。`filter.redactors` 配列に `"email"` を追加すれば、メールアドレスの redaction は従来どおり利用できます。ただし、メールアドレスは秘密ではなく宛先を識別する値であるため、既定では有効にしません。

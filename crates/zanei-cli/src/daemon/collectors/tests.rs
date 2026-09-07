@@ -623,7 +623,7 @@ fn browser_target_change_rebuilds_worker_and_same_targets_keep_it() {
 fn app_owned_filter(mode: BrowserMode, allowed_apps: &[&str]) -> FilterConfig {
     FilterConfig {
         capture_policy: Some(CapturePolicyConfig {
-            allowed_apps: allowed_apps.iter().map(|name| (*name).to_owned()).collect(),
+            allowed_apps: Some(allowed_apps.iter().map(|name| (*name).to_owned()).collect()),
             browser: BrowserPolicy {
                 mode,
                 default_policy: PolicyAction::Allow,

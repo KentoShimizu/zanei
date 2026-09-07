@@ -502,7 +502,7 @@ mod tests {
     fn safari_filter(mode: BrowserMode, on_url_unavailable: PolicyAction) -> FilterConfig {
         let mut filter = FilterConfig {
             capture_policy: Some(CapturePolicyConfig {
-                allowed_apps: vec!["Safari".to_owned()],
+                allowed_apps: Some(vec!["Safari".to_owned()]),
                 browser: BrowserPolicy {
                     mode,
                     default_policy: PolicyAction::Allow,

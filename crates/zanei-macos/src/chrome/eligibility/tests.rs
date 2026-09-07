@@ -235,7 +235,7 @@ fn safari_keeps_optional_url_and_never_invents_tab_identity() {
 fn safari_policy(on_url_unavailable: PolicyAction) -> FilterConfig {
     FilterConfig {
         capture_policy: Some(CapturePolicyConfig {
-            allowed_apps: vec!["Safari".to_owned()],
+            allowed_apps: Some(vec!["Safari".to_owned()]),
             browser: BrowserPolicy {
                 mode: BrowserMode::Rules,
                 default_policy: PolicyAction::Allow,
@@ -297,7 +297,7 @@ fn app_owned_chrome_uses_block_list_default_and_allow_list_after_reobservation()
     publisher.observe(7, normal(11, "https://blocked.example/"));
     let mut filter = safari_policy(PolicyAction::Allow);
     let policy = filter.capture_policy.as_mut().expect("capture policy");
-    policy.allowed_apps = vec!["Google Chrome".to_owned()];
+    policy.allowed_apps = Some(vec!["Google Chrome".to_owned()]);
     policy.browser.default_policy = PolicyAction::Block;
     policy.browser.allow_list = vec![BrowserUrlRule {
         host: "allowed.example".to_owned(),

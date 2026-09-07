@@ -66,7 +66,7 @@ egress に相当する設定はありません。外部送信という機能自�
 
 ## バリデーション
 
-省略した設定に既定値を補完した後にバリデーションを実行します。受理するのは以下の 18 キー（それぞれ定義された section 内）だけで、それ以外のキーがあるとファイル全体を不正とします。`config init` は 18 項目をすべて出力します。ルールに違反するファイルは受理されず、`config show` や `config edit` を含む設定を読み込むすべてのコマンドが exit code 1 で終了します。`config set` や `filter` に渡した不正値は使用法エラー（code 2）で、何も保存されません。`config set` が受け付けるのはスカラーキー（`capture.text_content`・`capture.content_snapshot`・`output.batch_interval_s`・`output.retention_hours`）のみで、配列キーは `filter` か手編集で変更します。
+省略した設定に既定値を補完した後にバリデーションを実行します。受理するのは以下の 18 キーと任意の [`[filter.capture_policy]`](#filtercapture_policy) テーブル（それぞれ定義された section 内）だけで、それ以外のキーがあるとファイル全体を不正とします。`config init` は 18 項目をすべて出力し、`[filter.capture_policy]` は書き出しません。ルールに違反するファイルは受理されず、`config show` や `config edit` を含む設定を読み込むすべてのコマンドが exit code 1 で終了します。`config set` や `filter` に渡した不正値は使用法エラー（code 2）で、何も保存されません。`config set` が受け付けるのはスカラーキー（`capture.text_content`・`capture.content_snapshot`・`output.batch_interval_s`・`output.retention_hours`）のみで、配列キーは `filter` か手編集で変更します。
 
 | キー | 受理する値 |
 | --- | --- |
@@ -79,6 +79,7 @@ egress に相当する設定はありません。外部送信という機能自�
 | `filter.text_content.exclude_websites`・`filter.text_content.include_only_websites`・`filter.content_snapshot.exclude_websites`・`filter.content_snapshot.include_only_websites` | 同じ domain list rule。4 list とも既定値は `[]` |
 | `filter.redactors` | `email`・`credit_card`・`token` のうち 0 個以上。重複不可。`email` は選択可能だが既定では無効 |
 | `output.batch_interval_s`・`output.retention_hours` | 0 より大きい符号なし整数（`u64`） |
+| `[filter.capture_policy]` | 任意。既定では存在しません。テーブルを書いた場合は `browser` と `ide`、およびその中の全キーが必須で、`allowed_apps` だけが任意です。[`[filter.capture_policy]`](#filtercapture_policy) を参照 |
 ## `[capture]`
 
 | キー | 既定値 | 説明 |
@@ -106,6 +107,88 @@ nested scope も同じ 4 list 名を使います。既定値と挙動は上記�
 :::warning[0.3.0 の挙動変更]
 新しい既定の `[filter.text_content].exclude_apps` は、既存の 0.2.x 設定ですでに `capture.text_content = true` でも適用されます。Safari・Firefox・Brave・Edge・Vivaldi・Arc の本文は既定で null になり、event と内容以外の事実は残ります。
 :::
+
+## `[filter.capture_policy]`
+
+recorder を組み込むアプリケーション向けの任意テーブルです。書き込むのはそのアプリケーションか
+手編集で、`config init` は生成せず、`config set` と `filter` も触れません。このテーブルが無い設定は
+上記のとおりに動作し、追加しても上記のキーの意味は変わりません。
+
+**記録対象アプリの選び方は全員共通です。** どのアプリケーションを記録するかは
+`filter.exclude_apps` と `filter.include_only_apps`、つまり
+[`zanei filter exclude-app`](/ja/reference/cli#filter) と `zanei filter only-app` が管理する list が
+決めます。`capture_policy` が足すのは、その list では表現できない browser の URL ルールと IDE の
+ファイルルールだけです。
+
+`allowed_apps` は任意で、独自の許可リストを固定したい policy のためにあります。省略すればアプリ選択の
+ゲートは上記 2 つの `filter` list だけになり、指定すればそれらの後に追加で適用される許可リストになります
+（したがって `allowed_apps = []` は何も記録しません）。
+
+`[filter]` の app list を通過した event の評価順は次のとおりです。
+
+1. 組み込み除外（パスワードマネージャ・資格情報ストア）が拒否します。どの設定でも解除できません。
+2. `allowed_apps` がある場合、アプリの表示名が含まれていなければ拒否します（前後の whitespace を除いた
+   大文字小文字を無視した一致）。
+3. `Google Chrome` と `Safari` は `browser` だけが決めます。
+4. `Cursor`・`Visual Studio Code`・`Code` は `ide` が決めます。
+5. それ以外のアプリは許可します。
+
+`browser` が URL を許可した後も、`[filter]` と `[filter.text_content]` / `[filter.content_snapshot]` の
+website ルールは Chrome と Safari に適用されます。`[filter]` の他のキーと同様、変更は daemon の設定監視が
+数秒以内に反映するため再起動は不要です。
+
+| キー | 必須 | 説明 |
+| --- | --- | --- |
+| `allowed_apps` | 任意 | アプリの表示名。省略するとアプリ選択は `filter.exclude_apps` / `filter.include_only_apps` に委ねられ、`[]` はすべてのアプリを拒否します。各 entry は非空・前後 whitespace なし・大文字小文字を無視して一意 |
+| `browser.mode` | 必須 | `off` は Chrome と Safari をそのまま拒否、`all_sites` は解決できた URL をすべて許可、`rules` は下の list を参照 |
+| `browser.default_policy` | 必須 | `mode = "rules"` でどのルールにも一致しなかった URL に対する `allow` / `block` |
+| `browser.on_url_unavailable` | 必須 | host を持つ `http` / `https` URL を window に結び付けられなかったときの `allow` / `block` |
+| `browser.block_auth` | 必須 | path に代表的な sign-in・sign-up・OAuth・パスワードリセットの segment を含む URL を拒否します。URL パターンであって認証画面の検出ではないため、`/docs/oauth` も一致します |
+| `browser.block_payments` | 必須 | path に `checkout`・`payment`・`payments`・`billing`・`subscription`・`subscriptions` を含む URL を拒否 |
+| `browser.allow_list`・`browser.block_list` | 必須 | `{ host, path_prefix, match_subdomains }` の配列。`block_list` は `allow_list` にも `mode = "all_sites"` にも優先します。`host` は `URL.hostname` が返す正規形（小文字の ASCII / IDNA。`例え.テスト` ではなく `xn--r8jz45g.xn--zckzah`、port なし、末尾ドットなし、IPv6 は角括弧）でなければなりません。`path_prefix` は前後 whitespace なしの、大文字小文字を区別するリテラル前方一致 |
+| `ide.block_env_files` | 必須 | `Cursor`・`Visual Studio Code`・`Code` で、window title が `.env` ファイルを指すときに捕捉を拒否します。`.env.example` などは拒否しません |
+| `ide.on_file_name_unavailable` | 必須 | window title からファイル名を読めなかったときの `allow` / `block` |
+
+利用者が特定アプリを除外でき、browser は 2 サイトに限定し、IDE の `.env` は決して捕捉しない組み込み
+アプリケーションが書く例です。
+
+```toml config.toml
+[filter]
+exclude_apps = ["1Password", "Keychain Access", "com.tinyspeck.slackmacgap"]
+include_only_apps = []
+
+[filter.capture_policy]                 # allowed_apps なし: 上の exclude_apps がアプリのゲート
+
+[filter.capture_policy.browser]
+mode = "rules"
+default_policy = "block"
+on_url_unavailable = "block"
+block_auth = true
+block_payments = true
+allow_list = [
+  { host = "github.com", path_prefix = "", match_subdomains = false },
+  { host = "example.com", path_prefix = "/docs", match_subdomains = true },
+]
+block_list = []
+
+[filter.capture_policy.ide]
+block_env_files = true
+on_file_name_unavailable = "block"
+```
+
+同じ policy を only mode にした場合（利用者が記録する 2 アプリを選んだ状態）です。
+
+```toml config.toml
+[filter]
+include_only_apps = ["com.apple.Notes", "com.google.Chrome"]
+```
+
+`filter` の list ではなく独自の許可リストを持たせる場合は次の形です。
+
+```toml config.toml
+[filter.capture_policy]
+allowed_apps = ["Notes", "Google Chrome"]
+```
 
 ## `[output]`
 

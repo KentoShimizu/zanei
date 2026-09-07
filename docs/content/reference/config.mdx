@@ -66,7 +66,7 @@ There is no egress-related setting; external transmission does not exist as a fe
 
 ## Validation
 
-Validation runs after omitted settings are filled with their defaults. Only the 18 keys below, in their declared sections, are accepted; any other key makes the file invalid. `config init` writes all 18 options. A file that violates a rule is not accepted: every command that loads it, including `config show` and `config edit`, exits with code 1. Invalid values given to `config set` or `filter` are usage errors (code 2) and nothing is saved. `config set` accepts only scalar keys (`capture.text_content`, `capture.content_snapshot`, `output.batch_interval_s`, `output.retention_hours`); array keys are edited with `filter` or by hand.
+Validation runs after omitted settings are filled with their defaults. Only the 18 keys below and the optional [`[filter.capture_policy]`](#filtercapture_policy) table, in their declared sections, are accepted; any other key makes the file invalid. `config init` writes all 18 options and never writes `[filter.capture_policy]`. A file that violates a rule is not accepted: every command that loads it, including `config show` and `config edit`, exits with code 1. Invalid values given to `config set` or `filter` are usage errors (code 2) and nothing is saved. `config set` accepts only scalar keys (`capture.text_content`, `capture.content_snapshot`, `output.batch_interval_s`, `output.retention_hours`); array keys are edited with `filter` or by hand.
 
 | Key | Accepted values |
 | --- | --- |
@@ -79,6 +79,7 @@ Validation runs after omitted settings are filled with their defaults. Only the 
 | `filter.text_content.exclude_websites`, `filter.text_content.include_only_websites`, `filter.content_snapshot.exclude_websites`, `filter.content_snapshot.include_only_websites` | The same domain-list rules; all four default to `[]` |
 | `filter.redactors` | Zero or more of `email`, `credit_card`, `token`; no duplicates. `email` is available but is not enabled by default |
 | `output.batch_interval_s`, `output.retention_hours` | Unsigned integer (`u64`) greater than zero |
+| `[filter.capture_policy]` | Optional and absent by default. When the table is present, `browser` and `ide` and every key inside them are required; `allowed_apps` is optional. See [`[filter.capture_policy]`](#filtercapture_policy) |
 ## `[capture]`
 
 | Key | Default | Description |
@@ -106,6 +107,90 @@ The nested scopes use the same four list names. Their defaults and behavior are 
 :::warning[0.3.0 behavior change]
 The new default `[filter.text_content].exclude_apps` applies even when an existing 0.2.x configuration already has `capture.text_content = true`. Bodies from Safari, Firefox, Brave, Edge, Vivaldi, and Arc become null by default; events and non-content facts remain.
 :::
+
+## `[filter.capture_policy]`
+
+An optional table for an application that embeds the recorder. It is written by that application
+or by hand: `config init` never writes it, and `config set` and `filter` never touch it. A
+configuration without it behaves exactly as described above, and adding it does not change the
+meaning of any key above.
+
+**App selection is the same for everyone.** Which applications are recorded is decided by
+`filter.exclude_apps` and `filter.include_only_apps` — the lists managed with
+[`zanei filter exclude-app`](/reference/cli#filter) and `zanei filter only-app`. `capture_policy`
+adds only what those lists cannot express: browser URL rules and IDE file rules.
+
+`allowed_apps` is optional and exists for a policy that must pin its own explicit list of
+application display names. Omit it and the two `filter` lists are the only app gate; include it and
+it is an additional allow list applied after them, so an empty `allowed_apps` records nothing.
+
+Given an event whose app already passed the `[filter]` app lists, evaluation runs in this order:
+
+1. Built-in exclusions (password managers and credential stores) deny the app. They cannot be
+   lifted by any configuration.
+2. `allowed_apps`, when present, must contain the app's display name (compared case-insensitively
+   after trimming surrounding whitespace); otherwise the event is denied.
+3. `Google Chrome` and `Safari` are decided by `browser` and nothing else.
+4. `Cursor`, `Visual Studio Code`, and `Code` are decided by `ide`.
+5. Every other app is allowed.
+
+The `[filter]` and `[filter.text_content]` / `[filter.content_snapshot]` website rules still apply
+to Chrome and Safari after `browser` allows a URL. Like the rest of `[filter]`, changes are picked
+up by the daemon's config watch within a few seconds; no restart is needed.
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `allowed_apps` | no | Application display names. Absent leaves app selection to `filter.exclude_apps` / `filter.include_only_apps`; `[]` denies every app. Each entry non-empty, no leading or trailing whitespace, unique ignoring case |
+| `browser.mode` | yes | `off` denies Chrome and Safari outright, `all_sites` allows any resolved URL, `rules` consults the lists below |
+| `browser.default_policy` | yes | `allow` or `block` for a resolved URL that matches no rule under `mode = "rules"` |
+| `browser.on_url_unavailable` | yes | `allow` or `block` when no `http`/`https` URL with a host could be bound to the window |
+| `browser.block_auth` | yes | Block URLs whose path contains a representative sign-in, sign-up, OAuth, or password-reset segment. It is a URL pattern, not detection of every authentication screen: `/docs/oauth` matches too |
+| `browser.block_payments` | yes | Block URLs whose path contains `checkout`, `payment`, `payments`, `billing`, `subscription`, or `subscriptions` |
+| `browser.allow_list`, `browser.block_list` | yes | Arrays of `{ host, path_prefix, match_subdomains }`. `block_list` wins over `allow_list` and over `mode = "all_sites"`. `host` must already be canonical — the exact form `URL.hostname` produces, so lowercase ASCII/IDNA (`xn--r8jz45g.xn--zckzah`, not `例え.テスト`), no port, no trailing dot, IPv6 in brackets. `path_prefix` is a literal, case-sensitive prefix with no surrounding whitespace |
+| `ide.block_env_files` | yes | Block capture in `Cursor`, `Visual Studio Code`, and `Code` when the window title names a `.env` file. `.env.example` and similar are not blocked |
+| `ide.on_file_name_unavailable` | yes | `allow` or `block` when no file name can be read from the window title |
+
+Written by an embedding application that lets the user exclude specific apps, where the browser is
+restricted to two sites and IDE `.env` files are never captured:
+
+```toml config.toml
+[filter]
+exclude_apps = ["1Password", "Keychain Access", "com.tinyspeck.slackmacgap"]
+include_only_apps = []
+
+[filter.capture_policy]                 # no allowed_apps: exclude_apps above is the app gate
+
+[filter.capture_policy.browser]
+mode = "rules"
+default_policy = "block"
+on_url_unavailable = "block"
+block_auth = true
+block_payments = true
+allow_list = [
+  { host = "github.com", path_prefix = "", match_subdomains = false },
+  { host = "example.com", path_prefix = "/docs", match_subdomains = true },
+]
+block_list = []
+
+[filter.capture_policy.ide]
+block_env_files = true
+on_file_name_unavailable = "block"
+```
+
+The same policy in only mode — the user picked the two apps to record:
+
+```toml config.toml
+[filter]
+include_only_apps = ["com.apple.Notes", "com.google.Chrome"]
+```
+
+And the pinned form, for a policy that must carry its own allow list instead of using the `filter`
+lists:
+
+```toml config.toml
+[filter.capture_policy]
+allowed_apps = ["Notes", "Google Chrome"]
+```
 
 ## `[output]`
 

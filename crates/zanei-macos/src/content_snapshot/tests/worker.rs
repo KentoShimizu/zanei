@@ -146,7 +146,7 @@ fn captures_with_actual_title(
     focus_context.activate(target.app.clone(), Some(target.window.clone()));
 
     let capture = CapturePolicyConfig {
-        allowed_apps: vec!["Cursor".to_owned()],
+        allowed_apps: Some(vec!["Cursor".to_owned()]),
         browser: BrowserPolicy {
             mode: BrowserMode::AllSites,
             default_policy: PolicyAction::Allow,

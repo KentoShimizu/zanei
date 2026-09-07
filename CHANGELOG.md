@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- `filter.capture_policy.allowed_apps` is now optional. When it is absent, which
+  applications are recorded is decided only by `filter.exclude_apps` and
+  `filter.include_only_apps`, so an embedding application and a standalone
+  recorder use the same app-selection model and the same `zanei filter`
+  commands. An explicit `allowed_apps` keeps its previous meaning, including an
+  empty list denying every app; the browser and IDE rules and the built-in
+  exclusions are unchanged. The key is omitted from serialized configuration
+  when it is absent.
+- `[filter.capture_policy]` is now documented in the configuration reference and
+  the privacy guide.
+
 ## 0.5.0 — 2026-09-07
 
 Isolated embedding, bounded context reads, and shared browser capture are now
