@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.2 — 2026-09-09
+
+- `filter.capture_policy.browser.block_auth` and `block_payments` now recognise three
+  kinds of sign-in and payment URL that previously slipped through as ordinary pages.
+  A hash route or anchor is judged like a path, so `https://example.com/#/login` and
+  `#/settings/billing` are blocked. One trailing file extension is dropped before the
+  segment check, so `/login.html`, `/signin.php`, and `/checkout.aspx` are blocked. The
+  host's leading label is read with the same vocabulary, so `checkout.vendor.example`
+  is blocked even when its path says nothing.
+- The vocabulary and the exact-segment match are unchanged, so pages that merely talk
+  about these subjects stay recorded: `/blog/login-guide`, `/oauth-client-library`,
+  `/checkout-history`, `checkout-history.vendor.example`, and the anchors
+  `#section-login` and `#login-form`. Only the leading host label is read, so a word
+  deeper in the host — `www.checkout.vendor.example` — is not matched. A fragment
+  cannot be told apart from an in-page anchor by the URL alone, and this is a privacy
+  boundary, so `#login` is treated as the route it names rather than recorded.
+
 ## 0.6.1 — 2026-09-08
 
 - `zanei start --paused` brings the recorder up with recording suspended,
