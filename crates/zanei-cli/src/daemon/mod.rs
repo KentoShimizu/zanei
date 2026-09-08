@@ -20,6 +20,7 @@ pub(crate) use control::{
 };
 pub(crate) use ownership::{StoreOwner, StoreOwnership, mode_name};
 pub use runtime::{RecordOutput, required_capabilities_for, run_daemon, run_record};
+pub(crate) use runtime_support::ensure_store_parent;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {

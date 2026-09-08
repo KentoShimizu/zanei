@@ -217,11 +217,26 @@ At recorder startup, required missing Accessibility and Input Monitoring permiss
 ```bash
 zanei start              # start background recording
 zanei start --foreground # run in the foreground instead (dev/debug)
+zanei start --paused     # start with recording suspended until `zanei resume`
 ```
 
 | Flag | Description |
 | --- | --- |
 | `--foreground` | Don't daemonize; run in the foreground |
+| `--paused` | Bring the recorder up with recording suspended; lift it with [`resume`](#resume) |
+
+`--paused` records the pause in the store before the recorder process exists, so there is no
+window between the start and a later [`pause`](#pause) in which events are captured. The recorder
+reads the request in the same startup that claims the store lock and comes up with every collector
+stopped. It works with `--foreground` as well, and creates the store (and its encryption key) when
+they do not exist yet.
+
+The store is the only source of truth for the pause: `--paused` is not remembered by the launch
+agent, so a recorder launchd restarts after a crash honors whatever the store says at that moment,
+and [`resume`](#resume) lifts a `--paused` pause like any other. The request is indefinite — the
+strictest pause `pause` can make — so a pause already in the store is never weakened by it.
+`--paused` fails with **code 1** when another recorder already owns the store, without changing
+that recorder's pause state.
 
 After the recorder reports that it is alive, background `start` rereads the recorder's permission snapshot once per second for up to 20 seconds while it remains pending. At the 5-second mark, it prints `Waiting for the recorder's permission check...` once to stderr unless `--quiet` is set. If the snapshot becomes available with all required permissions granted, `start` prints the normal success message and, when eligible, asks the `capture.text_content` opt-in question. If it reports missing required permissions, `start` prints the same granting guidance as `doctor` and exits with **code 3**. Only when the snapshot is still pending after 20 seconds does `start` report that the recorder is still waiting for the macOS permission dialogs. It notes that dialogs may take a moment to appear and advises running `zanei doctor --fix` if none are visible, then exits with **code 0** because the recorder is alive. The recorder remains running; after granting permissions, run `zanei stop && zanei start` and confirm with `zanei doctor`. `--foreground` runs the same recorder startup request logic in the foreground process.
 
@@ -283,6 +298,10 @@ zanei pause             # paused until `resume`
 | --- | --- |
 | `--for <TIME>` | Duration; omit to pause indefinitely |
 
+`pause` and `resume` need a running recorder and exit with **code 4** when there is none. To bring
+a recorder up already paused, use [`start --paused`](#start); to learn the store's pause without
+starting a recorder, read `paused_persisted` from [`status --json`](#status).
+
 ## `resume`
 
 Resumes recording after a pause.
@@ -307,6 +326,7 @@ Human-readable output shows the current app/site scope next to enabled `TEXT CON
   "state": "running",
   "running": true,
   "paused": false,
+  "paused_persisted": false,
   "since": "2026-08-16T08:00:00.000Z",
   "instance": "4242@2026-08-16T08:00:00.000Z",
   "mode": "launchd",
@@ -332,7 +352,8 @@ The JSON object always has the following fields. `integer` values are non-negati
 | --- | --- | --- |
 | `state` | string | `running` when the store lock has an owner; `stopped` when it does not. Inspection failures use `store_missing`, `store_unavailable`, `store_corrupt`, or `store_locked` (the store is encrypted but cannot be opened with the key; `degraded.store` holds the reason). Never null |
 | `running` | boolean | Whether the lock has an owner. Never null, including in a `store_*` state |
-| `paused` | boolean \| null | For a readable store, true only when a lock owner exists, its heartbeat is fresh, and its pause request is active. A stale, future, or missing heartbeat and a readable stopped store report false. Null when database contents cannot be read |
+| `paused` | boolean \| null | Whether recording is suspended right now. For a readable store, true only when a lock owner exists, its heartbeat is fresh, and its pause request is active. A stale, future, or missing heartbeat and a readable stopped store report false. Null when database contents cannot be read |
+| `paused_persisted` | boolean \| null | Whether the store carries an active pause request, whether or not a recorder runs: the state the next recorder to open this store comes up in. A timed pause that has expired reads false. Null when database contents cannot be read |
 | `since` | string \| null | Current owner's RFC3339 start timestamp; null when there is no owner |
 | `instance` | string \| null | Current owner identity, composed from PID and start timestamp; null when there is no owner |
 | `mode` | `"foreground"` \| `"launchd"` \| null | Current owner's lifecycle mode; null when there is no owner |
@@ -363,6 +384,7 @@ Human-readable output is a fixed set of lines rather than a table selected with 
 | --- | --- |
 | `STATE` | `state` |
 | `PAUSED` | `paused`, or `-` when null |
+| `STORED PAUSE` | `paused_persisted`, or `-` when null |
 | `SINCE` | `since`, or `-` when null |
 | `INSTANCE` | `instance`, or `-` when null |
 | `MODE` | `mode`, or `-` when null |

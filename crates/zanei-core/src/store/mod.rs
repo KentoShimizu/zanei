@@ -46,7 +46,9 @@ pub use reader::{SkippedRetired, StoreReader};
 pub use retired::{RetiredPlaintext, remove_retired, resolve_store_path, retired_plaintext_stores};
 pub use selection::EventSelection;
 pub use snapshot::{SnapshotReport, export_plain_sqlite};
-pub use types::{DaemonMode, DaemonState, HEARTBEAT_STALE_AFTER_SECONDS, StoreStatus};
+pub use types::{
+    DaemonMode, DaemonState, HEARTBEAT_STALE_AFTER_SECONDS, PAUSE_INDEFINITE, StoreStatus,
+};
 
 #[cfg(feature = "write")]
 pub use retired::{RetiredRetention, purge_retired_plaintext, set_aside_plaintext};

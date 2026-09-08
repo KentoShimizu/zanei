@@ -98,6 +98,11 @@ zanei pause             # resume するまで無期限に停止
 zanei resume
 ```
 
+`pause` と `resume` は動作中の recorder に対して作用します。起動から pause までの間に何も記録
+させたくない場合は、最初から停止状態で起動する `zanei start --paused` を使います。pause はストアに
+保持されるため、recorder が動作していなくても `zanei status --json` の `paused_persisted` で確認
+できます。
+
 :::note
 特定のアプリ・サイトを常に記録対象から外したい場合は、一時停止ではなく[フィルタ](/ja/guides/filters)を使ってください。ストアに書き込まれる前に破棄されます。
 :::

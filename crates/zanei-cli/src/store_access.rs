@@ -27,7 +27,8 @@ pub(crate) const KEYCHAIN_SERVICE_ENV: &str = "ZANEI_KEYCHAIN_SERVICE";
 pub(crate) const KEYCHAIN_LABEL_ENV: &str = "ZANEI_KEYCHAIN_LABEL";
 pub(crate) const KEYCHAIN_NO_PROMPT_ENV: &str = "ZANEI_KEYCHAIN_NO_PROMPT";
 
-/// Whether a missing key may be generated. Only the recorder creates keys.
+/// Whether a missing key may be generated. Only the recorder and the `start`
+/// that brings it up create keys.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeyAccess {
     Existing,

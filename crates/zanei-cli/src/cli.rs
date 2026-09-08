@@ -99,6 +99,11 @@ pub struct StartArgs {
     pub foreground: bool,
     #[arg(
         long,
+        help = "Start with recording suspended; lift it with `zanei resume`"
+    )]
+    pub paused: bool,
+    #[arg(
+        long,
         requires = "foreground",
         help = "Exit when the parent closes stdin; requires --foreground"
     )]

@@ -216,11 +216,25 @@ recorder は起動時に、必要かつ未付与のアクセシビリティと�
 ```bash
 zanei start              # バックグラウンド記録を開始
 zanei start --foreground # デーモン化せず前面で実行（開発・デバッグ用）
+zanei start --paused     # 記録を停止した状態で起動し、`zanei resume` まで維持
 ```
 
 | フラグ | 説明 |
 | --- | --- |
 | `--foreground` | デーモン化せず前面で実行 |
+| `--paused` | 記録を停止した状態で recorder を起動する。解除は [`resume`](#resume) |
+
+`--paused` は recorder プロセスが存在するより前に pause をストアへ記録するため、起動から後続の
+[`pause`](#pause) までの間にイベントが捕捉される窓はありません。recorder は store lock を獲得する
+のと同じ起動処理でこの要求を読み、すべての collector を停止した状態で立ち上がります。
+`--foreground` と併用でき、ストア（および暗号鍵）が存在しない場合は作成します。
+
+pause の唯一の source of truth はストアです。`--paused` は launch agent に記憶されないため、
+クラッシュ後に launchd が再起動した recorder はその時点のストアの内容に従い、
+[`resume`](#resume) は `--paused` による pause も通常どおり解除します。要求は無期限 — `pause` が
+行える最も強い pause — であるため、ストアに既にある pause が弱められることはありません。
+他の recorder が既にストアを所有している場合、`--paused` はその recorder の pause 状態を変更せず
+**終了コード 1** で失敗します。
 
 recorder が生存を報告した後、バックグラウンド `start` は権限 snapshot が Pending の間、1 秒間隔で最大 20 秒再読み込みします。5 秒経過時点で、`--quiet` でなければ stderr に `Waiting for the recorder's permission check...` を 1 回だけ表示します。snapshot が確定した場合、必要権限がすべて granted なら通常の成功メッセージを表示し、条件を満たせば `capture.text_content` の opt-in を確認します。必要権限が不足していれば `doctor` と同じ付与手順を表示し、**終了コード 3** で終了します。20 秒後も snapshot が Pending の場合に限り、recorder が macOS の権限ダイアログへの応答を待っていると案内します。ダイアログの表示には時間がかかる場合があり、何も表示されていなければ `zanei doctor --fix` を実行するよう案内し、recorder は生存しているため **終了コード 0** で終了します。recorder は動作を継続します。権限を付与した後、`zanei stop && zanei start` を実行し、`zanei doctor` で確認してください。`--foreground` も同じ recorder 起動時の要求ロジックを前面プロセスで実行します。
 
@@ -281,6 +295,10 @@ zanei pause             # resume まで無期限
 | --- | --- |
 | `--for <TIME>` | 停止期間。省略時は `resume` まで無期限 |
 
+`pause` と `resume` は動作中の recorder を必要とし、存在しなければ **終了コード 4** で終了します。
+停止した状態で recorder を起動するには [`start --paused`](#start) を使用し、recorder を起動せずに
+ストアの pause を知るには [`status --json`](#status) の `paused_persisted` を読みます。
+
 ## `resume`
 
 一時停止から再開します。
@@ -305,6 +323,7 @@ zanei status --json
   "state": "running",
   "running": true,
   "paused": false,
+  "paused_persisted": false,
   "since": "2026-08-16T08:00:00.000Z",
   "instance": "4242@2026-08-16T08:00:00.000Z",
   "mode": "launchd",
@@ -330,7 +349,8 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | --- | --- | --- |
 | `state` | string | store lock に owner がいれば `running`、いなければ `stopped`。検査失敗時は `store_missing` / `store_unavailable` / `store_corrupt` / `store_locked`（ストアは暗号化されているが鍵で開けない。理由は `degraded.store`）。null にならない |
 | `running` | boolean | lock owner の有無。`store_*` state でも null にならない |
-| `paused` | boolean \| null | store を読める場合、lock owner が存在し、その heartbeat が fresh で pause request が有効な場合だけ true。stale・future・missing heartbeat および読める stopped store は false。database 内容を読めない場合は null |
+| `paused` | boolean \| null | 現在記録が停止しているか。store を読める場合、lock owner が存在し、その heartbeat が fresh で pause request が有効な場合だけ true。stale・future・missing heartbeat および読める stopped store は false。database 内容を読めない場合は null |
+| `paused_persisted` | boolean \| null | recorder の動作有無にかかわらず、store が有効な pause request を保持しているか。次にこの store を開く recorder が起動する状態を表す。期限切れの時限 pause は false。database 内容を読めない場合は null |
 | `since` | string \| null | 現在の owner の RFC3339 起動 timestamp。owner がなければ null |
 | `instance` | string \| null | PID と起動 timestamp からなる現在の owner identity。owner がなければ null |
 | `mode` | `"foreground"` \| `"launchd"` \| null | 現在の owner の lifecycle mode。owner がなければ null |
@@ -361,6 +381,7 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | --- | --- |
 | `STATE` | `state` |
 | `PAUSED` | `paused`。null は `-` |
+| `STORED PAUSE` | `paused_persisted`。null は `-` |
 | `SINCE` | `since`。null は `-` |
 | `INSTANCE` | `instance`。null は `-` |
 | `MODE` | `mode`。null は `-` |
