@@ -98,6 +98,10 @@ zanei pause             # paused until you resume
 zanei resume
 ```
 
+`pause` and `resume` act on a running recorder. To start one that is already paused — so nothing is
+recorded between the start and the pause — use `zanei start --paused`. The pause lives in the store,
+so `zanei status --json` reports it under `paused_persisted` even while no recorder runs.
+
 :::note
 If you want certain apps or sites permanently excluded rather than temporarily paused, use [filters](/guides/filters); they discard matching events before anything is written to the store.
 :::

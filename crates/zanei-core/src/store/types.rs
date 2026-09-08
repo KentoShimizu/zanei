@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::DaemonCapabilities;
 
 pub const HEARTBEAT_STALE_AFTER_SECONDS: i64 = 15;
+/// The `paused_until` value that pauses recording until an explicit resume.
+pub const PAUSE_INDEFINITE: &str = "infinity";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DaemonState {
@@ -26,7 +28,13 @@ pub struct DaemonState {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StoreStatus {
     pub running: bool,
+    /// Whether recording is suspended right now: a pause request is active and
+    /// a recorder is publishing heartbeats to honor it.
     pub paused: bool,
+    /// Whether the store carries an active pause request, whether or not a
+    /// recorder is running. The next recorder to open this store comes up
+    /// paused when this is true.
+    pub pause_requested: bool,
     pub pid: Option<i64>,
     pub started_at: Option<String>,
     pub instance_id: Option<String>,

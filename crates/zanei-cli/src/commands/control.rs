@@ -6,7 +6,7 @@ use std::time::Instant;
 use time::OffsetDateTime;
 use zanei_core::config::{Config, parse_duration_expression};
 use zanei_core::normalize::format_timestamp;
-use zanei_core::store::DaemonMode;
+use zanei_core::store::{DaemonMode, PAUSE_INDEFINITE};
 
 use super::doctor::{StartPermissionState, require_recorder_for_start};
 use super::{EXIT_MISSING_PERMISSIONS, EXIT_NO_DAEMON, EXIT_SUCCESS};
@@ -32,10 +32,22 @@ pub fn start(
     paths: &Paths,
     foreground: bool,
     exit_on_stdin_eof: bool,
+    paused: bool,
     quiet: bool,
     json: bool,
 ) -> Result<u8, CliError> {
     let config = Config::load(&paths.config)?;
+    // Bootstrapping launchd needs a free store, and so does writing the pause
+    // `--paused` asks for: it would otherwise land on the recorder that already
+    // owns the store while this start fails anyway.
+    if (paused || !foreground)
+        && let Some(owner) = crate::daemon::StoreOwnership::probe(&paths.store)?
+    {
+        return Err(crate::daemon::DaemonError::StoreOwned { pid: owner.pid }.into());
+    }
+    if paused {
+        request_startup_pause(&paths.store)?;
+    }
     if foreground {
         crate::daemon::run_daemon(
             &paths.config,
@@ -46,9 +58,6 @@ pub fn start(
         return Ok(EXIT_SUCCESS);
     }
 
-    if let Some(owner) = crate::daemon::StoreOwnership::probe(&paths.store)? {
-        return Err(crate::daemon::DaemonError::StoreOwned { pid: owner.pid }.into());
-    }
     let executable = crate::executable::current().map_err(CliError::Input)?;
     let prompted_before = prompt_text_content(paths, quiet || json, || {
         start_permissions::before_bootstrap(&config, &paths.store).ok()
@@ -83,6 +92,23 @@ pub fn start(
     )
 }
 
+/// Records the pause `start --paused` asks for before the recorder process
+/// exists, so no collector can run between the recorder's start and a `pause`
+/// that arrives later. The recorder reads the request in the same startup that
+/// claims the store lock and comes up with every collector stopped.
+///
+/// The store stays the single source of truth for the pause: a launchd restart
+/// cannot resurrect one `resume` lifted, and `resume` lifts this one like any
+/// other. [`PAUSE_INDEFINITE`] is the strictest request `pause` can make, so a
+/// pause already in the store is never weakened.
+fn request_startup_pause(store_path: &Path) -> Result<(), CliError> {
+    crate::daemon::ensure_store_parent(store_path)?;
+    let writer =
+        store_access::open_writer(store_path, KeyAccess::CreateIfMissing, KeyPrompt::Allowed)?;
+    writer.set_paused_until(Some(PAUSE_INDEFINITE))?;
+    Ok(())
+}
+
 fn prompt_text_content(
     paths: &Paths,
     output_suppressed: bool,
@@ -111,7 +137,9 @@ fn prompt_text_content(
 fn restart_background(paths: &Paths) -> Result<u8, CliError> {
     let stop_exit = stop(&paths.store, true)?;
     if stop_exit == EXIT_SUCCESS {
-        start(paths, false, false, true, false)
+        // The store carries any pause this start requested, so the restart does
+        // not repeat the request.
+        start(paths, false, false, false, true, false)
     } else {
         Ok(stop_exit)
     }
@@ -265,7 +293,7 @@ pub fn pause(store_path: &Path, duration: Option<&str>, quiet: bool) -> Result<u
                 })
         })
         .transpose()?
-        .unwrap_or_else(|| "infinity".to_owned());
+        .unwrap_or_else(|| PAUSE_INDEFINITE.to_owned());
     if !daemon_running(store_path)? {
         if !quiet {
             eprintln!("Zanei daemon is not running");

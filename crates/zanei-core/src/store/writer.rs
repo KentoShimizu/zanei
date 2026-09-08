@@ -522,7 +522,7 @@ fn validate_optional_timestamp(field: &'static str, value: Option<&str>) -> Resu
 }
 
 fn validate_paused_until(value: Option<&str>) -> Result<(), StoreError> {
-    if value != Some("infinity") {
+    if value != Some(super::PAUSE_INDEFINITE) {
         validate_optional_timestamp("paused_until", value)?;
     }
     Ok(())

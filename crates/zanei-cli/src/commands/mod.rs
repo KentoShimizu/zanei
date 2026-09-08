@@ -73,6 +73,7 @@ pub(crate) fn run_with_app_directory(
             &paths,
             args.foreground,
             args.exit_on_stdin_eof,
+            args.paused,
             cli.quiet,
             cli.json,
         ),

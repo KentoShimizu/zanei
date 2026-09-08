@@ -385,7 +385,7 @@ impl PersistedStatus {
         let running = heartbeat_is_fresh(self.heartbeat_at.as_deref(), now)?;
         let pause_requested = match self.paused_until.as_deref() {
             None => false,
-            Some("infinity") => true,
+            Some(super::PAUSE_INDEFINITE) => true,
             Some(value) => parse_timestamp("paused_until", value)? > now,
         };
         if let Some(value) = self.last_event_ts.as_deref() {
@@ -423,6 +423,7 @@ impl PersistedStatus {
         Ok(StoreStatus {
             running,
             paused: running && pause_requested,
+            pause_requested,
             pid: self.pid,
             started_at: self.started_at,
             instance_id: self.instance_id,

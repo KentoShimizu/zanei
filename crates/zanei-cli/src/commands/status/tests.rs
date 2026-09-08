@@ -210,6 +210,7 @@ fn healthy_json_and_human_output_snapshot() {
   "state": "running",
   "running": true,
   "paused": false,
+  "paused_persisted": false,
   "since": "2026-08-24T10:00:00Z",
   "instance": "current-instance",
   "mode": "foreground",
@@ -240,6 +241,7 @@ fn healthy_json_and_human_output_snapshot() {
 }"#,
         r#"STATE             running
 PAUSED            false
+STORED PAUSE      false
 SINCE             2026-08-24T10:00:00Z
 INSTANCE          current-instance
 MODE              foreground
@@ -273,6 +275,7 @@ fn degraded_json_and_human_output_snapshot() {
   "state": "running",
   "running": true,
   "paused": false,
+  "paused_persisted": false,
   "since": "2026-08-24T10:00:00Z",
   "instance": "current-instance",
   "mode": "foreground",
@@ -307,6 +310,7 @@ fn degraded_json_and_human_output_snapshot() {
 }"#,
         r#"STATE             running
 PAUSED            false
+STORED PAUSE      false
 SINCE             2026-08-24T10:00:00Z
 INSTANCE          current-instance
 MODE              foreground
@@ -362,6 +366,7 @@ fn stale_json_and_human_output_snapshot() {
   "state": "running",
   "running": true,
   "paused": false,
+  "paused_persisted": false,
   "since": "2026-08-24T10:00:00Z",
   "instance": "current-instance",
   "mode": "foreground",
@@ -392,6 +397,7 @@ fn stale_json_and_human_output_snapshot() {
 }"#,
         r#"STATE             running
 PAUSED            false
+STORED PAUSE      false
 SINCE             2026-08-24T10:00:00Z
 INSTANCE          current-instance
 MODE              foreground
@@ -422,6 +428,7 @@ fn owner_mismatch_json_and_human_output_snapshot() {
   "state": "running",
   "running": true,
   "paused": false,
+  "paused_persisted": false,
   "since": "2026-08-24T10:00:00Z",
   "instance": "current-instance",
   "mode": "foreground",
@@ -454,6 +461,7 @@ fn owner_mismatch_json_and_human_output_snapshot() {
 }"#,
         r#"STATE             running
 PAUSED            false
+STORED PAUSE      false
 SINCE             2026-08-24T10:00:00Z
 INSTANCE          current-instance
 MODE              foreground
@@ -480,6 +488,7 @@ fn store_failure_json_and_human_output_snapshot() {
   "state": "store_unavailable",
   "running": false,
   "paused": null,
+  "paused_persisted": null,
   "since": null,
   "instance": null,
   "mode": null,
@@ -513,6 +522,7 @@ fn store_failure_json_and_human_output_snapshot() {
     .replace("/tmp/zanei-test/store.sqlite", &report.store.path);
     let human = r#"STATE             store_unavailable
 PAUSED            -
+STORED PAUSE      -
 SINCE             -
 INSTANCE          -
 MODE              -

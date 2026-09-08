@@ -103,6 +103,7 @@ fn status_json_stdout_matches_integration_snapshot() {
   "state": "stopped",
   "running": false,
   "paused": false,
+  "paused_persisted": false,
   "since": null,
   "instance": null,
   "mode": null,

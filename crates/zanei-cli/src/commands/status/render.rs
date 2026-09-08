@@ -12,6 +12,10 @@ pub(super) fn render_human(report: &StatusReport) -> String {
         format!("STATE             {}", report.state.as_str()),
         format!("PAUSED            {}", display_optional(report.paused)),
         format!(
+            "STORED PAUSE      {}",
+            display_optional(report.paused_persisted)
+        ),
+        format!(
             "SINCE             {}",
             display_optional(report.since.as_deref())
         ),
