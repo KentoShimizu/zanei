@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.1 — 2026-09-08
+
+- `zanei start --paused` brings the recorder up with recording suspended,
+  without a window between the start and a later `zanei pause` in which events
+  are captured. The pause is written to the store before the recorder process
+  exists, so the recorder reads it in the same startup that claims the store
+  lock and starts no collector. `zanei resume` lifts it as usual, and a pause
+  already in the store is never weakened. It works with `--foreground` too.
+- `zanei status --json` reports `paused_persisted`: the pause request the store
+  carries, whether or not a recorder runs, so a client can read the state a
+  recorder would come up in without starting one. `paused` keeps its meaning —
+  whether recording is suspended right now — and human output shows the new
+  value as `STORED PAUSE`.
+
 ## 0.6.0 — 2026-09-07
 
 - `filter.capture_policy.allowed_apps` is now optional. When it is absent, which
