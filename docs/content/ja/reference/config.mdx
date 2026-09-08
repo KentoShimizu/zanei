@@ -143,8 +143,8 @@ website ルールは Chrome と Safari に適用されます。`[filter]` の他
 | `browser.mode` | 必須 | `off` は Chrome と Safari をそのまま拒否、`all_sites` は解決できた URL をすべて許可、`rules` は下の list を参照 |
 | `browser.default_policy` | 必須 | `mode = "rules"` でどのルールにも一致しなかった URL に対する `allow` / `block` |
 | `browser.on_url_unavailable` | 必須 | host を持つ `http` / `https` URL を window に結び付けられなかったときの `allow` / `block` |
-| `browser.block_auth` | 必須 | path に代表的な sign-in・sign-up・OAuth・パスワードリセットの segment を含む URL を拒否します。URL パターンであって認証画面の検出ではないため、`/docs/oauth` も一致します |
-| `browser.block_payments` | 必須 | path に `checkout`・`payment`・`payments`・`billing`・`subscription`・`subscriptions` を含む URL を拒否 |
+| `browser.block_auth` | 必須 | host の先頭ラベル・path・fragment のいずれかに、代表的な sign-in・sign-up・OAuth・パスワードリセットの segment を持つ URL を拒否します。判定前に末尾の拡張子を 1 つ取り除くため、`/login.html` は `/login` として扱います。URL パターンであって認証画面の検出ではないため、`/docs/oauth` やアンカー `#login` も一致し、`/login-guide` は一致しません |
+| `browser.block_payments` | 必須 | 同じ 3 か所を同じ規則で見て、`checkout`・`payment`・`payments`・`billing`・`subscription`・`subscriptions` を持つ URL を拒否します。`checkout.vendor.example` は拒否し、`/checkout-history` は拒否しません |
 | `browser.allow_list`・`browser.block_list` | 必須 | `{ host, path_prefix, match_subdomains }` の配列。`block_list` は `allow_list` にも `mode = "all_sites"` にも優先します。`host` は `URL.hostname` が返す正規形（小文字の ASCII / IDNA。`例え.テスト` ではなく `xn--r8jz45g.xn--zckzah`、port なし、末尾ドットなし、IPv6 は角括弧）でなければなりません。`path_prefix` は前後 whitespace なしの、大文字小文字を区別するリテラル前方一致 |
 | `ide.block_env_files` | 必須 | `Cursor`・`Visual Studio Code`・`Code` で、window title が `.env` ファイルを指すときに捕捉を拒否します。`.env.example` などは拒否しません |
 | `ide.on_file_name_unavailable` | 必須 | window title からファイル名を読めなかったときの `allow` / `block` |

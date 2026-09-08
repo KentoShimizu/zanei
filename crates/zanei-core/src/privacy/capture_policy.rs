@@ -92,7 +92,7 @@ fn evaluate_browser(rules: &BrowserPolicy, raw_url: Option<&str>) -> CapturePoli
     if rules.block_list.iter().any(matches) {
         return Deny(Reason::BlockedUrl);
     }
-    if let Some(reason) = preset_match(rules, url.path()) {
+    if let Some(reason) = preset_match(rules, &url) {
         return Deny(reason);
     }
     if rules.mode == BrowserMode::AllSites || rules.allow_list.iter().any(matches) {
@@ -108,12 +108,42 @@ fn action(action: PolicyAction, reason: CaptureDeniedReason) -> CapturePolicyDec
     }
 }
 
-fn preset_match(rules: &BrowserPolicy, path: &str) -> Option<CaptureDeniedReason> {
-    // URL-only representative patterns, not detection of every auth/payment screen.
-    // Exact documentation routes such as /docs/oauth also match by design.
+/// The three places a URL names its own surface: the host's leading label, the path, and
+/// the fragment. Each is scanned as an independent route with the same vocabulary.
+///
+/// URL-only representative patterns, not detection of every auth/payment screen. Exact
+/// documentation routes such as /docs/oauth also match by design. Only the leading host
+/// label is read, because that is where a service names itself (checkout.vendor.test);
+/// a word deeper in the host belongs to the site's own name, and www.checkout.test is
+/// therefore not matched. A fragment is not sent to the server but is visible in the URL
+/// bar, and hash routing (#/login) cannot be told apart from an in-page anchor (#login)
+/// from the URL alone, so both are judged as the route they name.
+fn preset_match(rules: &BrowserPolicy, url: &url::Url) -> Option<CaptureDeniedReason> {
+    let host = url.host_str().expect("web URL has a host");
+    let service_label = host.split('.').next().expect("split yields one item");
+    let mut payment = false;
+    for route in [
+        service_label,
+        url.path(),
+        url.fragment().unwrap_or_default(),
+    ] {
+        match scan_route(rules, route) {
+            Some(CaptureDeniedReason::AuthenticationUrl) => {
+                return Some(CaptureDeniedReason::AuthenticationUrl);
+            }
+            Some(_) => payment = true,
+            None => {}
+        }
+    }
+    payment.then_some(CaptureDeniedReason::PaymentUrl)
+}
+
+/// Scans one `/`-separated route. An authentication match short-circuits, so
+/// authentication anywhere in a URL outranks a payment match anywhere in it.
+fn scan_route(rules: &BrowserPolicy, route: &str) -> Option<CaptureDeniedReason> {
     let mut previous = String::new();
     let mut payment = false;
-    for raw in path.split('/') {
+    for raw in route.split('/') {
         let segment = normalized_segment(raw);
         if rules.block_auth
             && (matches!(
@@ -171,6 +201,18 @@ fn normalized_segment(raw: &str) -> String {
             }
         }
         normalized.push(byte.to_ascii_lowercase());
+    }
+    // A served page keeps its route in the file name (login.html, signin.php), so one
+    // trailing extension is dropped. Bounded like the IDE file-name rule so a dotted
+    // word is not mistaken for a file name.
+    if let Some(dot) = normalized.iter().rposition(|byte| *byte == b'.') {
+        let extension = &normalized[dot + 1..];
+        if dot > 0
+            && matches!(extension.len(), 1..=10)
+            && extension.iter().all(u8::is_ascii_alphanumeric)
+        {
+            normalized.truncate(dot);
+        }
     }
     String::from_utf8(normalized).expect("ASCII decoding preserves UTF-8")
 }
