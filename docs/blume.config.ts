@@ -7,7 +7,7 @@ export default defineConfig({
     text: "Zanei",
   },
   description:
-    "Record your on-screen activity locally and turn it into LLM-ready timelines for AI agents.",
+    "Computer context layer for agents. Records your on-screen activity locally and turns it into LLM-ready timelines.",
   content: {
     root: "content",
   },

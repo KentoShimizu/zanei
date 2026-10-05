@@ -9,7 +9,7 @@ use crate::setup::{Agent, Scope};
 #[command(
     name = "zanei",
     version,
-    about = "Private, local activity context for AI agents on macOS"
+    about = "Computer context layer for agents"
 )]
 pub struct Cli {
     #[arg(

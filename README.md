@@ -1,7 +1,7 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/KentoShimizu/zanei/main/docs/public/favicon.svg" width="96" alt="Zanei icon">
   <h1>Zanei</h1>
-  <p><strong>Local activity context for AI agents</strong></p>
+  <p><strong>Computer context layer for agents</strong></p>
   <p>
     <a href="https://zanei.dev">Documentation</a>
     (<a href="https://zanei.dev/ja/">日本語</a>)
