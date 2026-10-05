@@ -6,11 +6,7 @@ use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
 use crate::setup::{Agent, Scope};
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "zanei",
-    version,
-    about = "Computer context layer for agents"
-)]
+#[command(name = "zanei", version, about = "Computer context layer for agents")]
 pub struct Cli {
     #[arg(
         long,
