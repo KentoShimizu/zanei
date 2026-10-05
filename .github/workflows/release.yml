@@ -10,6 +10,8 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
+    # Pauses until the repository owner approves the deployment to this environment.
+    environment: release
     steps:
       - uses: actions/checkout@v7
 
