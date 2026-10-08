@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.3 — 2026-10-08
+
+- A `resume` or `pause` can no longer be undone by the recorder's own state
+  snapshots. Heartbeats and the stopped state copied the pause request from an
+  earlier status read and wrote it back, so a `resume` that landed between the
+  read and the write was reverted: the recorder stayed paused, recording
+  nothing until it was restarted, although `resume` had succeeded. The pause
+  request is now written only by `pause`, `resume`, and `start --paused`.
+- An expired timed pause is cleared only if no newer request replaced it after
+  it was read, and the recorder stays paused when that happens, so a `pause`
+  issued as a timed pause runs out is neither erased nor briefly ignored.
+- A set-aside pre-encryption store's state (pause request, counters, last event
+  time, collector failures, last permission report) is carried into the new
+  store once. Before, every normal restart while a set-aside store remained
+  carried it over again, so its old pause request could undo a later `resume`
+  or erase a `start --paused`. A pause already requested for the new store is
+  kept over the carried one.
+
 ## 0.6.2 — 2026-09-09
 
 - `filter.capture_policy.browser.block_auth` and `block_payments` now recognise three
