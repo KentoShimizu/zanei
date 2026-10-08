@@ -567,7 +567,9 @@ fn normalize_pause_request(
     if deadline > OffsetDateTime::now_utc() {
         return Ok(true);
     }
-    lock_writer(writer)?.set_paused_until(None)?;
+    // A `pause` that replaced the expired request after it was read keeps its
+    // effect; the next pause poll applies it.
+    lock_writer(writer)?.clear_expired_pause(paused_until)?;
     Ok(false)
 }
 

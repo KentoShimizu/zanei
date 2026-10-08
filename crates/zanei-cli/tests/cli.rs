@@ -11,7 +11,9 @@ use time::OffsetDateTime;
 use zanei_core::config::Config;
 use zanei_core::normalize::normalize;
 use zanei_core::schema::{App, EmptyData, EventData, KNOWN_EVENT_TYPES, RawEvent};
-use zanei_core::store::{DaemonState, QueryFilter, StoreFormat, StoreReader, StoreWriter};
+use zanei_core::store::{
+    DaemonState, PAUSE_INDEFINITE, QueryFilter, StoreFormat, StoreReader, StoreWriter,
+};
 use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
 
 mod support;
@@ -237,7 +239,6 @@ fn status_and_doctor_share_control_text_rendering_without_changing_json() {
             mode: status.mode,
             heartbeat_at: status.heartbeat_at,
             retention_hours: status.retention_hours,
-            paused_until: status.paused_until,
             events_captured: status.events_captured,
             events_dropped: status.events_dropped,
             last_event_ts: status.last_event_ts,
@@ -1453,10 +1454,10 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
             writer.append(&legacy)?;
             // An indefinite pause must survive the upgrade.
             writer.write_daemon_state(&DaemonState {
-                paused_until: Some("infinity".to_owned()),
                 events_captured: 1,
                 ..DaemonState::default()
-            })
+            })?;
+            writer.set_paused_until(Some(PAUSE_INDEFINITE))
         })
         .expect("paused plaintext legacy store");
     // A 0.2.x store created with the default umask: readable by other accounts.
@@ -1622,10 +1623,10 @@ fn recorder_retries_state_adoption_after_a_crash_before_it_completed() {
     StoreWriter::open(&retired)
         .and_then(|writer| {
             writer.write_daemon_state(&DaemonState {
-                paused_until: Some("infinity".to_owned()),
                 events_dropped: 3,
                 ..DaemonState::default()
-            })
+            })?;
+            writer.set_paused_until(Some(PAUSE_INDEFINITE))
         })
         .expect("paused set-aside store");
     // The crash also came before the set-aside store was made owner-only.

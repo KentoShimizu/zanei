@@ -16,9 +16,10 @@ use crate::schema::{
 use crate::{Capability, CapabilityState, DaemonCapabilities};
 
 use super::{
-    DaemonMode, DaemonState, LockedReason, PurgeFilter, QueryFilter, StoreError, StoreFailureKind,
-    StoreFormat, StoreKey, StoreReader, StoreStatus, StoreWriter, export_plain_sqlite,
-    purge_retired_plaintext, remove_retired, retired_plaintext_stores, set_aside_plaintext,
+    DaemonMode, DaemonState, LockedReason, PAUSE_INDEFINITE, PurgeFilter, QueryFilter, StoreError,
+    StoreFailureKind, StoreFormat, StoreKey, StoreReader, StoreStatus, StoreWriter,
+    export_plain_sqlite, purge_retired_plaintext, remove_retired, retired_plaintext_stores,
+    set_aside_plaintext,
 };
 
 static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
@@ -363,7 +364,6 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
         mode: Some(DaemonMode::Foreground),
         heartbeat_at: Some("2026-08-16T09:59:45Z".to_owned()),
         retention_hours: Some(72),
-        paused_until: Some("infinity".to_owned()),
         events_captured: 12,
         events_dropped: 3,
         last_event_ts: Some("2026-08-16T09:59:44Z".to_owned()),
@@ -372,6 +372,9 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
         capabilities: Some(permission_snapshot(false)),
     };
     writer.write_daemon_state(&state).expect("write state");
+    writer
+        .set_paused_until(Some(PAUSE_INDEFINITE))
+        .expect("pause");
 
     let reader = StoreReader::open(database.path()).expect("open reader");
     let fresh = reader
@@ -415,7 +418,6 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
 
     let mut resumed = state;
     resumed.heartbeat_at = Some("2026-08-16T10:00:00Z".to_owned());
-    resumed.paused_until = None;
     writer
         .write_daemon_state(&resumed)
         .expect("write resumed heartbeat");
@@ -429,6 +431,48 @@ fn status_derives_running_paused_and_counters_from_persisted_state() {
     assert!(updated.running);
     assert!(!updated.paused);
     assert_eq!(updated.events_dropped, 5);
+}
+
+#[test]
+fn daemon_snapshots_never_overwrite_the_pause_request() {
+    let database = TestDatabase::new("snapshot-pause-ownership");
+    let mut recorder = StoreWriter::open(database.path()).expect("open recorder writer");
+    let control = StoreWriter::open(database.path()).expect("open control writer");
+    let now = OffsetDateTime::now_utc();
+    let pause_requested = || {
+        StoreReader::open(database.path())
+            .and_then(|reader| reader.status_at(now))
+            .expect("status")
+            .pause_requested
+    };
+    // A heartbeat prepared while paused, then persisted after `resume` landed,
+    // must not bring the pause back; nor may a snapshot erase a later `pause`.
+    let snapshot = running_state(now, 48);
+    control
+        .set_paused_until(Some(PAUSE_INDEFINITE))
+        .expect("pause");
+    recorder
+        .persist(&[], Some(&snapshot))
+        .expect("persist heartbeat while paused");
+    control.set_paused_until(None).expect("resume");
+    recorder
+        .persist(&[], Some(&snapshot))
+        .expect("persist stale heartbeat");
+    recorder
+        .write_daemon_state(&DaemonState::default())
+        .expect("write stopped state");
+    assert!(!pause_requested(), "a snapshot undid resume");
+
+    control
+        .set_paused_until(Some(PAUSE_INDEFINITE))
+        .expect("pause again");
+    recorder
+        .persist(&[], Some(&snapshot))
+        .expect("persist heartbeat after pause");
+    recorder
+        .write_daemon_state(&DaemonState::default())
+        .expect("write stopped state after pause");
+    assert!(pause_requested(), "a snapshot erased pause");
 }
 
 #[test]
@@ -817,7 +861,6 @@ fn running_state(heartbeat_at: OffsetDateTime, retention_hours: u64) -> DaemonSt
         mode: Some(DaemonMode::Foreground),
         heartbeat_at: Some(crate::normalize::format_timestamp(heartbeat_at)),
         retention_hours: Some(retention_hours),
-        paused_until: None,
         events_captured: 0,
         events_dropped: 0,
         last_event_ts: None,
@@ -1585,14 +1628,14 @@ fn set_aside_store_state_is_adopted_by_the_new_store() {
     StoreWriter::open(database.path())
         .and_then(|writer| {
             writer.write_daemon_state(&DaemonState {
-                paused_until: Some("infinity".to_owned()),
                 events_captured: 7,
                 events_dropped: 2,
                 last_event_ts: Some("2026-08-16T09:00:00.000Z".to_owned()),
                 collector_failures: BTreeMap::from([("eventtap".to_owned(), 3)]),
                 capabilities: Some(permission_snapshot(false)),
                 ..DaemonState::default()
-            })
+            })?;
+            writer.set_paused_until(Some(PAUSE_INDEFINITE))
         })
         .expect("paused plaintext store");
     let at = OffsetDateTime::parse("2026-08-23T00:00:00Z", &Rfc3339).expect("time");

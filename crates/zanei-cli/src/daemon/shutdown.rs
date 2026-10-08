@@ -59,7 +59,6 @@ fn clear_heartbeat(
         mode: None,
         heartbeat_at: None,
         retention_hours: None,
-        paused_until: status.paused_until,
         events_captured: status.events_captured,
         events_dropped: base_dropped
             .saturating_add(collector_health.dropped)

@@ -16,7 +16,6 @@ pub struct DaemonState {
     pub mode: Option<DaemonMode>,
     pub heartbeat_at: Option<String>,
     pub retention_hours: Option<u64>,
-    pub paused_until: Option<String>,
     pub events_captured: u64,
     pub events_dropped: u64,
     pub last_event_ts: Option<String>,

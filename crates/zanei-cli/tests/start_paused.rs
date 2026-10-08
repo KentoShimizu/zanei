@@ -18,6 +18,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// Longer than the recorder's one-second pause poll, so a recorder that starts
 /// capture despite the request has had several chances to record an event.
 const PAUSE_OBSERVATION_WINDOW: Duration = Duration::from_millis(2_500);
+/// Longer than two of the recorder's five-second heartbeat intervals, so a
+/// heartbeat snapshot taken before `resume` has had every chance to land.
+const RESUME_OBSERVATION_WINDOW: Duration = Duration::from_millis(11_000);
 
 /// A foreground recorder must not outlive a test that fails an assertion.
 struct RecorderGuard(Child);
@@ -59,6 +62,16 @@ fn foreground_start_paused_records_nothing_until_resume() {
     let resumed = fixture.open_reader().status().expect("resumed status");
     assert!(!resumed.paused);
     assert!(!resumed.pause_requested);
+    thread::sleep(RESUME_OBSERVATION_WINDOW);
+    let later = fixture
+        .open_reader()
+        .status()
+        .expect("status after heartbeats");
+    assert!(later.running);
+    assert!(
+        !later.pause_requested,
+        "a recorder heartbeat must not restore the pause resume lifted"
+    );
     assert!(
         recorder.0.try_wait().expect("poll recorder").is_none(),
         "resume must not stop the recorder"

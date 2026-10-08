@@ -171,6 +171,8 @@ impl StoreWriter {
     ///
     /// Event progress remains owned by the database so a heartbeat snapshot prepared
     /// before this transaction cannot overwrite counters advanced by the same batch.
+    /// The pause request is not part of a snapshot either, so a snapshot prepared
+    /// before a `pause` or `resume` landed cannot undo it.
     pub fn persist(
         &mut self,
         events: &[Event],
@@ -232,6 +234,16 @@ impl StoreWriter {
         self.connection.execute(
             "UPDATE daemon_state SET paused_until = ?1 WHERE id = 1",
             [paused_until],
+        )?;
+        Ok(())
+    }
+
+    /// Clears a timed pause that has run out, unless a newer request replaced it
+    /// after `expired` was read.
+    pub fn clear_expired_pause(&self, expired: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE daemon_state SET paused_until = NULL WHERE id = 1 AND paused_until = ?1",
+            [expired],
         )?;
         Ok(())
     }
@@ -404,9 +416,8 @@ fn write_daemon_snapshot(
         EventProgress::Preserve => {
             transaction.execute(
                 "UPDATE daemon_state SET pid = ?1, started_at = ?2, instance_id = ?3, \
-                 mode = ?4, heartbeat_at = ?5, retention_hours = ?6, paused_until = ?7, \
-                 events_dropped = ?8, degraded_json = ?9, collector_failures_json = ?10 \
-                 WHERE id = 1",
+                 mode = ?4, heartbeat_at = ?5, retention_hours = ?6, events_dropped = ?7, \
+                 degraded_json = ?8, collector_failures_json = ?9 WHERE id = 1",
                 params![
                     state.pid,
                     state.started_at,
@@ -414,7 +425,6 @@ fn write_daemon_snapshot(
                     state.mode.map(DaemonMode::as_str),
                     state.heartbeat_at,
                     retention_hours,
-                    state.paused_until,
                     events_dropped,
                     degraded_json,
                     collector_failures_json,
@@ -425,9 +435,9 @@ fn write_daemon_snapshot(
             let events_captured = signed("events_captured", state.events_captured)?;
             transaction.execute(
                 "UPDATE daemon_state SET pid = ?1, started_at = ?2, instance_id = ?3, \
-                 mode = ?4, heartbeat_at = ?5, retention_hours = ?6, paused_until = ?7, \
-                 events_captured = ?8, events_dropped = ?9, last_event_ts = ?10, \
-                 degraded_json = ?11, collector_failures_json = ?12 WHERE id = 1",
+                 mode = ?4, heartbeat_at = ?5, retention_hours = ?6, events_captured = ?7, \
+                 events_dropped = ?8, last_event_ts = ?9, degraded_json = ?10, \
+                 collector_failures_json = ?11 WHERE id = 1",
                 params![
                     state.pid,
                     state.started_at,
@@ -435,7 +445,6 @@ fn write_daemon_snapshot(
                     state.mode.map(DaemonMode::as_str),
                     state.heartbeat_at,
                     retention_hours,
-                    state.paused_until,
                     events_captured,
                     events_dropped,
                     state.last_event_ts,
@@ -476,7 +485,6 @@ fn write_capabilities(
 fn validate_daemon_state(state: &DaemonState) -> Result<(), StoreError> {
     validate_optional_timestamp("started_at", state.started_at.as_deref())?;
     validate_optional_timestamp("heartbeat_at", state.heartbeat_at.as_deref())?;
-    validate_paused_until(state.paused_until.as_deref())?;
     validate_optional_timestamp("last_event_ts", state.last_event_ts.as_deref())?;
 
     let identity = (
