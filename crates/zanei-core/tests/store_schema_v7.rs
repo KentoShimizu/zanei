@@ -59,6 +59,37 @@ fn readers_accept_prior_schemas_and_writers_migrate_them_sequentially() {
 }
 
 #[test]
+fn only_a_store_created_by_this_writer_owes_state_adoption() {
+    let directory = TestDirectory::new("adoption-pending");
+    let created = directory.path().join("created.sqlite");
+    assert!(
+        StoreWriter::open(&created)
+            .and_then(|writer| writer.daemon_state_adoption_pending())
+            .expect("new store"),
+        "a new store owes its adoption step"
+    );
+    // A store from a release that did not record the step has already been
+    // through it on the start that created it.
+    rusqlite::Connection::open(&created)
+        .expect("open created store")
+        .execute_batch("DROP TABLE daemon_state_adoption_pending;")
+        .expect("simulate an earlier release's store");
+    let earlier = StoreWriter::open(&created).expect("reopen earlier store");
+    assert!(
+        !earlier
+            .daemon_state_adoption_pending()
+            .expect("earlier store")
+    );
+    let legacy = directory.path().join("v1.sqlite");
+    create_schema(&legacy, 1);
+    assert!(
+        !StoreWriter::open(&legacy)
+            .and_then(|writer| writer.daemon_state_adoption_pending())
+            .expect("migrated store")
+    );
+}
+
+#[test]
 fn current_writer_open_is_a_no_op_and_future_versions_fail_fast() {
     let directory = TestDirectory::new("current-future");
     let current = directory.path().join("current.sqlite");

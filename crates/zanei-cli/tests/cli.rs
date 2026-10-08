@@ -1661,8 +1661,64 @@ fn recorder_retries_state_adoption_after_a_crash_before_it_completed() {
         "the pause is adopted on the next start"
     );
     assert_eq!(value["events_dropped"], 3);
+
+    // Adoption happens once per live store: a resume survives a normal
+    // shutdown and restart while the set-aside store is still next to it.
+    command(&config, &store).arg("resume").assert().success();
     signal_child(&mut child, "TERM");
     assert!(wait_for_child(&mut child).success());
+    let mut child = spawn_foreground_daemon(&config, &store);
+    wait_for_daemon_ready(&mut child, &store);
+    let restarted = open_store(&store).and_then(|reader| reader.status());
+    signal_child(&mut child, "TERM");
+    assert!(wait_for_child(&mut child).success());
+    assert!(
+        !restarted.expect("status after restart").pause_requested,
+        "a restart re-applied the set-aside store's pause"
+    );
+}
+
+#[test]
+fn start_paused_survives_adopting_an_unpaused_set_aside_store() {
+    let directory = TempDir::new().expect("adoption fixture");
+    let config = directory.path().join("config.toml");
+    let store = directory.path().join("store.sqlite");
+    fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
+    let retired = set_aside_store_path(&store, 1);
+    StoreWriter::open(&retired)
+        .and_then(|writer| {
+            writer.write_daemon_state(&DaemonState {
+                events_dropped: 3,
+                ..DaemonState::default()
+            })
+        })
+        .expect("unpaused set-aside store");
+    StoreWriter::open_with_key(&store, Some(&read_key(&key_file_for(&store))))
+        .expect("fresh encrypted store");
+
+    let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_zanei"))
+        .env(STORE_KEY_FILE_ENV, key_file_for(&store))
+        .arg("--config")
+        .arg(&config)
+        .arg("--store")
+        .arg(&store)
+        .args(["start", "--foreground", "--paused"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("start paused foreground daemon");
+    wait_for_daemon_ready(&mut child, &store);
+
+    let status = open_store(&store).and_then(|reader| reader.status());
+    signal_child(&mut child, "TERM");
+    assert!(wait_for_child(&mut child).success());
+    let status = status.expect("status after adoption");
+    assert!(
+        status.pause_requested,
+        "adoption erased the pause requested for this start"
+    );
+    assert_eq!(status.events_dropped, 3, "the rest of the state is adopted");
 }
 
 #[cfg(unix)]

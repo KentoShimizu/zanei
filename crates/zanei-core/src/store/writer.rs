@@ -16,6 +16,8 @@ use super::{
     apply_key, retention_cutoff, store_uri, verify_key,
 };
 
+mod adoption;
+
 /// A parameterized event selection for destructive store operations.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PurgeFilter {
@@ -135,7 +137,20 @@ impl StoreWriter {
         connection.execute_batch(STORE_PRAGMAS)?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let created = !transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'meta')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
         transaction.execute_batch(STORE_TABLES)?;
+        if created {
+            // Committed together with the schema, so a store can never exist
+            // without owing its one adoption step (see `adopt_daemon_state`).
+            transaction.execute(
+                "INSERT INTO daemon_state_adoption_pending(id) VALUES (1)",
+                [],
+            )?;
+        }
         super::migration::migrate_schema(&transaction)?;
         transaction.commit()?;
         Ok(Self { connection, format })
@@ -239,45 +254,12 @@ impl StoreWriter {
     }
 
     /// Clears a timed pause that has run out, unless a newer request replaced it
-    /// after `expired` was read.
-    pub fn clear_expired_pause(&self, expired: &str) -> Result<(), StoreError> {
-        self.connection.execute(
+    /// after `expired` was read. Returns whether it cleared the pause.
+    pub fn clear_expired_pause(&self, expired: &str) -> Result<bool, StoreError> {
+        Ok(self.connection.execute(
             "UPDATE daemon_state SET paused_until = NULL WHERE id = 1 AND paused_until = ?1",
             [expired],
-        )?;
-        Ok(())
-    }
-
-    /// Carries the parts of the previous store's daemon state that outlive a
-    /// store swap into this one: an active pause request (so an upgrade never
-    /// silently resumes recording), the cumulative counters, the last event
-    /// time, collector failure history, and the last capability report. The
-    /// recorder identity and heartbeat are left to the next heartbeat.
-    pub fn adopt_daemon_state(&self, previous: &super::StoreStatus) -> Result<(), StoreError> {
-        validate_paused_until(previous.paused_until.as_deref())?;
-        validate_optional_timestamp("last_event_ts", previous.last_event_ts.as_deref())?;
-        let events_captured = signed("events_captured", previous.events_captured)?;
-        let events_dropped = signed("events_dropped", previous.events_dropped)?;
-        let collector_failures_json = serialize_collector_failures(&previous.collector_failures)?;
-        let last_known_capabilities_json = previous
-            .last_known_capabilities
-            .as_ref()
-            .map(serialize_capabilities)
-            .transpose()?;
-        self.connection.execute(
-            "UPDATE daemon_state SET paused_until = ?1, events_captured = ?2, \
-             events_dropped = ?3, last_event_ts = ?4, collector_failures_json = ?5, \
-             last_known_capabilities_json = ?6 WHERE id = 1",
-            params![
-                previous.paused_until,
-                events_captured,
-                events_dropped,
-                previous.last_event_ts,
-                collector_failures_json,
-                last_known_capabilities_json,
-            ],
-        )?;
-        Ok(())
+        )? == 1)
     }
 
     pub fn increment_events_dropped(&self, count: u64) -> Result<(), StoreError> {

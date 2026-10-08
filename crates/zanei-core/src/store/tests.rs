@@ -1649,7 +1649,7 @@ fn set_aside_store_state_is_adopted_by_the_new_store() {
         .status()
         .expect("previous status");
     writer
-        .adopt_daemon_state(&previous)
+        .adopt_daemon_state(Some(&previous))
         .expect("adopt previous state");
     drop(writer);
 

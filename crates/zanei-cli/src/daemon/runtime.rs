@@ -263,43 +263,42 @@ fn open_encrypted_store(store_path: &Path) -> Result<(StoreWriter, StoreReader),
     // `StoreFormat::probe`).
     let writer = StoreWriter::open_known(store_path, format, key.as_ref())?;
     let reader = StoreReader::open_known(store_path, writer.format(), key.as_ref())?;
-    adopt_previous_state_if_fresh(&writer, &reader, store_path)?;
+    adopt_previous_state_once(&writer, store_path)?;
     restrict_store_permissions(store_path)?;
     Ok((writer, reader))
 }
 
 /// Carries the newest set-aside store's daemon state — an active pause, the
 /// counters, the last event time, collector failures, the last permission
-/// report — into a live store the recorder has never used. "Never used" is
-/// `started_at IS NULL`: the first heartbeat sets it, so a crash between
-/// creating the encrypted store and this step is simply retried on the next
-/// start, and a store that has recorded is never touched again. The state is
-/// the user's, not the file's, so an unreadable set-aside store is reported
-/// rather than allowed to stop the start.
-fn adopt_previous_state_if_fresh(
-    writer: &StoreWriter,
-    reader: &StoreReader,
-    store_path: &Path,
-) -> Result<(), DaemonError> {
-    if reader.status()?.started_at.is_some() {
+/// report — into the live store, once per live store: the store records the
+/// step as owed in the transaction that creates it and as done in the one
+/// that adopts, so a crash in between is retried on the next start and a
+/// store that has adopted is never touched again. The state is the user's,
+/// not the file's, so an unreadable set-aside store is reported rather than
+/// allowed to stop the start.
+fn adopt_previous_state_once(writer: &StoreWriter, store_path: &Path) -> Result<(), DaemonError> {
+    if !writer.daemon_state_adoption_pending()? {
         return Ok(());
     }
-    let Some(previous) = retired_plaintext_stores(store_path)?.pop() else {
-        return Ok(());
+    let previous = match retired_plaintext_stores(store_path)?.pop() {
+        // Probing opens the set-aside file only, never the live store.
+        Some(previous) if StoreFormat::probe(&previous.path)? == StoreFormat::Plaintext => {
+            match StoreReader::open_known(&previous.path, StoreFormat::Plaintext, None)
+                .and_then(|previous| previous.status())
+            {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    eprintln!(
+                        "zanei: could not carry the previous store's state over from {}: {error}",
+                        previous.path.display()
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
     };
-    // Probing opens the set-aside file only, never the live store.
-    if StoreFormat::probe(&previous.path)? != StoreFormat::Plaintext {
-        return Ok(());
-    }
-    match StoreReader::open_known(&previous.path, StoreFormat::Plaintext, None)
-        .and_then(|previous| previous.status())
-    {
-        Ok(state) => writer.adopt_daemon_state(&state)?,
-        Err(error) => eprintln!(
-            "zanei: could not carry the previous store's state over from {}: {error}",
-            previous.path.display()
-        ),
-    }
+    writer.adopt_daemon_state(previous.as_ref())?;
     Ok(())
 }
 
@@ -567,10 +566,10 @@ fn normalize_pause_request(
     if deadline > OffsetDateTime::now_utc() {
         return Ok(true);
     }
-    // A `pause` that replaced the expired request after it was read keeps its
-    // effect; the next pause poll applies it.
-    lock_writer(writer)?.clear_expired_pause(paused_until)?;
-    Ok(false)
+    // When another request replaced the expired one after it was read, stay
+    // paused until the next pause poll reads it: a new `pause` must not let
+    // capture start in between.
+    Ok(!lock_writer(writer)?.clear_expired_pause(paused_until)?)
 }
 
 fn executable_shutdown_requested(

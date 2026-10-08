@@ -353,7 +353,10 @@ fn expired_pause_clear_keeps_a_pause_requested_after_it_was_read() {
         .set_paused_until(Some(PAUSE_INDEFINITE))
         .expect("newer pause");
 
-    assert!(!normalize_pause_request(&writer, Some(&expired)).expect("pause request"));
+    assert!(
+        normalize_pause_request(&writer, Some(&expired)).expect("pause request"),
+        "capture must not start while the newer pause is in force"
+    );
     assert_eq!(
         StoreReader::open(store.path())
             .expect("store reader")

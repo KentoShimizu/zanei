@@ -120,6 +120,10 @@ CREATE TABLE IF NOT EXISTS daemon_capabilities (
     snapshot_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS daemon_state_adoption_pending (
+    id INTEGER PRIMARY KEY CHECK (id = 1)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     schema_version INTEGER NOT NULL
 );
