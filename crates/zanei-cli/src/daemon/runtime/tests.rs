@@ -15,7 +15,7 @@ use time::Duration;
 use zanei_core::{
     config::{CaptureSource, Config, ConfigWatcher},
     normalize::format_timestamp,
-    store::{DaemonMode, DaemonState, StoreReader, StoreWriter},
+    store::{DaemonMode, DaemonState, PAUSE_INDEFINITE, StoreReader, StoreWriter},
 };
 use zanei_macos::chrome::{ChromeFailure, ChromeFailureState, ChromeQueryFailure};
 use zanei_macos::permission::{PermissionError, PermissionStatus};
@@ -336,6 +336,35 @@ fn expired_pause_is_cleared_atomically() {
             .expect("store status")
             .paused_until,
         None
+    );
+}
+
+#[test]
+fn expired_pause_clear_keeps_a_pause_requested_after_it_was_read() {
+    let store = NamedTempFile::new().expect("temporary store");
+    let writer = Arc::new(Mutex::new(
+        StoreWriter::open(store.path()).expect("store writer"),
+    ));
+    let expired = format_timestamp(time::OffsetDateTime::now_utc() - Duration::seconds(1));
+    // `pause` replaces the expired request after the recorder read it.
+    writer
+        .lock()
+        .expect("writer lock")
+        .set_paused_until(Some(PAUSE_INDEFINITE))
+        .expect("newer pause");
+
+    assert!(
+        normalize_pause_request(&writer, Some(&expired)).expect("pause request"),
+        "capture must not start while the newer pause is in force"
+    );
+    assert_eq!(
+        StoreReader::open(store.path())
+            .expect("store reader")
+            .status()
+            .expect("store status")
+            .paused_until
+            .as_deref(),
+        Some(PAUSE_INDEFINITE)
     );
 }
 

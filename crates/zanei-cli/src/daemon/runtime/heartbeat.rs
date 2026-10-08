@@ -59,7 +59,6 @@ impl ActiveDaemon<'_> {
             mode: Some(self.owner.mode),
             heartbeat_at: Some(format_timestamp(OffsetDateTime::now_utc())),
             retention_hours: Some(self.active_retention_hours),
-            paused_until: self.last_status.paused_until.clone(),
             events_captured: self.last_status.events_captured,
             events_dropped: self
                 .base_dropped
@@ -88,7 +87,6 @@ pub(super) fn initial_heartbeat(
         mode: Some(owner.mode),
         heartbeat_at: Some(format_timestamp(OffsetDateTime::now_utc())),
         retention_hours: Some(retention_hours),
-        paused_until: status.paused_until.clone(),
         events_captured: status.events_captured,
         events_dropped: status.events_dropped,
         last_event_ts: status.last_event_ts.clone(),

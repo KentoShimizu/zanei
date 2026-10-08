@@ -11,7 +11,9 @@ use time::OffsetDateTime;
 use zanei_core::config::Config;
 use zanei_core::normalize::normalize;
 use zanei_core::schema::{App, EmptyData, EventData, KNOWN_EVENT_TYPES, RawEvent};
-use zanei_core::store::{DaemonState, QueryFilter, StoreFormat, StoreReader, StoreWriter};
+use zanei_core::store::{
+    DaemonState, PAUSE_INDEFINITE, QueryFilter, StoreFormat, StoreReader, StoreWriter,
+};
 use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
 
 mod support;
@@ -237,7 +239,6 @@ fn status_and_doctor_share_control_text_rendering_without_changing_json() {
             mode: status.mode,
             heartbeat_at: status.heartbeat_at,
             retention_hours: status.retention_hours,
-            paused_until: status.paused_until,
             events_captured: status.events_captured,
             events_dropped: status.events_dropped,
             last_event_ts: status.last_event_ts,
@@ -1453,10 +1454,10 @@ fn foreground_daemon_sets_a_plaintext_store_aside_and_keeps_reading_it() {
             writer.append(&legacy)?;
             // An indefinite pause must survive the upgrade.
             writer.write_daemon_state(&DaemonState {
-                paused_until: Some("infinity".to_owned()),
                 events_captured: 1,
                 ..DaemonState::default()
-            })
+            })?;
+            writer.set_paused_until(Some(PAUSE_INDEFINITE))
         })
         .expect("paused plaintext legacy store");
     // A 0.2.x store created with the default umask: readable by other accounts.
@@ -1622,10 +1623,10 @@ fn recorder_retries_state_adoption_after_a_crash_before_it_completed() {
     StoreWriter::open(&retired)
         .and_then(|writer| {
             writer.write_daemon_state(&DaemonState {
-                paused_until: Some("infinity".to_owned()),
                 events_dropped: 3,
                 ..DaemonState::default()
-            })
+            })?;
+            writer.set_paused_until(Some(PAUSE_INDEFINITE))
         })
         .expect("paused set-aside store");
     // The crash also came before the set-aside store was made owner-only.
@@ -1660,8 +1661,64 @@ fn recorder_retries_state_adoption_after_a_crash_before_it_completed() {
         "the pause is adopted on the next start"
     );
     assert_eq!(value["events_dropped"], 3);
+
+    // Adoption happens once per live store: a resume survives a normal
+    // shutdown and restart while the set-aside store is still next to it.
+    command(&config, &store).arg("resume").assert().success();
     signal_child(&mut child, "TERM");
     assert!(wait_for_child(&mut child).success());
+    let mut child = spawn_foreground_daemon(&config, &store);
+    wait_for_daemon_ready(&mut child, &store);
+    let restarted = open_store(&store).and_then(|reader| reader.status());
+    signal_child(&mut child, "TERM");
+    assert!(wait_for_child(&mut child).success());
+    assert!(
+        !restarted.expect("status after restart").pause_requested,
+        "a restart re-applied the set-aside store's pause"
+    );
+}
+
+#[test]
+fn start_paused_survives_adopting_an_unpaused_set_aside_store() {
+    let directory = TempDir::new().expect("adoption fixture");
+    let config = directory.path().join("config.toml");
+    let store = directory.path().join("store.sqlite");
+    fs::write(&config, "[capture]\nsources = []\n").expect("daemon config");
+    let retired = set_aside_store_path(&store, 1);
+    StoreWriter::open(&retired)
+        .and_then(|writer| {
+            writer.write_daemon_state(&DaemonState {
+                events_dropped: 3,
+                ..DaemonState::default()
+            })
+        })
+        .expect("unpaused set-aside store");
+    StoreWriter::open_with_key(&store, Some(&read_key(&key_file_for(&store))))
+        .expect("fresh encrypted store");
+
+    let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_zanei"))
+        .env(STORE_KEY_FILE_ENV, key_file_for(&store))
+        .arg("--config")
+        .arg(&config)
+        .arg("--store")
+        .arg(&store)
+        .args(["start", "--foreground", "--paused"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("start paused foreground daemon");
+    wait_for_daemon_ready(&mut child, &store);
+
+    let status = open_store(&store).and_then(|reader| reader.status());
+    signal_child(&mut child, "TERM");
+    assert!(wait_for_child(&mut child).success());
+    let status = status.expect("status after adoption");
+    assert!(
+        status.pause_requested,
+        "adoption erased the pause requested for this start"
+    );
+    assert_eq!(status.events_dropped, 3, "the rest of the state is adopted");
 }
 
 #[cfg(unix)]
