@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    ffi::{c_long, c_void},
+    ffi::{CString, c_char, c_long, c_void},
     ptr,
     time::{Duration, Instant},
 };
@@ -100,7 +100,7 @@ fn live_capture_and_recognition_at_one_and_two_x() {
         "an expired deadline must not block"
     );
 
-    let mut texts = Vec::new();
+    let mut texts: Vec<HashSet<String>> = Vec::new();
     for scale in [1.0, 2.0] {
         let mut lines = Vec::new();
         for attempt in 1..=2 {
@@ -112,12 +112,7 @@ fn live_capture_and_recognition_at_one_and_two_x() {
                 &image,
             );
         }
-        texts.push(
-            lines
-                .into_iter()
-                .map(|line| line.text)
-                .collect::<HashSet<_>>(),
-        );
+        texts.push(lines.into_iter().map(|line| line.text).collect());
     }
     let missing_at_1x = texts[1].difference(&texts[0]).count();
     let missing_at_2x = texts[0].difference(&texts[1]).count();
@@ -181,15 +176,12 @@ unsafe fn owned(value: CfRef) -> OwnedCf {
 }
 
 unsafe fn cf_string(text: &str) -> OwnedCf {
-    const UTF8: u32 = 0x0800_0100;
-    let length = text.len() as isize;
+    let text = CString::new(text).expect("no interior NUL");
     unsafe {
-        owned(CFStringCreateWithBytes(
+        owned(CFStringCreateWithCString(
             ptr::null(),
             text.as_ptr(),
-            length,
-            UTF8,
-            0,
+            0x0800_0100,
         ))
     }
 }
@@ -211,12 +203,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     static kCFTypeDictionaryKeyCallBacks: u8;
     static kCFTypeDictionaryValueCallBacks: u8;
-    fn CFStringCreateWithBytes(
+    fn CFStringCreateWithCString(
         allocator: *const c_void,
-        bytes: *const u8,
-        length: isize,
+        text: *const c_char,
         encoding: u32,
-        external: u8,
     ) -> CfRef;
     fn CFDictionaryCreate(
         allocator: *const c_void,

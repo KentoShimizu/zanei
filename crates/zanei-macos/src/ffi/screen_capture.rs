@@ -41,9 +41,9 @@ pub(crate) enum CaptureError {
     Failed { code: Option<isize> },
 }
 
-/// One window's pixels: sRGB, straight (non-premultiplied) RGBA, rows top to bottom with no
-/// padding, so `rgba.len() == width * height * 4`. `scale` is image pixels per window point.
-#[derive(Debug)]
+/// One window's pixels: sRGB, straight RGBA, top row first, `rgba.len() == width * height * 4`.
+/// It spans exactly the window frame without its shadow, so 0–1 image coordinates are
+/// window-relative; `scale` is image pixels per window point.
 pub(crate) struct WindowImage {
     pub(crate) width: usize,
     pub(crate) height: usize,
@@ -131,12 +131,17 @@ pub(crate) fn capture_window(
         unsafe { OwnedObject::from_retained(send_id_0(config_class as ObjcId, sel(c"new"))) }
             .ok_or(failed)?;
     let set_size = msg_send::<unsafe extern "C" fn(ObjcId, ObjcSel, usize)>();
+    let (width, height) = pixel_size(frame.size.width, frame.size.height, scale);
     unsafe {
-        let width = (frame.size.width * scale).round() as usize;
-        let height = (frame.size.height * scale).round() as usize;
         set_size(configuration.as_ptr(), sel(c"setWidth:"), width);
         set_size(configuration.as_ptr(), sel(c"setHeight:"), height);
         send_void_bool(configuration.as_ptr(), sel(c"setShowsCursor:"), false);
+        // The default single-window capture adds the shadow around `frame` (macOS 14+ setter).
+        send_void_bool(
+            configuration.as_ptr(),
+            sel(c"setIgnoreShadowsSingleWindow:"),
+            true,
+        );
     }
     let image = complete(
         deadline,
@@ -183,6 +188,11 @@ fn complete<T: Send + 'static>(
         Err(RecvTimeoutError::Timeout) => Err(CaptureError::Timeout),
         Err(RecvTimeoutError::Disconnected) => Err(CaptureError::Failed { code: None }),
     }
+}
+
+fn pixel_size(width: f64, height: f64, scale: f64) -> (usize, usize) {
+    let pixels = |points: f64| (points * scale).round() as usize;
+    (pixels(width), pixels(height))
 }
 
 fn capture_error(code: Option<isize>) -> CaptureError {
@@ -294,7 +304,13 @@ unsafe extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureError, capture_error, unpremultiply};
+    use super::{CaptureError, capture_error, pixel_size, unpremultiply};
+
+    #[test]
+    fn requested_image_spans_the_window_frame_at_the_scale() {
+        assert_eq!(pixel_size(1701.0, 988.5, 1.0), (1701, 989));
+        assert_eq!(pixel_size(1701.0, 988.5, 2.0), (3402, 1977));
+    }
 
     #[test]
     fn declined_screen_recording_is_a_permission_outcome_not_a_failure() {
