@@ -27,8 +27,11 @@ use super::{
     cf::{add_current_run_loop_source, run_loop_tick, string_value},
     create_observer,
     element::{
-        create_application, element_at_position, element_role, initial_snapshot::element_snapshot,
-        set_timeout, window::window_snapshot,
+        create_application, element_at_position, element_role,
+        initial_snapshot::element_snapshot,
+        set_timeout,
+        window::{OwningWindow, attributes_resolved_windows},
+        window_snapshot,
     },
     native_error,
     observer::{AppObserver, FocusSource},
@@ -353,7 +356,9 @@ impl NativeAx {
                 return None;
             }
         };
-        match element_snapshot(element.as_ptr(), AxPoint { x, y }, |window| {
+        let owning = attributes_resolved_windows(observer.app())
+            .then_some(OwningWindow::UnderPoint(AxPoint { x, y }));
+        match element_snapshot(element.as_ptr(), owning, |window| {
             observer.text_content_decision(window)
         }) {
             Ok(hit) => {

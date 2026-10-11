@@ -1,15 +1,21 @@
 //! Timeout-bounded AX element reads and privacy-safe snapshots.
 
-use std::{cell::Cell, ptr};
+use std::ptr;
 
-use crate::focused_field::{FieldClass, field_class, observed_field_class};
+use crate::{
+    ffi::{geometry::AxFrame, window_list::window_id_for_frame},
+    focused_field::{FieldClass, field_class, observed_field_class},
+};
 
-use super::{AX_ERROR_ATTRIBUTE_UNSUPPORTED, NativeAxError, NativeWindow, cf::*, native_error};
+use super::{
+    AX_ERROR_ATTRIBUTE_UNSUPPORTED, NativeAxError, NativeWindow,
+    cf::*,
+    native_error,
+    types::{decode_point, decode_size},
+};
 
 pub(super) mod initial_snapshot;
 pub(super) mod window;
-
-use window::{ElementWindow, OwningWindow, element_window};
 
 const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 0.5;
 const AX_ERROR_SUCCESS: i32 = 0;
@@ -44,67 +50,19 @@ pub(super) fn capture_value_snapshot(
     secure_input: bool,
     surface_changed: impl FnMut(),
 ) -> (ValueSnapshot, Option<crate::CaptureDecision>) {
-    capture_value_snapshot_verified(
-        window,
-        policy,
-        app,
-        capture_enabled,
-        surface_changed,
-        || element_window(element, OwningWindow::Focused),
-        |allowed| value_snapshot(element, allowed, secure_input),
-    )
-}
-
-/// Requires the window behind a surface-checked body read to be verified both before
-/// and after the read (see `window.rs`). An unverified window keeps the recorded
-/// window for attribution, and the read is suppressed as unreadable.
-fn capture_value_snapshot_verified(
-    window: &mut Option<NativeWindow>,
-    policy: &crate::CapturePolicy,
-    app: &zanei_core::schema::App,
-    capture_enabled: bool,
-    surface_changed: impl FnMut(),
-    mut resolve_window: impl FnMut() -> Result<ElementWindow, NativeAxError>,
-    read_value: impl FnOnce(bool) -> ValueSnapshot,
-) -> (ValueSnapshot, Option<crate::CaptureDecision>) {
-    let recorded = window.clone();
-    let verified = Cell::new(true);
-    let (snapshot, decision) = capture_value_snapshot_with(
+    capture_value_snapshot_with(
         window,
         policy,
         app,
         capture_enabled,
         surface_changed,
         || {
-            Ok(match resolve_window()? {
-                ElementWindow::Verified(current) => current,
-                ElementWindow::Unverified => {
-                    verified.set(false);
-                    recorded.clone()
-                }
-            })
+            copy_element(element, "AXWindow")?
+                .map(|window| window_snapshot(window.as_ptr()))
+                .transpose()
+                .map(Option::flatten)
         },
-        |allowed| {
-            if verified.get() {
-                read_value(allowed)
-            } else {
-                unverified_window_snapshot()
-            }
-        },
-    );
-    if verified.get() {
-        (snapshot, decision)
-    } else {
-        (unverified_window_snapshot(), None)
-    }
-}
-
-fn unverified_window_snapshot() -> ValueSnapshot {
-    suppressed_value_snapshot(
-        FieldClass::Unknown,
-        None,
-        None,
-        Some(native_error("AXFocusedUIElement window verification", -1)),
+        |allowed| value_snapshot(element, allowed, secure_input),
     )
 }
 
@@ -120,10 +78,7 @@ pub(super) fn capture_value_snapshot_with(
     if !capture_enabled {
         return (read_value(false), None);
     }
-    let is_ide = matches!(
-        app.name.trim().to_lowercase().as_str(),
-        "cursor" | "visual studio code" | "code"
-    );
+    let is_ide = is_ide(app);
     if is_ide {
         match read_window() {
             Ok(current) => {
@@ -171,6 +126,14 @@ pub(super) fn capture_value_snapshot_with(
         );
     }
     (snapshot, Some(decision))
+}
+
+/// IDEs whose capture policy depends on the window title.
+fn is_ide(app: &zanei_core::schema::App) -> bool {
+    matches!(
+        app.name.trim().to_lowercase().as_str(),
+        "cursor" | "visual studio code" | "code"
+    )
 }
 
 fn same_value_surface(previous: Option<&NativeWindow>, current: Option<&NativeWindow>) -> bool {
@@ -335,6 +298,48 @@ fn suppressed_value_snapshot(
     }
 }
 
+pub(super) fn window_snapshot(window: CfRef) -> Result<Option<NativeWindow>, NativeAxError> {
+    if copy_string(window, "AXRole")?.as_deref() != Some("AXWindow") {
+        return Ok(None);
+    }
+    let id = copy_attribute(window, "AXWindowNumber")?.and_then(|value| i64_value(value.as_ptr()));
+    let id = match id {
+        Some(id) => Some(id),
+        None => match (element_pid(window)?, window_frame(window)?) {
+            (Some(pid), Some(frame)) => window_id_for_frame(i64::from(pid), frame),
+            _ => None,
+        },
+    };
+    Ok(Some(NativeWindow {
+        title: copy_string(window, "AXTitle")?,
+        id,
+    }))
+}
+
+fn element_pid(element: CfRef) -> Result<Option<i32>, NativeAxError> {
+    let mut pid = 0;
+    let status = unsafe { AXUIElementGetPid(element, &raw mut pid) };
+    if status == AX_ERROR_SUCCESS {
+        Ok((pid > 0).then_some(pid))
+    } else {
+        Err(native_error("AXUIElementGetPid", status))
+    }
+}
+
+fn window_frame(window: CfRef) -> Result<Option<AxFrame>, NativeAxError> {
+    let Some(position) = copy_attribute(window, "AXPosition")? else {
+        return Ok(None);
+    };
+    let Some(size) = copy_attribute(window, "AXSize")? else {
+        return Ok(None);
+    };
+    let origin = decode_point(position.as_ptr())
+        .ok_or_else(|| native_error("AXPosition attribute type", -1))?;
+    let size =
+        decode_size(size.as_ptr()).ok_or_else(|| native_error("AXSize attribute type", -1))?;
+    Ok(Some(AxFrame { origin, size }))
+}
+
 pub(super) fn create_application(pid: i32) -> Result<OwnedCf, NativeAxError> {
     unsafe { OwnedCf::from_create(AXUIElementCreateApplication(pid)) }
         .ok_or_else(|| native_error("AXUIElementCreateApplication", -1))
@@ -465,6 +470,7 @@ fn copy_string(element: CfRef, attribute: &str) -> Result<Option<String>, Native
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXUIElementCreateApplication(pid: i32) -> CfRef;
+    fn AXUIElementGetPid(element: CfRef, pid: *mut i32) -> i32;
     fn AXUIElementGetTypeID() -> usize;
     fn AXUIElementSetMessagingTimeout(element: CfRef, timeout_seconds: f32) -> i32;
     fn AXUIElementCopyAttributeValue(element: CfRef, attribute: CfRef, value: *mut CfRef) -> i32;

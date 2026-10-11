@@ -29,7 +29,8 @@ use super::{
     element::{
         cf_equal, copy_element,
         initial_snapshot::{FocusedElementSnapshot, focused_element_snapshot},
-        window::window_snapshot,
+        window::{OwningWindow, attributes_resolved_windows},
+        window_snapshot,
     },
     remove_notification,
     value_context::{FocusedValueContext, after_target_preparation},
@@ -213,6 +214,7 @@ impl AppObserver {
             .map(|element| {
                 focused_element_snapshot(
                     element.as_ptr(),
+                    attributes_resolved_windows(&self.app).then_some(OwningWindow::Focused),
                     |window| self.text_content_decision(window),
                     secure_input,
                 )
