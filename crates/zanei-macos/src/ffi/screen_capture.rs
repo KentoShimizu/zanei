@@ -80,12 +80,11 @@ pub(crate) fn initialize_application() {
     unsafe { send_id_0(class(c"NSApplication"), sel(c"sharedApplication")) };
 }
 
-/// Captures exactly one window, without the cursor and independent of what covers it, at
-/// `scale` image pixels per window point. Gives up after `timeout`; a late completion releases
-/// its image without being observed.
+/// Captures exactly one window, without the cursor and independent of what covers it, at the
+/// backing scale of the display showing it. Gives up after `timeout`; a late completion
+/// releases its image without being observed.
 pub(crate) fn capture_window(
     window_id: i64,
-    scale: f64,
     timeout: Duration,
 ) -> Result<WindowImage, CaptureError> {
     let deadline = Instant::now() + timeout;
@@ -131,7 +130,14 @@ pub(crate) fn capture_window(
     let configuration =
         unsafe { OwnedObject::from_retained(send_id_0(config_class as ObjcId, sel(c"new"))) }
             .ok_or(failed)?;
-    let (width, height) = pixel_size(frame.size.width, frame.size.height, scale);
+    // SAFETY: `filter` is a live SCContentFilter; `pointPixelScale` (macOS 14) returns a float.
+    let scale = unsafe {
+        msg_send::<unsafe extern "C" fn(ObjcId, ObjcSel) -> f32>()(
+            filter.as_ptr(),
+            sel(c"pointPixelScale"),
+        )
+    };
+    let (width, height) = pixel_size(frame.size.width, frame.size.height, f64::from(scale));
     // Integer properties are `size_t` or non-negative `NSInteger`, passed alike.
     let set_integer = msg_send::<unsafe extern "C" fn(ObjcId, ObjcSel, usize)>();
     for (setter, value) in [
