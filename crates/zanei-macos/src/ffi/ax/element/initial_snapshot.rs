@@ -1,8 +1,9 @@
 //! Initial focused and hit-tested element acquisition.
 
 use super::{
-    AX_NUMBER_OF_CHARACTERS_ATTRIBUTE, AX_VALUE_ATTRIBUTE, copy_attribute, copy_element,
-    copy_string, gated_value, value_length, window_snapshot,
+    AX_NUMBER_OF_CHARACTERS_ATTRIBUTE, AX_VALUE_ATTRIBUTE, copy_attribute, copy_string,
+    gated_value, value_length,
+    window::{OwningWindow, element_window},
 };
 use crate::ffi::ax::{
     NativeAxError, NativeWindow,
@@ -20,6 +21,7 @@ pub(in crate::ffi::ax) struct FocusedElementSnapshot {
 
 pub(in crate::ffi::ax) fn element_snapshot(
     element: CfRef,
+    owning: Option<OwningWindow>,
     capture_decision: impl FnOnce(Option<&NativeWindow>) -> Option<CaptureDecision>,
 ) -> Result<Option<(Option<NativeWindow>, NativeElement)>, NativeAxError> {
     let subrole = copy_string(element, "AXSubrole")?;
@@ -28,11 +30,8 @@ pub(in crate::ffi::ax) fn element_snapshot(
     if field_class == FieldClass::SecureText {
         return Ok(None);
     }
-    let window = copy_element(element, "AXWindow")?
-        .map(|window| window_snapshot(window.as_ptr()))
-        .transpose()?
-        .flatten();
-    let capture_decision = capture_decision(window.as_ref());
+    let window = element_window(element, owning)?;
+    let capture_decision = capture_decision(window.decision_window());
     let capture_text_content = capture_decision
         .as_ref()
         .is_some_and(CaptureDecision::is_allowed);
@@ -48,7 +47,7 @@ pub(in crate::ffi::ax) fn element_snapshot(
     };
     let value_len = value_length(character_count, value.as_deref());
     Ok(Some((
-        window,
+        window.into_attribution(),
         NativeElement {
             role,
             subrole,
@@ -62,6 +61,7 @@ pub(in crate::ffi::ax) fn element_snapshot(
 
 pub(in crate::ffi::ax) fn focused_element_snapshot(
     element: CfRef,
+    owning: Option<OwningWindow>,
     capture_decision: impl FnOnce(Option<&NativeWindow>) -> Option<CaptureDecision>,
     secure_input: bool,
 ) -> Result<Option<FocusedElementSnapshot>, NativeAxError> {
@@ -72,11 +72,8 @@ pub(in crate::ffi::ax) fn focused_element_snapshot(
         return Ok(None);
     }
     let field_class = observed_field_class(role.as_deref(), subrole.as_deref(), secure_input);
-    let window = copy_element(element, "AXWindow")?
-        .map(|window| window_snapshot(window.as_ptr()))
-        .transpose()?
-        .flatten();
-    let capture_decision = capture_decision(window.as_ref());
+    let window = element_window(element, owning)?;
+    let capture_decision = capture_decision(window.decision_window());
     let capture_text_content = capture_decision
         .as_ref()
         .is_some_and(CaptureDecision::is_allowed);
@@ -108,7 +105,7 @@ pub(in crate::ffi::ax) fn focused_element_snapshot(
         value.as_deref().or(text_baseline.as_deref()),
     );
     Ok(Some(FocusedElementSnapshot {
-        window,
+        window: window.into_attribution(),
         element: NativeElement {
             role,
             subrole,

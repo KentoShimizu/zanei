@@ -15,6 +15,7 @@ use super::{
 };
 
 pub(super) mod initial_snapshot;
+pub(super) mod window;
 
 const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 0.5;
 const AX_ERROR_SUCCESS: i32 = 0;
@@ -77,10 +78,7 @@ pub(super) fn capture_value_snapshot_with(
     if !capture_enabled {
         return (read_value(false), None);
     }
-    let is_ide = matches!(
-        app.name.trim().to_lowercase().as_str(),
-        "cursor" | "visual studio code" | "code"
-    );
+    let is_ide = is_ide(app);
     if is_ide {
         match read_window() {
             Ok(current) => {
@@ -128,6 +126,14 @@ pub(super) fn capture_value_snapshot_with(
         );
     }
     (snapshot, Some(decision))
+}
+
+/// IDEs whose capture policy depends on the window title.
+fn is_ide(app: &zanei_core::schema::App) -> bool {
+    matches!(
+        app.name.trim().to_lowercase().as_str(),
+        "cursor" | "visual studio code" | "code"
+    )
 }
 
 fn same_value_surface(previous: Option<&NativeWindow>, current: Option<&NativeWindow>) -> bool {
