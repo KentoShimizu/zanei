@@ -1,6 +1,8 @@
 use std::fmt::Display;
 
-use super::model::{CaptureScopeReport, OcrState, StatusReport, StoreWriteState};
+use zanei_core::OcrFallback;
+
+use super::model::{CaptureScopeReport, StatusReport, StoreWriteState};
 use crate::commands::human_text::sanitize_human_text;
 
 pub(super) fn print_human(report: &StatusReport) {
@@ -73,7 +75,7 @@ pub(super) fn render_human(report: &StatusReport) -> String {
     );
     if report.capture.content_snapshot {
         content_snapshot.push_str(", ocr: ");
-        content_snapshot.push_str(report.capture.ocr.map_or("unknown", OcrState::describe));
+        content_snapshot.push_str(report.capture.ocr.map_or("unknown", ocr_text));
     }
     lines.push(content_snapshot);
     lines.push(format!("PERMISSIONS OK    {}", report.permissions_ok));
@@ -134,5 +136,13 @@ fn capture_setting(
         format!("{label}on (apps: {}, sites: {})", scope.apps, scope.sites)
     } else {
         format!("{label}off (opt-in: zanei config set {config_key} true)")
+    }
+}
+
+const fn ocr_text(state: OcrFallback) -> &'static str {
+    match state {
+        OcrFallback::On => "on",
+        OcrFallback::Off => "off (Screen Recording not granted)",
+        OcrFallback::Unavailable => "unavailable (macOS 14+)",
     }
 }

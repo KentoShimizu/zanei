@@ -319,8 +319,9 @@ fn get_status_prefers_the_running_recorder_permission_snapshot() {
 
 #[test]
 fn get_status_reports_the_recorder_ocr_state_without_affecting_permissions() {
-    // Catches `get_status` diverging from `zanei status --json` for the fallback state and the
-    // optional permission leaking into `permissions_ok`.
+    // Catches `get_status` diverging from `zanei status --json` for the fallback state, the
+    // listed output schema rejecting a documented state, and the optional permission leaking
+    // into `permissions_ok`.
     let fixture = Fixture::populated();
     std::fs::write(
         &fixture.config,
@@ -343,11 +344,23 @@ fn get_status_reports_the_recorder_ocr_state_without_affecting_permissions() {
         );
         let mut client = McpClient::start(&fixture);
         initialize(&mut client);
+        let listed = client.request("tools/list", json!({}));
+        let schema = listed["result"]["tools"]
+            .as_array()
+            .expect("tools/list result")
+            .iter()
+            .find(|tool| tool["name"] == "get_status")
+            .expect("get_status tool")["outputSchema"]
+            .clone();
 
         let status = client.call_tool("get_status", json!({}));
 
         assert_eq!(status["capture"]["ocr"], expected);
         assert_eq!(status["permissions_ok"], true);
+        assert!(
+            jsonschema::draft202012::is_valid(&schema, &status),
+            "get_status output failed its listed schema"
+        );
     }
 }
 

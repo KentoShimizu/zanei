@@ -9,6 +9,7 @@ use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use zanei_core::OcrFallback;
 use zanei_core::config::{Config, parse_time_expression};
 use zanei_core::normalize::format_timestamp;
 use zanei_core::store::{QueryFilter, QueryResult, StoreError, StoreReader};
@@ -16,15 +17,12 @@ use zanei_core::timeline::{
     Granularity, MIN_TIMELINE_TOKEN_BUDGET_TOKENS, TimeRange, TimelineFormat, TimelineOptions,
     build, serialize,
 };
-use zanei_core::{CapabilityState, DaemonCapabilities};
 
 use crate::{KeyProvider, PermissionCheck};
 
 mod output;
 
-use output::{
-    CaptureOutput, GetStatusOutput, GetTimelineOutput, OcrOutput, QueryEventsOutput, RangeOutput,
-};
+use output::{CaptureOutput, GetStatusOutput, GetTimelineOutput, QueryEventsOutput, RangeOutput};
 
 const DEFAULT_TIMELINE_SINCE: &str = "1h";
 const DEFAULT_QUERY_SINCE: &str = "15m";
@@ -239,17 +237,10 @@ impl ZaneiServer {
                 || (self.permission_check)(&config).map_err(internal_error),
                 Ok,
             )?;
-        let ocr = status
-            .reported_capabilities()
-            .filter(|_| config.capture.content_snapshot)
-            .and_then(DaemonCapabilities::capture_screen)
-            .and_then(|state| match state {
-                CapabilityState::Available => Some(OcrOutput::On),
-                CapabilityState::ActionRequired => Some(OcrOutput::Off),
-                CapabilityState::Unavailable => Some(OcrOutput::Unavailable),
-                // The recorder never reports screen capture as deferred.
-                CapabilityState::Deferred => None,
-            });
+        let ocr = OcrFallback::reported(
+            status.reported_capabilities(),
+            config.capture.content_snapshot,
+        );
         let retention_hours = status.effective_retention_hours(config.output.retention_hours);
 
         Ok(Json(GetStatusOutput {

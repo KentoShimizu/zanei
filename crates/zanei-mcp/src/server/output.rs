@@ -6,6 +6,7 @@ use rmcp::model::JsonObject;
 use rmcp::{schemars, schemars::JsonSchema};
 use serde::Serialize;
 use serde_json::Value;
+use zanei_core::OcrFallback;
 use zanei_core::schema::Event;
 use zanei_core::timeline::{Interaction, Session, TimeRange};
 
@@ -93,15 +94,19 @@ pub(super) struct CaptureOutput {
     pub(super) content_snapshot: bool,
     /// Text-recognition fallback state; null when content snapshots are off or the running
     /// recorder has not reported it.
-    pub(super) ocr: Option<OcrOutput>,
+    #[schemars(schema_with = "ocr_fallback_schema")]
+    pub(super) ocr: Option<OcrFallback>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum OcrOutput {
-    On,
-    Off,
-    Unavailable,
+// `zanei-core` does not depend on schemars, so the closed variants are spelled out here. The
+// null branch stays separate: the tool schema settings rewrite a `["string", "null"]` type list.
+fn ocr_fallback_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            { "type": "string", "enum": ["on", "off", "unavailable"] },
+            { "type": "null" }
+        ]
+    })
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

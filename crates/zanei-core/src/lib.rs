@@ -9,5 +9,5 @@ pub mod store;
 pub mod text_delta;
 pub mod timeline;
 
-pub use capability::{Capability, CapabilityState, DaemonCapabilities};
+pub use capability::{Capability, CapabilityState, DaemonCapabilities, OcrFallback};
 pub use schema::{CaptureContext, CaptureSurface, RawEvent};
