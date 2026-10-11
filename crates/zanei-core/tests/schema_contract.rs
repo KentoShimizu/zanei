@@ -4,8 +4,9 @@ use zanei_core::config::{FilterConfig, RedactorKind};
 use zanei_core::normalize::{CONTENT_SNAPSHOT_SAFETY_MAX_BYTES, normalize};
 use zanei_core::privacy::PrivacyFilter;
 use zanei_core::schema::{
-    App, ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotTrigger, Event, EventData,
-    KNOWN_EVENT_TYPES, RawEvent, Window,
+    App, ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotLine, ContentSnapshotTrigger,
+    Event, EventData, KNOWN_EVENT_TYPES, RECOGNIZED_TEXT_SOURCE, RawEvent, RgbColor, Window,
+    WindowFraction,
 };
 
 const EVENT_SCHEMA: &str = include_str!("../../../docs/public/schema/event.schema.json");
@@ -78,6 +79,8 @@ fn schema_and_rust_accept_the_same_boundary_corpus() {
     content_with_v1["v"] = json!(1);
     let mut existing_with_v2 = envelope("app.launch", json!({}));
     existing_with_v2["v"] = json!(2);
+    let mut existing_with_v4 = envelope("app.launch", json!({}));
+    existing_with_v4["v"] = json!(4);
 
     let mut app_activate_without_window = envelope("app.activate", json!({}));
     app_activate_without_window["window"] = Value::Null;
@@ -149,6 +152,7 @@ fn schema_and_rust_accept_the_same_boundary_corpus() {
         ("unknown event type", unknown_type, false),
         ("content snapshot with v1", content_with_v1, false),
         ("existing event with v2", existing_with_v2, false),
+        ("existing event with v4", existing_with_v4, false),
         (
             "app.activate without window",
             app_activate_without_window,
@@ -312,30 +316,184 @@ fn retained_v2_content_snapshot_round_trips_without_inventing_a_cutoff() {
 }
 
 #[test]
-fn content_snapshot_payload_shape_must_match_its_version() {
+fn content_snapshot_payload_shape_must_match_its_version_and_source() {
+    // Catches mixed versions, a broken `lines` <=> `macos.ocr` invariant, and drift between
+    // the schema and the Rust reader for each combination the events reference rejects.
     let validator = validator();
-    let mut legacy_shape_at_v3 = envelope(
-        "content.snapshot",
-        json!({ "text": "Visible", "chars": 7, "complete": true, "trigger": "settle" }),
-    );
-    legacy_shape_at_v3["v"] = json!(3);
-    assert_acceptance(
-        &validator,
-        "legacy content snapshot shape at v3",
-        &legacy_shape_at_v3,
-        false,
-    );
+    let current = json!({ "text": "Visible", "chars": 7, "cutoff": null, "trigger": "settle" });
+    let legacy = json!({ "text": "Visible", "chars": 7, "complete": true, "trigger": "settle" });
+    let (mut lines, mut legacy_lines) = (current.clone(), legacy.clone());
+    lines["lines"] = json!([line_json("Visible")]);
+    legacy_lines["lines"] = lines["lines"].clone();
+    let ocr = RECOGNIZED_TEXT_SOURCE;
+    let snapshot = |version: u8, source: &str, data: &Value| {
+        let mut value = envelope("content.snapshot", data.clone());
+        value["v"] = json!(version);
+        value["source"] = json!(source);
+        value
+    };
 
-    let mut current_shape_at_v2 = envelope(
+    for (name, value) in [
+        ("v2 cutoff", snapshot(2, "macos.ax", &current)),
+        ("v3 complete", snapshot(3, "macos.ax", &legacy)),
+        ("v4 complete", snapshot(4, "macos.ax", &legacy)),
+        ("v2 lines", snapshot(2, "macos.ax", &legacy_lines)),
+        ("v3 lines", snapshot(3, ocr, &lines)),
+        ("v4 ocr without lines", snapshot(4, ocr, &current)),
+        ("v4 ax with lines", snapshot(4, "macos.ax", &lines)),
+        (
+            "v4 other source with lines",
+            snapshot(4, "macos.workspace", &lines),
+        ),
+    ] {
+        assert_acceptance(&validator, name, &value, false);
+    }
+}
+
+#[test]
+fn content_snapshot_versions_round_trip_in_their_own_shape() {
+    // Catches a v3 event being relabelled, `lines` being dropped or invented, and a
+    // size-limited OCR snapshot becoming unreadable.
+    let validator = validator();
+    let accessibility = envelope(
         "content.snapshot",
-        json!({ "text": "Visible", "chars": 7, "cutoff": null, "trigger": "settle" }),
+        json!({ "text": "Visible", "chars": 7, "cutoff": null, "trigger": "refresh" }),
     );
-    current_shape_at_v2["v"] = json!(2);
+    let mut retained_v3 = accessibility.clone();
+    retained_v3["v"] = json!(3);
+    let mut recognized = accessibility.clone();
+    recognized["source"] = json!(RECOGNIZED_TEXT_SOURCE);
+    recognized["data"] = json!({
+        "text": "Hello\nReply", "chars": 11, "cutoff": "bytes", "trigger": "settle",
+        "lines": [
+            line_json("Hello"),
+            { "text": "Reply", "x": 0.0, "y": 1.0, "w": 0.0001, "h": 0.9999, "bg": "#000000", "ink": null }
+        ]
+    });
+    let mut size_limited = recognized.clone();
+    size_limited["data"]["lines"] = Value::Null;
+    size_limited["truncated"] = json!(true);
+    size_limited["redaction"] = json!({ "applied": true, "rules": ["size_limit"] });
+    let mut null_lines_without_truncation = size_limited.clone();
+    null_lines_without_truncation["truncated"] = json!(false);
+    null_lines_without_truncation["redaction"] = json!({ "applied": false, "rules": [] });
+
     assert_acceptance(
         &validator,
-        "current content snapshot shape at v2",
-        &current_shape_at_v2,
+        "null lines without truncation",
+        &null_lines_without_truncation,
         false,
+    );
+    for (name, value) in [
+        ("v4 accessibility text", accessibility),
+        ("retained v3", retained_v3),
+        ("v4 recognized text", recognized),
+        ("size-limited lines", size_limited),
+    ] {
+        assert_acceptance(&validator, name, &value, true);
+        let event: Event = serde_json::from_value(value.clone())
+            .unwrap_or_else(|error| panic!("{name} did not deserialize: {error}"));
+        assert_eq!(
+            serde_json::to_value(&event).expect("serialize"),
+            value,
+            "{name} changed on round-trip"
+        );
+    }
+}
+
+#[test]
+fn content_snapshot_lines_follow_the_published_field_rules() {
+    // Catches lowercase or malformed colours, out-of-window boxes, a missing `ink`, or extra
+    // line fields reaching the store, and off-grid positions being kept unrounded.
+    let validator = validator();
+    let recognized = |line: Value| {
+        let mut value = envelope(
+            "content.snapshot",
+            json!({ "text": "Hello", "chars": 5, "cutoff": null, "trigger": "settle", "lines": [line] }),
+        );
+        value["source"] = json!(RECOGNIZED_TEXT_SOURCE);
+        value
+    };
+    let with = |field: &str, field_value: Value| {
+        let mut line = line_json("Hello");
+        line[field] = field_value;
+        recognized(line)
+    };
+    let mut missing_ink = line_json("Hello");
+    missing_ink.as_object_mut().expect("line").remove("ink");
+
+    let cases = [
+        ("lowercase bg", with("bg", json!("#66db6e"))),
+        ("short ink", with("ink", json!("#66DB6"))),
+        ("x above 1", with("x", json!(1.0001))),
+        ("negative w", with("w", json!(-0.1))),
+        ("unknown line field", with("confidence", json!(0.5))),
+        ("missing ink", recognized(missing_ink)),
+    ];
+    for (name, value) in cases {
+        assert_acceptance(&validator, name, &value, false);
+    }
+
+    let off_grid = with("x", json!(0.123_46));
+    assert_acceptance(&validator, "off-grid x", &off_grid, true);
+    let event: Event = serde_json::from_value(off_grid).expect("off-grid x");
+    let encoded = serde_json::to_value(&event).expect("serialize rounded x");
+    assert_eq!(encoded["data"]["lines"][0]["x"], json!(0.1235));
+}
+
+#[test]
+fn recognized_snapshot_redacts_every_line_and_drops_lines_grown_past_the_safety_limit() {
+    // Catches secrets surviving in the layout copy of OCR text, and redaction markers growing
+    // `lines` into an unbounded row.
+    let validator = validator();
+    let filter = PrivacyFilter::new(FilterConfig {
+        redactors: vec![RedactorKind::Token],
+        ..Default::default()
+    });
+    let normalized = normalized_recognized(vec![recognized_line("key token=abcd1234")]);
+    assert_eq!(normalized.event.version, 4);
+    let redacted = filter
+        .process(normalized)
+        .expect("snapshot remains in scope");
+    let encoded = serde_json::to_value(&redacted).expect("serialize redacted snapshot");
+    assert_eq!(encoded["data"]["text"], "key token=[REDACTED:token]");
+    assert_eq!(
+        encoded["data"]["lines"][0]["text"],
+        "key token=[REDACTED:token]"
+    );
+    assert_eq!(encoded["redaction"]["rules"], json!(["token"]));
+
+    let email_filter = PrivacyFilter::new(FilterConfig {
+        redactors: vec![RedactorKind::Email],
+        ..Default::default()
+    });
+    let mut lines = Vec::new();
+    while serialized_len(&lines, "a@b.co a@b.co a@b.co") <= CONTENT_SNAPSHOT_SAFETY_MAX_BYTES {
+        lines.push(recognized_line("a@b.co a@b.co a@b.co"));
+    }
+    lines.pop();
+    let normalized = normalized_recognized(lines);
+    assert!(!normalized.event.is_truncated(), "fits before redaction");
+    let limited = email_filter
+        .process(normalized)
+        .expect("snapshot remains in scope");
+    let encoded = serde_json::to_value(&limited).expect("serialize size-limited snapshot");
+    assert_acceptance(
+        &validator,
+        "size-limited recognized snapshot",
+        &encoded,
+        true,
+    );
+    assert_eq!(encoded["data"]["lines"], Value::Null);
+    assert!(
+        encoded["data"]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("[REDACTED:email]"))
+    );
+    assert_eq!(encoded["truncated"], true);
+    assert_eq!(
+        encoded["redaction"]["rules"],
+        json!(["size_limit", "email"])
     );
 }
 
@@ -416,6 +574,79 @@ fn normalized_snapshot(
         1,
     )
     .expect("valid content snapshot")
+}
+
+fn normalized_recognized(
+    lines: Vec<ContentSnapshotLine>,
+) -> zanei_core::normalize::NormalizedEvent {
+    let text = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let chars = text.chars().count() as u64;
+    normalize(
+        RawEvent {
+            observed_at: None,
+            source: RECOGNIZED_TEXT_SOURCE.to_owned(),
+            event_type: "content.snapshot".to_owned(),
+            app: App {
+                name: "Example".to_owned(),
+                bundle_id: Some("com.example.App".to_owned()),
+                pid: Some(42),
+            },
+            window: Some(Window {
+                title: Some("Example window".to_owned()),
+                id: Some(7),
+            }),
+            element: None,
+            data: EventData::ContentSnapshot(ContentSnapshotData::recognized(
+                Some(text),
+                chars,
+                None,
+                ContentSnapshotTrigger::Settle,
+                lines,
+            )),
+            capture_context: Default::default(),
+        },
+        OffsetDateTime::UNIX_EPOCH,
+        1,
+    )
+    .expect("valid recognized snapshot")
+}
+
+fn recognized_line(text: &str) -> ContentSnapshotLine {
+    let fraction = |ratio| WindowFraction::from_ratio(ratio).expect("fraction");
+    ContentSnapshotLine {
+        text: text.to_owned(),
+        x: fraction(0.25),
+        y: fraction(0.5),
+        w: fraction(0.3333),
+        h: fraction(0.02),
+        bg: RgbColor {
+            red: 0x54,
+            green: 0x54,
+            blue: 0x54,
+        },
+        ink: Some(RgbColor {
+            red: 0xFF,
+            green: 0xFF,
+            blue: 0xFF,
+        }),
+    }
+}
+
+fn serialized_len(lines: &[ContentSnapshotLine], next: &str) -> usize {
+    let mut candidate = lines.to_vec();
+    candidate.push(recognized_line(next));
+    serde_json::to_vec(&candidate).expect("lines").len()
+}
+
+fn line_json(text: &str) -> Value {
+    json!({
+        "text": text, "x": 0.66, "y": 0.1234, "w": 0.15, "h": 0.02,
+        "bg": "#66DB6E", "ink": "#0A0B0C"
+    })
 }
 
 fn validator() -> jsonschema::Validator {
@@ -536,7 +767,7 @@ fn fixture(event_type: &'static str, valid_data: Value, invalid_data: Value) -> 
 
 fn envelope(event_type: &str, data: Value) -> Value {
     let mut value = json!({
-        "v": if event_type == "content.snapshot" { 3 } else { 1 },
+        "v": if event_type == "content.snapshot" { 4 } else { 1 },
         "id": format!("evt_{}", ulid::Ulid::new()),
         "ts": "2026-08-16T12:34:56.789Z",
         "mono_ns": 123456789,

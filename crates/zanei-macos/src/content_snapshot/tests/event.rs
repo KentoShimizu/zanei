@@ -15,7 +15,7 @@ use crate::content_snapshot::{
 use super::support::trigger;
 
 #[test]
-fn raw_event_matches_the_v3_content_snapshot_contract() {
+fn raw_event_matches_the_v4_content_snapshot_contract() {
     let candidate = ScheduledSnapshot {
         target: trigger(7, 11, SnapshotTriggerKind::Focus, Instant::now()),
         trigger: ContentSnapshotTrigger::Settle,
@@ -59,7 +59,7 @@ fn raw_event_matches_the_v3_content_snapshot_contract() {
         .expect("normalize raw event")
         .pop()
         .expect("content snapshot emits immediately");
-    assert_eq!(normalized.version, 3);
+    assert_eq!(normalized.version, 4);
     let filtered = PrivacyFilter::new(FilterConfig {
         redactors: vec![RedactorKind::Email],
         ..FilterConfig::default()

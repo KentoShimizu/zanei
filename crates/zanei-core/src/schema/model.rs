@@ -2,11 +2,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::{CaptureContext, EventData};
+use super::{CaptureContext, EventData, RECOGNIZED_TEXT_SOURCE};
 
 const LEGACY_EVENT_SCHEMA_VERSION: u8 = 1;
 const LEGACY_CONTENT_SNAPSHOT_SCHEMA_VERSION: u8 = 2;
-const CONTENT_SNAPSHOT_SCHEMA_VERSION: u8 = 3;
+// A v3 payload has exactly the fields of a v4 payload without `lines`. Events
+// still accept v3, but the store keeps no version column, so it reads such rows as v4.
+const RETAINED_CONTENT_SNAPSHOT_SCHEMA_VERSION: u8 = 3;
+const CONTENT_SNAPSHOT_SCHEMA_VERSION: u8 = 4;
 pub const KNOWN_EVENT_TYPES: [&str; 14] = [
     "app.activate",
     "app.launch",
@@ -41,18 +44,37 @@ fn supports_event_schema_version(event_type: &str, version: u8) -> bool {
     match event_type {
         "content.snapshot" => matches!(
             version,
-            LEGACY_CONTENT_SNAPSHOT_SCHEMA_VERSION | CONTENT_SNAPSHOT_SCHEMA_VERSION
+            LEGACY_CONTENT_SNAPSHOT_SCHEMA_VERSION
+                | RETAINED_CONTENT_SNAPSHOT_SCHEMA_VERSION
+                | CONTENT_SNAPSHOT_SCHEMA_VERSION
         ),
         _ => event_schema_version(event_type) == Some(version),
     }
 }
 
+/// The version a payload is read back with when no envelope states one, as in the store.
 pub(crate) fn event_schema_version_for_data(event_type: &str, data: &EventData) -> Option<u8> {
     match (event_type, data) {
         ("content.snapshot", EventData::ContentSnapshot(data)) if data.is_legacy() => {
             Some(LEGACY_CONTENT_SNAPSHOT_SCHEMA_VERSION)
         }
         _ => event_schema_version(event_type),
+    }
+}
+
+fn payload_supports_version(event_type: &str, data: &EventData, version: u8) -> bool {
+    match data {
+        EventData::ContentSnapshot(data) if data.is_legacy() => {
+            version == LEGACY_CONTENT_SNAPSHOT_SCHEMA_VERSION
+        }
+        EventData::ContentSnapshot(data) if data.lines().is_some() => {
+            version == CONTENT_SNAPSHOT_SCHEMA_VERSION
+        }
+        EventData::ContentSnapshot(_) => matches!(
+            version,
+            RETAINED_CONTENT_SNAPSHOT_SCHEMA_VERSION | CONTENT_SNAPSHOT_SCHEMA_VERSION
+        ),
+        _ => event_schema_version(event_type) == Some(version),
     }
 }
 
@@ -228,7 +250,7 @@ impl Event {
         if !self.data.matches_event_type(&self.event_type) {
             return Err("event type does not match its typed payload");
         }
-        if event_schema_version_for_data(&self.event_type, &self.data) != Some(self.version) {
+        if !payload_supports_version(&self.event_type, &self.data, self.version) {
             return Err("event payload does not match its schema version");
         }
         self.validate_context()?;
@@ -240,11 +262,19 @@ impl Event {
                 None => return Err("browser URL may be null only when the event is truncated"),
             }
         }
-        if let EventData::ContentSnapshot(data) = &self.data
-            && data.text.is_none()
-            && !self.is_truncated()
-        {
-            return Err("content snapshot text may be null only when the event is truncated");
+        if let EventData::ContentSnapshot(data) = &self.data {
+            if self.version == CONTENT_SNAPSHOT_SCHEMA_VERSION
+                && data.lines().is_some() != (self.source == RECOGNIZED_TEXT_SOURCE)
+            {
+                return Err(
+                    "v4 content snapshot lines must be present exactly when the source is macos.ocr",
+                );
+            }
+            if (data.text.is_none() || matches!(data.lines(), Some(None))) && !self.is_truncated() {
+                return Err(
+                    "content snapshot text or lines may be null only when the event is truncated",
+                );
+            }
         }
         Ok(())
     }
