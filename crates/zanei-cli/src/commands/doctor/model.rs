@@ -99,6 +99,7 @@ impl CapabilityReport {
             Capability::ObserveInput => Some(&self.observe_input),
             Capability::AutomateBrowser => self.automate_browser.as_ref(),
             Capability::AutomateSafari => self.automate_safari.as_ref(),
+            Capability::CaptureScreen => None,
         }
     }
 }

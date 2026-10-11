@@ -114,6 +114,7 @@ pub const fn capability_detail(
             AUTOMATION_SETTINGS_URL,
             Some(SAFARI_BUNDLE_ID),
         ),
+        Capability::CaptureScreen => unreachable!(),
     };
     MacOsCapabilityDetail {
         platform: "macos",
@@ -337,7 +338,9 @@ fn permission_status_with(
             let bundle_id = match capability {
                 Capability::AutomateBrowser => CHROME_BUNDLE_ID,
                 Capability::AutomateSafari => SAFARI_BUNDLE_ID,
-                Capability::ReadAccessibilityTree | Capability::ObserveInput => unreachable!(),
+                Capability::ReadAccessibilityTree
+                | Capability::ObserveInput
+                | Capability::CaptureScreen => unreachable!(),
             };
             let status = probe.automation_status(bundle_id)?;
             match status {
@@ -354,6 +357,7 @@ fn permission_status_with(
                 }),
             }
         }
+        Capability::CaptureScreen => unreachable!("screen capture is not probed yet"),
     }
 }
 
