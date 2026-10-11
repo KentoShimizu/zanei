@@ -8,6 +8,7 @@ use zanei_core::schema::{
 const KEYCODE_V: u16 = 0x09;
 const KEYCODE_C: u16 = 0x08;
 const KEYCODE_RETURN: u16 = 0x24;
+const KEYCODE_KEYPAD_ENTER: u16 = 0x4c;
 const KEYCODE_TAB: u16 = 0x30;
 const KEYCODE_SPACE: u16 = 0x31;
 const KEYCODE_DELETE: u16 = 0x33;
@@ -90,6 +91,11 @@ pub(crate) fn key_data(
         text,
         field_kind,
     }
+}
+
+/// Return and keypad Enter commonly send or commit what the focused field holds.
+pub(crate) const fn is_submit_key(key_code: u16) -> bool {
+    matches!(key_code, KEYCODE_RETURN | KEYCODE_KEYPAD_ENTER)
 }
 
 pub(crate) fn is_paste_shortcut(observation: &KeyObservation) -> bool {

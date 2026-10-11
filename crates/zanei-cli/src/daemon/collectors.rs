@@ -142,8 +142,10 @@ impl CollectorSet {
 
         let (click_sender, click_receiver) = click_channel();
         let (authorization_publisher, authorizations) = input_authorization_channel();
-        let authorization_publisher = (capture_ax && capture_input && config.capture.text_content)
-            .then_some(authorization_publisher);
+        // Key input also tells AX when to look for fields that announce no focus or value
+        // changes, so the channel exists whether or not text bodies are captured.
+        let authorization_publisher =
+            (capture_ax && capture_input).then_some(authorization_publisher);
         let monitor_required = config.capture.text_content && capture_input || capture_content;
         let mut producer_failures = ProducerFailures::default();
         let (secure_input_monitor, secure_input_probe) = if monitor_required {

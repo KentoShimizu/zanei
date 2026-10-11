@@ -1,6 +1,7 @@
 //! Per-application AX observer state and focused-value lifecycle.
 
 mod activation;
+mod focus_pull;
 #[cfg(test)]
 mod test_support;
 mod value_lifecycle;
@@ -33,6 +34,8 @@ use super::{
     remove_notification,
     value_context::{FocusedValueContext, after_target_preparation},
 };
+pub(in crate::ffi::ax) use focus_pull::FocusSource;
+use focus_pull::{Announcement, FocusPullState};
 use value_registration::{NotificationRegistry, RegistrationError};
 
 pub(super) struct AppObserver {
@@ -42,6 +45,7 @@ pub(super) struct AppObserver {
     pub(super) context: Box<ObserverContext>,
     window_target: Option<OwnedCf>,
     focused_target: FocusedTarget<RegisteredFocusedTarget>,
+    focus_pull: FocusPullState,
     notifications: NotificationRegistry,
     retired_contexts: Vec<FocusedValueContext>,
     degraded: Arc<AtomicU64>,
@@ -112,6 +116,7 @@ impl AppObserver {
             context,
             window_target: None,
             focused_target: FocusedTarget::new(),
+            focus_pull: FocusPullState::default(),
             notifications: NotificationRegistry::default(),
             retired_contexts: Vec::new(),
             degraded,
@@ -193,19 +198,16 @@ impl AppObserver {
         }))
     }
 
-    fn focused_element_events(
+    /// Installs a focused target that differs from the current one and announces it.
+    fn install_focused_target(
         &mut self,
+        target: Option<OwnedCf>,
+        announcement: Announcement,
         notification_at: Instant,
         observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
-        let target = copy_element(self.application.as_ptr(), "AXFocusedUIElement")?;
-        if self.same_value_target(target.as_ref()) {
-            self.refresh_current_field_class(secure_input, authorizations);
-            return Ok(vec![self.focus_event(observed_at)]);
-        }
-
         let snapshot = target
             .as_ref()
             .map(|element| {
@@ -224,38 +226,48 @@ impl AppObserver {
         let (event, defer_previous) = focus_change.into_parts();
         let mut events = event.into_iter().collect::<Vec<_>>();
         self.commit_focused_target(prepared, defer_previous);
+        self.focus_pull
+            .installed(self.focused_target.generation(), announcement);
         events.push(self.focus_event(observed_at));
         Ok(events)
     }
 
     pub(super) fn focused_element_or_clear(
         &mut self,
+        source: FocusSource,
         notification_at: Instant,
         observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Vec<NativeAxEvent> {
-        match self.focused_element_events(
-            notification_at,
-            observed_at,
-            secure_input,
-            authorizations,
-        ) {
+        let result =
+            copy_element(self.application.as_ptr(), "AXFocusedUIElement").and_then(|target| {
+                if !self.same_value_target(target.as_ref()) {
+                    return self.install_focused_target(
+                        target,
+                        source.into(),
+                        notification_at,
+                        observed_at,
+                        secure_input,
+                        authorizations,
+                    );
+                }
+                let class_changed = self.refresh_current_field_class(secure_input, authorizations);
+                let generation = self.focused_target.generation();
+                Ok(
+                    if self.focus_pull.observed(generation, source, class_changed) {
+                        vec![self.focus_event(observed_at)]
+                    } else {
+                        Vec::new()
+                    },
+                )
+            });
+        match result {
             Ok(events) => {
                 self.recover(AxRecoverySite::FocusedElement);
                 events
             }
-            Err(error) => {
-                crate::trace::trace!(
-                    "component=ax phase=focus_target action=error pid={} operation={} code={}",
-                    self.context.pid,
-                    error.operation(),
-                    error.code()
-                );
-                self.record_native(AxRecoverySite::FocusedElement, &error);
-                self.clear_focused_target();
-                vec![self.focus_event(observed_at)]
-            }
+            Err(error) => self.focus_read_failed(&error, observed_at),
         }
     }
 

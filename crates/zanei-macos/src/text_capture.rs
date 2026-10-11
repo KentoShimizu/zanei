@@ -8,7 +8,7 @@ mod value;
 
 #[cfg(test)]
 pub(crate) use authorization::AUTHORIZATION_QUEUE_CAPACITY;
-pub(crate) use authorization::InputAuthorization;
+pub(crate) use authorization::{InputActivity, InputActivityKind, InputAuthorization};
 pub use authorization::{
     InputAuthorizationPublisher, InputAuthorizations, input_authorization_channel,
 };

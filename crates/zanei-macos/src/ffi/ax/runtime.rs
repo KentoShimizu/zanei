@@ -1,5 +1,7 @@
 //! Observer-owning AX runtime.
 
+mod input_pull;
+
 use std::{
     collections::HashMap,
     sync::{
@@ -29,10 +31,12 @@ use super::{
         set_timeout, window_snapshot,
     },
     native_error,
-    observer::AppObserver,
+    observer::{AppObserver, FocusSource},
     types::{NativeAxError, NativeAxEvent, NativeAxObservation, NativeHitTest},
     value_context::{DeferredResolution, DeferredValueContext},
 };
+
+use input_pull::{PullScheduler, PullTrigger};
 
 const CALLBACK_QUEUE_CAPACITY: usize = 1_024;
 const MAX_NOTIFICATIONS_PER_POLL: usize = 1;
@@ -50,6 +54,7 @@ pub(crate) struct NativeAx {
     secure_input_probe: Option<SecureInputProbe>,
     capture_policy: CapturePolicy,
     observe_chrome_loads: bool,
+    pulls: PullScheduler,
 }
 
 impl NativeAx {
@@ -75,6 +80,7 @@ impl NativeAx {
             secure_input_probe,
             capture_policy,
             observe_chrome_loads,
+            pulls: PullScheduler::default(),
         }
     }
 
@@ -94,6 +100,7 @@ impl NativeAx {
         if let Some(observer) = self.observers.get_mut(&pid) {
             observer.update_attach(app, manual_accessibility);
             return Ok(observer.focused_element_or_clear(
+                FocusSource::Internal,
                 Instant::now(),
                 OffsetDateTime::now_utc(),
                 secure_input,
@@ -165,6 +172,7 @@ impl NativeAx {
         );
         app_observer.refresh_window_target();
         let focused = app_observer.focused_element_or_clear(
+            FocusSource::Internal,
             Instant::now(),
             OffsetDateTime::now_utc(),
             secure_input,
@@ -192,6 +200,7 @@ impl NativeAx {
             self.detached_contexts.extend(deferred);
         }
         self.authorizations.remove_pid(pid);
+        self.pulls.remove(pid);
         events
     }
 
@@ -262,6 +271,7 @@ impl NativeAx {
                 }
             }
         }
+        self.arm_input_pulls();
         let now = Instant::now();
         let secure_input = secure_input_active(
             self.capture_text_content,
@@ -270,6 +280,7 @@ impl NativeAx {
             &self.failures,
             AxRecoverySite::SecureInputPoll,
         );
+        events.extend(self.run_due_pulls(now, secure_input));
         for observer in self.observers.values_mut() {
             events.extend(observer.reconcile_accessibility_if_due(
                 now,
@@ -318,7 +329,8 @@ impl NativeAx {
         self.authorizations
     }
 
-    pub(crate) fn hit_test(&self, pid: i32, x: f64, y: f64) -> Option<NativeHitTest> {
+    pub(crate) fn observe_click(&mut self, pid: i32, x: f64, y: f64) -> Option<NativeHitTest> {
+        self.arm_pull(pid, PullTrigger::Click, Instant::now());
         let observer = self.observers.get(&pid)?;
         let element = match element_at_position(observer.application.as_ptr(), x, y) {
             Ok(Some(element)) => {
@@ -425,10 +437,15 @@ impl NativeAx {
             return Ok(Vec::new());
         };
         match name.as_str() {
-            "AXFocusedWindowChanged" => Ok(observer
-                .focused_window_event(queued.observed_at)?
-                .into_iter()
-                .collect()),
+            "AXFocusedWindowChanged" => {
+                // Focus scoped to the previous window was cleared; find the field again.
+                self.pulls
+                    .arm(queued.pid, PullTrigger::Window, queued.notification_at);
+                Ok(observer
+                    .focused_window_event(queued.observed_at)?
+                    .into_iter()
+                    .collect())
+            }
             "AXWindowCreated" => {
                 observer.refresh_window_target();
                 Ok(Vec::new())
@@ -446,6 +463,7 @@ impl NativeAx {
                     .collect())
             }
             "AXFocusedUIElementChanged" => Ok(observer.focused_element_or_clear(
+                FocusSource::Notification,
                 queued.notification_at,
                 queued.observed_at,
                 secure_input,

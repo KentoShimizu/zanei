@@ -272,6 +272,22 @@ impl InputAuthorizationPublisher {
         Ok(())
     }
 
+    pub(crate) fn report_activity(
+        &self,
+        activity: InputActivity,
+    ) -> Result<(), AuthorizationQueueError> {
+        self.sender
+            .try_send(AuthorizationAttempt {
+                sequence: self.next_sequence(),
+                at: activity.at,
+                kind: AttemptKind::Activity(activity),
+            })
+            .map_err(|_| {
+                self.integrity_lost.store(true, Ordering::Release);
+                AuthorizationQueueError
+            })
+    }
+
     fn next_sequence(&self) -> u64 {
         self.issued_sequence.fetch_add(1, Ordering::AcqRel) + 1
     }
@@ -279,6 +295,21 @@ impl InputAuthorizationPublisher {
 
 #[derive(Debug)]
 pub(crate) struct AuthorizationQueueError;
+
+/// Key input aimed at an application's focused field. It never authorizes text; it only tells
+/// the AX worker that the field may have changed without a notification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InputActivity {
+    pub(crate) pid: i32,
+    pub(crate) kind: InputActivityKind,
+    pub(crate) at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InputActivityKind {
+    Edit,
+    Submit,
+}
 
 struct AuthorizationAttempt {
     sequence: u64,
@@ -288,7 +319,11 @@ struct AuthorizationAttempt {
 
 enum AttemptKind {
     Reservation(InputAuthorization),
-    RejectedInput { pid: Option<i32> },
+    RejectedInput {
+        pid: Option<i32>,
+    },
+    /// Moved into `InputAuthorizations::activity` on receipt; never kept as authorization history.
+    Activity(InputActivity),
 }
 
 pub struct InputAuthorizations {
@@ -296,6 +331,7 @@ pub struct InputAuthorizations {
     integrity_lost: Arc<AtomicBool>,
     received_sequence: u64,
     pending: VecDeque<AuthorizationAttempt>,
+    activity: Vec<InputActivity>,
 }
 
 #[must_use]
@@ -314,6 +350,7 @@ pub fn input_authorization_channel() -> (InputAuthorizationPublisher, InputAutho
             integrity_lost,
             received_sequence: 0,
             pending: VecDeque::new(),
+            activity: Vec::new(),
         },
     )
 }
@@ -405,6 +442,13 @@ impl InputAuthorizations {
         self.pending.retain(|attempt| {
             !matches!(attempt.kind, AttemptKind::RejectedInput { pid: Some(value) } if value == pid)
         });
+        self.activity.retain(|activity| activity.pid != pid);
+    }
+
+    /// Drains input activity received so far, including activity received while matching.
+    pub(crate) fn take_activity(&mut self) -> Vec<InputActivity> {
+        self.receive_pending();
+        std::mem::take(&mut self.activity)
     }
 
     pub(crate) fn receive_pending(&mut self) {
@@ -414,6 +458,10 @@ impl InputAuthorizations {
                 sequence_gap = true;
             }
             self.received_sequence = attempt.sequence;
+            if let AttemptKind::Activity(activity) = attempt.kind {
+                self.activity.push(activity);
+                continue;
+            }
             if self.pending.len() == AUTHORIZATION_QUEUE_CAPACITY {
                 trace::trace!(
                     "component=authorization event=queue_integrity authorization=invalidated reason=pending_capacity capacity={}",
@@ -452,7 +500,7 @@ impl InputAuthorizations {
             let expired = now.saturating_duration_since(attempt.at) > INPUT_WINDOW;
             let opens_window = match &attempt.kind {
                 AttemptKind::Reservation(authorization) => authorization.can_open_window(),
-                AttemptKind::RejectedInput { .. } => false,
+                AttemptKind::RejectedInput { .. } | AttemptKind::Activity(_) => false,
             };
             if expired || !opens_window {
                 expired_count += usize::from(expired);
@@ -504,6 +552,7 @@ impl AttemptKind {
         match self {
             Self::Reservation(_) => "reservation",
             Self::RejectedInput { .. } => "rejected_input",
+            Self::Activity(_) => "activity",
         }
     }
 }

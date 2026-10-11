@@ -6,7 +6,12 @@ use super::{
     CallbackContext, CfMutableRef, EVENT_TARGET_UNIX_PROCESS_ID_FIELD, NativeApp, NativeContext,
     NativeInputTarget,
 };
-use crate::{focus_context::FocusContext, text_capture::InputAuthorization, trace};
+use crate::{
+    eventtap::logic::is_submit_key,
+    focus_context::FocusContext,
+    text_capture::{InputActivity, InputActivityKind, InputAuthorization},
+    trace,
+};
 
 pub(super) fn input_target(
     event: CfMutableRef,
@@ -35,13 +40,46 @@ pub(super) fn input_target(
     })
 }
 
+/// Activity is reported only for the application that owns the current focus, and never while
+/// Secure Input is active.
+fn input_activity(
+    target: Option<&NativeInputTarget>,
+    secure_input: bool,
+    key_code: u16,
+    at: Instant,
+) -> Option<InputActivity> {
+    let pid = i32::try_from(target?.context.app.pid).ok()?;
+    (!secure_input).then_some(InputActivity {
+        pid,
+        kind: if is_submit_key(key_code) {
+            InputActivityKind::Submit
+        } else {
+            InputActivityKind::Edit
+        },
+        at,
+    })
+}
+
 pub(super) fn prepare_input_authorization(
     context: &CallbackContext,
     target: Option<&NativeInputTarget>,
+    key_code: u16,
     input_at: Instant,
     secure_input: bool,
 ) -> Option<InputAuthorization> {
     let publisher = context.input_authorizations.as_ref()?;
+    if let Some(activity) = input_activity(target, secure_input, key_code, input_at)
+        && publisher.report_activity(activity).is_err()
+    {
+        trace::trace!(
+            "component=eventtap event=input_activity pid={} result=dropped reason=authorization_queue_full",
+            activity.pid
+        );
+        context.degraded_operations.fetch_add(1, Ordering::Relaxed);
+    }
+    if !context.capture_text_content {
+        return None;
+    }
     let valid_target = (!secure_input)
         .then_some(target)
         .flatten()
@@ -122,4 +160,117 @@ pub(super) fn trace_target(
         secure_input,
         ime_active
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, atomic::AtomicU64, mpsc::sync_channel},
+        time::Instant,
+    };
+
+    use zanei_core::schema::FieldKind;
+
+    use super::{super::CallbackContext, NativeApp, NativeContext, NativeInputTarget};
+    use crate::{
+        focus_context::FocusContext,
+        focused_field::{FieldClass, FocusedField},
+        input_source::ImeState,
+        text_capture::{InputActivityKind, input_authorization_channel},
+    };
+
+    const KNOWN_TEXT: Option<FocusedField> = Some(FocusedField {
+        generation: 3,
+        class: FieldClass::KnownText(FieldKind::Text),
+    });
+
+    /// Runs one key-down through the callback helper and returns the reported activity kinds and
+    /// whether a text authorization was reserved.
+    fn key_down(
+        capture_text_content: bool,
+        target: Option<Option<FocusedField>>,
+        key_code: u16,
+        secure_input: bool,
+    ) -> (Vec<InputActivityKind>, bool) {
+        let (publisher, mut authorizations) = input_authorization_channel();
+        let context = CallbackContext {
+            sender: sync_channel(1).0,
+            dropped_events: Arc::new(AtomicU64::new(0)),
+            degraded_operations: Arc::new(AtomicU64::new(0)),
+            input_authorizations: Some(publisher),
+            ime_state: ImeState::new(),
+            secure_input_probe: None,
+            focus_context: FocusContext::new(),
+            capture_text_content,
+        };
+        let target = target.map(|focused_field| NativeInputTarget {
+            context: NativeContext {
+                app: NativeApp {
+                    name: "Test".to_owned(),
+                    bundle_id: None,
+                    pid: 501,
+                },
+                window: None,
+            },
+            focused_field,
+            focus_generation: 1,
+            field_generation: 1,
+        });
+        let at = Instant::now();
+        let reserved = super::prepare_input_authorization(
+            &context,
+            target.as_ref(),
+            key_code,
+            at,
+            secure_input,
+        )
+        .is_some();
+        let kinds = authorizations.take_activity();
+        assert!(kinds.iter().all(|activity| activity.pid == 501));
+        (
+            kinds.into_iter().map(|activity| activity.kind).collect(),
+            reserved,
+        )
+    }
+
+    // Bug: metadata mode reserves authorizations; keys for a field that is not yet known never
+    // reach AX; Return or keypad Enter is not reported as a submit.
+    #[test]
+    fn key_downs_for_the_focused_app_report_activity_in_both_modes() {
+        use InputActivityKind::{Edit, Submit};
+        assert_eq!(
+            key_down(false, Some(KNOWN_TEXT), 0x00, false),
+            (vec![Edit], false)
+        );
+        assert_eq!(
+            key_down(false, Some(None), 0x24, false),
+            (vec![Submit], false)
+        );
+        assert_eq!(
+            key_down(false, Some(None), 0x4c, false),
+            (vec![Submit], false)
+        );
+        assert_eq!(key_down(true, Some(None), 0x00, false), (vec![Edit], false));
+        assert_eq!(
+            key_down(true, Some(KNOWN_TEXT), 0x00, false),
+            (vec![Edit], true)
+        );
+    }
+
+    // Bug: a pull is armed for an application that does not own the focus, or during Secure Input.
+    #[test]
+    fn unmatched_targets_and_secure_input_report_no_activity() {
+        for capture_text_content in [false, true] {
+            assert!(
+                key_down(capture_text_content, None, 0x00, false)
+                    .0
+                    .is_empty()
+            );
+            assert!(
+                key_down(capture_text_content, Some(KNOWN_TEXT), 0x00, true)
+                    .0
+                    .is_empty()
+            );
+        }
+    }
 }

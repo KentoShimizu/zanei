@@ -276,6 +276,11 @@ extern "C" fn event_callback(
                     prepare_input_authorization(
                         context,
                         input_target.as_ref(),
+                        // SAFETY: event is the valid CGEventRef borrowed for this callback.
+                        u16::try_from(unsafe {
+                            CGEventGetIntegerValueField(event.as_ptr(), KEYBOARD_KEYCODE_FIELD)
+                        })
+                        .unwrap_or_default(),
                         occurred_at,
                         secure_input,
                     )

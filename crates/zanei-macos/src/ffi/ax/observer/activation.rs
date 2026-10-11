@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 
 use crate::text_capture::InputAuthorizations;
 
-use super::AppObserver;
+use super::{AppObserver, FocusSource};
 use crate::ax::health::AxRecoverySite;
 use crate::ffi::ax::{NativeAxEvent, NativeAxObservation, element::element_role};
 
@@ -37,9 +37,15 @@ impl AppObserver {
         if !self.accessibility_activation.take_due(now) {
             return Vec::new();
         }
-        self.focused_element_or_clear(now, observed_at, secure_input, authorizations)
-            .into_iter()
-            .map(NativeAxEvent::internalize_focus)
-            .collect()
+        self.focused_element_or_clear(
+            FocusSource::Internal,
+            now,
+            observed_at,
+            secure_input,
+            authorizations,
+        )
+        .into_iter()
+        .map(NativeAxEvent::internalize_focus)
+        .collect()
     }
 }
