@@ -1533,42 +1533,26 @@ fn activity_never_authorizes_and_never_fills_authorization_history() {
     assert!(authorizations.matching_for_test(7, 1, now));
 }
 
-fn observe_from(
-    capture: &mut ValueCapture,
-    sampled: bool,
-    observation: ValueObservation,
-    authorizations: &mut InputAuthorizations,
-) -> Option<ValueEmission> {
-    if sampled {
-        capture.observe_sample(observation, authorizations)
-    } else {
-        capture.observe(observation, authorizations)
-    }
-}
+type Observe =
+    fn(&mut ValueCapture, ValueObservation, &mut InputAuthorizations) -> Option<ValueEmission>;
+const ORIGINS: [Observe; 2] = [ValueCapture::observe, ValueCapture::observe_sample];
 
 // Bug: a message sent right after typing is cleared inside the same batch, so "abc" and "" are
 // coalesced and measured as "" against the old baseline, and the typed text is never recorded.
 #[test]
 fn clearing_a_field_emits_the_text_typed_before_the_clear() {
-    for sampled in [false, true] {
+    for observe in ORIGINS {
         let now = Instant::now();
         let (mut capture, mut authorizations) = authorized_capture(7, 1, now, "");
         let typed = observation(7, 1, now + Duration::from_millis(10), "abc");
-        assert_eq!(
-            observe_from(&mut capture, sampled, typed, &mut authorizations),
-            None
-        );
+        assert_eq!(observe(&mut capture, typed, &mut authorizations), None);
 
         let cleared_at = now + Duration::from_millis(20);
-        let typed = observe_from(
-            &mut capture,
-            sampled,
-            observation(7, 1, cleared_at, ""),
-            &mut authorizations,
-        )
-        .expect("the clear emits the typed text first");
+        let cleared = observation(7, 1, cleared_at, "");
+        let typed = observe(&mut capture, cleared, &mut authorizations)
+            .expect("the clear emits the typed text first");
 
-        assert_eq!(typed.text.as_deref(), Some("abc"), "sampled={sampled}");
+        assert_eq!(typed.text.as_deref(), Some("abc"));
         assert_eq!(
             capture.take_due(cleared_at + VALUE_DEBOUNCE, &mut authorizations),
             Some(ValueEmission {
@@ -1633,20 +1617,17 @@ fn text_after_a_clear_is_measured_from_empty_and_stays_authorized() {
 fn an_unchanged_body_is_neither_staged_nor_extends_the_batch() {
     let now = Instant::now();
     let (mut capture, mut authorizations) = authorized_capture(7, 1, now, "abc");
-    for (sampled, at_ms) in [(true, 10), (false, 20)] {
-        let unchanged = observation(7, 1, now + Duration::from_millis(at_ms), "abc");
-        assert_eq!(
-            observe_from(&mut capture, sampled, unchanged, &mut authorizations),
-            None
-        );
-        assert!(!capture.has_pending(), "sampled={sampled}");
+    for observe in ORIGINS {
+        let unchanged = observation(7, 1, now + Duration::from_millis(10), "abc");
+        assert_eq!(observe(&mut capture, unchanged, &mut authorizations), None);
+        assert!(!capture.has_pending());
     }
 
     let typed_at = now + Duration::from_millis(100);
     let _ = capture.observe_sample(observation(7, 1, typed_at, "abcd"), &mut authorizations);
-    for (sampled, at_ms) in [(true, 900), (false, 950)] {
-        let unchanged = observation(7, 1, now + Duration::from_millis(at_ms), "abcd");
-        let _ = observe_from(&mut capture, sampled, unchanged, &mut authorizations);
+    for observe in ORIGINS {
+        let unchanged = observation(7, 1, now + Duration::from_millis(900), "abcd");
+        let _ = observe(&mut capture, unchanged, &mut authorizations);
     }
 
     let emission = capture

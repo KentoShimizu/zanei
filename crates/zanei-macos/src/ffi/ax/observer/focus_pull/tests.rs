@@ -6,16 +6,14 @@ use std::{
 use time::OffsetDateTime;
 use zanei_core::schema::FieldKind;
 
-use super::{AppObserver, FocusSource, ValueRead};
+use super::{AppObserver, CaptureValue, FocusSource, ValueRead};
 use crate::{
     ffi::ax::{
-        NativeAxEvent, NativeAxObservation, NativeElement,
+        NativeAxEvent, NativeAxObservation,
         cf::cf_string,
         element::{capture_value_snapshot_with, value_snapshot_with},
         native_error,
-        observer::RegisteredFocusedTarget,
         tests::fake_field_snapshot,
-        value_context::FocusedValueContext,
     },
     focused_field::FieldClass,
     text_capture::{InputAuthorizations, ValueCapture, input_authorization_channel},
@@ -26,47 +24,107 @@ const TEXT: FieldClass = FieldClass::KnownText(FieldKind::Text);
 
 fn pull_same_target(observer: &mut AppObserver) -> Vec<NativeAxObservation> {
     let (_publisher, mut authorizations) = input_authorization_channel();
-    pull(observer, None, Instant::now(), &mut authorizations).0
+    let reads = Reads {
+        role: Some("AXGroup"),
+        value: None,
+    };
+    pull(observer, reads, Instant::now(), &mut authorizations).observations
 }
 
-/// Pulls the unchanged fake target. `body` is what a value read returns; `None` fails the test
-/// if the value is read. Returns the observations and whether the value was read.
+/// Fake AX reads for one pull of the unchanged target: `role` answers a classification refresh
+/// and `value` a value read (`Err` is an AX error code). `None` fails the test if that read
+/// happens.
+#[derive(Clone, Copy, Default)]
+struct Reads<'a> {
+    role: Option<&'a str>,
+    value: Option<Result<&'a str, i32>>,
+}
+
+fn value(body: &str) -> Reads<'_> {
+    Reads {
+        role: None,
+        value: Some(Ok(body)),
+    }
+}
+
+/// Reads a text area whose value is `value` (`Err` is an AX error code).
+fn fake_value_read(value: Result<&str, i32>) -> impl CaptureValue + '_ {
+    move |_, window, policy, app, enabled, _, changed| {
+        capture_value_snapshot_with(
+            window,
+            policy,
+            app,
+            enabled,
+            changed,
+            || panic!("only IDE surfaces read the window"),
+            |allowed| {
+                value_snapshot_with(
+                    fake_field_snapshot(Some("AXTextArea")),
+                    allowed,
+                    || {
+                        value
+                            .map(|body| Some(body.to_owned()))
+                            .map_err(|code| native_error("AXUIElementCopyAttributeValue", code))
+                    },
+                    || {
+                        Ok(value
+                            .ok()
+                            .and_then(|body| i64::try_from(body.chars().count()).ok()))
+                    },
+                )
+            },
+        )
+    }
+}
+
+struct Pulled {
+    observations: Vec<NativeAxObservation>,
+    refreshed: bool,
+    read: bool,
+}
+
 fn pull(
     observer: &mut AppObserver,
-    body: Option<&str>,
+    reads: Reads<'_>,
     at: Instant,
     authorizations: &mut InputAuthorizations,
-) -> (Vec<NativeAxObservation>, bool) {
+) -> Pulled {
+    let refreshed = Cell::new(false);
     let read = Cell::new(false);
     let observations = observer.pull_focused_field_with(
         "edit",
         || Ok(cf_string("fake focused element")),
-        |_, window, policy, app, enabled, _, changed| {
-            read.set(true);
-            let body = body.expect("this pull must not read the value");
-            capture_value_snapshot_with(
-                window,
-                policy,
-                app,
-                enabled,
-                changed,
-                || panic!("only IDE surfaces read the window"),
-                |allowed| {
-                    value_snapshot_with(
-                        fake_field_snapshot(Some("AXTextArea")),
-                        allowed,
-                        || Ok(Some(body.to_owned())),
-                        || Ok(i64::try_from(body.chars().count()).ok()),
+        |observer, _, authorizations| {
+            refreshed.set(true);
+            let role = reads.role.expect("this pull must not classify the target");
+            let before = observer.fake_focused_field_class();
+            assert!(
+                observer
+                    .refresh_current_field_class_with(
+                        fake_field_snapshot(Some(role)),
+                        authorizations,
+                        || Ok(()),
+                        || Ok(()),
                     )
-                },
-            )
+                    .is_ok()
+            );
+            before != observer.fake_focused_field_class()
+        },
+        |element, window, policy, app, enabled, secure, changed| {
+            read.set(true);
+            let value = reads.value.expect("this pull must not read the value");
+            fake_value_read(value)(element, window, policy, app, enabled, secure, changed)
         },
         at,
         OffsetDateTime::UNIX_EPOCH,
         false,
         authorizations,
     );
-    (observations, read.get())
+    Pulled {
+        observations,
+        refreshed: refreshed.get(),
+        read: read.get(),
+    }
 }
 
 /// Turns the fake target into a registered text field with capture enabled; returns its
@@ -89,28 +147,11 @@ fn text_target(observer: &mut AppObserver, class: FieldClass) -> u64 {
     generation
 }
 
-/// Installs the same element again as a new generation, as when focus leaves and returns.
+/// Installs the same target again as a new generation, as when focus leaves and returns.
 fn refocus(observer: &mut AppObserver) {
-    let generation = observer.focused_target.next_generation();
-    let element = NativeElement {
-        role: None,
-        subrole: None,
-        title: None,
-        value: None,
-        value_len: None,
-        capture_decision: None,
-    };
-    let target = RegisteredFocusedTarget {
-        element: cf_string("fake focused element").expect("element CFString"),
-        context: FocusedValueContext::new(
-            None,
-            element,
-            true,
-            Some(String::new()),
-            generation,
-            TEXT,
-        ),
-    };
+    let previous = observer.focused_target.transition::<()>(Ok(None));
+    let mut target = previous.ok().flatten().expect("fake focused target");
+    target.context.generation = observer.focused_target.next_generation();
     assert!(
         observer
             .focused_target
@@ -204,6 +245,7 @@ fn a_failed_discovery_read_keeps_the_target_and_records_the_failure() {
                 AX_ERROR_CANNOT_COMPLETE,
             ))
         },
+        |_, _, _| panic!("a failed discovery read is not followed by a classification read"),
         |_, _, _, _, _, _, _| panic!("a failed discovery read is not followed by a value read"),
         Instant::now(),
         OffsetDateTime::UNIX_EPOCH,
@@ -231,15 +273,16 @@ fn a_sampled_silent_field_records_confirmed_text() {
         .expect("reservation")
         .confirm();
 
-    let (observations, read) = pull(
+    let pulled = pull(
         &mut observer,
-        Some("こんにちは"),
+        value("こんにちは"),
         now + Duration::from_millis(150),
         &mut authorizations,
     );
 
-    assert!(read);
-    assert!(is_public_focus(&observations));
+    assert!(pulled.read);
+    assert!(!pulled.refreshed);
+    assert!(is_public_focus(&pulled.observations));
     assert_eq!(
         texts(observer.flush_pending(false, &mut authorizations)),
         ["こんにちは"]
@@ -254,8 +297,8 @@ fn a_native_value_delivery_stops_samples_until_the_next_generation() {
     text_target(&mut observer, TEXT);
     let (_publisher, mut authorizations) = input_authorization_channel();
     let now = Instant::now();
-    assert!(pull(&mut observer, Some("a"), now, &mut authorizations).1);
-    assert!(pull(&mut observer, Some("a"), now, &mut authorizations).1);
+    assert!(pull(&mut observer, value("a"), now, &mut authorizations).read);
+    assert!(pull(&mut observer, value("a"), now, &mut authorizations).read);
 
     observer.value_changed_events_with(
         ValueRead::Notification,
@@ -263,53 +306,99 @@ fn a_native_value_delivery_stops_samples_until_the_next_generation() {
         OffsetDateTime::UNIX_EPOCH,
         false,
         &mut authorizations,
-        |_, window, policy, app, enabled, _, changed| {
-            capture_value_snapshot_with(
-                window,
-                policy,
-                app,
-                enabled,
-                changed,
-                || panic!("only IDE surfaces read the window"),
-                |allowed| {
-                    value_snapshot_with(
-                        fake_field_snapshot(Some("AXTextArea")),
-                        allowed,
-                        || Ok(Some("ab".to_owned())),
-                        || Ok(Some(2)),
-                    )
-                },
-            )
-        },
+        fake_value_read(Ok("ab")),
         |observer, class| {
             observer
                 .reconcile_current_value_notification_with(class, || Ok(()), || Ok(()))
                 .is_ok()
         },
     );
-    assert!(!pull(&mut observer, None, now, &mut authorizations).1);
+    let no_reads = Reads::default();
+    assert!(!pull(&mut observer, no_reads, now, &mut authorizations).read);
 
     refocus(&mut observer);
-    assert!(pull(&mut observer, Some("ab"), now, &mut authorizations).1);
+    assert!(pull(&mut observer, value("ab"), now, &mut authorizations).read);
 }
 
-// Bug: focused buttons or sliders of a silent app emit `ui.value` on every input, or a single
-// Secure Input poll or failed read stops sampling a text field for the rest of its focus.
+// Bug: focused buttons or sliders of a silent app emit `ui.value` on every input, a healthy text
+// field pays for a classification read on every pull, or a Secure Input poll or failed read
+// stops sampling a text field for the rest of its focus.
 #[test]
-fn samples_skip_safe_non_text_targets_but_retry_degraded_text_targets() {
-    for (class, reads) in [
-        (FieldClass::KnownSafeNonText, false),
-        (FieldClass::SecureText, true),
-        (FieldClass::Unknown, true),
+fn pulls_reclassify_only_degraded_targets_and_sample_only_text() {
+    for (class, refreshes, reads) in [
+        (FieldClass::KnownSafeNonText, false, false),
+        (TEXT, false, true),
+        (FieldClass::SecureText, true, true),
     ] {
         let mut observer = AppObserver::fake_with_unknown_focused_target();
         text_target(&mut observer, class);
         let (_publisher, mut authorizations) = input_authorization_channel();
-        let body = reads.then_some("a");
-        let (_, read) = pull(&mut observer, body, Instant::now(), &mut authorizations);
-        assert_eq!(read, reads, "{class:?}");
+        let reads_for_class = Reads {
+            role: refreshes.then_some("AXTextArea"),
+            value: reads.then_some(Ok("a")),
+        };
+        let pulled = pull(
+            &mut observer,
+            reads_for_class,
+            Instant::now(),
+            &mut authorizations,
+        );
+        assert_eq!(
+            (pulled.refreshed, pulled.read),
+            (refreshes, reads),
+            "{class:?}"
+        );
         if reads {
             assert_eq!(observer.fake_focused_field_class(), TEXT, "{class:?}");
         }
+    }
+}
+
+// Bug: a silent text field that was unclassified and unregistered when it was found (no AX role
+// yet), or demoted by an AX timeout on a value read, is never classified again, so its typed text
+// is not captured for the rest of its focus.
+#[test]
+fn an_unclassified_or_demoted_target_recovers_on_a_later_pull() {
+    for demoted_by_failed_read in [false, true] {
+        let mut observer = AppObserver::fake_with_unknown_focused_target();
+        let (publisher, mut authorizations) = input_authorization_channel();
+        let now = Instant::now();
+        let generation = if demoted_by_failed_read {
+            let generation = text_target(&mut observer, TEXT);
+            let failed = Reads {
+                role: None,
+                value: Some(Err(AX_ERROR_CANNOT_COMPLETE)),
+            };
+            assert!(pull(&mut observer, failed, now, &mut authorizations).read);
+            generation
+        } else {
+            observer.capture_text_content = true;
+            let target = observer.focused_target.current_mut().expect("fake target");
+            target.context.capture = ValueCapture::new(true, None, FieldClass::Unknown);
+            target.context.generation
+        };
+        assert_eq!(observer.fake_focused_field_class(), FieldClass::Unknown);
+
+        let recovered = Reads {
+            role: Some("AXTextArea"),
+            value: Some(Ok("ab")),
+        };
+        let pulled = pull(&mut observer, recovered, now, &mut authorizations);
+        assert!(pulled.refreshed && pulled.read);
+        assert_eq!(observer.fake_focused_field_class(), TEXT);
+
+        let typed_at = now + Duration::from_millis(200);
+        publisher
+            .prepare(7, generation, typed_at)
+            .expect("reservation")
+            .confirm();
+        let at = typed_at + Duration::from_millis(150);
+        let pulled = pull(&mut observer, value("abc"), at, &mut authorizations);
+        assert!(!pulled.refreshed && pulled.read);
+        assert_eq!(
+            texts(observer.flush_pending(false, &mut authorizations)),
+            ["c"],
+            "demoted_by_failed_read={demoted_by_failed_read}"
+        );
     }
 }

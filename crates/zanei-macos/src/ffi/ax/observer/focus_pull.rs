@@ -161,6 +161,7 @@ impl AppObserver {
         self.pull_focused_field_with(
             trigger,
             || copy_element(application, "AXFocusedUIElement"),
+            Self::refresh_current_field_class,
             |element, window, policy, app, enabled, secure, changed| {
                 capture_value_snapshot(element, window, policy, app, enabled, secure, changed)
             },
@@ -176,6 +177,7 @@ impl AppObserver {
         &mut self,
         trigger: &'static str,
         resolve: impl FnOnce() -> Result<Option<OwnedCf>, NativeAxError>,
+        refresh: impl FnOnce(&mut Self, bool, &mut InputAuthorizations) -> bool,
         capture: impl CaptureValue,
         now: Instant,
         observed_at: OffsetDateTime,
@@ -213,15 +215,27 @@ impl AppObserver {
         }
         trace_pull(pid, trigger, "discovery", "same");
         self.recover(AxRecoverySite::FocusedElement);
-        let event = self.focus_event(observed_at);
         let generation = self.focused_target.generation();
+        let sampling = !self.focus_pull.at(generation).value_delivered;
+        // A target that was unclassified at install, or demoted or unregistered by a failed
+        // read, is classified again (with the notification path's gates and registration) so it
+        // can recover; a healthy target costs no extra read.
+        let class_changed =
+            sampling && self.needs_class_refresh() && refresh(self, secure_input, authorizations);
+        let event = self.focus_event(observed_at);
         let has_target = self.focused_target.current().is_some();
-        let mut observations = vec![if self.focus_pull.pulled(generation, has_target) {
+        let announce = self.focus_pull.pulled(generation, has_target) || class_changed;
+        let mut observations = vec![if announce {
             event.into()
         } else {
             event.internalize_focus()
         }];
-        if self.samples_value() {
+        if sampling
+            && self
+                .focused_target
+                .current()
+                .is_some_and(|target| target.context.field_class.is_known_text())
+        {
             let events = self.value_changed_events_with(
                 ValueRead::Sample,
                 now,
@@ -242,16 +256,18 @@ impl AppObserver {
         observations
     }
 
-    /// Whether a pull reads the current target's value: only until the generation proves that
-    /// it notifies. A newly installed target is not sampled; its install read is the baseline.
-    /// Safe non-text targets are not read; a text target whose class was degraded by Secure
-    /// Input or a failed read is, so the next read can restore it.
-    fn samples_value(&mut self) -> bool {
-        let generation = self.focused_target.generation();
-        self.focused_target
-            .current()
-            .is_some_and(|target| target.context.field_class != FieldClass::KnownSafeNonText)
-            && !self.focus_pull.at(generation).value_delivered
+    /// Whether the current target lacks a usable classification or value registration. Values
+    /// are sampled only from registered known-text targets, until the generation proves that it
+    /// notifies; a newly installed target is not sampled, as its install read is the baseline.
+    fn needs_class_refresh(&self) -> bool {
+        self.focused_target.current().is_some_and(|target| {
+            !matches!(
+                target.context.field_class,
+                FieldClass::KnownText(_) | FieldClass::KnownSafeNonText
+            ) || !self
+                .notifications
+                .accepts_delivery(target.element.as_ptr(), "AXValueChanged")
+        })
     }
 
     /// A focus read or install failure clears the target, as focus can no longer be attributed.
