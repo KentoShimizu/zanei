@@ -45,6 +45,8 @@ pub(super) struct FakeNode {
     fail_children_count: bool,
     numeric_value: bool,
     illegal_leaf_range: bool,
+    /// Children counted but gone by the time the list is read.
+    vanished_children: usize,
     root_invalid: bool,
     call_micros: u64,
     elapsed_micros: Arc<AtomicU64>,
@@ -69,6 +71,7 @@ impl FakeNode {
             fail_children_count: false,
             numeric_value: false,
             illegal_leaf_range: false,
+            vanished_children: 0,
             root_invalid: false,
             call_micros: 0,
             elapsed_micros: Arc::new(AtomicU64::new(0)),
@@ -209,7 +212,7 @@ impl SnapshotNode for FakeNode {
         if self.fail_children_count {
             return Err(SnapshotReadError::Contract("AXChildren count failed"));
         }
-        Ok(self.children.len())
+        Ok(self.children.len() + self.vanished_children)
     }
 
     fn children_range(
@@ -662,7 +665,8 @@ fn failed_child_count_of_a_blank_text_area_is_degraded_not_blank() {
 #[test]
 fn masks_are_complete_only_when_every_input_field_could_be_placed() {
     // Catches recognition masking from a partial walk: a cut-off walk, an unreadable role or
-    // child list, or a frameless input can each hide a field whose text would then be stored.
+    // child list, a child list shorter than its count, or a frameless input can each hide a
+    // field whose text would then be stored.
     let masks_complete = |root: FakeNode, budget: WalkBudget| {
         let clock = FakeClock(Arc::clone(&root.elapsed_micros));
         let window = frame(0.0, 0.0, 100.0, 100.0);
@@ -693,6 +697,9 @@ fn masks_are_complete_only_when_every_input_field_could_be_placed() {
     let mut uncounted = window_with(field.clone());
     uncounted.fail_children_count = true;
     assert!(!masks_complete(uncounted, generous_budget()));
+    let mut shrunk = window_with(field.clone());
+    shrunk.vanished_children = 1;
+    assert!(!masks_complete(shrunk, generous_budget()));
     let mut frameless = field;
     frameless.attributes.frame = None;
     assert!(!masks_complete(window_with(frameless), generous_budget()));
