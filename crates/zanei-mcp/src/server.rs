@@ -16,12 +16,15 @@ use zanei_core::timeline::{
     Granularity, MIN_TIMELINE_TOKEN_BUDGET_TOKENS, TimeRange, TimelineFormat, TimelineOptions,
     build, serialize,
 };
+use zanei_core::{CapabilityState, DaemonCapabilities};
 
 use crate::{KeyProvider, PermissionCheck};
 
 mod output;
 
-use output::{CaptureOutput, GetStatusOutput, GetTimelineOutput, QueryEventsOutput, RangeOutput};
+use output::{
+    CaptureOutput, GetStatusOutput, GetTimelineOutput, OcrOutput, QueryEventsOutput, RangeOutput,
+};
 
 const DEFAULT_TIMELINE_SINCE: &str = "1h";
 const DEFAULT_QUERY_SINCE: &str = "15m";
@@ -236,6 +239,17 @@ impl ZaneiServer {
                 || (self.permission_check)(&config).map_err(internal_error),
                 Ok,
             )?;
+        let ocr = status
+            .reported_capabilities()
+            .filter(|_| config.capture.content_snapshot)
+            .and_then(DaemonCapabilities::capture_screen)
+            .and_then(|state| match state {
+                CapabilityState::Available => Some(OcrOutput::On),
+                CapabilityState::ActionRequired => Some(OcrOutput::Off),
+                CapabilityState::Unavailable => Some(OcrOutput::Unavailable),
+                // The recorder never reports screen capture as deferred.
+                CapabilityState::Deferred => None,
+            });
         let retention_hours = status.effective_retention_hours(config.output.retention_hours);
 
         Ok(Json(GetStatusOutput {
@@ -256,6 +270,7 @@ impl ZaneiServer {
                     .collect(),
                 text_content: config.capture.text_content,
                 content_snapshot: config.capture.content_snapshot,
+                ocr,
             },
             permissions_ok,
         }))

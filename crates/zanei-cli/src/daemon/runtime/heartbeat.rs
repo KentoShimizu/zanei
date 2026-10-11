@@ -9,6 +9,8 @@ use zanei_core::{
     store::{DaemonState, StoreStatus},
 };
 
+use zanei_macos::permission::capture_screen_state;
+
 use super::{ActiveDaemon, DaemonError, StoreOwner, merge_collector_failures, probe_permissions};
 
 impl ActiveDaemon<'_> {
@@ -24,7 +26,13 @@ impl ActiveDaemon<'_> {
         match probe_permissions(&self.collectors.required_capabilities()) {
             Ok(capabilities) => {
                 self.degraded.remove("permissions");
-                self.last_capabilities = Some(capabilities);
+                // Only the recorder reports Screen Recording: a CLI probe would see the
+                // terminal's permission, not Zanei's.
+                self.last_capabilities = Some(if self.collectors.captures_content_snapshot() {
+                    capabilities.with_capture_screen(capture_screen_state())
+                } else {
+                    capabilities
+                });
             }
             Err(error) => {
                 self.degraded

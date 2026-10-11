@@ -91,6 +91,17 @@ pub(super) struct CaptureOutput {
     pub(super) sources: Vec<String>,
     pub(super) text_content: bool,
     pub(super) content_snapshot: bool,
+    /// Text-recognition fallback state; null when content snapshots are off or the running
+    /// recorder has not reported it.
+    pub(super) ocr: Option<OcrOutput>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum OcrOutput {
+    On,
+    Off,
+    Unavailable,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

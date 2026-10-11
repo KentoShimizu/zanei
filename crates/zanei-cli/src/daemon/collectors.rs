@@ -260,6 +260,10 @@ impl CollectorSet {
         }
     }
 
+    pub(crate) const fn captures_content_snapshot(&self) -> bool {
+        self.capture.content_snapshot
+    }
+
     pub(crate) fn has_eventtap(&self) -> bool {
         self.eventtap.is_some()
     }

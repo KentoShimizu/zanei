@@ -810,9 +810,10 @@ fn status_json_and_human_report_content_flags_scopes_and_store_fields() {
     assert_eq!(report["capture"]["sources"], serde_json::json!([]));
     assert_eq!(report["capture"]["text_content"], true);
     assert_eq!(report["capture"]["content_snapshot"], true);
+    assert_eq!(report["capture"]["ocr"], serde_json::Value::Null);
     assert_eq!(
         report["capture"].as_object().map(|value| value.len()),
-        Some(3)
+        Some(4)
     );
     assert_eq!(report["store"]["encryption"], "sqlcipher");
     assert_eq!(report["store"]["retired_plaintext"], serde_json::json!([]));
@@ -827,7 +828,9 @@ fn status_json_and_human_report_content_flags_scopes_and_store_fields() {
     assert_eq!(human.status.code(), Some(4));
     let human = String::from_utf8(human.stdout).expect("human status UTF-8");
     assert!(human.contains("TEXT CONTENT      on (apps: only 1, sites: exclude 0)"));
-    assert!(human.contains("CONTENT SNAPSHOT  on (apps: exclude 6, sites: exclude 0)"));
+    assert!(
+        human.contains("CONTENT SNAPSHOT  on (apps: exclude 6, sites: exclude 0), ocr: unknown")
+    );
     assert!(human.contains("STORE             "));
     assert!(human.contains("(encrypted)"));
 }

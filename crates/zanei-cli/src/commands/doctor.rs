@@ -44,8 +44,8 @@ pub fn run(config_path: &Path, store_path: &Path, fix: bool, json: bool) -> Resu
     } else {
         print_human(&report, &executable, true, report.health.is_running());
     }
-    if let Some(missing_permissions) = report.permissions_to_fix(fix) {
-        guide_granting(missing_permissions, &executable)?;
+    if let Some(panes) = report.permissions_to_fix(fix) {
+        guide_granting(&panes, &executable)?;
     }
     Ok(report.exit_code())
 }

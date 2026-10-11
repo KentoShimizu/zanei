@@ -21,6 +21,7 @@ use zanei_core::{
         StoreWriter, purge_retired_plaintext, retired_plaintext_stores, set_aside_plaintext,
     },
 };
+use zanei_macos::content_snapshot::prepare_window_capture;
 use zanei_macos::permission::{PermissionError, PermissionStatus, permission_status};
 
 use super::{
@@ -105,11 +106,16 @@ pub fn run_daemon(
     ) = initialize_permission_dependent_runtime(&writer, &initial_heartbeat, || {
         let main_run_loop = main_thread::prepare()?;
         let mut collectors = CollectorSet::new(&config);
+        if collectors.captures_content_snapshot() {
+            prepare_window_capture();
+        }
         let initial_input_monitoring_status = collectors
             .has_eventtap()
             .then(|| permission_status(&Capability::ObserveInput));
-        let permission_request_worker =
-            PermissionRequestWorker::start(collectors.required_capabilities())?;
+        let permission_request_worker = PermissionRequestWorker::start(
+            collectors.required_capabilities(),
+            collectors.captures_content_snapshot(),
+        )?;
         let main_thread_observers = collectors.prepare_main_thread();
         Ok((
             main_run_loop,
@@ -514,7 +520,7 @@ impl ActiveDaemon<'_> {
         let Some(required) = self.pending_permission_request.take() else {
             return;
         };
-        match PermissionRequestWorker::start(required) {
+        match PermissionRequestWorker::start(required, false) {
             Ok(worker) => self.permission_request_worker = Some(worker),
             Err(error) => {
                 self.degraded

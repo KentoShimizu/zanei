@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use zanei_core::schema::KNOWN_EVENT_TYPES;
 use zanei_core::timeline::MIN_TIMELINE_TOKEN_BUDGET_TOKENS;
+use zanei_core::{Capability, CapabilityState, DaemonCapabilities};
 
 mod support;
 
@@ -72,6 +73,7 @@ fn mcp_stdio_exposes_three_tools_and_contract_results() {
     assert_eq!(status["capture"]["sources"], json!(["app"]));
     assert_eq!(status["capture"]["text_content"], false);
     assert_eq!(status["capture"]["content_snapshot"], false);
+    assert_eq!(status["capture"]["ocr"], Value::Null);
     assert_eq!(status["permissions_ok"], true);
     assert_eq!(status["events_dropped"], 2);
     assert_eq!(status["degraded"], json!({}));
@@ -313,6 +315,40 @@ fn get_status_prefers_the_running_recorder_permission_snapshot() {
 
     assert_eq!(status["running"], true);
     assert_eq!(status["permissions_ok"], false);
+}
+
+#[test]
+fn get_status_reports_the_recorder_ocr_state_without_affecting_permissions() {
+    // Catches `get_status` diverging from `zanei status --json` for the fallback state and the
+    // optional permission leaking into `permissions_ok`.
+    let fixture = Fixture::populated();
+    std::fs::write(
+        &fixture.config,
+        "[capture]\nsources = [\"app\"]\ncontent_snapshot = true\n",
+    )
+    .expect("content snapshot config");
+    for (state, expected) in [
+        (CapabilityState::Available, json!("on")),
+        (CapabilityState::ActionRequired, json!("off")),
+        (CapabilityState::Unavailable, json!("unavailable")),
+    ] {
+        fixture.set_recorder_capabilities(
+            DaemonCapabilities::new(
+                BTreeSet::from([Capability::ReadAccessibilityTree]),
+                CapabilityState::Available,
+                CapabilityState::Available,
+                CapabilityState::Deferred,
+            )
+            .with_capture_screen(state),
+        );
+        let mut client = McpClient::start(&fixture);
+        initialize(&mut client);
+
+        let status = client.call_tool("get_status", json!({}));
+
+        assert_eq!(status["capture"]["ocr"], expected);
+        assert_eq!(status["permissions_ok"], true);
+    }
 }
 
 #[test]

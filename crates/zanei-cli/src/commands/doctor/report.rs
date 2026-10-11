@@ -67,6 +67,17 @@ pub(super) fn build_report(
                 Vec::new(),
             )
         }),
+        capture_screen: snapshot
+            .capture_screen()
+            .filter(|_| config.capture.content_snapshot)
+            .map(|state| {
+                CapabilityDetail::new(
+                    Capability::CaptureScreen,
+                    state,
+                    false,
+                    vec!["content.snapshot"],
+                )
+            }),
     };
 
     Ok(DoctorReport {
@@ -80,6 +91,7 @@ pub(super) fn build_report(
         capabilities,
         missing_permissions,
         reported_by_recorder,
+        content_snapshot: config.capture.content_snapshot,
         store_key,
         health,
     })

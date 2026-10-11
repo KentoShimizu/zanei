@@ -5,6 +5,7 @@ use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zanei_core::config::{Config, FilterScope};
 use zanei_core::store::{HEARTBEAT_STALE_AFTER_SECONDS, StoreFormat, StoreStatus};
+use zanei_core::{CapabilityState, DaemonCapabilities};
 
 use super::{RETIRED_STORE_DEGRADED_COMPONENT, STORE_DEGRADED_COMPONENT, StoreInspection};
 use crate::commands::doctor::permissions_ok;
@@ -171,7 +172,12 @@ impl StatusReport {
                 encryption: encryption_name(format),
                 retired_plaintext: retired.paths,
             },
-            capture: CaptureReport::new(config),
+            capture: CaptureReport::new(
+                config,
+                owner_matches_heartbeat
+                    .then(|| status.reported_capabilities())
+                    .flatten(),
+            ),
             permissions_ok,
         })
     }
@@ -218,7 +224,7 @@ impl StatusReport {
                     .and_then(encryption_name),
                 retired_plaintext: super::RetiredReport::listed(&paths.store).paths,
             },
-            capture: CaptureReport::new(config),
+            capture: CaptureReport::new(config, None),
             permissions_ok: permissions_ok(config)?,
         })
     }
@@ -356,6 +362,8 @@ pub(super) struct CaptureReport {
     pub(super) sources: Vec<&'static str>,
     pub(super) text_content: bool,
     pub(super) content_snapshot: bool,
+    /// Null when content snapshots are off or the current recorder has not reported it.
+    pub(super) ocr: Option<OcrState>,
     #[serde(skip)]
     pub(super) text_scope: CaptureScopeReport,
     #[serde(skip)]
@@ -368,8 +376,28 @@ pub(super) struct CaptureScopeReport {
     pub(super) sites: String,
 }
 
+/// The text-recognition fallback of content snapshots, as the recorder reports it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum OcrState {
+    On,
+    Off,
+    Unavailable,
+}
+
+impl OcrState {
+    pub(super) const fn describe(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off (Screen Recording not granted)",
+            Self::Unavailable => "unavailable (macOS 14+)",
+        }
+    }
+}
+
 impl CaptureReport {
-    fn new(config: &Config) -> Self {
+    /// `recorder` is the snapshot of a fresh heartbeat from the current owner, if any.
+    fn new(config: &Config, recorder: Option<&DaemonCapabilities>) -> Self {
         let text_scope = ScopeSummary::for_scope(config, FilterScope::TextContent, &[]);
         let snapshot_scope = ScopeSummary::for_scope(config, FilterScope::ContentSnapshot, &[]);
         Self {
@@ -381,6 +409,16 @@ impl CaptureReport {
                 .collect(),
             text_content: config.capture.text_content,
             content_snapshot: config.capture.content_snapshot,
+            ocr: recorder
+                .filter(|_| config.capture.content_snapshot)
+                .and_then(DaemonCapabilities::capture_screen)
+                .and_then(|state| match state {
+                    CapabilityState::Available => Some(OcrState::On),
+                    CapabilityState::ActionRequired => Some(OcrState::Off),
+                    CapabilityState::Unavailable => Some(OcrState::Unavailable),
+                    // The recorder never reports screen capture as deferred.
+                    CapabilityState::Deferred => None,
+                }),
             text_scope: CaptureScopeReport {
                 apps: text_scope.status_apps(),
                 sites: text_scope.status_sites(),

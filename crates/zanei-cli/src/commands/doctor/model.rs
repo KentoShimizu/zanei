@@ -14,6 +14,9 @@ pub(super) struct DoctorReport {
     #[serde(skip)]
     pub(super) missing_permissions: Vec<Capability>,
     pub(super) reported_by_recorder: bool,
+    /// Whether content snapshots are on, so the optional Screen Recording state matters.
+    #[serde(skip)]
+    pub(super) content_snapshot: bool,
     pub(super) store_key: StoreKeyReport,
     pub(super) health: HealthReport,
 }
@@ -27,8 +30,21 @@ impl DoctorReport {
         }
     }
 
-    pub(super) fn permissions_to_fix(&self, fix: bool) -> Option<&[Capability]> {
-        (fix && !self.missing_permissions.is_empty()).then_some(&self.missing_permissions)
+    /// The panes `--fix` opens: the missing required permissions, then Screen Recording when
+    /// the recorder reports it as not granted. The optional pane never changes the exit code.
+    pub(super) fn permissions_to_fix(&self, fix: bool) -> Option<Vec<Capability>> {
+        let mut panes = self.missing_permissions.clone();
+        if self.screen_recording_missing() {
+            panes.push(Capability::CaptureScreen);
+        }
+        (fix && !panes.is_empty()).then_some(panes)
+    }
+
+    pub(super) fn screen_recording_missing(&self) -> bool {
+        self.capabilities
+            .capture_screen
+            .as_ref()
+            .is_some_and(|capability| capability.state == "action_required")
     }
 }
 
@@ -90,6 +106,9 @@ pub(super) struct CapabilityReport {
     pub(super) automate_browser: Option<CapabilityDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) automate_safari: Option<CapabilityDetail>,
+    /// Only the recorder reports it: a probe from this process would see the terminal's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) capture_screen: Option<CapabilityDetail>,
 }
 
 impl CapabilityReport {
@@ -99,7 +118,7 @@ impl CapabilityReport {
             Capability::ObserveInput => Some(&self.observe_input),
             Capability::AutomateBrowser => self.automate_browser.as_ref(),
             Capability::AutomateSafari => self.automate_safari.as_ref(),
-            Capability::CaptureScreen => None,
+            Capability::CaptureScreen => self.capture_screen.as_ref(),
         }
     }
 }

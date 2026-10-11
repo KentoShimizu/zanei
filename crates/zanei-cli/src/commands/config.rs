@@ -21,8 +21,15 @@ const CONTENT_SNAPSHOT_WARNING_PREFIX: &str = concat!(
     "documents written by other people and text you typed that is on screen. Password fields and\n",
     "Chrome Incognito windows are never captured; stored text is redacted and deleted after "
 );
-const CONTENT_SNAPSHOT_WARNING_SUFFIX: &str =
-    " hours.\n\nCurrent scope (change it first if this is not what you want):\n";
+// The CLI itself requests nothing: the recorder asks for Screen Recording at its next start.
+const CONTENT_SNAPSHOT_WARNING_SUFFIX: &str = concat!(
+    " hours.\n\n",
+    "After the restart, the recorder asks once for the macOS Screen Recording permission. If you\n",
+    "grant it, Zanei reads a window's text from its pixels when Accessibility exposes too little of\n",
+    "it: the window image stays in memory and is discarded, and only the text and its layout are\n",
+    "stored. Input fields that an app does not expose to Accessibility cannot be masked in that text.\n\n",
+    "Current scope (change it first if this is not what you want):\n"
+);
 const CONTENT_SNAPSHOT_ACTIONS: &str = concat!(
     "  zanei filter content-snapshot only-app add <APP>      record only these apps\n",
     "  zanei filter content-snapshot exclude-app add <APP>   everything except these\n",
@@ -454,6 +461,10 @@ mod tests {
                 "Content snapshots record the text shown in the frontmost window, including messages and\n",
                 "documents written by other people and text you typed that is on screen. Password fields and\n",
                 "Chrome Incognito windows are never captured; stored text is redacted and deleted after 72 hours.\n\n",
+                "After the restart, the recorder asks once for the macOS Screen Recording permission. If you\n",
+                "grant it, Zanei reads a window's text from its pixels when Accessibility exposes too little of\n",
+                "it: the window image stays in memory and is discarded, and only the text and its layout are\n",
+                "stored. Input fields that an app does not expose to Accessibility cannot be masked in that text.\n\n",
                 "Current scope (change it first if this is not what you want):\n",
                 "  Apps:  every app except 6 excluded (Safari, Firefox, Brave, Edge, Vivaldi, Arc)\n",
                 "  Sites: every site\n",

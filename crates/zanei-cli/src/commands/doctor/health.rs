@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(report.exit_code(), super::super::EXIT_MISSING_PERMISSIONS);
         assert_eq!(
             report.permissions_to_fix(true),
-            Some([Capability::ObserveInput].as_slice())
+            Some(vec![Capability::ObserveInput])
         );
         assert_eq!(report.permissions_to_fix(false), None);
         assert_eq!(

@@ -1,8 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tempfile::TempDir;
 use time::OffsetDateTime;
+use zanei_collector::Capability;
 use zanei_core::{
+    CapabilityState, DaemonCapabilities,
     config::Config,
     normalize::format_timestamp,
     store::{DaemonMode, StoreError, StoreFormat, StoreStatus, StoreWriter},
@@ -235,7 +237,8 @@ fn healthy_json_and_human_output_snapshot() {
   "capture": {
     "sources": [],
     "text_content": false,
-    "content_snapshot": false
+    "content_snapshot": false,
+    "ocr": null
   },
   "permissions_ok": true
 }"#,
@@ -304,7 +307,8 @@ fn degraded_json_and_human_output_snapshot() {
   "capture": {
     "sources": [],
     "text_content": false,
-    "content_snapshot": false
+    "content_snapshot": false,
+    "ocr": null
   },
   "permissions_ok": true
 }"#,
@@ -391,7 +395,8 @@ fn stale_json_and_human_output_snapshot() {
   "capture": {
     "sources": [],
     "text_content": false,
-    "content_snapshot": false
+    "content_snapshot": false,
+    "ocr": null
   },
   "permissions_ok": true
 }"#,
@@ -455,7 +460,8 @@ fn owner_mismatch_json_and_human_output_snapshot() {
   "capture": {
     "sources": [],
     "text_content": false,
-    "content_snapshot": false
+    "content_snapshot": false,
+    "ocr": null
   },
   "permissions_ok": true
 }"#,
@@ -515,7 +521,8 @@ fn store_failure_json_and_human_output_snapshot() {
   "capture": {
     "sources": [],
     "text_content": false,
-    "content_snapshot": false
+    "content_snapshot": false,
+    "ocr": null
   },
   "permissions_ok": true
 }"#
@@ -543,6 +550,74 @@ DEGRADED          true
     assert_output_snapshot(&report, &json, &human);
 }
 
+#[test]
+fn ocr_state_comes_only_from_a_fresh_current_recorder_with_snapshots_on() {
+    // Catches reporting the terminal's or a previous recorder's Screen Recording state, showing
+    // a fallback for a disabled feature, and the optional permission leaking into readiness.
+    let snapshots_on = "[capture]\nsources = []\ncontent_snapshot = true\n";
+    let report = readable_output_report_with;
+    let recorder = |state: Option<CapabilityState>| {
+        let capabilities = DaemonCapabilities::new(
+            BTreeSet::from([Capability::ReadAccessibilityTree]),
+            CapabilityState::Available,
+            CapabilityState::Deferred,
+            CapabilityState::Deferred,
+        );
+        StoreStatus {
+            running: true,
+            capabilities: Some(match state {
+                Some(state) => capabilities.with_capture_screen(state),
+                None => capabilities,
+            }),
+            ..output_store_status()
+        }
+    };
+
+    for (state, json, human) in [
+        (Some(CapabilityState::Available), "\"on\"", "on"),
+        (
+            Some(CapabilityState::ActionRequired),
+            "\"off\"",
+            "off (Screen Recording not granted)",
+        ),
+        (
+            Some(CapabilityState::Unavailable),
+            "\"unavailable\"",
+            "unavailable (macOS 14+)",
+        ),
+        (None, "null", "unknown"),
+    ] {
+        let report = report(snapshots_on, recorder(state));
+        assert!(report.permissions_ok);
+        assert_eq!(
+            serde_json::to_value(&report).expect("status JSON")["capture"]["ocr"],
+            serde_json::from_str::<serde_json::Value>(json).expect("expected state")
+        );
+        assert!(render_human(&report).contains(&format!(
+            "CONTENT SNAPSHOT  on (apps: exclude 6, sites: exclude 0), ocr: {human}\n"
+        )));
+    }
+
+    let stale = StoreStatus {
+        running: false,
+        ..recorder(Some(CapabilityState::Available))
+    };
+    assert_eq!(report(snapshots_on, stale).capture.ocr, None);
+    let other_instance = StoreStatus {
+        instance_id: Some("previous-instance".to_owned()),
+        ..recorder(Some(CapabilityState::Available))
+    };
+    assert_eq!(report(snapshots_on, other_instance).capture.ocr, None);
+    let off = report(
+        "[capture]\nsources = []\n",
+        recorder(Some(CapabilityState::Available)),
+    );
+    assert_eq!(off.capture.ocr, None);
+    assert!(render_human(&off).contains(
+        "CONTENT SNAPSHOT  off (opt-in: zanei config set capture.content_snapshot true)\n"
+    ));
+}
+
 fn test_paths(directory: &TempDir) -> Paths {
     Paths {
         config: directory.path().join("config.toml"),
@@ -562,12 +637,18 @@ fn output_store_status() -> StoreStatus {
 }
 
 fn readable_output_report(status: StoreStatus) -> StatusReport {
+    readable_output_report_with(
+        "[capture]\nsources = []\n\n[output]\nretention_hours = 72\n",
+        status,
+    )
+}
+
+fn readable_output_report_with(config: &str, status: StoreStatus) -> StatusReport {
     let paths = Paths {
         config: "/tmp/zanei-test/config.toml".into(),
         store: "/tmp/zanei-test/store.sqlite".into(),
     };
-    let config = Config::from_toml("[capture]\nsources = []\n\n[output]\nretention_hours = 72\n")
-        .expect("snapshot config");
+    let config = Config::from_toml(config).expect("snapshot config");
     let owner = StoreOwner {
         pid: 42,
         instance_id: "current-instance".to_owned(),
