@@ -26,11 +26,6 @@ use crate::{
     },
 };
 
-/// Cells per side of the grid a capture is summed over before comparing it with the image
-/// behind the window's last stored recognized body.
-const FINGERPRINT_GRID: usize = 64;
-const RGBA_BYTES: usize = 4;
-
 static WINDOW_CAPTURE_PREPARED: AtomicBool = AtomicBool::new(false);
 
 /// Connects the process to the window server, without which window capture aborts the
@@ -267,27 +262,11 @@ pub(in crate::content_snapshot) fn recognize_window(
     }
 }
 
-/// Sums each colour channel over the cells of a `FINGERPRINT_GRID` square grid and hashes the
-/// sums with the image size. A visible change alters a cell sum, so equal fingerprints mean an
-/// unchanged window; the hash keeps nothing of the image.
+/// Hashes the whole pixel buffer in order with the image size, so any changed pixel, including
+/// rearranged ones, gives a different fingerprint. Only the hash is kept, never image data.
 pub(in crate::content_snapshot) fn fingerprint(image: &WindowImage) -> u64 {
-    let mut sums = vec![[0_u64; 3]; FINGERPRINT_GRID * FINGERPRINT_GRID];
-    let columns: Vec<usize> = (0..image.width)
-        .map(|column| column * FINGERPRINT_GRID / image.width)
-        .collect();
-    for (row, pixels) in image
-        .rgba
-        .chunks_exact(image.width * RGBA_BYTES)
-        .enumerate()
-    {
-        let cells = &mut sums[row * FINGERPRINT_GRID / image.height * FINGERPRINT_GRID..];
-        for (pixel, &column) in pixels.as_chunks::<RGBA_BYTES>().0.iter().zip(&columns) {
-            for (sum, &channel) in cells[column].iter_mut().zip(pixel) {
-                *sum += u64::from(channel);
-            }
-        }
-    }
     let mut hasher = DefaultHasher::new();
-    (image.width, image.height, sums).hash(&mut hasher);
+    (image.width, image.height).hash(&mut hasher);
+    hasher.write(&image.rgba);
     hasher.finish()
 }

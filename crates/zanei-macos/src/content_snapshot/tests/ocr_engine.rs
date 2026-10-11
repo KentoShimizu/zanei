@@ -172,3 +172,35 @@ fn a_lost_recognition_thread_is_reported_instead_of_awaited() {
         OcrOutcome::Unavailable(OcrUnavailable::Stopped)
     ));
 }
+
+#[test]
+fn rearranged_pixels_count_as_a_changed_image() {
+    // Catches a fingerprint that keeps only per-region totals, so text whose characters swap
+    // places within one region (e.g. "12" becoming "21") is never recognized again.
+    let mut before = image(1);
+    before.width = 128;
+    before.height = 1;
+    before.rgba = [10, 20, 30, 255].repeat(128);
+    before.rgba[..8].copy_from_slice(&[0, 0, 0, 255, 255, 255, 255, 255]);
+    let mut after = WindowImage {
+        rgba: before.rgba.clone(),
+        ..before
+    };
+    after.rgba[..8].copy_from_slice(&[255, 255, 255, 255, 0, 0, 0, 255]);
+    let stored = fingerprint(&before);
+    assert_ne!(fingerprint(&after), stored);
+
+    let mut capture: Capture = Box::new(move |_| {
+        Ok(WindowImage {
+            rgba: after.rgba.clone(),
+            ..after
+        })
+    });
+    let mut recognize: Recognize = Box::new(|_| Ok(lines()));
+    let outcome = recognize_window(
+        &mut capture,
+        &mut recognize,
+        request(Some(stored), Vec::new()),
+    );
+    assert!(matches!(outcome, OcrOutcome::Recognized { .. }));
+}
