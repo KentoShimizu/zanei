@@ -5,7 +5,9 @@
 //! resolved through the owning application, and such a window is *verified* only
 //! when it was read in the same operation under a check that ties it to the element:
 //! the focused window between two reads confirming the element still has focus, or
-//! the clicked on-screen window matched by window number or by a unique frame.
+//! the clicked on-screen window matched by window number or by a unique frame. A
+//! verified window's id comes from that same operation: the matched on-screen window,
+//! the window's own number, or a frame no other on-screen window shares.
 //!
 //! A body read whose capture decision depends on the current window needs a verified
 //! window. When the window cannot be verified now ([`ElementWindow::Unverified`]),
@@ -97,10 +99,17 @@ fn application_window(
                     .is_some_and(|focused| cf_equal(focused.as_ptr(), element)))
             },
             || {
-                copy_element(application.as_ptr(), "AXFocusedWindow")?
-                    .map(|window| window_snapshot(window.as_ptr()))
-                    .transpose()
-                    .map(Option::flatten)
+                let Some(window) = copy_element(application.as_ptr(), "AXFocusedWindow")? else {
+                    return Ok(None);
+                };
+                identified_window(window.as_ptr(), || {
+                    Ok(match window_number(window.as_ptr())? {
+                        Some(number) => Some(number),
+                        None => window_frame(window.as_ptr())?.and_then(|frame| {
+                            unique_window_id_for_frame(&on_screen_windows(i64::from(pid)), frame)
+                        }),
+                    })
+                })
             },
         ),
         OwningWindow::UnderPoint(point) => {
@@ -109,7 +118,9 @@ fn application_window(
                 return Ok(ElementWindow::Unverified);
             };
             match clicked_ax_window(application.as_ptr(), clicked)? {
-                Some(window) => window_snapshot(window.as_ptr()).map(ElementWindow::Verified),
+                Some((window, id)) => {
+                    identified_window(window.as_ptr(), || Ok(Some(id))).map(ElementWindow::Verified)
+                }
                 None => Ok(ElementWindow::Unverified),
             }
         }
@@ -162,7 +173,7 @@ enum AxWindowIdentity {
 fn clicked_ax_window(
     application: CfRef,
     clicked: &OnScreenWindow,
-) -> Result<Option<OwnedCf>, NativeAxError> {
+) -> Result<Option<(OwnedCf, i64)>, NativeAxError> {
     let Some(windows) = copy_attribute(application, "AXWindows")? else {
         return Ok(None);
     };
@@ -184,26 +195,46 @@ fn clicked_ax_window(
         });
         elements.push(window);
     }
-    Ok(matching_window(&identities, clicked)
-        .and_then(|index| unsafe { OwnedCf::retain(elements[index]) }))
+    Ok(
+        matching_window(&identities, clicked).and_then(|(index, id)| {
+            unsafe { OwnedCf::retain(elements[index]) }.map(|window| (window, id))
+        }),
+    )
 }
 
-/// Picks the AX window that is the clicked on-screen window.
+/// Picks the AX window that is the clicked on-screen window, with the clicked window's
+/// id. The id is carried from the match so it is never re-derived from a later window
+/// list, where same-frame windows may have been reordered.
 ///
 /// A window number identifies a window exactly. A frame does not: windows can share
 /// one (tabs, stacked documents), so a frame match counts only when it is unique.
-fn matching_window(identities: &[AxWindowIdentity], clicked: &OnScreenWindow) -> Option<usize> {
+fn matching_window(
+    identities: &[AxWindowIdentity],
+    clicked: &OnScreenWindow,
+) -> Option<(usize, i64)> {
     if let Some(index) = identities.iter().position(
         |identity| matches!(identity, AxWindowIdentity::Number(number) if *number == clicked.id),
     ) {
-        return Some(index);
+        return Some((index, clicked.id));
     }
     let mut frame_matches = identities.iter().enumerate().filter(|(_, identity)| {
         matches!(identity, AxWindowIdentity::Frame(Some(frame))
             if window_id_for_frame_in_windows(slice::from_ref(clicked), *frame).is_some())
     });
     match (frame_matches.next(), frame_matches.next()) {
-        (Some((index, _)), None) => Some(index),
+        (Some((index, _)), None) => Some((index, clicked.id)),
+        _ => None,
+    }
+}
+
+/// The id of the only on-screen window with `frame`; windows sharing a frame leave
+/// the id unknown rather than taking whichever is listed first.
+fn unique_window_id_for_frame(on_screen: &[OnScreenWindow], frame: AxFrame) -> Option<i64> {
+    let mut matches = on_screen
+        .iter()
+        .filter(|window| window_id_for_frame_in_windows(slice::from_ref(*window), frame).is_some());
+    match (matches.next(), matches.next()) {
+        (Some(window), None) => Some(window.id),
         _ => None,
     }
 }
@@ -211,16 +242,25 @@ fn matching_window(identities: &[AxWindowIdentity], clicked: &OnScreenWindow) ->
 pub(in crate::ffi::ax) fn window_snapshot(
     window: CfRef,
 ) -> Result<Option<NativeWindow>, NativeAxError> {
+    identified_window(window, || {
+        Ok(match window_number(window)? {
+            Some(id) => Some(id),
+            None => match (element_pid(window)?, window_frame(window)?) {
+                (Some(pid), Some(frame)) => window_id_for_frame(i64::from(pid), frame),
+                _ => None,
+            },
+        })
+    })
+}
+
+fn identified_window(
+    window: CfRef,
+    id: impl FnOnce() -> Result<Option<i64>, NativeAxError>,
+) -> Result<Option<NativeWindow>, NativeAxError> {
     if copy_string(window, "AXRole")?.as_deref() != Some("AXWindow") {
         return Ok(None);
     }
-    let id = match window_number(window)? {
-        Some(id) => Some(id),
-        None => match (element_pid(window)?, window_frame(window)?) {
-            (Some(pid), Some(frame)) => window_id_for_frame(i64::from(pid), frame),
-            _ => None,
-        },
-    };
+    let id = id()?;
     Ok(Some(NativeWindow {
         title: copy_string(window, "AXTitle")?,
         id,
@@ -338,7 +378,7 @@ mod tests {
 
         assert_eq!(
             matching_window(&identities, &on_screen(2, 0, frame)),
-            Some(1)
+            Some((1, 2))
         );
         assert_eq!(matching_window(&identities, &on_screen(3, 0, frame)), None);
     }
@@ -366,8 +406,37 @@ mod tests {
 
         assert_eq!(
             matching_window(&identities, &on_screen(2, 0, frame)),
-            Some(3)
+            Some((3, 2))
         );
+    }
+
+    #[test]
+    fn click_keeps_the_matched_id_when_same_frame_windows_reorder() {
+        let frame = rect(0.0, 0.0, 800.0, 600.0);
+        let identities = [
+            AxWindowIdentity::Number(2),
+            AxWindowIdentity::Frame(Some(frame)),
+        ];
+        let matched = matching_window(&identities, &on_screen(1, 0, frame));
+        // By the time the window is snapshotted, the other window is listed first;
+        // re-deriving the id from that list would pair this title with window 2.
+        let reordered = [on_screen(2, 0, frame), on_screen(1, 0, frame)];
+
+        assert_eq!(window_id_for_frame_in_windows(&reordered, frame), Some(2));
+        assert_eq!(matched, Some((1, 1)));
+    }
+
+    #[test]
+    fn focused_window_id_from_a_frame_must_be_unique() {
+        let frame = rect(0.0, 0.0, 800.0, 600.0);
+        let stacked = [on_screen(1, 0, frame), on_screen(2, 0, frame)];
+        let single = [
+            on_screen(1, 0, rect(10.0, 10.0, 300.0, 200.0)),
+            on_screen(2, 0, frame),
+        ];
+
+        assert_eq!(unique_window_id_for_frame(&stacked, frame), None);
+        assert_eq!(unique_window_id_for_frame(&single, frame), Some(2));
     }
 
     #[test]
