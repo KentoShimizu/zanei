@@ -216,6 +216,51 @@ fn snapshot_cutoff_survives_without_treating_omitted_text_as_complete() {
     assert!(matches!(value.content,EvidenceContent::Text { text,.. } if text=="visible"));
 }
 #[test]
+fn recognized_snapshot_details_carry_no_line_text_and_stay_within_budget() {
+    // Catches OCR line text leaking into the text-free details, and long `lines` making
+    // the details read fail as corrupt.
+    let db = TestDatabase::new("evidence-recognized");
+    let mut event = clipboard_copy_shortcut("evt_00000000000000000000000001", NOW);
+    event.event_type = "content.snapshot".into();
+    event.source = crate::schema::RECOGNIZED_TEXT_SOURCE.into();
+    event.version = 4;
+    let line: crate::schema::ContentSnapshotLine = serde_json::from_value(serde_json::json!({
+        "text": "private line", "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.02,
+        "bg": "#545454", "ink": "#FFFFFF"
+    }))
+    .unwrap();
+    event.data = EventData::ContentSnapshot(ContentSnapshotData::recognized(
+        Some("private line".into()),
+        12,
+        None,
+        ContentSnapshotTrigger::Settle,
+        vec![line; 100],
+    ));
+    StoreWriter::open(db.path())
+        .unwrap()
+        .append(&event)
+        .unwrap();
+    let reader = StoreReader::open_known(db.path(), StoreFormat::Plaintext, None).unwrap();
+    let request = EvidenceRequest {
+        origin: EvidenceOrigin {
+            store_identity: reader.append_head().unwrap().store_identity,
+            append_sequence: 1,
+            event_id: event.id,
+            observed_at: NOW.into(),
+            field: EvidenceField::Text,
+        },
+        start: 0,
+        end: None,
+        max_bytes: 64,
+    };
+    let value = evidence(reader.read_evidence_at(&request, 48, now()).unwrap());
+    let details = serde_json::to_string(&value.details.payload).unwrap();
+    assert!(!details.contains("private line"), "{details}");
+    assert!(
+        matches!(value.details.payload, EventData::ContentSnapshot(data) if data.lines() == Some(&None))
+    );
+}
+#[test]
 fn malformed_stored_content_is_an_error_not_absent() {
     let (db, reader, request) = fixture(Some("text"));
     Connection::open(db.path())

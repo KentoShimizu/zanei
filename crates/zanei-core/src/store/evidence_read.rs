@@ -246,7 +246,7 @@ fn read_details(
     connection: &rusqlite::Connection,
     sequence: u64,
 ) -> Result<EvidenceDetails, ContextPageError> {
-    let stripped = "json_replace(data_json, '$.text', NULL, '$.url', NULL, '$.tab_title', NULL, '$.prev_title', NULL, '$.combo', NULL)";
+    let stripped = "json_replace(data_json, '$.text', NULL, '$.lines', NULL, '$.url', NULL, '$.tab_title', NULL, '$.prev_title', NULL, '$.combo', NULL)";
     let sql = format!(
         "SELECT type, CASE WHEN length(CAST({stripped} AS BLOB)) <= {MAX_DETAIL_BYTES} THEN {stripped} END, \
         json_extract(redaction_json, '$.applied'), \
