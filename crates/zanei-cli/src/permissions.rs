@@ -36,7 +36,6 @@ pub(crate) fn request_missing_permissions(
             Capability::AutomateBrowser | Capability::AutomateSafari => {
                 unreachable!("browser automation is requested by use")
             }
-            Capability::CaptureScreen => unreachable!("screen capture is never required"),
         },
         thread::sleep,
         PERMISSION_DECISION_POLL_INTERVAL,
@@ -190,9 +189,7 @@ mod tests {
                             PermissionStatus::Granted
                         }
                     }
-                    Capability::AutomateBrowser
-                    | Capability::AutomateSafari
-                    | Capability::CaptureScreen => {
+                    Capability::AutomateBrowser | Capability::AutomateSafari => {
                         panic!("automation must not be probed")
                     }
                 })
@@ -233,9 +230,7 @@ mod tests {
                 let checks = match permission {
                     Capability::ReadAccessibilityTree => &accessibility_checks,
                     Capability::ObserveInput => &input_checks,
-                    Capability::AutomateBrowser
-                    | Capability::AutomateSafari
-                    | Capability::CaptureScreen => {
+                    Capability::AutomateBrowser | Capability::AutomateSafari => {
                         panic!("automation must not be probed")
                     }
                 };
@@ -297,9 +292,7 @@ mod tests {
                             PermissionStatus::Granted
                         }
                     }
-                    Capability::AutomateBrowser
-                    | Capability::AutomateSafari
-                    | Capability::CaptureScreen => {
+                    Capability::AutomateBrowser | Capability::AutomateSafari => {
                         panic!("automation must not be probed")
                     }
                 })
@@ -373,9 +366,9 @@ mod tests {
         let snapshot = probe_permissions_with(&required, |permission| match permission {
             Capability::ReadAccessibilityTree => Ok::<_, ()>(PermissionStatus::Granted),
             Capability::ObserveInput => Ok(PermissionStatus::Denied),
-            Capability::AutomateBrowser
-            | Capability::AutomateSafari
-            | Capability::CaptureScreen => Ok(PermissionStatus::NotDetermined),
+            Capability::AutomateBrowser | Capability::AutomateSafari => {
+                Ok(PermissionStatus::NotDetermined)
+            }
         })
         .expect("probe snapshot");
 
@@ -398,9 +391,9 @@ mod tests {
             Capability::ReadAccessibilityTree | Capability::ObserveInput => {
                 Ok::<_, ()>(PermissionStatus::Denied)
             }
-            Capability::AutomateBrowser
-            | Capability::AutomateSafari
-            | Capability::CaptureScreen => Ok(PermissionStatus::NotDetermined),
+            Capability::AutomateBrowser | Capability::AutomateSafari => {
+                Ok(PermissionStatus::NotDetermined)
+            }
         })
         .expect("probe snapshot");
 
@@ -465,9 +458,9 @@ mod tests {
     fn probes_chrome_and_safari_automation_as_independent_targets() {
         let required = BTreeSet::from([Capability::AutomateBrowser, Capability::AutomateSafari]);
         let snapshot = probe_permissions_with(&required, |permission| match permission {
-            Capability::ReadAccessibilityTree
-            | Capability::ObserveInput
-            | Capability::CaptureScreen => Ok::<_, ()>(PermissionStatus::Granted),
+            Capability::ReadAccessibilityTree | Capability::ObserveInput => {
+                Ok::<_, ()>(PermissionStatus::Granted)
+            }
             Capability::AutomateBrowser => Ok(PermissionStatus::Denied),
             Capability::AutomateSafari => Ok(PermissionStatus::Granted),
         })
