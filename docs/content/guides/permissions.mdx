@@ -3,7 +3,7 @@ title: macOS permissions
 description: The TCC permissions Zanei requests, how to grant them, and how zanei doctor verifies the recorder's state.
 ---
 
-Depending on `capture.sources` and the two content opt-ins, Zanei uses up to three macOS permissions (TCC). Screen recording is not one of them.
+Depending on `capture.sources` and the two content opt-ins, Zanei uses up to three required macOS permissions (TCC). With content snapshots on, it also asks for one optional permission, [Screen Recording](#screen-recording).
 
 ## Required permissions
 
@@ -20,11 +20,25 @@ Some properties worth knowing:
 - A permission counts as required only when a feature that needs it is enabled. `capture.content_snapshot` is independent from `capture.sources`: it requires Accessibility even when `window` is absent. Snapshot capture by itself does not require Input Monitoring.
 - Without `browser`, Automation for a supported browser is still required when that browser is allowed by the text-content scope with `text_content` and `ui` or `input`, or by an enabled content-snapshot scope. A browser excluded from all relevant scopes does not require Automation.
 
+## Screen Recording
+
+| Permission | System Settings item | Used for | Related event types |
+| --- | --- | --- | --- |
+| Screen Recording | Screen Recording (on macOS 15 and later: Screen & System Audio Recording) | Reading a window's text by text recognition when Accessibility exposes too little of it (macOS 14 or later) | `content.snapshot` with `source: "macos.ocr"` |
+
+Screen Recording is optional and used only while `capture.content_snapshot` is on. What Zanei does with it, and what it never stores, is described in the [privacy model](/guides/privacy#content-snapshots-are-opt-in).
+
+- **When it is requested.** At startup, after the Accessibility and Input Monitoring steps have been answered or have timed out, the recorder requests Screen Recording once if it is not granted. It does not wait for your answer. With content snapshots off, it is never requested.
+- **Only one dialog.** macOS shows this dialog once per app. If you already had content snapshots on before upgrading to a release with this fallback, you see it once on the first start after upgrading. If you decline or miss it, later starts do not show it again: run `zanei doctor --fix`, which opens the Screen Recording pane and copies and reveals `Zanei.app` so you can add or switch on its row.
+- **After granting.** The grant takes effect after `zanei stop && zanei start`.
+- **Without it.** Accessibility snapshots continue unchanged; only the fallback is off. It never affects `permissions_ok`, `doctor`'s exit code, or `start`'s exit code. `zanei status` and `zanei doctor` show the fallback state (see the [CLI reference](/reference/cli#status)).
+- **Re-confirmation.** macOS may periodically ask you to confirm Zanei's Screen Recording access again. Declining turns the fallback off and leaves Accessibility snapshots unchanged.
+
 ## First-time setup
 
 The signed app bundle has the stable TCC identity `dev.zanei.recorder`. Permission dialogs identify it as `Zanei`. Accessibility adds a `Zanei` row automatically, but Input Monitoring may omit the row even after the dialog grant has taken effect. Use this order:
 
-1. Run `zanei start`. On a fresh setup, the normal dialog order is Accessibility → grant → Input Monitoring. The recorder waits up to two minutes for Accessibility to be granted and does not request Input Monitoring during that wait. After Accessibility is granted, or when the two-minute limit is reached, it requests Input Monitoring; the limit exists so that users who decline Accessibility still get a chance to grant Input Monitoring. macOS may show the Input Monitoring dialog next, but on many systems it does not. If it does not appear, continue to step 3 and use `zanei doctor --fix` to add the app manually. Each permission is requested only once during that startup. If `start` exits with code 3, the daemon has started and its heartbeat reported the missing permissions; it remains running. While a first-run permission dialog is awaiting a response, `zanei doctor` may report Automation as `not_determined`; respond to the dialog, then run it again.
+1. Run `zanei start`. On a fresh setup, the normal dialog order is Accessibility → grant → Input Monitoring. The recorder waits up to two minutes for Accessibility to be granted and does not request Input Monitoring during that wait. After Accessibility is granted, or when the two-minute limit is reached, it requests Input Monitoring; the limit exists so that users who decline Accessibility still get a chance to grant Input Monitoring. macOS may show the Input Monitoring dialog next, but on many systems it does not. If it does not appear, continue to step 3 and use `zanei doctor --fix` to add the app manually. When content snapshots are on, the optional [Screen Recording](#screen-recording) request follows. Each permission is requested only once during that startup. If `start` exits with code 3, the daemon has started and its heartbeat reported the missing permissions; it remains running. While a first-run permission dialog is awaiting a response, `zanei doctor` may report Automation as `not_determined`; respond to the dialog, then run it again.
 2. Open the matching pane below. Switch the automatically added Accessibility row ON. If Input Monitoring lists `Zanei`, switch that row ON; absence of that row alone does not mean the dialog grant failed.
 3. To manage an omitted Input Monitoring permission from the list, click `+` and select the installed `Zanei.app`. While the permission is still reported missing, `zanei doctor --fix` opens the pane, copies the exact resolved `Zanei.app` root, and reveals the same app in Finder. Press Command-Shift-G in the file dialog and paste that path. A manually added bundle entry persists.
 4. Run `zanei stop && zanei start` so the recorder picks up the grants.
@@ -35,6 +49,7 @@ The signed app bundle has the stable TCC identity `dev.zanei.recorder`. Permissi
 | Accessibility | Privacy & Security → Accessibility |
 | Input Monitoring | Privacy & Security → Input Monitoring |
 | Automation | Privacy & Security → Automation (macOS asks on the first Apple Event; Zanei does not request it at startup) |
+| Screen Recording (optional) | Privacy & Security → Screen Recording, or Screen & System Audio Recording on macOS 15 and later |
 
 Granting is always your own action: `zanei doctor --fix` opens the required panes and explains the relevant controls. Its exact behavior is described below.
 
@@ -58,8 +73,10 @@ guide copies the symlink-resolved `Zanei.app` root, or the executable for an unb
 and reveals that same target in Finder. For Automation, it directs you to the app/executable
 running the recorder and its `Google Chrome` or `Safari` toggle. This requester may differ from
 the diagnostic executable. Automation alone does not copy a path or reveal a Finder target,
-and restarting does not promise another permission dialog after denial. When nothing required
-is missing, `--json --fix` prints only JSON.
+and restarting does not promise another permission dialog after denial. When content snapshots are on and the
+recorder reports Screen Recording as not granted, the guide also opens that pane and copies and
+reveals the same `Zanei.app` target; this optional pane does not change the exit code. When
+nothing is missing, `--json --fix` prints only JSON.
 
 ### For agents and scripts: `--json`
 
@@ -101,6 +118,7 @@ If a pane contains a `Zanei` row, delete it to remove that permission. Alternati
 zanei stop
 tccutil reset Accessibility dev.zanei.recorder
 tccutil reset ListenEvent dev.zanei.recorder
+tccutil reset ScreenCapture dev.zanei.recorder
 zanei start
 ```
 
@@ -116,6 +134,6 @@ A locally bundled app signed with `-` has an ad-hoc identity, so you may need to
 
 ## Scope
 
-- Zanei asks macOS to present Accessibility and Input Monitoring decisions, but it never grants permissions or touches the TCC database. The reset commands above are explicit user actions. Automation remains tied to the first real Apple Event.
+- Zanei asks macOS to present Accessibility and Input Monitoring decisions, and Screen Recording while content snapshots are on, but it never grants permissions or touches the TCC database. The reset commands above are explicit user actions. Automation remains tied to the first real Apple Event.
 - Each recorder requests required missing permissions only once at startup. It does not repeatedly prompt during the same run.
 - A background `start` with missing permissions exits with code 3 after the recorder reports them. The daemon remains running in a degraded state; after granting, restart it with `zanei stop && zanei start`.

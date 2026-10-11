@@ -39,7 +39,7 @@ Activity history is sensitive data, so the defaults are conservative:
 | Principle | Implementation |
 | --- | --- |
 | **Local-only, encrypted at rest** | There is no network path for sending your data anywhere. The store file is encrypted; the key stays in your login Keychain. |
-| **No screen recording** | No screenshots, no screen-capture APIs. Only OS accessibility and event information. |
+| **No stored screenshots or video** | Zanei never stores screenshots or video. When content snapshots are on, Zanei asks once for the macOS Screen Recording permission. If you grant it, Zanei reads a window's text from its pixels whenever Accessibility exposes too little of it: it captures that one window in memory, recognizes the text on this Mac with Apple Vision, keeps only the text and its on-screen layout (position and colors), and discards the image immediately. Images are never written to disk or sent anywhere. Without Screen Recording, this fallback is off. See the [privacy model](/guides/privacy#content-snapshots-are-opt-in). |
 | **No keystroke content by default** | Only the fact that typing happened and the field type are recorded. Capturing content is an explicit opt-in. |
 | **Sensitive data excluded** | Password fields, Chrome Incognito URLs, and password managers are excluded by default. |
 | **Short-lived retention** | Events are deleted automatically after 48 hours by default. |

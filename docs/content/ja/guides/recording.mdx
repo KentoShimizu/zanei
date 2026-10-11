@@ -19,7 +19,7 @@ description: デーモンの起動・停止・一時停止・状態確認と、�
 zanei start
 ```
 
-recorder は起動時に、必要かつ未付与のアクセシビリティと入力監視を 1 回要求します。recorder heartbeat が権限不足を報告すると、バックグラウンド `start` は終了コード 3 を返しますが、デーモンは degraded 状態で動作を継続します。付与後に `zanei stop && zanei start` し、`zanei doctor` で確認してください（[権限ガイド](/ja/guides/permissions)）。
+recorder は起動時に、必要かつ未付与のアクセシビリティと入力監視を 1 回要求します。content snapshot が有効な場合は、続けて任意の画面収録権限を、未許可なら 1 回要求します。この要求は終了コードを変えません。recorder heartbeat が権限不足を報告すると、バックグラウンド `start` は終了コード 3 を返しますが、デーモンは degraded 状態で動作を継続します。付与後に `zanei stop && zanei start` し、`zanei doctor` で確認してください（[権限ガイド](/ja/guides/permissions)）。
 
 ### フォアグラウンドで試す
 

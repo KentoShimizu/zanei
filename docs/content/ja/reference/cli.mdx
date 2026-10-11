@@ -98,7 +98,7 @@ description: zanei の全コマンド・フラグ・共通規約・終了コー�
 
 ## `doctor`
 
-recorder health と、設定中の source・content opt-in に必要な TCC 権限（アクセシビリティ / 入力監視 / オートメーション）の付与状況を診断します。
+recorder health と、設定中の source・content opt-in に必要な TCC 権限（アクセシビリティ / 入力監視 / オートメーション）の付与状況を診断します。content snapshot が有効な間は、文字認識フォールバックが使う任意の画面収録権限も表示します。
 
 ```bash
 zanei doctor            # 人間可読。不足があれば付与手順と System Settings ペインを案内
@@ -114,9 +114,12 @@ zanei doctor --json     # agent 向け機械可読
 `--fix` は不足権限を 1 ペインずつ処理し、次のペインを開く前に Return キー入力を待ちます。
 最後のペインの後には追加の待機はありません。`--json --fix` を併用しても対話は無効にならず、
 まず JSON report を出力した後、必要権限が不足していれば同じ対話フローに入ります。
-したがって、この組み合わせの stdout は JSON だけにはなりません。
+したがって、この組み合わせの stdout は JSON だけにはなりません。content snapshot が有効で、
+recorder が画面収録を未許可と報告している場合、`--fix` は画面収録のペインも開きます。必要権限の
+ペインがあればその後に、必要権限に不足がなければ画面収録のペインだけを開き、入力監視と同じ
+`Zanei.app` をコピーして Finder に表示します。
 
-- 必要権限がひとつでも欠けていれば**終了コード 3**。
+- 必要権限がひとつでも欠けていれば**終了コード 3**。画面収録は任意の権限で、終了コード 3 の原因にはなりません。
 - `input_monitoring` が「必須」になるのは `input.*` または `ui.click` を捕捉する設定です。
   `input` と `ui` のどちらも選択しない構成では、欠けていても `ok` です。
 
@@ -145,6 +148,11 @@ zanei doctor --json     # agent 向け機械可読
     "automate_safari": {
       "state": "deferred", "required": true,
       "detail": { "platform": "macos", "permission": "automation", "status": "not_determined", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation", "target_bundle_id": "com.apple.Safari" }
+    },
+    "capture_screen": {
+      "state": "action_required", "required": false,
+      "required_for": ["content.snapshot"],
+      "detail": { "platform": "macos", "permission": "screen_recording", "status": "denied", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" }
     }
   },
   "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" },
@@ -157,6 +165,8 @@ zanei doctor --json     # agent 向け機械可読
 ```
 
 capability の `state` は `available` / `action_required` / `deferred` です。内側の macOS `detail` がネイティブな permission 名と `granted` / `denied` / `not_determined`、対応する System Settings URL、必要な場合は target bundle ID を所有します。`reported_by_recorder` は、新鮮な recorder heartbeat 由来なら `true` です。heartbeat がなければ `doctor` 自身のプロセスから probe して `false` とし、人間向け出力には recorder 自身の権限を見るには起動が必要という注記を加えます。
+
+`capture_screen` は、content snapshot の文字認識フォールバックに使う任意の画面収録権限です。報告するのは recorder だけで、`capture.content_snapshot` が有効かつ macOS 14 以降の場合に限ります。常に `required: false` で、`ok` にも終了コードにも影響しません。ローカルの probe では recorder ではなくターミナルの権限を調べることになるため、新鮮な recorder heartbeat がなければ `doctor` はこの項目を省き、人間向け出力ではフォールバックの状態を不明と表示します。人間向け出力では画面収録を任意の権限として示し、`OCR fallback off: Screen Recording not granted` や `OCR fallback unavailable: requires macOS 14` のようにフォールバックの状態を表示します。
 
 `store_key` はストアの暗号化鍵の所在を報告します。`state` は `key_store`（鍵が見つかった。`detail` にログインキーチェーンか開発用上書き `ZANEI_STORE_KEY_FILE` かの所在が入る）、`not_needed`（ストアがない・平文・認識できない）、`missing`（ストアは暗号化されているが鍵がない）、`mismatch`（鍵でこのストアを復号できない）、`key_store_locked` / `key_store_denied`（`detail` にプラットフォームの案内。例：ログインキーチェーンがロックされている）、`unavailable` のいずれかです。`detail` は補足がある場合だけ含まれます。人間向け出力では権限の表の後に `Store key: ...` の行が加わります。ストアがロックされていても `doctor` は失敗せず、鍵の状態を報告し、権限は自身のプロセスから probe します。
 
@@ -211,7 +221,7 @@ capability の `state` は `available` / `action_required` / `deferred` です�
 launchd に登録し、バックグラウンド記録を開始します。
 既に agent が登録されている場合は、launchd による登録解除の完了を最大 10 秒待ってから再登録します。
 バックグラウンド起動では、まずデーモンが生存報告するまで最大 10 秒待ちます。その後、下記の権限確認にさらに最大 20 秒かかる場合があります。
-recorder は起動時に、必要かつ未付与のアクセシビリティと入力監視を 1 回要求します。オートメーションは Chrome への初回の実 Apple Event まで要求しません。
+recorder は起動時に、必要かつ未付与のアクセシビリティと入力監視を 1 回要求します。content snapshot が有効な場合は、続けて任意の画面収録権限を、未許可なら 1 回要求します。これは終了コードに影響しません（[権限ガイド](/ja/guides/permissions#画面収録)）。オートメーションは Chrome への初回の実 Apple Event まで要求しません。
 
 ```bash
 zanei start              # バックグラウンド記録を開始
@@ -316,7 +326,7 @@ zanei status
 zanei status --json
 ```
 
-人間向け出力は、有効な `TEXT CONTENT` と `CONTENT SNAPSHOT` に現在の app/site scope を表示し、無効な行には明示的な有効化 command を表示します。例は `TEXT CONTENT      on (apps: exclude 6, sites: exclude 0)` と `CONTENT SNAPSHOT   off (opt-in: zanei config set capture.content_snapshot true)` です。両方の privacy-sensitive な opt-in を JSON なしで確認できます。
+人間向け出力は、有効な `TEXT CONTENT` と `CONTENT SNAPSHOT` に現在の app/site scope を表示し、無効な行には明示的な有効化 command を表示します。例は `TEXT CONTENT      on (apps: exclude 6, sites: exclude 0)` と `CONTENT SNAPSHOT   off (opt-in: zanei config set capture.content_snapshot true)` です。両方の privacy-sensitive な opt-in を JSON なしで確認できます。有効な `CONTENT SNAPSHOT` 行には文字認識フォールバックの状態も表示します。例：`CONTENT SNAPSHOT   on (apps: exclude 6, sites: exclude 0), ocr: off (Screen Recording not granted)`。
 
 ```json
 {
@@ -338,7 +348,7 @@ zanei status --json
   "store_write_state": "healthy",
   "degraded": {},
   "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z", "encryption": "sqlcipher" },
-  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false, "ocr": null },
   "permissions_ok": true
 }
 ```
@@ -373,6 +383,7 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | `capture.sources` | `string[]` | 現在の設定の source。null にならない |
 | `capture.text_content` | boolean | 現在の設定の text-content opt-in。null にならない |
 | `capture.content_snapshot` | boolean | 現在の設定の frontmost-window content-snapshot opt-in。`capture.sources` から独立し、null にならない |
+| `capture.ocr` | `"on"` \| `"off"` \| `"unavailable"` \| null | 現在の owner と instance が一致する fresh heartbeat が報告する文字認識フォールバックの状態。macOS 14 以降で画面収録が許可されていれば `on`、未許可なら `off`、macOS 14 未満なら `unavailable`。`capture.content_snapshot` が false の場合、またはそうした heartbeat がない場合は null。`permissions_ok` と `degraded` には含めない |
 | `permissions_ok` | boolean | 現在の owner と instance が一致する fresh heartbeat の permission snapshot があればその値。snapshot がない場合、または heartbeat が stale・future・missing な場合はローカル probe。null にならない |
 
 人間向け出力は `--format` で選ぶ table ではなく、次の固定行です。
@@ -392,7 +403,7 @@ JSON object は常に次の field を持ちます。`integer` は非負整数で
 | `STORE WRITES` | `store_write_state`。null は `-` |
 | `STORE` | `store.path`。`store.encryption` が null でなければ ` (encrypted)` または ` (plaintext; the recorder encrypts it on its next start)` が続く |
 | `TEXT CONTENT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` または `off (opt-in: zanei config set capture.text_content true)` |
-| `CONTENT SNAPSHOT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` または `off (opt-in: zanei config set capture.content_snapshot true)` |
+| `CONTENT SNAPSHOT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N), ocr: <state>` または `off (opt-in: zanei config set capture.content_snapshot true)`。`<state>` は `on`、`off (Screen Recording not granted)`、`unavailable (macOS 14+)`、`capture.ocr` が null なら `unknown` |
 | `PERMISSIONS OK` | `true` または `false` |
 | `COLLECTOR FAILURES` | 空 map は `none`。store を読み取れない場合は `-`。それ以外は各 entry の indented `component: count` 行が続く |
 | `DEGRADED` | 空 map は `false`。それ以外は `true` と、各 entry の indented `component: reason` 行 |
@@ -615,6 +626,11 @@ Content snapshots record the text shown in the frontmost window, including messa
 documents written by other people and text you typed that is on screen. Password fields and
 Chrome Incognito windows are never captured; stored text is redacted and deleted after 48 hours.
 
+After the restart, the recorder asks once for the macOS Screen Recording permission. If you
+grant it, Zanei reads a window's text from its pixels when Accessibility exposes too little of
+it: the window image stays in memory and is discarded, and only the text and its layout are
+stored. Input fields that an app does not expose to Accessibility cannot be masked in that text.
+
 Current scope (change it first if this is not what you want):
   Apps:  every app except 6 excluded (Safari, Firefox, Brave, Edge, Vivaldi, Arc)
   Sites: every site
@@ -626,6 +642,8 @@ Enable content snapshots with this scope? [y/N]
 ```
 
 `N`・Enter・EOF は file を変更しません。非 TTY で書き込むには `--quiet` が必須で、未指定なら scope summary を stderr に出し、保存せず code 2 で終了します。agent は `filter content-snapshot` で scope を先に決め、何を記録するかを明言してから `zanei config set capture.content_snapshot true --quiet` を使い、再起動します。`false` への変更は確認しません。
+
+CLI 自体は画面収録を要求せず、システム設定も開きません。要求するのは次回起動時の recorder です（[権限ガイド](/ja/guides/permissions#画面収録)）。
 
 スキーマは[設定リファレンス](/ja/reference/config)を参照。
 

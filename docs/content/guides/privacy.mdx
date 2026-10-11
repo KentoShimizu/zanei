@@ -8,7 +8,7 @@ Zanei records what you do on your computer. Because that data is sensitive, the 
 ## Defaults
 
 1. **No egress.** There is no feature that sends data anywhere. Everything stays in a local SQLite file.
-2. **No screen recording.** No screenshots or screen-capture APIs. Zanei reads OS accessibility and event metadata.
+2. **No stored screenshots or video.** Zanei never stores screenshots or video. When content snapshots are on, Zanei asks once for the macOS Screen Recording permission. If you grant it, Zanei reads a window's text from its pixels whenever Accessibility exposes too little of it: it captures that one window in memory, recognizes the text on this Mac with Apple Vision, keeps only the text and its on-screen layout (position and colors), and discards the image immediately. Images are never written to disk or sent anywhere. Without Screen Recording, this fallback is off. Everything else comes from OS accessibility and event metadata.
 3. **No content by default.** Typing is recorded as "typing happened in this kind of field," not what was typed. Text shown in windows is not recorded. Typed content and content snapshots are separate opt-ins.
 4. **Capture-time filtering.** Events attributable to excluded apps are discarded before they reach the store. An unattributed clipboard change can still be stored with `app.name: "Unknown"` because it cannot be matched to the excluded app. Excluded Chrome sites produce no URL events or text-content bodies.
 5. **Read-only MCP exposure.** The [MCP server](/reference/mcp) is a read-only view. An agent connected only through MCP can read the timeline but cannot change what is recorded or edit filters.
@@ -52,9 +52,18 @@ In 0.3.0, the default `[filter.text_content]` scope excludes Safari, Firefox, Br
 
 ## Content snapshots are opt-in
 
-`capture.content_snapshot = true` records text that macOS Accessibility exposes in the visible part of the frontmost window. It does not take screenshots, use OCR, or call screen-recording APIs. A snapshot is considered after the window settles, periodically while you remain active in it, and when you leave it. Each event contains at most 32 KiB of UTF-8 text. `data.cutoff` reports `time`, `nodes`, `bytes`, or `stopped` when traversal ends early, and is null when traversal completes.
+`capture.content_snapshot = true` records the text shown in the visible part of the frontmost window. A snapshot is considered after the window settles, periodically while you remain active in it, and when you leave it. Each event contains at most 32 KiB of UTF-8 text. `data.cutoff` reports `time`, `nodes`, `bytes`, or `stopped` when collection ends early, and is null when it completes.
+
+Zanei reads this text through macOS Accessibility. Some apps draw their own text and expose little of it to Accessibility. For those windows, Zanei can use text recognition (OCR) instead, as described under [Defaults](#defaults). The fallback runs only when all of these hold:
+
+- the optional [Screen Recording permission](/guides/permissions#screen-recording) is granted and the Mac runs macOS 14 or later;
+- for that window and that snapshot, a substantial part of the window consists of elements that exist to show content but expose no text to Accessibility.
+
+The decision is made per window from what Accessibility exposes, not from a list of apps. Windows whose text Accessibility exposes keep using Accessibility. When recognition fails or finds no text, the Accessibility text is recorded as it would be without the fallback. OCR snapshots carry `source: "macos.ocr"` and add each line's position and colors; recognized text can contain errors. The [event reference](/reference/events#contentsnapshot-in-detail) defines the shape.
 
 Content snapshots are independent from typed-content capture and from `capture.sources`. Zanei does not read secure-field subtrees or the values of single-line input fields, and it takes no snapshot while Secure Input is active. However, text you typed can still appear after it is rendered elsewhere in the window or in a multi-line text area. Snapshots can also contain messages, documents, and other text written by other people.
+
+OCR snapshots follow every rule on this page with no exception: snapshot scope, built-in exclusions, Chrome private-window handling, Secure Input, `zanei pause`, the size limits, the daily limit, redaction, retention, and encryption. A window that is excluded or out of scope is never captured. Only the target window is captured; other windows, notifications, and overlays covering it are not part of the image. Recognized lines that fall inside a secure field or single-line input field are dropped. This masking works only for fields the app exposes to Accessibility: text typed into a field the app does not expose can appear in an OCR snapshot.
 
 Choose the scope before enabling the opt-in:
 
@@ -67,7 +76,7 @@ zanei stop && zanei start
 
 The store remains encrypted and normal retention applies. A plaintext SQLite export includes snapshot bodies unless you exclude them with `--types`; protect it like any other sensitive export. If you share your screen, run `zanei pause` first when the visible text should not be recorded. On employer-managed devices, follow your organization's rules for third-party messages and documents.
 
-The recorder stops creating snapshots after 128 MiB in a day. This is an in-memory backstop and restarts with the daemon. With the default 48-hour retention, it bounds snapshot text to about 256 MiB before database overhead when the daemon remains running; normal use is expected to be much lower because identical snapshots are not stored.
+The recorder stops creating snapshots after 128 MiB in a day, counting the line layout of OCR snapshots as well as their text. This is an in-memory backstop and restarts with the daemon. With the default 48-hour retention, it bounds snapshot text to about 256 MiB before database overhead when the daemon remains running; normal use is expected to be much lower because identical snapshots are not stored.
 
 ## Automatic exclusions
 
@@ -87,7 +96,7 @@ A policy may also pin its own `allowed_apps` list, which is applied in addition 
 
 For values that are captured, redactors replace recognizable matches for enabled rules. The defaults are credit-card numbers and tokens (`redactors = ["credit_card", "token"]`). Email redaction remains available and works as before when you add `"email"` to the `filter.redactors` array, but it is not enabled by default because an email address is an addressing identifier, not a secret.
 
-Redactors do not remove names, phone or fax numbers, or postal addresses. Use capture-time [filters](/guides/filters) to keep unwanted data out of the store and a short retention period to limit how long captured data remains; redaction is not the control that limits exposure. Every event carries a `redaction` field recording whether rules were applied.
+Redactors do not remove names, phone or fax numbers, or postal addresses. Use capture-time [filters](/guides/filters) to keep unwanted data out of the store and a short retention period to limit how long captured data remains; redaction is not the control that limits exposure. In OCR snapshots, redactors apply to `data.text` and to the text of every line in `data.lines`. Every event carries a `redaction` field recording whether rules were applied.
 
 ## Limitations
 

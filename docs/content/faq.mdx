@@ -13,11 +13,11 @@ Into one local SQLite file (`~/.local/state/zanei/store.sqlite`) and nowhere els
 
 ## Does it take screenshots?
 
-No. Zanei does not use screenshots, OCR, screen recording, or screen-capture APIs. If you separately enable `capture.content_snapshot`, it reads text that macOS Accessibility exposes in the visible part of the frontmost window. It does not read secure-field subtrees or single-line input values, and takes no snapshot while Secure Input is active. See the [privacy model](/guides/privacy#content-snapshots-are-opt-in).
+Zanei never stores screenshots or video. When content snapshots are on, Zanei asks once for the macOS Screen Recording permission. If you grant it, Zanei reads a window's text from its pixels whenever Accessibility exposes too little of it: it captures that one window in memory, recognizes the text on this Mac with Apple Vision, keeps only the text and its on-screen layout (position and colors), and discards the image immediately. Images are never written to disk or sent anywhere. Without Screen Recording, this fallback is off. Content snapshots are a separate opt-in, and every snapshot rule applies to this fallback too. See the [privacy model](/guides/privacy#content-snapshots-are-opt-in) and the [Screen Recording permission](/guides/permissions#screen-recording).
 
 ## Which apps can it read content snapshots from?
 
-Only apps that expose useful text through macOS Accessibility. Coverage varies by app and UI implementation; `zanei apps` lists candidates to choose from, but does not guarantee that an app exposes readable text. Snapshots cover the visible part of the frontmost window, not a document's complete contents. Safari, Firefox, Brave, Edge, Vivaldi, and Arc are excluded from snapshots by default because their private windows cannot be identified reliably. Website filters apply to Chrome and Safari. Other browsers can be controlled by app scope.
+Apps that expose useful text through macOS Accessibility. With Screen Recording granted, also apps that draw their own text and expose little of it to Accessibility, through the text-recognition fallback. That fallback relies on Accessibility to report the window's content elements, so a window that exposes none at all is not covered. Coverage varies by app and UI implementation; `zanei apps` lists candidates to choose from, but does not guarantee that an app exposes readable text. Snapshots cover the visible part of the frontmost window, not a document's complete contents. Safari, Firefox, Brave, Edge, Vivaldi, and Arc are excluded from snapshots by default because their private windows cannot be identified reliably. Website filters apply to Chrome and Safari. Other browsers can be controlled by app scope.
 
 ## Which browsers can it capture URLs from?
 
@@ -50,7 +50,7 @@ classify, which keeps password fields out. Restart Zanei after changing `capture
 A Chromium-based app can be built to ignore accessibility requests from external clients, and some
 apps disable the integration outright. If an app does not expose its content tree, typed-text bodies
 (`ui.value` / `data.text`) and content snapshots (`content.snapshot`) for that content are missing,
-and Zanei does not use screen images as a substitute. Keystroke facts (such as
+and the text-recognition fallback for snapshots does not cover them because it relies on the same tree. Keystroke facts (such as
 `input.key` counts) are still recorded. Clicks are recorded only to the extent AX hit-testing works.
 Clipboard copy and paste events are still recorded when their bodies are omitted. For copy, the body
 comes directly from the macOS pasteboard and can be recorded only when `capture.text_content` is
@@ -111,11 +111,12 @@ Yes. A background `start` returns code 3 only after the recorder is alive and it
 
 Use this order so the bundle-specific permission reset can still resolve the installed app:
 
-1. Remove the Accessibility and Input Monitoring grants. Delete the `Zanei` rows in **System Settings → Privacy & Security**, or run these commands while Zanei is still installed:
+1. Remove the Accessibility, Input Monitoring, and Screen Recording grants. Delete the `Zanei` rows in **System Settings → Privacy & Security**, or run these commands while Zanei is still installed:
 
 ```bash
 tccutil reset Accessibility dev.zanei.recorder
 tccutil reset ListenEvent dev.zanei.recorder
+tccutil reset ScreenCapture dev.zanei.recorder
 ```
 
 2. Stop the recorder:

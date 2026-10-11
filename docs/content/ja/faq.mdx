@@ -13,11 +13,11 @@ description: プライバシー・ブラウザ対応・データアクセス・�
 
 ## スクリーンショットを取りますか？
 
-いいえ。Zanei はスクリーンショット・OCR・画面録画・画面収録 API を使いません。`capture.content_snapshot` を別途有効にした場合だけ、前面ウィンドウの可視範囲で macOS Accessibility が公開するテキストを読みます。secure field の subtree と単行入力欄の値は読まず、Secure Input 中は snapshot を取りません。[プライバシーモデル](/ja/guides/privacy)を参照してください。
+Zanei はスクリーンショットや動画を保存しません。content snapshot を有効にすると、Zanei は macOS の画面収録権限を一度だけ求めます。許可すると、Accessibility から読めるテキストが少なすぎるウィンドウでは、画面の画素からテキストを読み取ります。対象のウィンドウ 1 つだけをメモリ上に取り込み、この Mac 上の Apple Vision で文字を認識し、テキストとその画面上の配置（位置と色）だけを残して、画像はすぐに破棄します。画像をディスクに書き込むことも、外部に送ることもありません。画面収録を許可しなければ、このフォールバックは動きません。 content snapshot は別の opt-in で、snapshot の規則はこのフォールバックにもすべて適用されます。[プライバシーモデル](/ja/guides/privacy#content-snapshot-は-opt-in)と[画面収録の権限](/ja/guides/permissions#画面収録)を参照してください。
 
 ## どのアプリから content snapshot を取得できますか？
 
-macOS Accessibility で有用なテキストを公開する app だけです。対応範囲は app と UI 実装によって異なります。`zanei apps` は選択候補を表示しますが、読み取り可能な text の存在を保証しません。snapshot は前面ウィンドウの可視範囲で、document 全体ではありません。private window を確実に判定できないため、Safari・Firefox・Brave・Edge・Vivaldi・Arc は既定で snapshot scope 外です。サイトフィルタはChromeとSafariに適用します。他のbrowserはapp scopeで制御します。
+macOS Accessibility で有用なテキストを公開する app です。画面収録を許可していれば、テキストを独自に描画して Accessibility にほとんど公開しない app も、文字認識フォールバックで読めます。このフォールバックはウィンドウの内容要素を Accessibility から知る必要があるため、内容要素をまったく公開しないウィンドウは対象外です。対応範囲は app と UI 実装によって異なります。`zanei apps` は選択候補を表示しますが、読み取り可能な text の存在を保証しません。snapshot は前面ウィンドウの可視範囲で、document 全体ではありません。private window を確実に判定できないため、Safari・Firefox・Brave・Edge・Vivaldi・Arc は既定で snapshot scope 外です。サイトフィルタはChromeとSafariに適用します。他のbrowserはapp scopeで制御します。
 
 ## どのブラウザの URL が取れますか？Safari は？
 
@@ -51,7 +51,7 @@ Chromium にとってツリー構築の合図になります。ツリーは非�
 Chromium 系アプリは、外部クライアントからのアクセシビリティ要求を無視するように作ることができ、
 統合自体を無効にしているアプリもあります。アプリが content tree を公開しない
 場合、その content の入力本文（`ui.value` / `data.text`）と content snapshot（`content.snapshot`）は
-欠落し、Zanei が代わりに画面画像を使うこともありません。キー入力があった事実（`input.key` の回数
+欠落します。snapshot の文字認識フォールバックも同じ tree を頼りにするため、この場合は動きません。キー入力があった事実（`input.key` の回数
 など）は引き続き記録されます。クリックは AX hit-testing が機能する範囲でのみ記録されます。クリップボード
 のコピー／ペーストイベントは、本文が省略される場合も記録されます。コピー本文は macOS pasteboard から
 直接取得し、`capture.text_content` が有効で、コピー元 window で text capture が許可されている場合にだけ
@@ -110,11 +110,12 @@ Zanei は自分のマシン上の自分の操作を記録するツールです�
 
 bundle ID を指定した権限 reset がインストール済み app を解決できるよう、次の順で操作します。
 
-1. アクセシビリティと入力監視の権限を解除します。**システム設定 → プライバシーとセキュリティ**で `Zanei` の行を削除するか、Zanei がまだインストールされている間に次を実行します。
+1. アクセシビリティ・入力監視・画面収録の権限を解除します。**システム設定 → プライバシーとセキュリティ**で `Zanei` の行を削除するか、Zanei がまだインストールされている間に次を実行します。
 
 ```bash
 tccutil reset Accessibility dev.zanei.recorder
 tccutil reset ListenEvent dev.zanei.recorder
+tccutil reset ScreenCapture dev.zanei.recorder
 ```
 
 2. recorder を停止します。

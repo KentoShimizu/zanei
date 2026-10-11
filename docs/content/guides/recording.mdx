@@ -19,7 +19,7 @@ Recording runs as a background daemon (a launchd agent), controlled with these c
 zanei start
 ```
 
-At startup, the recorder requests required missing Accessibility and Input Monitoring permissions once. A background `start` exits with code 3 if the recorder heartbeat reports missing permissions, but the daemon remains running in a degraded state. Grant them, run `zanei stop && zanei start`, and verify with `zanei doctor` (see the [permissions guide](/guides/permissions)).
+At startup, the recorder requests required missing Accessibility and Input Monitoring permissions once. While content snapshots are on, it then requests the optional Screen Recording permission once if it is not granted; that request never changes the exit code. A background `start` exits with code 3 if the recorder heartbeat reports missing permissions, but the daemon remains running in a degraded state. Grant them, run `zanei stop && zanei start`, and verify with `zanei doctor` (see the [permissions guide](/guides/permissions)).
 
 ### Running in the foreground
 

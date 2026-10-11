@@ -28,11 +28,11 @@ One event per line (NDJSON) in raw outputs (`query --format jsonl`, `record`, `e
 
 | Field | Description |
 | --- | --- |
-| `v` | Minimum envelope version required to interpret this event type and payload. Existing event types use `1`; retained legacy `content.snapshot` events use `2`; current `content.snapshot` events use `3` |
+| `v` | Minimum envelope version required to interpret this event type and payload. Existing event types use `1`. Current `content.snapshot` events use `4`; retained older `content.snapshot` events keep `2` or `3` |
 | `id` | ULID-based event ID, unique and time-sortable |
 | `ts` | Wall-clock timestamp (RFC3339, millisecond precision) |
 | `mono_ns` | Monotonic clock in nanoseconds, for reliable ordering even across wall-clock changes |
-| `source` | Capture backend, e.g. `macos.ax`, `macos.workspace`, `macos.eventtap`, `macos.applescript` |
+| `source` | Capture backend, e.g. `macos.ax`, `macos.workspace`, `macos.eventtap`, `macos.applescript`, `macos.ocr` (content snapshots read by text recognition) |
 | `type` | Event type (see the [taxonomy](#event-taxonomy)) |
 | `app` | App name, bundle ID, and PID. An unattributed `clipboard.copy` uses `name: "Unknown"`, `bundle_id: null`, and `pid: null` |
 | `window` | Window title and ID (when applicable) |
@@ -51,8 +51,9 @@ Zanei measures these limits in UTF-8 bytes during normalization. A value at the 
 
 | Limit | Fields | Rationale |
 | --- | --- | --- |
-| 32 KiB (32,768 bytes) | `content.snapshot.data.text` at collection time | Bounds one Accessibility snapshot while preserving useful visible text; a snapshot stopped by this limit has `data.cutoff: "bytes"` |
-| 64 KiB (65,536 bytes) | `element.value`; every `data.text`, including the independent safety check for `content.snapshot` | Bounds per-field redaction, serialization, and in-memory batch cost. Snapshot collection stops earlier at 32 KiB, so this is only a core safety valve for that type |
+| 32 KiB (32,768 bytes) | `content.snapshot.data.text` at collection time | Bounds one snapshot while preserving useful visible text; a snapshot stopped by this limit has `data.cutoff: "bytes"` |
+| 64 KiB (65,536 bytes) | `content.snapshot.data.lines` at collection time, measured as serialized JSON | Bounds the line layout of one OCR snapshot. Lines are added in reading order until either this or the 32 KiB text limit is reached, so `text` and `lines` stop at the same line, with `data.cutoff: "bytes"` |
+| 64 KiB (65,536 bytes) | `element.value`; every `data.text`, including the independent safety check for `content.snapshot`; `content.snapshot.data.lines` as serialized JSON | Bounds per-field redaction, serialization, and in-memory batch cost. Snapshot collection stops at the limits above, so for that type this is only a core safety valve, for example against growth from redaction markers |
 | 4 KiB (4,096 bytes) | `window.title`; `element.title`; `data.prev_title` for `window.title`; `data.url` and `data.tab_title` for `browser.navigate` | URLs and titles are context metadata; normal values fit comfortably while abnormal OS or application payloads are rejected |
 
 The same limits are checked again after key-event coalescing and privacy redaction, because concatenation and replacement markers can increase the byte length. A browser event whose URL was removed cannot be evaluated against website filters, so it is discarded rather than bypassing those filters.
@@ -74,7 +75,7 @@ The current event types. The **Permission** column shows what must be granted fo
 | `input.scroll` | `macos.eventtap` | Scrolling | Accessibility + Input Monitoring |
 | `browser.navigate` | `macos.applescript` | URL / tab change. Chrome and Safari; Chrome Incognito excluded | Accessibility + Automation |
 | `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | Clipboard use; content is opt-in | Accessibility + Input Monitoring |
-| `content.snapshot` | `macos.ax` | Accessibility text shown in the visible part of the frontmost window; separate opt-in | Accessibility |
+| `content.snapshot` | `macos.ax`, `macos.ocr` | Text shown in the visible part of the frontmost window, from Accessibility or, when Accessibility exposes too little of it, from on-device text recognition; separate opt-in | Accessibility (+ Screen Recording for `macos.ocr`) |
 
 In `--types` filters, a trailing wildcard selects a whole family: `browser.*`, `ui.*`, `content.*`, and so on.
 
@@ -98,7 +99,7 @@ What each type carries in `data`, and whether the envelope's `window` / `element
 | `browser.navigate` | ✓ | — | `url` (null only after size limiting), `tab_title`, `mode` (`"normal"` or `"unknown"`), `transition` (`navigate`/`tab_switch`/null) |
 | `clipboard.copy` | ✓ / — | — | `origin` (`copy_shortcut`/`unknown`), `content_kind` (`text`/`image`/`file`/`other`), `size_bytes`, `text`. Unknown origin has no app/window attribution or body |
 | `clipboard.paste` | ✓ | — | `content_kind`, `size_bytes`, `text`, and `field_kind` of the paste target |
-| `content.snapshot` | ✓ | — | Current v3: `text` (`string` or null after the core size safety rule), `chars` (pre-redaction character count after the collector limit), `cutoff` (`time`, `nodes`, `bytes`, or `stopped` when traversal stops early; null when it completes), and `trigger` (`settle`, `refresh`, or `focus_out`). Retained legacy v2 events instead carry `complete` and do not identify the cut-off reason. Source is `macos.ax` |
+| `content.snapshot` | ✓ | — | Current v4: `text` (`string` or null after the core size safety rule), `chars` (pre-redaction character count after the collector limit), `cutoff` (`time`, `nodes`, `bytes`, or `stopped` when collection stops early; null when it completes), `trigger` (`settle`, `refresh`, or `focus_out`), and `lines` only when `source` is `macos.ocr` (see below). Retained v3 events have the same fields without `lines`. Retained legacy v2 events instead carry `complete` and do not identify the cut-off reason. Retained v2 and v3 events always have source `macos.ax` |
 
 `field_kind` classifies the focused input field: `text` / `search` / `url` / `email` / `number` / `other`, or null when focus is not on a text-like element. There is no `password` value. Text bodies require Accessibility to confirm a known non-secure input field; failure to confirm leaves `input.key.text` and pasted text null.
 
@@ -110,7 +111,7 @@ Value changes are batched while typing continues and recorded after a 1-second p
 
 Some apps expose a field's value to Accessibility but post no change notifications for it. For such a field, Zanei reads the value shortly after your keystrokes, Return, clicks, and window switches, and never periodically while you are idle. When Zanei first finds a focused field this way, it also emits `ui.focus` for it. These reads are best effort: text typed and submitted before Zanei reads the field can be lost, while text it has already read is kept, and input made before Zanei knows the field is not recorded as text.
 
-Because each event carries only the difference, a run of `ui.value` events does not reconstruct what was typed, and concatenating their `data.text` can produce wording the user never entered. An input method rewrites the tail of the value when it commits, so a later difference replaces part of an earlier one instead of continuing it. Read these events as evidence of what someone was writing about, not as a verbatim record. For the exact wording, look for a `content.snapshot` of the same window shortly afterwards: once the text is entered or sent, the app usually renders it in the visible part of the window, and that snapshot is the accurate thing to quote. It is available only while `capture.content_snapshot` is enabled and the app is inside its filter scope, a visit short enough to end before a snapshot trigger fires leaves none, and a snapshot covers only what was visible.
+Because each event carries only the difference, a run of `ui.value` events does not reconstruct what was typed, and concatenating their `data.text` can produce wording the user never entered. An input method rewrites the tail of the value when it commits, so a later difference replaces part of an earlier one instead of continuing it. Read these events as evidence of what someone was writing about, not as a verbatim record. For the exact wording, look for a `content.snapshot` of the same window shortly afterwards: once the text is entered or sent, the app usually renders it in the visible part of the window, and a snapshot with `source: "macos.ax"` is the accurate thing to quote. A `macos.ocr` snapshot shows the wording too, but can contain recognition errors. It is available only while `capture.content_snapshot` is enabled and the app is inside its filter scope, a visit short enough to end before a snapshot trigger fires leaves none, and a snapshot covers only what was visible.
 
 A value change with no authorizing input (a different app, a different focused element, more than 3 seconds after the last input, or a Chrome window whose text bodies are suppressed) is not recorded as text: `data.text` is null and only `value_len` describes the resulting value. Deletion likewise has `text: null`. Voice input does not itself open an authorization window because it has no recorded keystroke or paste trigger. If voice text is inserted while a 3-second window opened by a preceding recorded keystroke or paste for the same app and focused-element generation is still active, that text can be included in the authorized difference.
 
@@ -127,6 +128,33 @@ The exact shape of "fact of typing + field type by default, content opt-in":
 | `other` | Esc, F-keys, media keys | null | null | no |
 
 A shortcut is an action rather than content, so `combo` is recorded without opt-in; shortcuts such as saves, commits, and tab switches are a primary input to the timeline. `input.key.text` also requires inactive Secure Input, a known non-secure Accessibility field, and an eligible Chrome window when Chrome is active.
+
+### `content.snapshot` in detail
+
+Every `content.snapshot` written by the current release has `v: 4`. The envelope `source` says where the text came from:
+
+| `source` | Text from | `data.lines` |
+| --- | --- | --- |
+| `macos.ax` | macOS Accessibility | absent |
+| `macos.ocr` | On-device text recognition of the window image, used when Accessibility exposes too little of the window's text ([privacy model](/guides/privacy#content-snapshots-are-opt-in)) | present |
+
+`text`, `chars`, `cutoff`, and `trigger` mean the same for both sources. For `macos.ocr`:
+
+- `text` is the recognized lines joined by `\n`, after masking and redaction. `cutoff` is null, or `bytes` when the size limits stopped collection.
+- Lines follow the regions that Accessibility reports for the window, such as a sidebar, a message list, and a text input. Lines outside every region come first; regions follow left to right, then top to bottom. Within a region, lines run top to bottom, and lines at the same height left to right. A window without such regions is read top to bottom, then left to right.
+- `lines` lists the same lines in the same order as `text`. It becomes null only when the core size safety rule removes it, with `truncated: true`.
+- There is no confidence value and no speaker or role label. Interpret the layout yourself, for example by background color or horizontal position.
+- Recognized text is approximate. It can contain recognition errors and short noise from icons, so do not quote it as exact wording.
+
+Each entry of `lines`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `text` | string | The line's recognized text, after redaction |
+| `x`, `y` | number | Top-left corner of the line's box as a fraction of the window's width and height, 0 to 1, measured from the window's top-left corner, rounded to 4 decimal places |
+| `w`, `h` | number | Width and height of the box as a fraction of the window's width and height, rounded to 4 decimal places |
+| `bg` | string | Dominant color around the line, `#RRGGBB` in uppercase hexadecimal |
+| `ink` | string \| null | Color of the text, `#RRGGBB`; null when no pixel inside the box differs clearly from `bg` |
 
 ### Clipboard attribution
 
@@ -168,13 +196,13 @@ Only content (what you typed or copied) is opt-in. Facts of use (shortcuts, clic
 
 ## Schema versioning
 
-The envelope version is per event type and payload, not a global output version. The existing 13 types require `v: 1`; current `content.snapshot` events require `v: 3`. Retained legacy `content.snapshot` events with `v: 2` remain valid, and `query`, `export`, and MCP `query_events` return them losslessly with their `complete` field rather than inventing a cut-off reason. A consumer that understands only `v: 2` does not need to accept a `v: 3` event. The envelope, event taxonomy, contexts, and per-version payloads are closed: `content.snapshot` with `v: 1`, v2 with `cutoff`, v3 with `complete`, an existing non-snapshot type with v2 or v3, unknown fields, and unknown event types are invalid. Adding a type requires a new minimum `v` and a matching store migration.
+The envelope version is per event type and payload, not a global output version. The existing 13 types require `v: 1`; current `content.snapshot` events require `v: 4`. Retained `content.snapshot` events with `v: 2` or `v: 3` remain valid, and `query`, `export`, and MCP `query_events` return each in its own shape: v2 with its `complete` field rather than an invented cut-off reason, v3 without `lines`. No store migration is involved. A consumer that understands only an older `v` does not need to accept a newer one, and Zanei releases from before `v: 4` cannot interpret the `v: 4` snapshots that later releases write. The envelope, event taxonomy, contexts, and per-version payloads are closed: `content.snapshot` with `v: 1`, v2 with `cutoff`, v3 or v4 with `complete`, `lines` in v2 or v3, a v4 `macos.ocr` event without `lines`, a v4 event with another source that has `lines`, an existing non-snapshot type with v2, v3, or v4, unknown fields, and unknown event types are invalid. Adding a type requires a new minimum `v` and a matching store migration.
 
 Store readers skip rows whose event type they do not recognize instead of failing the whole read. CLI `query` and `export` keep their JSON array shapes and warn with the skipped count on stderr; `--quiet` suppresses the warning. MCP `query_events`, `timeline --format json`, and structured MCP `get_timeline` report the count as `skipped_unknown_types` in their existing result objects.
 
 ## Reading content snapshots
 
-`query` and MCP `query_events` do not return `content.*` when no type filter is supplied. Request `content.snapshot` or `content.*` explicitly, preferably with a narrow time range and small limit. Other event families may be requested alongside it. `export` is a backup surface and includes every type in every format by default; use `--types` to narrow it.
+`query` and MCP `query_events` do not return `content.*` when no type filter is supplied. Request `content.snapshot` or `content.*` explicitly, preferably with a narrow time range and small limit. The results contain snapshots from both sources; tell them apart by `source`. Other event families may be requested alongside it. `export` is a backup surface and includes every type in every format by default; use `--types` to narrow it.
 
 Timeline output never includes snapshot bodies. Each session reports how many snapshots belong to it: Markdown adds `Content snapshots: N` after activity lines and omits the line for zero, while JSON always includes `content_snapshots`, including zero.
 

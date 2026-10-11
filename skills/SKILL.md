@@ -5,7 +5,7 @@ description: Query what the user did on this computer outside the current conver
 
 # Zanei
 
-Zanei records the user's activity on this machine as OS-level events — app switches, window titles, UI interactions, Chrome URLs. Everything stays in a local store and is deleted after about 48 hours by default. There are no screenshots. Typed/copied content and Accessibility text shown in windows are separate opt-ins.
+Zanei records the user's activity on this machine as OS-level events — app switches, window titles, UI interactions, Chrome URLs. Everything stays in a local store and is deleted after about 48 hours by default. Typed/copied content and text shown in windows (content snapshots) are separate opt-ins. Zanei never stores screenshots or video. When content snapshots are on, Zanei asks once for the macOS Screen Recording permission. If you grant it, Zanei reads a window's text from its pixels whenever Accessibility exposes too little of it: it captures that one window in memory, recognizes the text on this Mac with Apple Vision, keeps only the text and its on-screen layout (position and colors), and discards the image immediately. Images are never written to disk or sent anywhere. Without Screen Recording, this fallback is off.
 
 ## When to use
 
@@ -31,6 +31,7 @@ Zanei records the user's activity on this machine as OS-level events — app swi
 - Health signals are separate things: `degraded` is current health and clears on recovery; `events_dropped` counts real delivery loss only; `collector_failures` is cumulative history, not a current failure.
 - Even with content capture on, typed-text diffs come only from fields Accessibility can classify as safe text fields. Many Electron/web apps expose unclassifiable fields, so their typed text is absent by design — but text the user copies there is captured, and IME-committed text arrives as `ui.value` diffs rather than `input.key`. Password fields and Chrome Incognito bodies are never captured.
 - `ui.value` diffs are additions, not a transcript: an IME rewrites the tail of a field on commit, so concatenating them can produce wording the user never wrote. Use them for what the user was writing about, and never quote them verbatim. For exact wording, look for a `content.snapshot` of the same window just afterwards — the app renders entered or sent text there — keeping in mind it exists only with that opt-in on, only for apps in its scope, and only for what was visible.
+- A `content.snapshot` with `source: "macos.ocr"` was read from the window's pixels by on-device text recognition because Accessibility exposed too little. Its text can contain recognition errors and icon noise, so do not quote it as exact wording; `data.lines` gives each line's position and colors, which help tell apart, for example, the user's own messages from other people's. Prefer `source: "macos.ax"` snapshots for exact quotes.
 - Content snapshots can contain messages and documents written by other people as well as text the user typed that is visible on screen. Treat them as more sensitive than ordinary activity metadata.
 
 ## Setup and permissions
