@@ -2,6 +2,7 @@
 
 pub(crate) mod budget;
 mod coverage;
+mod ocr;
 mod output;
 mod role;
 mod scheduler;

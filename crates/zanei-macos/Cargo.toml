@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 zanei-collector = { path = "../zanei-collector" }
 zanei-core = { path = "../zanei-core" }
+serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 
