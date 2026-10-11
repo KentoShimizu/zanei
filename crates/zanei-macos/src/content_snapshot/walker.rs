@@ -299,7 +299,12 @@ fn visit_node<'a, N: SnapshotNode>(
         // one extra read for the childless part of the blank-slot rule.
         match context.read_node(is_root, || node.children_count())? {
             NodeRead::Value(count) => Some(count),
-            NodeRead::Degraded => None,
+            NodeRead::Degraded => {
+                // An otherwise blank node is not yet counted as degraded.
+                context.degraded_nodes = context.degraded_nodes.saturating_add(1);
+                walked.degraded = true;
+                None
+            }
         }
     } else {
         None

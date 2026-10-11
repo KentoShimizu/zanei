@@ -42,6 +42,7 @@ pub(super) struct FakeNode {
     children: Vec<Self>,
     fail_safe_read: bool,
     fail_value_read: bool,
+    fail_children_count: bool,
     numeric_value: bool,
     illegal_leaf_range: bool,
     root_invalid: bool,
@@ -65,6 +66,7 @@ impl FakeNode {
             children: Vec::new(),
             fail_safe_read: false,
             fail_value_read: false,
+            fail_children_count: false,
             numeric_value: false,
             illegal_leaf_range: false,
             root_invalid: false,
@@ -204,6 +206,9 @@ impl SnapshotNode for FakeNode {
         self.metrics
             .children_count_reads
             .fetch_add(1, Ordering::Relaxed);
+        if self.fail_children_count {
+            return Err(SnapshotReadError::Contract("AXChildren count failed"));
+        }
         Ok(self.children.len())
     }
 
@@ -628,4 +633,27 @@ fn text_areas_are_blank_slots_only_when_empty_and_childless() {
     // walk never reads.
     let attachment = placed("AXImage", 0.0, 50.0, 100.0, 100.0);
     assert_eq!(editor(None, vec![attachment]).blank_coverage, 0.0);
+}
+
+#[test]
+fn failed_child_count_of_a_blank_text_area_is_degraded_not_blank() {
+    // Catches a timed-out child-count read vanishing from degraded counts
+    // while the text area silently drops out of coverage.
+    let mut root = placed("AXWindow", 0.0, 0.0, 800.0, 600.0);
+    let mut area = placed("AXTextArea", 0.0, 0.0, 800.0, 600.0);
+    area.fail_children_count = true;
+    root.children = vec![area];
+    let clock = FakeClock(Arc::clone(&root.elapsed_micros));
+
+    let (output, analysis) = walk_snapshot_analyzed(
+        root,
+        frame(0.0, 0.0, 800.0, 600.0),
+        generous_budget(),
+        &clock,
+        || false,
+    )
+    .expect("fake walk");
+
+    assert_eq!(output.degraded_nodes, 1);
+    assert_eq!(analysis.blank_coverage, 0.0);
 }
