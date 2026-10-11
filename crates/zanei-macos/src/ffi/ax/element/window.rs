@@ -66,19 +66,19 @@ fn application_window(
     };
     let application = create_application(pid)?;
     match owning {
-        OwningWindow::Focused { recorded } => {
-            let focused = copy_element(application.as_ptr(), "AXFocusedUIElement")?;
-            focused_element_window(
-                focused.is_some_and(|focused| cf_equal(focused.as_ptr(), element)),
-                || {
-                    copy_element(application.as_ptr(), "AXFocusedWindow")?
-                        .map(|window| window_snapshot(window.as_ptr()))
-                        .transpose()
-                        .map(Option::flatten)
-                },
-                recorded,
-            )
-        }
+        OwningWindow::Focused { recorded } => focused_element_window(
+            || {
+                Ok(copy_element(application.as_ptr(), "AXFocusedUIElement")?
+                    .is_some_and(|focused| cf_equal(focused.as_ptr(), element)))
+            },
+            || {
+                copy_element(application.as_ptr(), "AXFocusedWindow")?
+                    .map(|window| window_snapshot(window.as_ptr()))
+                    .transpose()
+                    .map(Option::flatten)
+            },
+            recorded,
+        ),
         OwningWindow::UnderPoint(point) => {
             let on_screen = on_screen_windows(i64::from(pid));
             let Some(clicked) = clicked_window(&on_screen, point) else {
@@ -93,16 +93,24 @@ fn application_window(
 }
 
 /// The application's focused window holds only its focused element.
+///
+/// Focus is checked before and after the window read, so a focus change in between
+/// cannot bind the element to the newly focused window. An element that is not
+/// focused across the read keeps its recorded window, or stays unresolved when none
+/// was recorded.
 fn focused_element_window(
-    still_focused: bool,
+    mut is_focused: impl FnMut() -> Result<bool, NativeAxError>,
     focused_window: impl FnOnce() -> Result<Option<NativeWindow>, NativeAxError>,
     recorded: Option<NativeWindow>,
 ) -> Result<Option<NativeWindow>, NativeAxError> {
-    if still_focused {
-        focused_window()
-    } else {
-        Ok(recorded)
+    if !is_focused()? {
+        return Ok(recorded);
     }
+    let window = focused_window()?;
+    if !is_focused()? {
+        return Ok(recorded);
+    }
+    Ok(window)
 }
 
 /// Returns the normal-layer window that received a click at `point`.
@@ -390,7 +398,7 @@ mod tests {
             || surface_changes.set(surface_changes.get() + 1),
             || {
                 focused_element_window(
-                    false,
+                    || Ok(false),
                     || panic!("the focused window holds another element"),
                     recorded.clone(),
                 )
@@ -417,8 +425,28 @@ mod tests {
 
     #[test]
     fn focused_element_lives_in_the_focused_window() {
-        let resolved = focused_element_window(true, || Ok(titled("main.rs")), titled(".env"));
+        let resolved =
+            focused_element_window(|| Ok(true), || Ok(titled("main.rs")), titled(".env"));
 
         assert_eq!(resolved.ok().flatten(), titled("main.rs"));
+    }
+
+    #[test]
+    fn focus_change_during_the_window_read_does_not_bind_the_new_window() {
+        // Focus moves to another window between the element check and the window read.
+        for recorded in [None, titled(".env")] {
+            let checks = Cell::new(0);
+            let resolved = focused_element_window(
+                || {
+                    checks.set(checks.get() + 1);
+                    Ok(checks.get() == 1)
+                },
+                || Ok(titled("main.rs")),
+                recorded.clone(),
+            );
+
+            assert_eq!(checks.get(), 2);
+            assert_eq!(resolved.ok().flatten(), recorded);
+        }
     }
 }
