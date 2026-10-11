@@ -14,6 +14,9 @@ pub enum Capability {
     AutomateBrowser,
     /// Automate Safari to observe its current state.
     AutomateSafari,
+    /// Capture a window's pixels for text recognition. Optional: never required, so it
+    /// never affects readiness.
+    CaptureScreen,
 }
 
 impl Capability {
@@ -40,6 +43,8 @@ pub struct DaemonCapabilities {
     automate_browser: CapabilityState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automate_safari: Option<CapabilityState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capture_screen: Option<CapabilityState>,
 }
 
 impl DaemonCapabilities {
@@ -56,6 +61,7 @@ impl DaemonCapabilities {
             observe_input,
             automate_browser,
             automate_safari: None,
+            capture_screen: None,
         }
     }
 
@@ -65,6 +71,20 @@ impl DaemonCapabilities {
         self
     }
 
+    /// Records the optional screen-capture state, which only a recorder with content
+    /// snapshots on reports.
+    #[must_use]
+    pub const fn with_capture_screen(mut self, state: CapabilityState) -> Self {
+        self.capture_screen = Some(state);
+        self
+    }
+
+    /// `None` when this snapshot does not report screen capture.
+    #[must_use]
+    pub const fn capture_screen(&self) -> Option<CapabilityState> {
+        self.capture_screen
+    }
+
     #[must_use]
     pub const fn state(&self, capability: Capability) -> CapabilityState {
         match capability {
@@ -72,6 +92,10 @@ impl DaemonCapabilities {
             Capability::ObserveInput => self.observe_input,
             Capability::AutomateBrowser => self.automate_browser,
             Capability::AutomateSafari => match self.automate_safari {
+                Some(state) => state,
+                None => CapabilityState::Deferred,
+            },
+            Capability::CaptureScreen => match self.capture_screen {
                 Some(state) => state,
                 None => CapabilityState::Deferred,
             },
@@ -94,5 +118,47 @@ impl DaemonCapabilities {
                         && self.state(*capability) == CapabilityState::Deferred)
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_screen_capture_never_affects_readiness_and_round_trips() {
+        // Catches the optional permission leaking into `permissions_ok` / `start`'s exit
+        // code, and a heartbeat losing or inventing the reported state.
+        let required = BTreeSet::from([Capability::ReadAccessibilityTree]);
+        let capabilities = DaemonCapabilities::new(
+            required.clone(),
+            CapabilityState::Available,
+            CapabilityState::Deferred,
+            CapabilityState::Deferred,
+        )
+        .with_capture_screen(CapabilityState::ActionRequired);
+
+        assert!(capabilities.ready());
+        assert_eq!(capabilities.ready_for(&required), Some(true));
+        let json = serde_json::to_value(&capabilities).expect("serialize capabilities");
+        assert_eq!(json["capture_screen"], "action_required");
+        let read: DaemonCapabilities =
+            serde_json::from_value(json).expect("deserialize capabilities");
+        assert_eq!(read.capture_screen(), Some(CapabilityState::ActionRequired));
+
+        let unreported: DaemonCapabilities = serde_json::from_value(serde_json::json!({
+            "required": ["read_accessibility_tree"],
+            "read_accessibility_tree": "available",
+            "observe_input": "deferred",
+            "automate_browser": "deferred"
+        }))
+        .expect("heartbeat without screen capture");
+        assert_eq!(unreported.capture_screen(), None);
+        assert!(
+            serde_json::to_value(&unreported)
+                .expect("serialize")
+                .get("capture_screen")
+                .is_none()
+        );
     }
 }
