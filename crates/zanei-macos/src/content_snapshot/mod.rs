@@ -1,6 +1,7 @@
 //! Dedicated worker for opt-in, frontmost-window content snapshots.
 
 pub(crate) mod budget;
+mod coverage;
 mod output;
 mod role;
 mod scheduler;
