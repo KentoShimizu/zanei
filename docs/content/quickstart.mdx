@@ -52,8 +52,9 @@ missing (details in the [permissions guide](/guides/permissions)):
 zanei doctor
 ```
 
-Recording the Accessibility text shown in the frontmost window is a separate opt-in and stays off
-by default. First narrow `[filter.content_snapshot]` with `include_only_apps` / `include_only_websites`
+Recording the text shown in the frontmost window is a separate opt-in and stays off by default. Zanei
+reads it from Accessibility, or with the text-recognition (OCR) fallback when Screen Recording is
+granted (see the [privacy model](/guides/privacy#content-snapshots-are-opt-in)). First narrow `[filter.content_snapshot]` with `include_only_apps` / `include_only_websites`
 (use `zanei apps` to choose apps), then run `zanei config set capture.content_snapshot true`; it shows
 the current scope and asks for confirmation (see [configuration](/reference/config) and [filters](/guides/filters)).
 

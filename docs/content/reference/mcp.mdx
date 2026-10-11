@@ -91,7 +91,7 @@ Returns raw events matching the given conditions. Equivalent to `zanei query`. F
 
 `truncated: true` when `limit` was exceeded. `skipped_unknown_types` counts stored rows skipped because this binary does not recognize their type. Event contents are privacy-processed at capture time (secure-field exclusion, redaction); the MCP layer does not add back anything that was excluded.
 
-Content snapshots can be as large as 32 KiB and may contain messages or documents written by other people. Request them only with an explicit type, a narrow `since`/`until` range, and a small `limit`. Do not send their bodies outside the current task unless the user explicitly asks.
+Content snapshots can be as large as 32 KiB of text, plus up to 64 KiB of line layout in `data.lines` for OCR snapshots (see the [event reference](/reference/events#field-size-limits)), and may contain messages or documents written by other people. Request them only with an explicit type, a narrow `since`/`until` range, and a small `limit`. Do not send their bodies outside the current task unless the user explicitly asks.
 
 ### `get_status`
 
@@ -111,7 +111,7 @@ Lightweight check for agents: is recording running? A subset of `zanei status`.
   "collector_failures": { "eventtap": 1 },
   "retention_hours": 48,
   "oldest_event_ts": "2026-08-14T09:00:00Z",
-  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false, "ocr": null },
   "permissions_ok": true
 }
 ```
@@ -122,6 +122,7 @@ Lightweight check for agents: is recording running? A subset of `zanei status`.
 | `degraded` | Current collector or runtime degradation by component; removed when the responsible site recovers. AX reasons classify the current failure by stable phase and kind, include the native operation and numeric code when available, and report the number of unresolved PID/operation sites when greater than one. A success clears only its matching site |
 | `collector_failures` | Cumulative collector operation failures by collector; a nonzero value alone does not mean the collector is currently degraded |
 | `capture.content_snapshot` | Whether frontmost-window content snapshots are enabled. Snapshots exist only when this is `true`; scope details are available through CLI `zanei filter show` |
+| `capture.ocr` | Text-recognition fallback state, with the same values and null conditions as `capture.ocr` in [`zanei status --json`](/reference/cli#status): `"on"`, `"off"`, `"unavailable"`, or null |
 | `permissions_ok` | The running recorder's own permission result while its heartbeat is fresh; a local probe when no recorder is running |
 
 An agent that sees `running: false` can tell the user that activity is not currently being recorded, instead of answering from nothing.

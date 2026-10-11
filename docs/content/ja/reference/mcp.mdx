@@ -91,7 +91,7 @@ ChatGPT は対象外です。ChatGPT のコネクタは remote HTTPS の MCP サ
 
 `limit` を超えた場合は `truncated: true`。`skipped_unknown_types` は、この binary が type を認識できず skip した store row の件数です。イベント内容は捕捉時点でプライバシー処理（secure field 除外・redaction）済みのものが格納されており、MCP 層で除外済みの情報が復元されることはありません。
 
-Content snapshot は 1 件 32 KiB までで、他人が書いた message や document を含み得ます。明示的な type、狭い `since` / `until`、小さい `limit` でだけ取得してください。ユーザーの明示要求なしに本文を現在の task 外へ送ってはいけません。
+Content snapshot は 1 件あたりテキストが 32 KiB まで、OCR による snapshot ではさらに `data.lines` の行配置が 64 KiB まで加わります（[イベントリファレンス](/ja/reference/events#field-の-byte-上限)）。他人が書いた message や document を含み得ます。明示的な type、狭い `since` / `until`、小さい `limit` でだけ取得してください。ユーザーの明示要求なしに本文を現在の task 外へ送ってはいけません。
 
 ### `get_status`
 
@@ -111,7 +111,7 @@ agent 向けの軽量チェック：記録は動いているか。`zanei status`
   "collector_failures": { "eventtap": 1 },
   "retention_hours": 48,
   "oldest_event_ts": "2026-08-14T09:00:00Z",
-  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false, "ocr": null },
   "permissions_ok": true
 }
 ```
@@ -122,6 +122,7 @@ agent 向けの軽量チェック：記録は動いているか。`zanei status`
 | `degraded` | component ごとの現在の collector / runtime 劣化状態。責任を持つ site の回復時に削除される。AX reason は現在の failure を安定した phase / kind で分類し、取得できる場合は native operation と数値 code、未解消の PID / operation site が複数ならその件数を報告する。成功時に削除するのは対応する site だけ |
 | `collector_failures` | collector ごとの累積処理失敗回数。非ゼロであることだけでは現在劣化中を意味しない |
 | `capture.content_snapshot` | 前面ウィンドウの content snapshot が有効か。snapshot が存在するのは `true` のときだけ。scope 詳細は CLI の `zanei filter show` で確認 |
+| `capture.ocr` | 文字認識フォールバックの状態。値と null の条件は [`zanei status --json`](/ja/reference/cli#status) の `capture.ocr` と同じで、`"on"`・`"off"`・`"unavailable"`・null のいずれか |
 | `permissions_ok` | heartbeat が新鮮な間は実行中 recorder 自身の権限判定。recorder 不在時はローカル probe の結果 |
 
 `running: false` を見た agent は、推測で答えるのではなく「PC 操作履歴は現在記録されていない」とユーザーに伝えられます。

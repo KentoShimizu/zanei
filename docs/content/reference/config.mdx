@@ -34,7 +34,7 @@ Use [`zanei config set`](/reference/cli#config) for `capture.text_content`, `cap
 [capture]
 sources = ["app", "window", "ui", "input", "browser"]
 text_content = false            # content capture is an explicit opt-in
-content_snapshot = false        # frontmost-window Accessibility text is a separate opt-in
+content_snapshot = false        # text shown in the frontmost window is a separate opt-in
 
 [filter]                        # capture-time filters: the privacy boundary (applied before the store)
 exclude_apps = ["1Password", "Keychain Access"]   # deny list (bundle_id recommended); defaults ship built-in
@@ -86,7 +86,7 @@ Validation runs after omitted settings are filled with their defaults. Only the 
 | --- | --- | --- |
 | `sources` | `["app", "window", "ui", "input", "browser"]` | Which event families to capture. Without `browser`, browser Automation is required for eligible content snapshots or when `text_content` is enabled with `ui` or `input`; `window` alone does not require it (see [permissions](/guides/permissions)) |
 | `text_content` | `false` | Capture typed/field content (`ui.value`, `input.key`, clipboard contents). Off by default; see the [privacy model](/guides/privacy) |
-| `content_snapshot` | `false` | Capture Accessibility text shown in the frontmost window as `content.snapshot`. Independent from `sources` and `text_content`; even with `window` absent from `sources`, this opt-in requires Accessibility and can record snapshots. Restart required |
+| `content_snapshot` | `false` | Capture the text shown in the frontmost window as `content.snapshot`, from Accessibility or the text-recognition (OCR) fallback when Screen Recording is granted (see the [privacy model](/guides/privacy#content-snapshots-are-opt-in)). Independent from `sources` and `text_content`; even with `window` absent from `sources`, this opt-in requires Accessibility and can record snapshots. Restart required |
 
 ## `[filter]`
 

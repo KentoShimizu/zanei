@@ -43,7 +43,7 @@ zanei stop && zanei start
 zanei doctor
 ```
 
-前面ウィンドウに表示された Accessibility text の記録も設定できます。既定はオフです。先に `[filter.content_snapshot]` の `include_only_apps` / `include_only_websites` で scope を絞り（アプリ選択には `zanei apps`）、それから `zanei config set capture.content_snapshot true` を実行すると、現在の scope が表示され確認を求められます（詳細は[設定](/ja/reference/config)と[フィルタ](/ja/guides/filters)）。
+前面ウィンドウに表示されたテキストの記録も設定できます。既定はオフです。テキストは Accessibility から読み、画面収録が許可されていれば文字認識（OCR）のフォールバックも使います（[プライバシーモデル](/ja/guides/privacy#content-snapshot-は-opt-in)）。先に `[filter.content_snapshot]` の `include_only_apps` / `include_only_websites` で scope を絞り（アプリ選択には `zanei apps`）、それから `zanei config set capture.content_snapshot true` を実行すると、現在の scope が表示され確認を求められます（詳細は[設定](/ja/reference/config)と[フィルタ](/ja/guides/filters)）。
 
 </Step>
 <Step title="タイムラインを取得する">
