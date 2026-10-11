@@ -58,6 +58,23 @@ enabled and the source window is allowed for text capture; this path does not re
 paste, those text-capture conditions apply to the destination window and AX must also classify the
 destination as a text field. If it cannot, the paste event is recorded with a `null` body.
 
+## Is typed text captured in apps that do not announce text changes?
+
+Yes, when the app exposes the focused field's value to macOS Accessibility. Some apps let assistive
+clients read a text field but post no notifications when focus moves to it or its text changes.
+Zanei reads the focused field shortly after your keystrokes, Return, clicks, and window switches,
+and never periodically while you are idle. The field then gets `ui.focus` and `ui.value` events with
+the same authorization, filters, and redaction as any other field. With `capture.text_content` off,
+`ui.value` records only the length.
+
+This is best effort:
+
+- Text typed and submitted, for example with Return, before Zanei reads the field can be lost. Text
+  Zanei has already read is kept, even when the app clears the field after sending.
+- Input made before Zanei knows the field is not recorded as text. The first value Zanei reads is
+  the starting point.
+- Only the focused field is read this way, not other text shown in the window.
+
 ## Can I read the store directly?
 
 The live store is encrypted with [SQLCipher](https://www.zetetic.net/sqlcipher/) (AES-256). The key lives in your login Keychain as "Zanei store key" and never leaves this Mac, so a copy of the file in a backup, a sync folder, or on another machine cannot be read without it.

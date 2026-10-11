@@ -1,9 +1,10 @@
-//! Input-driven re-resolution of the focused field.
+//! Input-driven re-resolution and value sampling of the focused field.
 //!
 //! Some applications expose a readable focused text field but post neither
 //! `AXFocusedUIElementChanged` nor `AXValueChanged` for it. After user input the runtime asks the
-//! observer to re-read the application's focused element so such a field enters the same
-//! focus lifecycle as a notifying one.
+//! observer to re-read the application's focused element, and the value of a field that has not
+//! proven that it notifies, so such a field enters the same focus and value lifecycle as a
+//! notifying one.
 
 use std::time::Instant;
 
@@ -11,12 +12,26 @@ use time::OffsetDateTime;
 
 use super::AppObserver;
 use crate::{
+    CaptureDecision, CapturePolicy,
     ax::health::AxRecoverySite,
     ffi::ax::{
-        NativeAxError, NativeAxEvent, NativeAxObservation, cf::OwnedCf, element::copy_element,
+        NativeAxError, NativeAxEvent, NativeAxObservation, NativeWindow,
+        cf::{CfRef, OwnedCf},
+        element::{ValueSnapshot, capture_value_snapshot, copy_element},
     },
+    focused_field::FieldClass,
     text_capture::InputAuthorizations,
 };
+use zanei_core::schema::App;
+
+/// The read that produced a value observation of the focused target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ValueRead {
+    /// A matched native `AXValueChanged` delivery.
+    Notification,
+    /// An input-driven read of a field that has not delivered `AXValueChanged`.
+    Sample,
+}
 
 /// Origin of a focus resolution that is not an input-driven pull.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,12 +60,13 @@ impl From<FocusSource> for Announcement {
     }
 }
 
-/// Announcement state of one focused-target generation. A new generation starts as
-/// `Internal` unless the install path records how it was announced.
+/// Pull state of one focused-target generation. A new generation starts as `Internal` unless
+/// the install path records how it was announced, and without a native value delivery.
 #[derive(Default)]
 pub(super) struct FocusPullState {
     generation: u64,
     announcement: Announcement,
+    value_delivered: bool,
 }
 
 impl FocusPullState {
@@ -59,7 +75,14 @@ impl FocusPullState {
         *self = Self {
             generation,
             announcement,
+            value_delivered: false,
         };
+    }
+
+    /// Records a matched native `AXValueChanged` delivery: the field notifies, so pulls stop
+    /// reading its value for the rest of the generation.
+    pub(super) fn value_delivered(&mut self, generation: u64) {
+        self.at(generation).value_delivered = true;
     }
 
     /// The current target was resolved again without a pull. Returns whether the focus event is
@@ -71,7 +94,7 @@ impl FocusPullState {
         source: FocusSource,
         class_changed: bool,
     ) -> bool {
-        let announcement = self.announcement(generation);
+        let announcement = &mut self.at(generation).announcement;
         let previous = *announcement;
         if source == FocusSource::Notification {
             *announcement = Announcement::Native;
@@ -82,7 +105,7 @@ impl FocusPullState {
     /// The current target was resolved again by a pull. Returns whether the focus is announced
     /// publicly; otherwise it is only re-published internally.
     fn pulled(&mut self, generation: u64, has_target: bool) -> bool {
-        let announcement = self.announcement(generation);
+        let announcement = &mut self.at(generation).announcement;
         let announce = has_target && *announcement == Announcement::Internal;
         if announce {
             *announcement = Announcement::Sampled;
@@ -90,12 +113,39 @@ impl FocusPullState {
         announce
     }
 
-    fn announcement(&mut self, generation: u64) -> &mut Announcement {
+    fn at(&mut self, generation: u64) -> &mut Self {
         if self.generation != generation {
             self.installed(generation, Announcement::Internal);
         }
-        &mut self.announcement
+        self
     }
+}
+
+/// Reads the value snapshot of the focused element; injected so tests avoid native AX reads.
+pub(super) trait CaptureValue:
+    FnOnce(
+    CfRef,
+    &mut Option<NativeWindow>,
+    &CapturePolicy,
+    &App,
+    bool,
+    bool,
+    &mut dyn FnMut(),
+) -> (ValueSnapshot, Option<CaptureDecision>)
+{
+}
+
+impl<F> CaptureValue for F where
+    F: FnOnce(
+        CfRef,
+        &mut Option<NativeWindow>,
+        &CapturePolicy,
+        &App,
+        bool,
+        bool,
+        &mut dyn FnMut(),
+    ) -> (ValueSnapshot, Option<CaptureDecision>)
+{
 }
 
 impl AppObserver {
@@ -111,6 +161,9 @@ impl AppObserver {
         self.pull_focused_field_with(
             trigger,
             || copy_element(application, "AXFocusedUIElement"),
+            |element, window, policy, app, enabled, secure, changed| {
+                capture_value_snapshot(element, window, policy, app, enabled, secure, changed)
+            },
             now,
             observed_at,
             secure_input,
@@ -118,10 +171,12 @@ impl AppObserver {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn pull_focused_field_with(
         &mut self,
         trigger: &'static str,
         resolve: impl FnOnce() -> Result<Option<OwnedCf>, NativeAxError>,
+        capture: impl CaptureValue,
         now: Instant,
         observed_at: OffsetDateTime,
         secure_input: bool,
@@ -133,13 +188,13 @@ impl AppObserver {
             Err(error) => {
                 // A failed read is neither focus loss nor an empty field: keep the target, its
                 // generation and any pending value, and retry on the next input.
-                trace_pull(pid, trigger, "error");
+                trace_pull(pid, trigger, "discovery", "error");
                 self.record_native(AxRecoverySite::FocusedElement, &error);
                 return Vec::new();
             }
         };
         if !self.same_value_target(target.as_ref()) {
-            trace_pull(pid, trigger, "changed");
+            trace_pull(pid, trigger, "discovery", "changed");
             let events = match self.install_focused_target(
                 target,
                 Announcement::Sampled,
@@ -156,18 +211,47 @@ impl AppObserver {
             };
             return events.into_iter().map(NativeAxObservation::from).collect();
         }
-        trace_pull(pid, trigger, "same");
+        trace_pull(pid, trigger, "discovery", "same");
         self.recover(AxRecoverySite::FocusedElement);
         let event = self.focus_event(observed_at);
+        let generation = self.focused_target.generation();
         let has_target = self.focused_target.current().is_some();
-        if self
-            .focus_pull
-            .pulled(self.focused_target.generation(), has_target)
-        {
-            vec![event.into()]
+        let mut observations = vec![if self.focus_pull.pulled(generation, has_target) {
+            event.into()
         } else {
-            vec![event.internalize_focus()]
+            event.internalize_focus()
+        }];
+        if self.samples_value() {
+            let events = self.value_changed_events_with(
+                ValueRead::Sample,
+                now,
+                observed_at,
+                secure_input,
+                authorizations,
+                capture,
+                Self::reconcile_current_value_notification,
+            );
+            trace_pull(
+                pid,
+                trigger,
+                "value",
+                if events.is_empty() { "none" } else { "emitted" },
+            );
+            observations.extend(events.into_iter().map(NativeAxObservation::from));
         }
+        observations
+    }
+
+    /// Whether a pull reads the current target's value: only until the generation proves that
+    /// it notifies. A newly installed target is not sampled; its install read is the baseline.
+    /// Safe non-text targets are not read; a text target whose class was degraded by Secure
+    /// Input or a failed read is, so the next read can restore it.
+    fn samples_value(&mut self) -> bool {
+        let generation = self.focused_target.generation();
+        self.focused_target
+            .current()
+            .is_some_and(|target| target.context.field_class != FieldClass::KnownSafeNonText)
+            && !self.focus_pull.at(generation).value_delivered
     }
 
     /// A focus read or install failure clears the target, as focus can no longer be attributed.
@@ -188,11 +272,12 @@ impl AppObserver {
     }
 }
 
-fn trace_pull(pid: i32, trigger: &'static str, result: &'static str) {
+fn trace_pull(pid: i32, trigger: &'static str, read: &'static str, result: &'static str) {
     crate::trace::trace!(
-        "component=ax phase=pull action=run pid={} trigger={} read=discovery result={}",
+        "component=ax phase=pull action=run pid={} trigger={} read={} result={}",
         pid,
         trigger,
+        read,
         result
     );
 }

@@ -1080,32 +1080,32 @@ fn trace_shaped_window_cases_preserve_only_authorized_deltas() {
                 Step::Observe {
                     at_ms: 600,
                     generation: 1,
-                    value: "Ab",
+                    value: "Abc",
                 },
                 Step::Observe {
                     at_ms: 1_100,
                     generation: 1,
-                    value: "Ab",
+                    value: "Abcd",
                 },
                 Step::Observe {
                     at_ms: 1_600,
                     generation: 1,
-                    value: "Ab",
+                    value: "Abcde",
                 },
                 Step::Observe {
                     at_ms: 2_100,
                     generation: 1,
-                    value: "Ab",
+                    value: "Abcdef",
                 },
                 Step::Observe {
                     at_ms: 2_600,
                     generation: 1,
-                    value: "Ab",
+                    value: "Abcdefg",
                 },
                 Step::Observe {
                     at_ms: 3_001,
                     generation: 1,
-                    value: "Ab private",
+                    value: "Abcdefg private",
                 },
                 Step::Reserve {
                     at_ms: 3_100,
@@ -1115,13 +1115,13 @@ fn trace_shaped_window_cases_preserve_only_authorized_deltas() {
                 Step::Observe {
                     at_ms: 3_200,
                     generation: 1,
-                    value: "Ab privatez",
+                    value: "Abcdefg privatez",
                 },
             ],
             flush_at_ms: 4_200,
             expected: ValueEmission {
                 element_value: None,
-                value_len: Some(11),
+                value_len: Some(16),
                 text: Some("z".to_owned()),
                 capture_decision: None,
             },
@@ -1531,4 +1531,192 @@ fn activity_never_authorizes_and_never_fills_authorization_history() {
     }
 
     assert!(authorizations.matching_for_test(7, 1, now));
+}
+
+fn observe_from(
+    capture: &mut ValueCapture,
+    sampled: bool,
+    observation: ValueObservation,
+    authorizations: &mut InputAuthorizations,
+) -> Option<ValueEmission> {
+    if sampled {
+        capture.observe_sample(observation, authorizations)
+    } else {
+        capture.observe(observation, authorizations)
+    }
+}
+
+// Bug: a message sent right after typing is cleared inside the same batch, so "abc" and "" are
+// coalesced and measured as "" against the old baseline, and the typed text is never recorded.
+#[test]
+fn clearing_a_field_emits_the_text_typed_before_the_clear() {
+    for sampled in [false, true] {
+        let now = Instant::now();
+        let (mut capture, mut authorizations) = authorized_capture(7, 1, now, "");
+        let typed = observation(7, 1, now + Duration::from_millis(10), "abc");
+        assert_eq!(
+            observe_from(&mut capture, sampled, typed, &mut authorizations),
+            None
+        );
+
+        let cleared_at = now + Duration::from_millis(20);
+        let typed = observe_from(
+            &mut capture,
+            sampled,
+            observation(7, 1, cleared_at, ""),
+            &mut authorizations,
+        )
+        .expect("the clear emits the typed text first");
+
+        assert_eq!(typed.text.as_deref(), Some("abc"), "sampled={sampled}");
+        assert_eq!(
+            capture.take_due(cleared_at + VALUE_DEBOUNCE, &mut authorizations),
+            Some(ValueEmission {
+                element_value: None,
+                value_len: Some(0),
+                text: None,
+                capture_decision: None,
+            })
+        );
+    }
+}
+
+// Bug: text typed after a clear in the same batch is measured against the text that was
+// cleared ("hello" to "hi" yields nothing, "hello" to "help me" yields "p me"), or the empty
+// base lets an unauthorized later value surface.
+#[test]
+fn text_after_a_clear_is_measured_from_empty_and_stays_authorized() {
+    for next in ["hi", "help me"] {
+        let now = Instant::now();
+        let (mut capture, mut authorizations) = authorized_capture(7, 1, now, "hello");
+        let _ = capture.observe(
+            observation(7, 1, now + Duration::from_millis(10), ""),
+            &mut authorizations,
+        );
+        let _ = capture.observe(
+            observation(7, 1, now + Duration::from_millis(20), next),
+            &mut authorizations,
+        );
+        let emission = capture
+            .take_due(
+                now + Duration::from_millis(20) + VALUE_DEBOUNCE,
+                &mut authorizations,
+            )
+            .expect("the batch emits");
+        assert_eq!(emission.text.as_deref(), Some(next));
+    }
+
+    let now = Instant::now();
+    let (mut capture, mut authorizations) = authorized_capture(7, 1, now, "hello");
+    let _ = capture.observe(
+        observation(7, 1, now + Duration::from_millis(10), ""),
+        &mut authorizations,
+    );
+    let (_unused_publisher, mut unauthorized) = input_authorization_channel();
+    let _ = capture.observe(
+        observation(7, 1, now + Duration::from_millis(20), "x"),
+        &mut unauthorized,
+    );
+    let emission = capture
+        .take_due(
+            now + Duration::from_millis(20) + VALUE_DEBOUNCE,
+            &mut authorizations,
+        )
+        .expect("the batch emits");
+    assert_eq!(emission.text, None);
+    assert_eq!(emission.value_len, Some(1));
+}
+
+// Bug: every read of an unchanged field after input stages a value, extends the debounce and
+// emits a no-op `ui.value`; a repeated identical notification does the same.
+#[test]
+fn an_unchanged_body_is_neither_staged_nor_extends_the_batch() {
+    let now = Instant::now();
+    let (mut capture, mut authorizations) = authorized_capture(7, 1, now, "abc");
+    for (sampled, at_ms) in [(true, 10), (false, 20)] {
+        let unchanged = observation(7, 1, now + Duration::from_millis(at_ms), "abc");
+        assert_eq!(
+            observe_from(&mut capture, sampled, unchanged, &mut authorizations),
+            None
+        );
+        assert!(!capture.has_pending(), "sampled={sampled}");
+    }
+
+    let typed_at = now + Duration::from_millis(100);
+    let _ = capture.observe_sample(observation(7, 1, typed_at, "abcd"), &mut authorizations);
+    for (sampled, at_ms) in [(true, 900), (false, 950)] {
+        let unchanged = observation(7, 1, now + Duration::from_millis(at_ms), "abcd");
+        let _ = observe_from(&mut capture, sampled, unchanged, &mut authorizations);
+    }
+
+    let emission = capture
+        .take_due(typed_at + VALUE_DEBOUNCE, &mut authorizations)
+        .expect("unchanged reads do not extend the debounce");
+    assert_eq!(emission.text.as_deref(), Some("d"));
+}
+
+// Bug: with text capture off every read of an unchanged field emits a count-only `ui.value`, or
+// the count comparison swallows a notification for an edit that keeps the length.
+#[test]
+fn equal_counts_are_ignored_for_reads_but_not_for_notifications() {
+    let now = Instant::now();
+    let (_unused_publisher, mut authorizations) = input_authorization_channel();
+    let mut capture = ValueCapture::new(false, None, FieldClass::KnownText(FieldKind::Text));
+    let counted = |at_ms: u64| ValueObservation {
+        value: None,
+        value_len: Some(3),
+        ..observation(7, 1, now + Duration::from_millis(at_ms), "")
+    };
+    let _ = capture.observe_sample(counted(0), &mut authorizations);
+    let first = capture
+        .take_due(now + VALUE_DEBOUNCE, &mut authorizations)
+        .expect("the first read is recorded");
+    assert_eq!(first.value_len, Some(3));
+
+    let _ = capture.observe_sample(counted(1_100), &mut authorizations);
+    assert!(!capture.has_pending());
+    let _ = capture.observe(counted(1_200), &mut authorizations);
+    assert!(capture.has_pending());
+}
+
+// Bug: an unchanged read skips the capture-binding check, so a pending body keeps a stale
+// Chrome version after the page changed under the same text.
+#[test]
+fn an_unchanged_body_under_a_new_chrome_version_restarts_the_batch() {
+    let now = Instant::now();
+    let filter = FilterConfig::default();
+    let (eligibility, tracker) = chrome_eligibility_channel(filter.clone());
+    let policy = CapturePolicy::new(tracker, filter, None);
+    let app = App {
+        name: "Google Chrome".to_owned(),
+        bundle_id: Some(CHROME_BUNDLE_ID.to_owned()),
+        pid: Some(7),
+    };
+    let decision_for = |url: &str| {
+        eligibility.observe(
+            7,
+            ChromeEligibilityObservation::Normal {
+                window_id: Some(11),
+                url: url.to_owned(),
+            },
+        );
+        policy.decision(PrivacyScope::TextContent, &app, Some(11), None)
+    };
+    let first_decision = decision_for("https://v1.example/");
+    let (mut capture, mut authorizations) = authorized_capture(7, 1, now, "A");
+    let mut first = observation(7, 1, now, "Ab");
+    first.capture_decision = Some(first_decision);
+    let _ = capture.observe(first, &mut authorizations);
+
+    let second_decision = decision_for("https://v2.example/");
+    let second_at = now + Duration::from_millis(10);
+    let mut second = observation(7, 1, second_at, "Ab");
+    second.capture_decision = Some(second_decision.clone());
+    let _ = capture.observe_sample(second, &mut authorizations);
+
+    let emission = capture
+        .take_due(second_at + VALUE_DEBOUNCE, &mut authorizations)
+        .expect("the restarted batch emits");
+    assert_eq!(emission.text, None);
+    assert_eq!(emission.capture_decision(), Some(&second_decision));
 }

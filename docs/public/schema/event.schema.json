@@ -230,7 +230,7 @@
               },
               "text": {
                 "type": ["string", "null"],
-                "description": "Newly added difference after redaction. Present only when capture.text_content is enabled and a keystroke or paste from the same app and focused-element generation has a value-change notification timestamp no more than 3 seconds after input. Authorization is not consumed on emission: the same non-consuming 3-second window can authorize multiple value-change notifications. Null for deletion, app or generation mismatch, expired or missing authorization, unavailable or secure input, and Chrome Incognito or website-filtered windows. The complete field value is never recorded."
+                "description": "Newly added difference after redaction. Present only when capture.text_content is enabled and a keystroke or paste from the same app and focused-element generation has a value observation timestamp no more than 3 seconds after input. Authorization is not consumed on emission: the same non-consuming 3-second window can authorize multiple value observations. Null for deletion, app or generation mismatch, expired or missing authorization, unavailable or secure input, and Chrome Incognito or website-filtered windows. The complete field value is never recorded."
               }
             }
           }

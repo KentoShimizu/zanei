@@ -39,6 +39,7 @@ If you opt in:
 - Chrome Incognito and website-filtered windows keep text-content bodies null. Window titles and interaction metadata can remain.
 - Chrome text and snapshot bodies are written only after Zanei confirms, from an observation made after the input, that the window still shows an allowed site. Text typed or shown immediately before switching to an excluded or Incognito tab is omitted.
 - Unknown UI elements do not provide `element.value`.
+- In apps that expose a field's value but post no change notifications, Zanei reads the focused field only shortly after your input, never periodically while you are idle. Input made before Zanei has found the field authorizes nothing; the first value it reads is the starting point.
 - `input.key.text` is null while an input method (IME) is active and when the input-source type is unknown; committed text can be captured only as an authorized `ui.value.data.text` difference.
 - Voice input does not itself open an authorization window because it has no recorded keystroke or paste trigger. If voice text is inserted while a 3-second window opened by a preceding recorded keystroke or paste for the same app and focused-element generation is still active, that text can be included in the authorized `ui.value.data.text` difference.
 - [Redactors](#redaction) replace recognizable matches for enabled rules; they do not make captured text anonymous.
