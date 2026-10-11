@@ -59,7 +59,7 @@ opt-in を有効にした場合の挙動は次のとおりです。
 - 任意の[画面収録権限](/ja/guides/permissions#画面収録)が許可されていて、macOS 14 以降であること
 - そのウィンドウのその snapshot で、本来内容を表示するための要素がウィンドウのかなりの部分を占めているのに、Accessibility にテキストを公開していないこと
 
-判定はアプリの一覧ではなく、Accessibility が公開する内容からウィンドウごとに行います。Accessibility でテキストを読めるウィンドウは、引き続き Accessibility を使います。文字認識が失敗した場合やテキストが見つからなかった場合は、フォールバックがないときと同じ Accessibility のテキストを記録します。OCR による snapshot は `source: "macos.ocr"` を持ち、各行の位置と色も記録します。認識したテキストには誤りが含まれることがあります。形式は[イベントリファレンス](/ja/reference/events#contentsnapshot-の詳細)で定義しています。
+フォールバックは Accessibility による snapshot と同じきっかけで動き、保存する snapshot どうしの間隔も同じです。前回認識した snapshot からウィンドウの画像が変わっていなければ、文字認識を省略し、新しいものは記録しません。判定はアプリの一覧ではなく、Accessibility が公開する内容からウィンドウごとに行います。Accessibility でテキストを読めるウィンドウは、引き続き Accessibility を使います。文字認識が失敗した場合やテキストが見つからなかった場合は、フォールバックがないときと同じ Accessibility のテキストを記録します。OCR による snapshot は `source: "macos.ocr"` を持ち、各行の位置と色も記録します。認識したテキストには誤りが含まれることがあります。形式は[イベントリファレンス](/ja/reference/events#contentsnapshot-の詳細)で定義しています。
 
 Content snapshot は入力内容の捕捉とも `capture.sources` とも独立しています。secure field の subtree と単行入力欄の値は読みません。Secure Input 中は snapshot を取りません。ただし、入力したテキストがウィンドウ内の別の場所や複数行のテキスト領域に表示されると含まれ得ます。他人が書いた message・document・その他の表示テキストも含み得ます。
 

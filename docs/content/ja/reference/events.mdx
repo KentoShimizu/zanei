@@ -28,7 +28,7 @@ Zanei が記録するすべてのイベントは、ソースによらず OS 非�
 
 | フィールド | 説明 |
 | --- | --- |
-| `v` | この event type と payload を解釈するために必要な最小 envelope version。既存 type は `1`。現在の `content.snapshot` event は `4` で、保持中の古い `content.snapshot` event は `2` または `3` のまま |
+| `v` | この event type と payload を解釈するために必要な最小 envelope version。既存 type は `1`。現在の `content.snapshot` event は `4`、ストアから読む保持中の旧 `content.snapshot` event は `2`。以前のリリースが出力した JSON の `3` も有効 |
 | `id` | ULID ベースのイベント ID。一意かつ時刻順ソート可能 |
 | `ts` | 実時刻タイムスタンプ（RFC3339、ミリ秒精度） |
 | `mono_ns` | 単調時計（ナノ秒）。実時刻が変わっても順序が保たれる |
@@ -99,7 +99,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `browser.navigate` | ✓ | — | `url`（size limit 適用後のみ null）、`tab_title`、`mode`（`"normal"` または `"unknown"`）、`transition`（`navigate`/`tab_switch`/null） |
 | `clipboard.copy` | ✓ / — | — | `origin`（`copy_shortcut`/`unknown`）、`content_kind`（`text`/`image`/`file`/`other`）、`size_bytes`、`text`。unknown origin は app/window 帰属と本文を持たない |
 | `clipboard.paste` | ✓ | — | `content_kind`、`size_bytes`、`text`、ペースト先の `field_kind` |
-| `content.snapshot` | ✓ | — | 現在の v4：`text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`cutoff`（打ち切り時は `time` / `nodes` / `bytes` / `stopped`、完了時は null）、`trigger`（`settle` / `refresh` / `focus_out`）、`source` が `macos.ocr` のときだけ `lines`（下記参照）。保持中の v3 event は `lines` を除く同じ field を持つ。保持中の旧 v2 event は代わりに `complete` を持ち、打ち切り理由は識別できない。保持中の v2・v3 の source は常に `macos.ax` |
+| `content.snapshot` | ✓ | — | 現在の v4：`text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`cutoff`（打ち切り時は `time` / `nodes` / `bytes` / `stopped`、完了時は null）、`trigger`（`settle` / `refresh` / `focus_out`）、`source` が `macos.ocr` のときだけ `lines`（下記参照）。以前のリリースが v3 として保存した snapshot は、source `macos.ax`・同一の payload の v4 として読み出す。保持中の旧 v2 event は代わりに `complete` を持ち、打ち切り理由は識別できず、source は常に `macos.ax` |
 
 `field_kind` はフォーカス中の入力フィールドの種別です：`text` / `search` / `url` / `email` / `number` / `other`、テキスト系要素にフォーカスがなければ null。`password` という値は存在しません。Accessibility が既知の非 secure 入力欄を確認できなければ、`input.key.text` とペースト本文は null です。
 
@@ -196,7 +196,7 @@ opt-in なのは「内容」（打った・コピーした文字列）だけで�
 
 ## スキーマのバージョニング
 
-envelope version は出力全体ではなく event type と payload ごとに決まります。既存 13 type は `v: 1`、現在の `content.snapshot` event は `v: 4` が必要です。`v: 2` と `v: 3` の `content.snapshot` event も有効なまま保持し、`query`・`export`・MCP `query_events` はそれぞれ元の形で返します。v2 は打ち切り理由を捏造せず `complete` field を持つまま、v3 は `lines` なしで返します。store migration は伴いません。古い `v` だけを理解する consumer は新しい `v` を受理する必要がありません。また、`v: 4` より前の Zanei リリースは、それ以降のリリースが書き込む `v: 4` の snapshot を解釈できません。envelope・event taxonomy・context・version 別 payload は closed です。`content.snapshot` の `v: 1`、`cutoff` を持つ v2、`complete` を持つ v3 / v4、`lines` を持つ v2 / v3、`lines` のない v4 の `macos.ocr` event、`lines` を持つそれ以外の source の v4 event、snapshot 以外の既存 type の v2 / v3 / v4、未知の field・event type は不正です。type の追加には新しい最小 `v` と対応する store migration が必要です。
+envelope version は出力全体ではなく event type と payload ごとに決まります。既存 13 type は `v: 1`、現在の `content.snapshot` event は `v: 4` が必要です。ストアは row ごとの version を持たず、保存された snapshot の形から読み方が決まります。`query`・`export`・MCP `query_events` は、保持中の v2 snapshot を打ち切り理由を捏造せず `complete` field を持つ `v: 2` のまま返し、以前のリリースが v3 として保存した snapshot は source `macos.ax`・同一の payload の `v: 4`（`lines` なし）として返します。store migration は伴いません。以前のリリースが書き出した NDJSON ファイルなど、JSON 上の `v: 3` event は引き続き有効です。古い `v` だけを理解する consumer は新しい `v` を受理する必要がありません。また、`v: 4` より前の Zanei リリースは、それ以降のリリースが書き込む `v: 4` の snapshot を解釈できません。envelope・event taxonomy・context・version 別 payload は closed です。`content.snapshot` の `v: 1`、`cutoff` を持つ v2、`complete` を持つ v3 / v4、`lines` を持つ v2 / v3、`lines` のない v4 の `macos.ocr` event、`lines` を持つそれ以外の source の v4 event、snapshot 以外の既存 type の v2 / v3 / v4、未知の field・event type は不正です。type の追加には新しい最小 `v` と対応する store migration が必要です。
 
 store reader は未知の event type を含む行を skip し、read 全体は失敗させません。CLI の `query` と `export` は JSON array の形を維持し、skip 件数を stderr に warning として出します。`--quiet` で抑止できます。MCP `query_events`、`timeline --format json`、structured MCP `get_timeline` は既存の result object に `skipped_unknown_types` を返します。
 
