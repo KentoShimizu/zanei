@@ -43,6 +43,8 @@ pub(crate) enum FocusChangeCapture {
 pub(crate) struct ValueCapture {
     capture_text_content: bool,
     baseline: Option<String>,
+    /// Character count of the settled value, compared with count-only samples.
+    baseline_len: Option<u64>,
     pending: Option<PendingValue>,
     requires_rebaseline: bool,
 }
@@ -73,32 +75,98 @@ impl ValueCapture {
         Self {
             capture_text_content,
             baseline,
+            baseline_len: None,
             pending: None,
             requires_rebaseline,
         }
     }
 
+    /// Observes a value delivered with a native change notification.
     pub(crate) fn observe(
         &mut self,
         observation: ValueObservation,
         authorizations: &mut InputAuthorizations,
     ) -> Option<ValueEmission> {
+        self.observe_from(observation, false, authorizations)
+    }
+
+    /// Observes a value read after user input. A read is not evidence of a change, so a
+    /// count-only read equal to the latest count is ignored as well.
+    pub(crate) fn observe_sample(
+        &mut self,
+        observation: ValueObservation,
+        authorizations: &mut InputAuthorizations,
+    ) -> Option<ValueEmission> {
+        self.observe_from(observation, true, authorizations)
+    }
+
+    fn observe_from(
+        &mut self,
+        observation: ValueObservation,
+        sampled: bool,
+        authorizations: &mut InputAuthorizations,
+    ) -> Option<ValueEmission> {
         trace::trace!(
-            "component=text_capture event=observe pid={} field_class={} value_len={} target_generation={} requires_rebaseline={} pending={}",
+            "component=text_capture event=observe pid={} field_class={} value_len={} target_generation={} requires_rebaseline={} pending={} origin={}",
             observation.pid,
             trace::field_class_name(observation.field_class),
             optional_u64(observation.value_len),
             observation.target_generation,
             self.requires_rebaseline,
-            self.pending.is_some()
+            self.pending.is_some(),
+            if sampled { "sample" } else { "notification" }
         );
         if !observation.field_class.is_known_text() || self.requires_rebaseline {
             self.stage(observation, authorizations);
             return None;
         }
         let due = self.take_due(observation.notification_at, authorizations);
+        if self.is_unchanged(&observation, sampled) {
+            trace::trace!(
+                "component=text_capture event=stage pid={} target_generation={} pending=unchanged reason=same_value",
+                observation.pid,
+                observation.target_generation
+            );
+            return due;
+        }
+        let due = if self.clears_pending(&observation) {
+            // Emit the typed text before staging the cleared field; coalescing both would
+            // measure the clear against the old baseline and lose the text.
+            self.flush_pending(authorizations)
+        } else {
+            due
+        };
         self.stage(observation, authorizations);
         due
+    }
+
+    /// Whether a known-text observation equals the latest pending value, or the settled value
+    /// when nothing is pending, under the same classification and capture binding.
+    fn is_unchanged(&self, observation: &ValueObservation, sampled: bool) -> bool {
+        let (value, value_len) = match &self.pending {
+            Some(pending)
+                if pending.field_class == observation.field_class
+                    && pending.capture_boundary(observation).is_none() =>
+            {
+                (&pending.value, pending.value_len)
+            }
+            Some(_) => return false,
+            None => (&self.baseline, self.baseline_len),
+        };
+        *value == observation.value
+            && (observation.value.is_some() || (sampled && value_len == observation.value_len))
+    }
+
+    fn clears_pending(&self, observation: &ValueObservation) -> bool {
+        observation.value.as_deref() == Some("")
+            && self.pending.as_ref().is_some_and(|pending| {
+                pending.field_class.is_known_text()
+                    && pending
+                        .value
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                    && pending.capture_boundary(observation).is_none()
+            })
     }
 
     pub(crate) fn transition_class(
@@ -293,6 +361,7 @@ impl ValueCapture {
                 let previous = self.pending.take().expect("pending value remains present");
                 let discarded_observations = previous.text_steps.len();
                 self.baseline = previous.value;
+                self.baseline_len = previous.value_len;
                 let pending = PendingValue::new(observation, window_match);
                 trace::trace!(
                     "component=text_capture event=stage pending=restarted discarded_observation_count={} observation_count={} baseline_advanced=true reason={}",
@@ -330,6 +399,7 @@ impl ValueCapture {
     ) {
         self.discard_pending();
         self.baseline = None;
+        self.baseline_len = None;
         self.requires_rebaseline = self.capture_text_content;
         authorizations.invalidate(pid, target_generation);
     }
@@ -346,12 +416,12 @@ impl ValueCapture {
                 .window_match
                 .take()
                 .is_some_and(|window_match| window_match.resolve_for_flush());
-            if authorized {
-                authorized_suffix = true;
-            } else {
+            // An emptied field is the base for later steps: text typed after a clear is
+            // measured from empty, not from the text that was cleared.
+            if !authorized || step.value.as_deref() == Some("") {
                 authorized_baseline = step.value.clone();
-                authorized_suffix = false;
             }
+            authorized_suffix = authorized;
         }
         let decision_allows = pending
             .capture_decision
@@ -370,6 +440,7 @@ impl ValueCapture {
             .flatten();
         if pending.field_class.is_known_text() {
             self.baseline = pending.value;
+            self.baseline_len = pending.value_len;
         }
         (
             pending.field_class,

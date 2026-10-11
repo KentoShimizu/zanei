@@ -9,7 +9,11 @@ use crate::{
     text_capture::{FocusChangeCapture, InputAuthorizations},
 };
 
-use super::{AppObserver, value_registration::RegistrationError};
+use super::{
+    AppObserver,
+    focus_pull::{CaptureValue, ValueRead},
+    value_registration::RegistrationError,
+};
 use crate::ffi::ax::{
     NativeAxError, NativeAxEvent, add_notification,
     element::{ValueFieldSnapshot, capture_value_snapshot, value_field_snapshot},
@@ -39,7 +43,8 @@ impl AppObserver {
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
     ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
-        self.value_changed_events_with(
+        Ok(self.value_changed_events_with(
+            ValueRead::Notification,
             notification_at,
             observed_at,
             secure_input,
@@ -48,29 +53,20 @@ impl AppObserver {
                 capture_value_snapshot(element, window, policy, app, enabled, secure, changed)
             },
             Self::reconcile_current_value_notification,
-        )
+        ))
     }
 
-    fn value_changed_events_with(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn value_changed_events_with(
         &mut self,
+        read: ValueRead,
         notification_at: Instant,
         observed_at: OffsetDateTime,
         secure_input: bool,
         authorizations: &mut InputAuthorizations,
-        capture: impl FnOnce(
-            crate::ffi::ax::cf::CfRef,
-            &mut Option<crate::ffi::ax::NativeWindow>,
-            &crate::CapturePolicy,
-            &zanei_core::schema::App,
-            bool,
-            bool,
-            &mut dyn FnMut(),
-        ) -> (
-            crate::ffi::ax::element::ValueSnapshot,
-            Option<crate::CaptureDecision>,
-        ),
+        capture: impl CaptureValue,
         reconcile: impl FnOnce(&mut Self, FieldClass) -> bool,
-    ) -> Result<Vec<NativeAxEvent>, NativeAxError> {
+    ) -> Vec<NativeAxEvent> {
         let failures = self.failures.clone();
         let degraded = self.degraded.clone();
         let pid = i64::from(self.context.pid);
@@ -80,7 +76,7 @@ impl AppObserver {
                     "component=ax phase=value action=observe pid={} result=target_missing",
                     self.context.pid
                 );
-                return Ok(Vec::new());
+                return Vec::new();
             };
             if !self
                 .notifications
@@ -91,7 +87,10 @@ impl AppObserver {
                     self.context.pid,
                     target.context.generation
                 );
-                return Ok(Vec::new());
+                return Vec::new();
+            }
+            if read == ValueRead::Notification {
+                self.focus_pull.value_delivered(target.context.generation);
             }
             let context = &mut target.context;
             let previous_class = context.field_class;
@@ -137,10 +136,12 @@ impl AppObserver {
                 snapshot,
                 capture_decision,
             );
-            let value_event = context
-                .capture
-                .observe(observation, authorizations)
-                .map(|emission| context.value_event(self.context.pid, emission));
+            let emission = match read {
+                ValueRead::Notification => context.capture.observe(observation, authorizations),
+                ValueRead::Sample => context.capture.observe_sample(observation, authorizations),
+            };
+            let value_event =
+                emission.map(|emission| context.value_event(self.context.pid, emission));
             (
                 previous_class != context.field_class,
                 registration_class,
@@ -155,7 +156,7 @@ impl AppObserver {
             events.push(self.focus_event(observed_at));
         }
         events.extend(value_event);
-        Ok(events)
+        events
     }
 
     pub(in crate::ffi::ax) fn take_due_value_events(
@@ -386,7 +387,7 @@ impl AppObserver {
         registration
     }
 
-    fn reconcile_current_value_notification(&mut self, field_class: FieldClass) -> bool {
+    pub(super) fn reconcile_current_value_notification(&mut self, field_class: FieldClass) -> bool {
         let observer = self.observer.as_ptr();
         let context_pointer = (&raw const *self.context).cast_mut().cast();
         let pid = self.context.pid;

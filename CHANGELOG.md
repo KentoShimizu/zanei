@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Typed text is captured in apps that expose a focused text field to
+  Accessibility but post no focus or value change notifications for it. Zanei
+  reads the focused field shortly after keystrokes, Return, clicks, and window
+  switches, never periodically while idle, and records `ui.focus` and
+  `ui.value` for it like for any other field. Text typed and submitted before
+  Zanei reads the field can still be lost, and input made before Zanei knows
+  the field is not recorded. A field found when Zanei attached to an app, and
+  never announced by the app, now gets one `ui.focus` on first interaction.
+- Text typed into a field that is cleared within a second, such as a chat
+  message sent with Return, is no longer lost in any app, and text typed after
+  the clear is no longer measured against the cleared text.
+- A repeated value notification or read that reports exactly the same text no
+  longer produces a no-op `ui.value` event or delays the current batch.
+
 ## 0.6.3 — 2026-10-08
 
 - A `resume` or `pause` can no longer be undone by the recorder's own state

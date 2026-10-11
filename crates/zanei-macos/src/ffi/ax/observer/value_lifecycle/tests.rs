@@ -33,46 +33,45 @@ fn surface_race_preserves_registration_and_next_same_focus_input_recovers() {
             publisher.prepare(7, generation, at).unwrap().confirm();
         }
         let read = Cell::new(false);
-        let mut events = observer
-            .value_changed_events_with(
-                at,
-                OffsetDateTime::UNIX_EPOCH,
-                false,
-                &mut authorizations,
-                |_, window, policy, app, enabled, _, changed| {
-                    capture_value_snapshot_with(
-                        window,
-                        policy,
-                        app,
-                        enabled,
-                        changed,
-                        || {
-                            Ok(titled_window(Some(if step == 0 && !read.get() {
-                                "main.rs"
-                            } else {
-                                "next.rs"
-                            })))
-                        },
-                        |allowed| {
-                            value_snapshot_with(
-                                fake_field_snapshot(Some("AXTextArea")),
-                                allowed,
-                                || {
-                                    read.set(true);
-                                    Ok(Some(body.to_owned()))
-                                },
-                                || Ok(Some(body.len() as i64)),
-                            )
-                        },
-                    )
-                },
-                |observer, class| {
-                    observer
-                        .reconcile_current_value_notification_with(class, || Ok(()), || Ok(()))
-                        .is_ok()
-                },
-            )
-            .unwrap();
+        let mut events = observer.value_changed_events_with(
+            ValueRead::Notification,
+            at,
+            OffsetDateTime::UNIX_EPOCH,
+            false,
+            &mut authorizations,
+            |_, window, policy, app, enabled, _, changed| {
+                capture_value_snapshot_with(
+                    window,
+                    policy,
+                    app,
+                    enabled,
+                    changed,
+                    || {
+                        Ok(titled_window(Some(if step == 0 && !read.get() {
+                            "main.rs"
+                        } else {
+                            "next.rs"
+                        })))
+                    },
+                    |allowed| {
+                        value_snapshot_with(
+                            fake_field_snapshot(Some("AXTextArea")),
+                            allowed,
+                            || {
+                                read.set(true);
+                                Ok(Some(body.to_owned()))
+                            },
+                            || Ok(Some(body.len() as i64)),
+                        )
+                    },
+                )
+            },
+            |observer, class| {
+                observer
+                    .reconcile_current_value_notification_with(class, || Ok(()), || Ok(()))
+                    .is_ok()
+            },
+        );
         assert!(
             read.get(),
             "registered same-focus delivery must reach the value boundary"
@@ -97,36 +96,35 @@ fn surface_race_preserves_registration_and_next_same_focus_input_recovers() {
     }
     // Disabled capture still reclassifies a genuinely unknown field and unregisters it.
     observer.capture_text_content = false;
-    observer
-        .value_changed_events_with(
-            now + Duration::from_secs(3),
-            OffsetDateTime::UNIX_EPOCH,
-            false,
-            &mut authorizations,
-            |_, window, policy, app, enabled, _, changed| {
-                capture_value_snapshot_with(
-                    window,
-                    policy,
-                    app,
-                    enabled,
-                    changed,
-                    || panic!("disabled capture does not read window"),
-                    |allowed| {
-                        value_snapshot_with(
-                            fake_field_snapshot(None),
-                            allowed,
-                            || panic!("unknown field does not read body"),
-                            || panic!("unknown count"),
-                        )
-                    },
-                )
-            },
-            |observer, class| {
-                observer
-                    .reconcile_current_value_notification_with(class, || Ok(()), || Ok(()))
-                    .is_ok()
-            },
-        )
-        .unwrap();
+    observer.value_changed_events_with(
+        ValueRead::Notification,
+        now + Duration::from_secs(3),
+        OffsetDateTime::UNIX_EPOCH,
+        false,
+        &mut authorizations,
+        |_, window, policy, app, enabled, _, changed| {
+            capture_value_snapshot_with(
+                window,
+                policy,
+                app,
+                enabled,
+                changed,
+                || panic!("disabled capture does not read window"),
+                |allowed| {
+                    value_snapshot_with(
+                        fake_field_snapshot(None),
+                        allowed,
+                        || panic!("unknown field does not read body"),
+                        || panic!("unknown count"),
+                    )
+                },
+            )
+        },
+        |observer, class| {
+            observer
+                .reconcile_current_value_notification_with(class, || Ok(()), || Ok(()))
+                .is_ok()
+        },
+    );
     assert!(!observer.is_current_target(crate::ffi::ax::TargetKind::Value, element));
 }
