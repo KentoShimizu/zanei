@@ -19,10 +19,15 @@ use zanei_core::privacy::CHROME_BUNDLE_ID;
 
 pub const SAFARI_BUNDLE_ID: &str = "com.apple.Safari";
 
-use crate::ffi::permission::{
-    AutomationTarget, AutomationTargetError, accessibility_is_trusted, input_monitoring_status,
-    request_accessibility as request_accessibility_ffi,
-    request_input_monitoring as request_input_monitoring_ffi,
+use crate::ffi::{
+    permission::{
+        AutomationTarget, AutomationTargetError, accessibility_is_trusted, input_monitoring_status,
+        request_accessibility as request_accessibility_ffi,
+        request_input_monitoring as request_input_monitoring_ffi,
+    },
+    screen_capture::{
+        request_screen_capture_access, screen_capture_access, screen_capture_available,
+    },
 };
 
 const IO_HID_ACCESS_GRANTED: i32 = 0;
@@ -44,6 +49,8 @@ const INPUT_MONITORING_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
 const AUTOMATION_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation";
+const SCREEN_RECORDING_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const OPEN_EXECUTABLE: &str = "/usr/bin/open";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +75,7 @@ pub enum MacOsPermission {
     Accessibility,
     InputMonitoring,
     Automation,
+    ScreenRecording,
 }
 
 impl MacOsPermission {
@@ -76,6 +84,7 @@ impl MacOsPermission {
             Self::Accessibility => "accessibility",
             Self::InputMonitoring => "input_monitoring",
             Self::Automation => "automation",
+            Self::ScreenRecording => "screen_recording",
         }
     }
 }
@@ -114,7 +123,11 @@ pub const fn capability_detail(
             AUTOMATION_SETTINGS_URL,
             Some(SAFARI_BUNDLE_ID),
         ),
-        Capability::CaptureScreen => unreachable!(),
+        Capability::CaptureScreen => (
+            MacOsPermission::ScreenRecording,
+            SCREEN_RECORDING_SETTINGS_URL,
+            None,
+        ),
     };
     MacOsCapabilityDetail {
         platform: "macos",
@@ -122,7 +135,10 @@ pub const fn capability_detail(
         status: match state {
             CapabilityState::Available => PermissionStatus::Granted,
             CapabilityState::ActionRequired => PermissionStatus::Denied,
-            CapabilityState::Deferred => PermissionStatus::NotDetermined,
+            // Below macOS 14 the fallback cannot run, so whether access is granted is moot.
+            CapabilityState::Deferred | CapabilityState::Unavailable => {
+                PermissionStatus::NotDetermined
+            }
         },
         settings_url,
         target_bundle_id,
@@ -201,10 +217,30 @@ pub fn request_input_monitoring() {
     let _ = request_input_monitoring_ffi();
 }
 
+/// The recorder's `capture_screen` state: unavailable below macOS 14, where windows cannot be
+/// captured, and otherwise whether this process holds Screen Recording. Never prompts.
+#[must_use]
+pub fn capture_screen_state() -> CapabilityState {
+    if !screen_capture_available() {
+        CapabilityState::Unavailable
+    } else if screen_capture_access() {
+        CapabilityState::Available
+    } else {
+        CapabilityState::ActionRequired
+    }
+}
+
+/// Asks once for Screen Recording under this process's identity. macOS shows its dialog at
+/// most once per app, and a grant applies only after the process restarts, so do not wait.
+pub fn request_screen_recording() {
+    let _ = request_screen_capture_access();
+}
+
 trait PermissionProbe {
     fn accessibility_is_trusted(&self) -> bool;
     fn input_monitoring_status(&self) -> i32;
     fn automation_status(&self, bundle_id: &str) -> Result<i32, PermissionError>;
+    fn screen_capture_access(&self) -> bool;
 }
 
 struct NativePermissionProbe;
@@ -212,6 +248,10 @@ struct NativePermissionProbe;
 impl PermissionProbe for NativePermissionProbe {
     fn accessibility_is_trusted(&self) -> bool {
         accessibility_is_trusted()
+    }
+
+    fn screen_capture_access(&self) -> bool {
+        screen_capture_access()
     }
 
     fn input_monitoring_status(&self) -> i32 {
@@ -357,7 +397,12 @@ fn permission_status_with(
                 }),
             }
         }
-        Capability::CaptureScreen => unreachable!("screen capture is not probed yet"),
+        // The preflight exposes only a Boolean, like Accessibility.
+        Capability::CaptureScreen => Ok(if probe.screen_capture_access() {
+            PermissionStatus::Granted
+        } else {
+            PermissionStatus::Denied
+        }),
     }
 }
 

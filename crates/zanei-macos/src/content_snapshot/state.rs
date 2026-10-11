@@ -17,6 +17,13 @@ pub(crate) struct SnapshotWindowKey {
     pub(crate) window_id: i64,
 }
 
+/// Where a snapshot body's text came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SnapshotOrigin {
+    Ax,
+    Ocr,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SaveBlock {
     Duplicate,
@@ -24,9 +31,14 @@ pub(crate) enum SaveBlock {
     DailyBudget,
 }
 
+/// Duplicates are judged per origin, so a body from one origin stored between
+/// two equal bodies from the other does not make the second one new.
 #[derive(Clone, Copy, Debug)]
 struct SavedWindow {
-    hash: Option<u64>,
+    ax_hash: Option<u64>,
+    ocr_hash: Option<u64>,
+    /// Fingerprint of the window image behind the last stored recognized body.
+    ocr_image: Option<u64>,
     saved_at: Instant,
 }
 
@@ -86,16 +98,16 @@ impl SnapshotState {
     pub(crate) fn evaluate_save(
         &mut self,
         key: SnapshotWindowKey,
+        origin: SnapshotOrigin,
         hash: u64,
         bytes: usize,
         now: Instant,
     ) -> Result<(), SaveBlock> {
         self.roll_daily_window(now);
-        if self
-            .windows
-            .get(&key)
-            .is_some_and(|saved| saved.hash == Some(hash))
-        {
+        if self.windows.get(&key).is_some_and(|saved| match origin {
+            SnapshotOrigin::Ax => saved.ax_hash == Some(hash),
+            SnapshotOrigin::Ocr => saved.ocr_hash == Some(hash),
+        }) {
             return Err(SaveBlock::Duplicate);
         }
         if !self.global_interval_allows(now) {
@@ -118,7 +130,9 @@ impl SnapshotState {
             .entry(key)
             .and_modify(|saved| saved.saved_at = now)
             .or_insert(SavedWindow {
-                hash: None,
+                ax_hash: None,
+                ocr_hash: None,
+                ocr_image: None,
                 saved_at: now,
             });
         self.global_saved_at = Some(now);
@@ -126,12 +140,39 @@ impl SnapshotState {
         self.backoffs.remove(&key.pid);
     }
 
-    pub(crate) fn record_hash(&mut self, key: SnapshotWindowKey, hash: u64) {
-        let saved = self
-            .windows
+    pub(crate) fn record_hash(
+        &mut self,
+        key: SnapshotWindowKey,
+        origin: SnapshotOrigin,
+        hash: u64,
+    ) {
+        let saved = self.saved_mut(key);
+        match origin {
+            SnapshotOrigin::Ax => saved.ax_hash = Some(hash),
+            SnapshotOrigin::Ocr => {
+                saved.ocr_hash = Some(hash);
+                saved.ocr_image = None;
+            }
+        }
+    }
+
+    /// Records the image behind the recognized body just recorded with `record_hash`.
+    pub(crate) fn record_recognized_image(&mut self, key: SnapshotWindowKey, image: u64) {
+        self.saved_mut(key).ocr_image = Some(image);
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used once the worker recognizes text")
+    )]
+    pub(crate) fn recognized_image(&self, key: SnapshotWindowKey) -> Option<u64> {
+        self.windows.get(&key).and_then(|saved| saved.ocr_image)
+    }
+
+    fn saved_mut(&mut self, key: SnapshotWindowKey) -> &mut SavedWindow {
+        self.windows
             .get_mut(&key)
-            .expect("snapshot hash is recorded only after reserving its limits");
-        saved.hash = Some(hash);
+            .expect("snapshot hash is recorded only after reserving its limits")
     }
 
     pub(crate) fn record_failure(&mut self, pid: i64, now: Instant, timed_out: bool) {

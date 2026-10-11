@@ -156,5 +156,6 @@ const fn capability_state_name(state: CapabilityState) -> &'static str {
         CapabilityState::Available => "available",
         CapabilityState::ActionRequired => "action_required",
         CapabilityState::Deferred => "deferred",
+        CapabilityState::Unavailable => "unavailable",
     }
 }

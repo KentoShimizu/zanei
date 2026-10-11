@@ -18,7 +18,7 @@ use zanei_core::{
 use crate::{
     content_snapshot::{
         SnapshotTriggerReceiver, SnapshotWalkOutput,
-        output::{emit, emit_released, trace_candidate, trace_output},
+        output::{SnapshotBody, emit, emit_released, trace_candidate, trace_output},
         scheduler::{ScheduledSnapshot, SnapshotScheduler},
         state::SnapshotState,
     },
@@ -360,13 +360,13 @@ fn process_candidate<F>(
         trace_output(&candidate, "secure_input", &output);
         return;
     }
-    let hash = SnapshotState::text_hash(&output.text);
+    let body = SnapshotBody::ax(output.text.clone(), output.cutoff, candidate.trigger);
     let save_at = Instant::now();
     emit(
         candidate,
-        output,
+        &output,
+        body,
         key,
-        hash,
         policy,
         read_decision,
         taken_at.wall,

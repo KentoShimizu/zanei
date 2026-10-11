@@ -9,7 +9,10 @@ use zanei_core::{
         capture_policy::{BrowserMode, BrowserPolicy, IdePolicy, PolicyAction},
     },
     privacy::{CHROME_BUNDLE_ID, PrivacyScope},
-    schema::{ContentSnapshotTrigger, EventData},
+    schema::{
+        ContentSnapshotData, ContentSnapshotLine, ContentSnapshotTrigger, EventData, RgbColor,
+        WindowFraction,
+    },
 };
 
 use crate::{
@@ -18,9 +21,9 @@ use crate::{
     content_snapshot::{
         SharedHealth, SnapshotTriggerKind, SnapshotWalkOutput,
         budget::GLOBAL_SAVE_INTERVAL,
-        output::{emit, emit_released},
+        output::{SnapshotBody, emit, emit_released},
         scheduler::ScheduledSnapshot,
-        state::{SaveBlock, SnapshotState, SnapshotWindowKey},
+        state::{SaveBlock, SnapshotOrigin, SnapshotState, SnapshotWindowKey},
     },
     permission::SAFARI_BUNDLE_ID,
     text_capture::TextQuarantine,
@@ -44,7 +47,6 @@ fn v2_1_chrome_snapshot_without_version_is_dropped() {
         window_id: 11,
     };
     let text = "must not bypass confirmation".to_owned();
-    let hash = SnapshotState::text_hash(&text);
     let output = SnapshotWalkOutput {
         text,
         nodes: 1,
@@ -70,9 +72,9 @@ fn v2_1_chrome_snapshot_without_version_is_dropped() {
 
     emit(
         candidate,
-        output,
+        &output,
+        ax_body(&output.text),
         key,
-        hash,
         &policy,
         &decision,
         time::OffsetDateTime::UNIX_EPOCH,
@@ -104,7 +106,6 @@ fn snapshot_ts_quarantine_release_preserves_candidate_time_and_reservation() {
     };
     let text = "held snapshot".to_owned();
     let bytes = text.len();
-    let hash = SnapshotState::text_hash(&text);
     let output = SnapshotWalkOutput {
         text,
         nodes: 1,
@@ -138,9 +139,9 @@ fn snapshot_ts_quarantine_release_preserves_candidate_time_and_reservation() {
 
     emit(
         candidate,
-        output,
+        &output,
+        ax_body(&output.text),
         key,
-        hash,
         &policy,
         &decision,
         time::OffsetDateTime::UNIX_EPOCH,
@@ -157,6 +158,7 @@ fn snapshot_ts_quarantine_release_preserves_candidate_time_and_reservation() {
                 pid: 8,
                 window_id: 12,
             },
+            SnapshotOrigin::Ax,
             SnapshotState::text_hash("next"),
             4,
             now,
@@ -237,9 +239,9 @@ fn dropped_snapshot_does_not_deduplicate_identical_settle_on_return() {
 
     emit(
         candidate,
-        output,
+        &output,
+        ax_body(&output.text),
         key,
-        hash,
         &policy,
         &decision,
         time::OffsetDateTime::UNIX_EPOCH,
@@ -264,11 +266,20 @@ fn dropped_snapshot_does_not_deduplicate_identical_settle_on_return() {
     assert!(events.try_recv().is_err());
 
     let return_at = now + GLOBAL_SAVE_INTERVAL;
-    assert_eq!(state.evaluate_save(key, hash, bytes, return_at), Ok(()));
-    state.reserve(key, bytes, return_at);
-    state.record_hash(key, hash);
     assert_eq!(
-        state.evaluate_save(key, hash, bytes, return_at + GLOBAL_SAVE_INTERVAL),
+        state.evaluate_save(key, SnapshotOrigin::Ax, hash, bytes, return_at),
+        Ok(())
+    );
+    state.reserve(key, bytes, return_at);
+    state.record_hash(key, SnapshotOrigin::Ax, hash);
+    assert_eq!(
+        state.evaluate_save(
+            key,
+            SnapshotOrigin::Ax,
+            hash,
+            bytes,
+            return_at + GLOBAL_SAVE_INTERVAL
+        ),
         Err(SaveBlock::Duplicate)
     );
 }
@@ -303,9 +314,9 @@ fn safari_snapshot_delivery_requires_confirmation_with_either_policy() {
         let mut quarantine = TextQuarantine::new(ChromeObserver::new());
         emit(
             candidate,
-            snapshot_output(text),
+            &snapshot_output(text),
+            ax_body(text),
             key,
-            SnapshotState::text_hash(text),
             &policy,
             &decision,
             time::OffsetDateTime::UNIX_EPOCH,
@@ -370,9 +381,9 @@ fn safari_snapshot_delivery_requires_confirmation_with_either_policy() {
     let mut quarantine = TextQuarantine::new(ChromeObserver::new());
     emit(
         candidate,
-        snapshot_output("unobserved"),
+        &snapshot_output("unobserved"),
+        ax_body("unobserved"),
         key,
-        SnapshotState::text_hash("unobserved"),
         &policy,
         &unobserved,
         time::OffsetDateTime::UNIX_EPOCH,
@@ -408,9 +419,9 @@ fn safari_snapshot_delivery_requires_confirmation_with_either_policy() {
     let mut quarantine = TextQuarantine::new(ChromeObserver::new());
     emit(
         candidate,
-        snapshot_output("stale app-owned"),
+        &snapshot_output("stale app-owned"),
+        ax_body("stale app-owned"),
         key,
-        SnapshotState::text_hash("stale app-owned"),
         &policy,
         &app_owned,
         time::OffsetDateTime::UNIX_EPOCH,
@@ -436,6 +447,10 @@ fn safari_candidate(now: Instant) -> ScheduledSnapshot {
         trigger: ContentSnapshotTrigger::Settle,
         activity_window: None,
     }
+}
+
+fn ax_body(text: &str) -> SnapshotBody {
+    SnapshotBody::ax(text.to_owned(), None, ContentSnapshotTrigger::Settle)
 }
 
 fn snapshot_output(text: &str) -> SnapshotWalkOutput {
@@ -485,4 +500,85 @@ fn safari_observation(url: &str) -> ChromeEligibilityObservation {
         window_id: Some(11),
         url: Some(url.to_owned()),
     }
+}
+
+#[test]
+fn recognized_body_is_deduplicated_per_origin_and_charged_with_its_lines() {
+    // Catches one hash per window, where an Accessibility remainder stored between two equal
+    // recognized bodies makes the second one look new, and a daily budget that ignores lines.
+    let now = Instant::now();
+    let candidate = ScheduledSnapshot {
+        target: trigger(7, 11, SnapshotTriggerKind::Focus, now),
+        trigger: ContentSnapshotTrigger::Settle,
+        activity_window: None,
+    };
+    let key = SnapshotWindowKey {
+        pid: 7,
+        window_id: 11,
+    };
+    let filter = FilterConfig::default();
+    let (_, tracker) = chrome_eligibility_channel(filter.clone());
+    let policy = CapturePolicy::new(tracker, filter, None);
+    let decision = policy.decision(
+        PrivacyScope::ContentSnapshot,
+        &candidate.target.app.raw_app(),
+        Some(11),
+        candidate.target.window.title.as_deref(),
+    );
+    let mut state = SnapshotState::new(now);
+    let mut quarantine = TextQuarantine::new(ChromeObserver::new());
+    let (sender, events) = sync_channel(3);
+    let recognized = || {
+        let half = WindowFraction::from_ratio(0.5).expect("fraction");
+        let line = ContentSnapshotLine {
+            text: "message".to_owned(),
+            x: half,
+            y: half,
+            w: half,
+            h: half,
+            bg: RgbColor {
+                red: 0,
+                green: 0,
+                blue: 0,
+            },
+            ink: None,
+        };
+        let data = ContentSnapshotData::recognized(
+            Some("message".to_owned()),
+            7,
+            None,
+            ContentSnapshotTrigger::Settle,
+            vec![line],
+        );
+        SnapshotBody::recognized(data, 1)
+    };
+    let recognized_bytes = serde_json::to_vec(&recognized().data).expect("json").len();
+    for (step, body) in [recognized(), ax_body("LINE"), recognized()]
+        .into_iter()
+        .enumerate()
+    {
+        let at = now + GLOBAL_SAVE_INTERVAL * u32::try_from(step).expect("step");
+        emit(
+            candidate.clone(),
+            &snapshot_output(""),
+            body,
+            key,
+            &policy,
+            &decision,
+            time::OffsetDateTime::UNIX_EPOCH,
+            at,
+            &mut state,
+            &sender,
+            &SharedHealth::default(),
+            &mut quarantine,
+        );
+    }
+
+    let sources: Vec<_> = events.try_iter().map(|event| event.source).collect();
+    assert_eq!(sources, ["macos.ocr", "macos.ax"]);
+    assert_eq!(
+        state.daily_bytes(now),
+        u64::try_from(recognized_bytes + 4).expect("bytes")
+    );
+    assert_eq!(state.recognized_image(key), Some(1));
 }
