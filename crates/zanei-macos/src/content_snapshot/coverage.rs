@@ -122,6 +122,9 @@ pub(crate) struct WalkAnalysis {
     pub(crate) mask_regions: Vec<WindowRect>,
     /// Large non-root elements that partition the window, in walk order.
     pub(crate) order_containers: Vec<WindowRect>,
+    /// False when an input may be missing from `mask_regions`: the walk was cut
+    /// off, a node's role or children were unreadable, or an input had no frame.
+    pub(crate) masks_complete: bool,
 }
 
 impl WalkAnalysis {
@@ -136,6 +139,7 @@ pub(crate) struct WalkAnalyzer {
     text_cells: [bool; COVERAGE_CELLS],
     mask_regions: Vec<WindowRect>,
     order_containers: Vec<WindowRect>,
+    masks_complete: bool,
 }
 
 impl WalkAnalyzer {
@@ -145,7 +149,12 @@ impl WalkAnalyzer {
             text_cells: [false; COVERAGE_CELLS],
             mask_regions: Vec::new(),
             order_containers: Vec::new(),
+            masks_complete: true,
         }
+    }
+
+    pub(crate) fn masks_incomplete(&mut self) {
+        self.masks_complete = false;
     }
 
     pub(crate) fn record(&mut self, node: &WalkedNode<'_>) {
@@ -174,6 +183,7 @@ impl WalkAnalyzer {
             blank_coverage: blank as f64 / COVERAGE_CELLS as f64,
             mask_regions: self.mask_regions,
             order_containers: self.order_containers,
+            masks_complete: self.masks_complete,
         }
     }
 }

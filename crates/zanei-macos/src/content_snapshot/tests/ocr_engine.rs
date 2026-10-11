@@ -52,6 +52,7 @@ fn request(stored_image: Option<u64>, mask_regions: Vec<WindowRect>) -> OcrReque
             blank_coverage: 1.0,
             mask_regions,
             order_containers: Vec::new(),
+            masks_complete: true,
         },
         trigger: ContentSnapshotTrigger::Refresh,
     }

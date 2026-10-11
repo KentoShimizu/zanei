@@ -21,13 +21,14 @@ use crate::{
     chrome::{ChromeObserver, chrome_eligibility_channel},
     content_snapshot::{
         Control, SharedHealth, SnapshotAxError, SnapshotTriggerKind, SnapshotWalkOutput,
+        WORKER_POLL_INTERVAL,
         budget::{DAILY_TEXT_BUDGET_BYTES, GLOBAL_SAVE_INTERVAL},
         scheduler::{SETTLE_QUIET_INTERVAL, SnapshotScheduler},
         snapshot_trigger_channel,
         state::{SnapshotState, SnapshotWindowKey},
         tests::walker::FakeNode,
         worker::{
-            run_worker_with_scanner,
+            loop_wait, run_worker_with_scanner,
             scan::{SnapshotApplication, scan_application},
             seed_scheduler_from_focus, service_controls,
         },
@@ -620,4 +621,18 @@ fn v2_4_post_walk_deny_does_not_exhaust_daily_budget() {
     worker.join().expect("content worker");
 
     assert!(state_results.recv().expect("state result"));
+}
+
+#[test]
+fn a_due_candidate_does_not_spin_the_loop_while_recognizing() {
+    // Catches a past deadline shortening every wait to zero while no candidate can be taken,
+    // which busy-loops the worker for the whole recognition.
+    let now = Instant::now();
+    let overdue = Some(now - Duration::from_secs(1));
+    assert_eq!(loop_wait(true, overdue, now), WORKER_POLL_INTERVAL);
+    assert_eq!(loop_wait(false, overdue, now), Duration::ZERO);
+    assert_eq!(
+        loop_wait(false, Some(now + Duration::from_millis(5)), now),
+        Duration::from_millis(5)
+    );
 }

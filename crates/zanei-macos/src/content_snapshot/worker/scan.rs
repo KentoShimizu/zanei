@@ -244,7 +244,9 @@ fn initial_time_cutoff(clock: &impl WalkClock, ax_calls: usize) -> Option<Scanne
             degraded_nodes: 0,
             frameless_nodes: 0,
         };
-        (output, WalkAnalyzer::new().finish())
+        let mut analyzer = WalkAnalyzer::new();
+        analyzer.masks_incomplete();
+        (output, analyzer.finish())
     })
 }
 

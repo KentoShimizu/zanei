@@ -54,6 +54,12 @@ pub(super) fn start_recognition(
         send_ax(walked, state, delivery);
         return None;
     }
+    // Recognized lines inside an input field the walk missed could not be masked.
+    if !analysis.masks_complete {
+        trace_recognition(&walked, "masks_incomplete", None);
+        send_ax(walked, state, delivery);
+        return None;
+    }
     if let Err(reason) = ocr.access() {
         trace_recognition(&walked, reason.trace_name(), None);
         send_ax(walked, state, delivery);
@@ -103,6 +109,11 @@ pub(super) fn finish_recognition(
             send_ax(walked, state, delivery);
         }
     }
+    #[cfg(test)]
+    delivery
+        .health
+        .finished_recognitions
+        .fetch_add(1, Ordering::Release);
 }
 
 fn send_ax(walked: WalkedCandidate, state: &mut SnapshotState, delivery: &mut Delivery<'_>) {

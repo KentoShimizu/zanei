@@ -87,6 +87,8 @@ struct SharedHealth {
     failures: Arc<AtomicU64>,
     degraded: Arc<RwLock<Option<String>>>,
     processed_triggers: Arc<AtomicU64>,
+    #[cfg(test)]
+    finished_recognitions: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]

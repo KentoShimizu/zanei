@@ -113,14 +113,11 @@ pub(super) fn run_worker_with_scanner<F>(
             &health,
             state,
         );
-        let wait = scheduler
-            .next_deadline()
-            .map_or(WORKER_POLL_INTERVAL, |deadline| {
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or(Duration::ZERO)
-                    .min(WORKER_POLL_INTERVAL)
-            });
+        let wait = loop_wait(
+            recognizing.is_some(),
+            scheduler.next_deadline(),
+            Instant::now(),
+        );
         let observation = match trigger.recv_timeout(wait) {
             Ok(observation) => Some(observation),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
@@ -171,6 +168,21 @@ pub(super) fn run_worker_with_scanner<F>(
     }
     emit_released(quarantine.flush(), &sender, &health, state);
     scheduler.stop();
+}
+
+/// A due deadline must not zero the wait while recognizing, when no candidate can be taken.
+pub(super) fn loop_wait(
+    recognizing: bool,
+    next_deadline: Option<Instant>,
+    now: Instant,
+) -> Duration {
+    match next_deadline {
+        Some(deadline) if !recognizing => deadline
+            .checked_duration_since(now)
+            .unwrap_or(Duration::ZERO)
+            .min(WORKER_POLL_INTERVAL),
+        _ => WORKER_POLL_INTERVAL,
+    }
 }
 
 pub(super) fn service_controls(

@@ -51,6 +51,7 @@ fn analysis(mask_regions: Vec<WindowRect>) -> WalkAnalysis {
         blank_coverage: 1.0,
         mask_regions,
         order_containers: Vec::new(),
+        masks_complete: true,
     }
 }
 
@@ -92,7 +93,7 @@ impl Run {
     /// Secure Input queries with `secure` in order.
     fn start(
         backend: OcrBackend,
-        masks: Vec<WindowRect>,
+        walk: WalkAnalysis,
         secure: &'static [bool],
         stored_image: Option<u64>,
     ) -> (Self, CapturePolicy) {
@@ -154,7 +155,7 @@ impl Run {
                             degraded_nodes: 0,
                             frameless_nodes: 0,
                         };
-                        Ok(Some((output, analysis(masks.clone()))))
+                        Ok(Some((output, walk.clone())))
                     },
                 );
             })
@@ -201,7 +202,7 @@ fn recognized_text_replaces_the_accessibility_body() {
     // Catches emitting both bodies for one candidate, or the recognized body as `macos.ax`.
     let (run, _) = Run::start(
         backend(|| Ok(()), |_| Ok(image(1))),
-        Vec::new(),
+        analysis(Vec::new()),
         &[false; 3],
         None,
     );
@@ -211,9 +212,9 @@ fn recognized_text_replaces_the_accessibility_body() {
 
 #[test]
 fn without_a_recognized_body_the_accessibility_body_is_recorded() {
-    // Catches a regression against snapshots without recognition: denied access, a capture
-    // failure, and fully masked lines must each still record today's body, and only a
-    // failure counts toward health. Without access nothing may be captured at all.
+    // Catches a regression without recognition: denied access, masks that may miss an input,
+    // a capture failure, and fully masked lines each still record today's body; only a
+    // failure counts toward health, and without access or complete masks nothing is captured.
     let full_window = WindowRect {
         x: 0.0,
         y: 0.0,
@@ -221,22 +222,32 @@ fn without_a_recognized_body_the_accessibility_body_is_recorded() {
         height: 1.0,
     };
     let captures = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&captures);
-    let denied = backend(
-        || Err(OcrUnavailable::Permission),
-        move |_| {
+    let counted = |access| {
+        let counted = Arc::clone(&captures);
+        backend(access, move |_| {
             counted.fetch_add(1, Ordering::Relaxed);
             Ok(image(1))
-        },
-    );
+        })
+    };
+    let denied = counted(|| Err(OcrUnavailable::Permission));
+    let incomplete = WalkAnalysis {
+        masks_complete: false,
+        ..analysis(Vec::new())
+    };
     let timed_out = backend(|| Ok(()), |_| Err(CaptureError::Timeout));
     let masked = backend(|| Ok(()), |_| Ok(image(1)));
-    for (backend, masks, secure, failures) in [
-        (denied, Vec::new(), &[false; 2] as &'static [bool], 0),
-        (timed_out, Vec::new(), &[false; 3], 1),
-        (masked, vec![full_window], &[false; 3], 0),
+    for (backend, walk, secure, failures) in [
+        (
+            denied,
+            analysis(Vec::new()),
+            &[false; 2] as &'static [bool],
+            0,
+        ),
+        (counted(|| Ok(())), incomplete, &[false; 2], 0),
+        (timed_out, analysis(Vec::new()), &[false; 3], 1),
+        (masked, analysis(vec![full_window]), &[false; 3], 0),
     ] {
-        let (run, _) = Run::start(backend, masks, secure, None);
+        let (run, _) = Run::start(backend, walk, secure, None);
         assert_eq!(text(&run.next_event()), ("macos.ax", Some(AX_TEXT)));
         assert_eq!(run.health.failures.load(Ordering::Relaxed), failures);
         assert!(run.finish().is_empty());
@@ -250,7 +261,7 @@ fn send_time_gates_apply_to_recognized_text() {
     // happened, while the window was being recognized.
     let (secure_on, _) = Run::start(
         backend(|| Ok(()), |_| Ok(image(1))),
-        Vec::new(),
+        analysis(Vec::new()),
         &[false, false, true],
         None,
     );
@@ -271,7 +282,7 @@ fn send_time_gates_apply_to_recognized_text() {
                 Ok(image(1))
             },
         ),
-        Vec::new(),
+        analysis(Vec::new()),
         &[false; 3],
         None,
     );
@@ -296,7 +307,7 @@ fn recognition_keeps_the_worker_responsive_and_stop_discards_its_result() {
             Ok(lines())
         }),
     };
-    let (run, _) = Run::start(blocking, Vec::new(), &[false; 2], None);
+    let (run, _) = Run::start(blocking, analysis(Vec::new()), &[false; 2], None);
     started
         .recv_timeout(Duration::from_secs(5))
         .expect("recognition started");
@@ -316,25 +327,24 @@ fn recognition_keeps_the_worker_responsive_and_stop_discards_its_result() {
 fn an_unchanged_window_image_records_nothing() {
     // Catches the Accessibility body, or the recognized body again, being recorded while the
     // window shows the image behind its last stored recognized body.
-    let (run, _) = Run::start(
+    let (run, policy) = Run::start(
         backend(|| Ok(()), |_| Ok(image(1))),
-        Vec::new(),
-        // Sending any body would make a third Secure Input query.
+        analysis(Vec::new()),
+        // Sending any body would take the third Secure Input answer.
         &[false; 3],
         Some(fingerprint(&image(1))),
     );
-    let Run {
-        stop,
-        worker,
-        events,
-        secure,
-        ..
-    } = run;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while run.health.finished_recognitions.load(Ordering::Acquire) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the recognition outcome is handled"
+        );
+        thread::yield_now();
+    }
     assert!(
-        secure.join().is_err(),
-        "no body is sent for an unchanged image"
+        policy.secure_input_allows(),
+        "the third Secure Input answer is still unused"
     );
-    stop.store(true, Ordering::Release);
-    worker.join().expect("content worker");
-    assert!(events.try_recv().is_err());
+    assert!(run.finish().is_empty());
 }

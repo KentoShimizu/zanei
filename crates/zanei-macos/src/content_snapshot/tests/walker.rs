@@ -658,3 +658,42 @@ fn failed_child_count_of_a_blank_text_area_is_degraded_not_blank() {
     assert_eq!(output.degraded_nodes, 1);
     assert_eq!(analysis.blank_coverage, 0.0);
 }
+
+#[test]
+fn masks_are_complete_only_when_every_input_field_could_be_placed() {
+    // Catches recognition masking from a partial walk: a cut-off walk, an unreadable role or
+    // child list, or a frameless input can each hide a field whose text would then be stored.
+    let masks_complete = |root: FakeNode, budget: WalkBudget| {
+        let clock = FakeClock(Arc::clone(&root.elapsed_micros));
+        let window = frame(0.0, 0.0, 100.0, 100.0);
+        walk_snapshot_analyzed(root, window, budget, &clock, || false)
+            .expect("fake walk")
+            .1
+            .masks_complete
+    };
+    let window_with = |child: FakeNode| {
+        let mut root = FakeNode::new("AXGroup");
+        root.children.push(child);
+        root
+    };
+    let field = FakeNode::new("AXTextField");
+    assert!(masks_complete(
+        window_with(field.clone()),
+        generous_budget()
+    ));
+
+    let one_node = WalkBudget {
+        nodes: 1,
+        ..generous_budget()
+    };
+    assert!(!masks_complete(window_with(field.clone()), one_node));
+    let mut unreadable = FakeNode::new("AXGroup");
+    unreadable.fail_safe_read = true;
+    assert!(!masks_complete(window_with(unreadable), generous_budget()));
+    let mut uncounted = window_with(field.clone());
+    uncounted.fail_children_count = true;
+    assert!(!masks_complete(uncounted, generous_budget()));
+    let mut frameless = field;
+    frameless.attributes.frame = None;
+    assert!(!masks_complete(window_with(frameless), generous_budget()));
+}
