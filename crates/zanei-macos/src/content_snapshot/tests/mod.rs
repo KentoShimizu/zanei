@@ -5,6 +5,7 @@ mod event;
 mod ocr_engine;
 mod output;
 mod policy;
+mod recognition;
 mod role;
 mod scheduler;
 mod state;

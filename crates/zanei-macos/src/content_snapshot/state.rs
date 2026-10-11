@@ -161,10 +161,6 @@ impl SnapshotState {
         self.saved_mut(key).ocr_image = Some(image);
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used once the worker recognizes text")
-    )]
     pub(crate) fn recognized_image(&self, key: SnapshotWindowKey) -> Option<u64> {
         self.windows.get(&key).and_then(|saved| saved.ocr_image)
     }

@@ -151,18 +151,8 @@ enum Work<N> {
     },
 }
 
-pub(crate) fn walk_snapshot<N: SnapshotNode>(
-    root: N,
-    window_frame: AxFrame,
-    budget: WalkBudget,
-    clock: &impl WalkClock,
-    stopped: impl Fn() -> bool,
-) -> Result<SnapshotWalkOutput, SnapshotWalkError> {
-    walk_snapshot_analyzed(root, window_frame, budget, clock, stopped).map(|(output, _)| output)
-}
-
-/// Walks like `walk_snapshot` and also returns the analysis of the same
-/// traversal, collected within the same budgets.
+/// Walks the window and returns its text together with the analysis of the
+/// same traversal, collected within the same budgets.
 pub(crate) fn walk_snapshot_analyzed<N: SnapshotNode>(
     root: N,
     window_frame: AxFrame,
@@ -216,6 +206,9 @@ pub(crate) fn walk_snapshot_analyzed<N: SnapshotNode>(
     // Account for the final native call crossing the wall-time boundary even
     // when it discovers that no work remains.
     let _ = context.can_continue();
+    if context.cutoff.is_some() {
+        context.analysis.masks_incomplete();
+    }
     let output = SnapshotWalkOutput {
         text: context.text.finish(),
         nodes: context.nodes,
@@ -244,6 +237,8 @@ fn visit_node<'a, N: SnapshotNode>(
         NodeRead::Value(attributes) => attributes,
         NodeRead::Degraded => {
             context.degraded_nodes = context.degraded_nodes.saturating_add(1);
+            // An unknown role may be an input field.
+            context.analysis.masks_incomplete();
             if context.can_continue()
                 && let NodeRead::Value(count) =
                     context.read_node(is_root, || node.children_count())?
@@ -266,6 +261,12 @@ fn visit_node<'a, N: SnapshotNode>(
     let class = classify_role(attributes.role.as_deref(), attributes.subrole.as_deref());
     let Some(frame) = attributes.frame else {
         context.frameless_nodes = context.frameless_nodes.saturating_add(1);
+        if matches!(
+            class,
+            SnapshotNodeClass::SecureInput | SnapshotNodeClass::SingleLineInput
+        ) {
+            context.analysis.masks_incomplete();
+        }
         descend_if_container(node, is_root, class, false, stack, context)?;
         return Ok(());
     };
@@ -341,6 +342,8 @@ fn descend_if_container<'a, N: SnapshotNode>(
             if !degraded {
                 context.degraded_nodes = context.degraded_nodes.saturating_add(1);
             }
+            // The unvisited subtree may hold input fields.
+            context.analysis.masks_incomplete();
             Ok(None)
         }
     }
@@ -362,6 +365,7 @@ fn load_children<'a, N: SnapshotNode>(
             if !degraded {
                 context.degraded_nodes = context.degraded_nodes.saturating_add(1);
             }
+            context.analysis.masks_incomplete();
             return Ok(());
         }
     };

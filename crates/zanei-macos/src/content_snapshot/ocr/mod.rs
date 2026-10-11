@@ -1,10 +1,6 @@
 //! Turns the lines recognized in one window image into the body of a
 //! `macos.ocr` snapshot: input-field masking, line colours, reading order, and
 //! the snapshot size limits. Pure; the caller owns capture and recognition.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called by the text-recognition fallback")
-)]
 
 mod assemble;
 mod layout;

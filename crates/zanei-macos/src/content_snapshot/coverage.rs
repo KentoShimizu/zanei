@@ -10,10 +10,6 @@ const COVERAGE_GRID: usize = 48;
 const COVERAGE_CELLS: usize = COVERAGE_GRID * COVERAGE_GRID;
 /// Accessibility is insufficient when at least a quarter of the window is
 /// occupied by elements that exist to present content but expose none.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the text-recognition fallback")
-)]
 const BLANK_COVERAGE_MIN: f64 = 0.25;
 /// Order containers cover at least 3 % of the window area.
 const ORDER_CONTAINER_MIN_AREA: f64 = 0.03;
@@ -126,13 +122,12 @@ pub(crate) struct WalkAnalysis {
     pub(crate) mask_regions: Vec<WindowRect>,
     /// Large non-root elements that partition the window, in walk order.
     pub(crate) order_containers: Vec<WindowRect>,
+    /// False when an input may be missing from `mask_regions`: the walk was cut
+    /// off, a node's role or children were unreadable, or an input had no frame.
+    pub(crate) masks_complete: bool,
 }
 
 impl WalkAnalysis {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the text-recognition fallback")
-    )]
     pub(crate) fn ax_insufficient(&self) -> bool {
         self.blank_coverage >= BLANK_COVERAGE_MIN
     }
@@ -144,6 +139,7 @@ pub(crate) struct WalkAnalyzer {
     text_cells: [bool; COVERAGE_CELLS],
     mask_regions: Vec<WindowRect>,
     order_containers: Vec<WindowRect>,
+    masks_complete: bool,
 }
 
 impl WalkAnalyzer {
@@ -153,7 +149,12 @@ impl WalkAnalyzer {
             text_cells: [false; COVERAGE_CELLS],
             mask_regions: Vec::new(),
             order_containers: Vec::new(),
+            masks_complete: true,
         }
+    }
+
+    pub(crate) fn masks_incomplete(&mut self) {
+        self.masks_complete = false;
     }
 
     pub(crate) fn record(&mut self, node: &WalkedNode<'_>) {
@@ -182,6 +183,7 @@ impl WalkAnalyzer {
             blank_coverage: blank as f64 / COVERAGE_CELLS as f64,
             mask_regions: self.mask_regions,
             order_containers: self.order_containers,
+            masks_complete: self.masks_complete,
         }
     }
 }

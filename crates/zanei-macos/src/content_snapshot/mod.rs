@@ -3,7 +3,6 @@
 pub(crate) mod budget;
 mod coverage;
 mod ocr;
-#[expect(dead_code, reason = "driven by the snapshot worker")]
 mod ocr_engine;
 mod output;
 mod role;
@@ -88,6 +87,8 @@ struct SharedHealth {
     failures: Arc<AtomicU64>,
     degraded: Arc<RwLock<Option<String>>>,
     processed_triggers: Arc<AtomicU64>,
+    #[cfg(test)]
+    finished_recognitions: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -208,6 +209,13 @@ impl Collector for ContentSnapshotCollector {
         let health = self.health.clone();
         let focus_context = self.focus_context.clone();
         let channels = Arc::clone(&self.channels);
+        let ocr =
+            ocr_engine::OcrEngine::start(ocr_engine::OcrBackend::native()).map_err(|error| {
+                CollectorError::Start {
+                    collector: self.name().to_owned(),
+                    message: error.to_string(),
+                }
+            })?;
         #[cfg(test)]
         let panic_next_worker = Arc::clone(&self.panic_next_worker);
         let handle = thread::Builder::new()
@@ -234,6 +242,7 @@ impl Collector for ContentSnapshotCollector {
                     health,
                     state,
                     focus_context,
+                    ocr,
                 );
             })
             .map_err(|error| CollectorError::Start {

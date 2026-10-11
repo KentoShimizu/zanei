@@ -18,7 +18,9 @@ use zanei_core::{
 use crate::{
     content_snapshot::{
         SnapshotTriggerReceiver, SnapshotWalkOutput,
-        output::{SnapshotBody, emit, emit_released, trace_candidate, trace_output},
+        coverage::WalkAnalysis,
+        ocr_engine::OcrEngine,
+        output::{emit_released, trace_candidate, trace_output},
         scheduler::{ScheduledSnapshot, SnapshotScheduler},
         state::SnapshotState,
     },
@@ -30,11 +32,17 @@ use crate::{
 use super::{Control, SharedHealth, WORKER_POLL_INTERVAL};
 use crate::{CapturePolicy, chrome::ChromeObserver};
 
+mod recognition;
 pub(super) mod scan;
 mod scheduling;
 
+use recognition::Delivery;
+use recognition::{WalkedCandidate, finish_recognition, start_recognition};
 use scheduling::CandidateTime;
 pub(super) use scheduling::seed_scheduler_from_focus;
+
+/// One walked window: its text and the analysis of the same traversal.
+pub(super) type ScannedWindow = (SnapshotWalkOutput, WalkAnalysis);
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_worker(
@@ -48,6 +56,7 @@ pub(super) fn run_worker(
     health: SharedHealth,
     state: &mut SnapshotState,
     focus_context: FocusContext,
+    ocr: OcrEngine,
 ) {
     run_worker_with_scanner(
         trigger,
@@ -60,6 +69,7 @@ pub(super) fn run_worker(
         health,
         state,
         focus_context,
+        ocr,
         scan::scan,
     );
 }
@@ -76,6 +86,7 @@ pub(super) fn run_worker_with_scanner<F>(
     health: SharedHealth,
     state: &mut SnapshotState,
     focus_context: FocusContext,
+    ocr: OcrEngine,
     mut scan_window: F,
 ) where
     F: FnMut(
@@ -83,12 +94,15 @@ pub(super) fn run_worker_with_scanner<F>(
         i64,
         &AtomicBool,
         &mut dyn FnMut(Option<String>) -> bool,
-    ) -> Result<Option<SnapshotWalkOutput>, ScanError>,
+    ) -> Result<Option<ScannedWindow>, ScanError>,
 {
     debug_assert_eq!(std::thread::current().name(), Some("zanei-content"));
     let mut scheduler = SnapshotScheduler::default();
     seed_scheduler_from_focus(&mut scheduler, &focus_context, Instant::now());
     let mut quarantine = TextQuarantine::new(chrome_observer);
+    // While recognition runs on its own thread, the loop keeps servicing controls and
+    // triggers but takes no new candidate; stopping discards the unread result.
+    let mut recognizing: Option<WalkedCandidate> = None;
     while !stop.load(Ordering::Acquire) {
         if service_controls(&controls, &mut scheduler, state, Instant::now()) {
             break;
@@ -99,14 +113,11 @@ pub(super) fn run_worker_with_scanner<F>(
             &health,
             state,
         );
-        let wait = scheduler
-            .next_deadline()
-            .map_or(WORKER_POLL_INTERVAL, |deadline| {
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or(Duration::ZERO)
-                    .min(WORKER_POLL_INTERVAL)
-            });
+        let wait = loop_wait(
+            recognizing.is_some(),
+            scheduler.next_deadline(),
+            Instant::now(),
+        );
         let observation = match trigger.recv_timeout(wait) {
             Ok(observation) => Some(observation),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
@@ -119,19 +130,33 @@ pub(super) fn run_worker_with_scanner<F>(
             health.processed_triggers.fetch_add(1, Ordering::Relaxed);
             scheduler.observe_message(observation);
         }
-        while let Some(candidate) = scheduler.take_due(Instant::now()) {
+        let mut delivery = Delivery {
+            policy: &capture_policy,
+            sender: &sender,
+            health: &health,
+            quarantine: &mut quarantine,
+        };
+        if let Some(walked) = recognizing.take() {
+            match ocr.poll() {
+                // A result that arrives once stop is requested is discarded.
+                Some(_) if stop.load(Ordering::Acquire) => {}
+                Some(outcome) => finish_recognition(walked, outcome, state, &mut delivery),
+                None => recognizing = Some(walked),
+            }
+        }
+        while recognizing.is_none()
+            && let Some(candidate) = scheduler.take_due(Instant::now())
+        {
             let taken_at = CandidateTime::now();
-            process_candidate(
+            recognizing = process_candidate(
                 candidate,
                 taken_at,
                 state,
                 CandidateContext {
-                    policy: &capture_policy,
-                    sender: &sender,
+                    delivery: &mut delivery,
                     stop: &stop,
-                    health: &health,
                     focus_context: &focus_context,
-                    quarantine: &mut quarantine,
+                    ocr: &ocr,
                     scan_window: &mut scan_window,
                 },
             );
@@ -143,6 +168,21 @@ pub(super) fn run_worker_with_scanner<F>(
     }
     emit_released(quarantine.flush(), &sender, &health, state);
     scheduler.stop();
+}
+
+/// A due deadline must not zero the wait while recognizing, when no candidate can be taken.
+pub(super) fn loop_wait(
+    recognizing: bool,
+    next_deadline: Option<Instant>,
+    now: Instant,
+) -> Duration {
+    match next_deadline {
+        Some(deadline) if !recognizing => deadline
+            .checked_duration_since(now)
+            .unwrap_or(Duration::ZERO)
+            .min(WORKER_POLL_INTERVAL),
+        _ => WORKER_POLL_INTERVAL,
+    }
 }
 
 pub(super) fn service_controls(
@@ -185,42 +225,42 @@ fn service_lifecycle(
     }
 }
 
-struct CandidateContext<'a, F> {
-    policy: &'a CapturePolicy,
-    sender: &'a SyncSender<RawEvent>,
+struct CandidateContext<'a, 'b, F> {
+    delivery: &'a mut Delivery<'b>,
     stop: &'a AtomicBool,
-    health: &'a SharedHealth,
     focus_context: &'a FocusContext,
-    quarantine: &'a mut TextQuarantine,
+    ocr: &'a OcrEngine,
     scan_window: &'a mut F,
 }
 
+/// Runs the gates and the walk. Returns the candidate when its text is being recognized.
 fn process_candidate<F>(
     mut candidate: ScheduledSnapshot,
     taken_at: CandidateTime,
     state: &mut SnapshotState,
-    context: CandidateContext<'_, F>,
-) where
+    context: CandidateContext<'_, '_, F>,
+) -> Option<WalkedCandidate>
+where
     F: FnMut(
         i32,
         i64,
         &AtomicBool,
         &mut dyn FnMut(Option<String>) -> bool,
-    ) -> Result<Option<SnapshotWalkOutput>, ScanError>,
+    ) -> Result<Option<ScannedWindow>, ScanError>,
 {
     let CandidateContext {
-        policy,
-        sender,
+        delivery,
         stop,
-        health,
         focus_context,
-        quarantine,
+        ocr,
         scan_window,
     } = context;
+    let policy = delivery.policy;
+    let health = delivery.health;
     let now = taken_at.monotonic;
     let Some(key) = candidate.key() else {
         trace_candidate(&candidate, "window_id", 0, Duration::ZERO, 0, false, None);
-        return;
+        return None;
     };
     if candidate.trigger != ContentSnapshotTrigger::FocusOut
         && !focus_context.current().is_some_and(|focus| {
@@ -237,7 +277,7 @@ fn process_candidate<F>(
             false,
             None,
         );
-        return;
+        return None;
     }
     if candidate.trigger == ContentSnapshotTrigger::FocusOut
         && !SnapshotScheduler::focus_out_allows(state.last_saved_at(key), now)
@@ -251,7 +291,7 @@ fn process_candidate<F>(
             false,
             None,
         );
-        return;
+        return None;
     }
     if !policy.secure_input_allows() {
         trace_candidate(
@@ -263,11 +303,11 @@ fn process_candidate<F>(
             false,
             None,
         );
-        return;
+        return None;
     }
     if !policy.refresh_activity_allows(candidate.activity_window) {
         trace_candidate(&candidate, "activity", 0, Duration::ZERO, 0, false, None);
-        return;
+        return None;
     }
     if !state.global_interval_allows(now) {
         trace_candidate(
@@ -279,7 +319,7 @@ fn process_candidate<F>(
             false,
             None,
         );
-        return;
+        return None;
     }
     if !state.daily_budget_allows(now) {
         trace_candidate(
@@ -291,15 +331,15 @@ fn process_candidate<F>(
             false,
             None,
         );
-        return;
+        return None;
     }
     if !state.backoff_allows(key.pid, now) {
         trace_candidate(&candidate, "pid_backoff", 0, Duration::ZERO, 0, false, None);
-        return;
+        return None;
     }
     let Ok(pid) = i32::try_from(key.pid) else {
         trace_candidate(&candidate, "pid", 0, Duration::ZERO, 0, false, None);
-        return;
+        return None;
     };
     let (scan_result, read_decision) = {
         let mut read_decision = None;
@@ -320,18 +360,18 @@ fn process_candidate<F>(
             read_decision,
         )
     };
-    let output = match scan_result {
-        Ok(Some(output)) => output,
+    let (output, analysis) = match scan_result {
+        Ok(Some(scanned)) => scanned,
         Ok(None) => {
             trace_candidate(&candidate, "stale", 0, Duration::ZERO, 0, false, None);
-            return;
+            return None;
         }
         Err(error) => {
             record_scan_failure(state, health, key.pid, now, &candidate, &error);
-            return;
+            return None;
         }
     };
-    let Some(read_decision) = read_decision.as_ref() else {
+    let Some(read_decision) = read_decision else {
         trace_candidate(
             &candidate,
             "window_policy_unavailable",
@@ -341,7 +381,7 @@ fn process_candidate<F>(
             false,
             None,
         );
-        return;
+        return None;
     };
     health.failures.fetch_add(
         u64::try_from(output.degraded_nodes).expect("degraded node count must fit u64"),
@@ -349,33 +389,18 @@ fn process_candidate<F>(
     );
     if stop.load(Ordering::Acquire) || output.cutoff == Some(ContentSnapshotCutoff::Stopped) {
         trace_output(&candidate, "stopped", &output);
-        return;
+        return None;
     }
     state.record_scan_success(key.pid);
-    if output.text.is_empty() {
-        trace_output(&candidate, "empty", &output);
-        return;
-    }
-    if !policy.secure_input_allows() {
-        trace_output(&candidate, "secure_input", &output);
-        return;
-    }
-    let body = SnapshotBody::ax(output.text.clone(), output.cutoff, candidate.trigger);
-    let save_at = Instant::now();
-    emit(
+    let walked = WalkedCandidate {
         candidate,
-        &output,
-        body,
         key,
-        policy,
-        read_decision,
-        taken_at.wall,
-        save_at,
-        state,
-        sender,
-        health,
-        quarantine,
-    );
+        decision: read_decision,
+        observed_at: taken_at.wall,
+        output,
+        blank_coverage: analysis.blank_coverage,
+    };
+    start_recognition(walked, analysis, ocr, state, delivery)
 }
 
 fn record_scan_failure(
