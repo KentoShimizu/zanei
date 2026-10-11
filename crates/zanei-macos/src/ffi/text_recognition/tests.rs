@@ -82,24 +82,16 @@ fn live_vision_recognizes_synthetic_lines_top_to_bottom() {
 fn live_capture_and_recognition_at_one_and_two_x() {
     initialize_application();
     assert!(screen_capture_available(), "requires macOS 14 or later");
-    assert!(
-        screen_capture_access(),
-        "grant Screen Recording to this terminal and restart it"
-    );
+    assert!(screen_capture_access(), "needs Screen Recording");
     let pid = std::env::var("ZANEI_OCR_TEST_PID").map_or_else(
         |_| frontmost_application().map(|app| i64::from(app.pid)),
         |pid| pid.parse().ok(),
     );
-    let window_id = pid
-        .and_then(front_window)
-        .and_then(|window| window.id)
-        .expect("a window");
+    let window = pid.and_then(front_window).expect("an on-screen window");
+    let window_id = window.id.expect("a window id");
+    // An expired deadline must not block.
     let expired = capture_window(window_id, 1.0, Duration::ZERO);
-    assert_eq!(
-        expired.err(),
-        Some(CaptureError::Timeout),
-        "an expired deadline must not block"
-    );
+    assert_eq!(expired.err(), Some(CaptureError::Timeout));
 
     let mut texts: Vec<HashSet<String>> = Vec::new();
     for scale in [1.0, 2.0] {
@@ -129,16 +121,14 @@ fn render_lines(lines: &[&str], scale: f64) -> WindowImage {
     let mut rgba = vec![u8::MAX; width * height * 4];
     // SAFETY: the context is dropped before `rgba` moves into the image.
     let context = unsafe { bitmap_context(&mut rgba, width, height) }.expect("bitmap context");
+    let null = ptr::null();
     unsafe {
-        let font = owned(CTFontCreateWithName(
-            cf_string("Hiragino Sans").as_ptr(),
-            13.0 * scale,
-            ptr::null(),
-        ));
+        let name = cf_string("Hiragino Sans");
+        let font = owned(CTFontCreateWithName(name.as_ptr(), 13.0 * scale, null));
         let keys = [kCTFontAttributeName];
         let values = [font.as_ptr()];
         let attributes = owned(CFDictionaryCreate(
-            ptr::null(),
+            null,
             keys.as_ptr(),
             values.as_ptr(),
             1,
@@ -147,19 +137,13 @@ fn render_lines(lines: &[&str], scale: f64) -> WindowImage {
         ));
         for (index, text) in lines.iter().enumerate() {
             let string = cf_string(text);
-            let attributed = owned(CFAttributedStringCreate(
-                ptr::null(),
-                string.as_ptr(),
-                attributes.as_ptr(),
-            ));
+            let attributed = CFAttributedStringCreate(null, string.as_ptr(), attributes.as_ptr());
+            let attributed = owned(attributed);
             let line = owned(CTLineCreateWithAttributedString(attributed.as_ptr()));
             // Core Graphics text positions count up from the bottom edge.
             let baseline_from_top = MARGIN + LINE_PITCH * index as f64 + 13.0;
-            CGContextSetTextPosition(
-                context.as_ptr(),
-                MARGIN * scale,
-                height as f64 - baseline_from_top * scale,
-            );
+            let y = height as f64 - baseline_from_top * scale;
+            CGContextSetTextPosition(context.as_ptr(), MARGIN * scale, y);
             CTLineDraw(line.as_ptr(), context.as_ptr());
         }
     }
@@ -178,19 +162,14 @@ unsafe fn owned(value: CfRef) -> OwnedCf {
 
 unsafe fn cf_string(text: &str) -> OwnedCf {
     let text = CString::new(text).expect("no interior NUL");
-    unsafe {
-        owned(CFStringCreateWithCString(
-            ptr::null(),
-            text.as_ptr(),
-            0x0800_0100,
-        ))
-    }
+    let string = unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), 0x0800_0100) };
+    unsafe { owned(string) }
 }
 
 #[link(name = "CoreText", kind = "framework")]
 unsafe extern "C" {
     static kCTFontAttributeName: CfRef;
-    fn CTFontCreateWithName(name: CfRef, size: f64, matrix: *const c_void) -> CfRef;
+    fn CTFontCreateWithName(name: CfRef, size: f64, matrix: CfRef) -> CfRef;
     fn CTLineCreateWithAttributedString(string: CfRef) -> CfRef;
     fn CTLineDraw(line: CfRef, context: CfRef);
 }
@@ -204,11 +183,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     static kCFTypeDictionaryKeyCallBacks: u8;
     static kCFTypeDictionaryValueCallBacks: u8;
-    fn CFStringCreateWithCString(
-        allocator: *const c_void,
-        text: *const c_char,
-        encoding: u32,
-    ) -> CfRef;
+    fn CFStringCreateWithCString(allocator: CfRef, text: *const c_char, encoding: u32) -> CfRef;
     fn CFDictionaryCreate(
         allocator: *const c_void,
         keys: *const CfRef,
@@ -217,9 +192,5 @@ unsafe extern "C" {
         key_callbacks: *const c_void,
         value_callbacks: *const c_void,
     ) -> CfRef;
-    fn CFAttributedStringCreate(
-        allocator: *const c_void,
-        string: CfRef,
-        attributes: CfRef,
-    ) -> CfRef;
+    fn CFAttributedStringCreate(allocator: CfRef, string: CfRef, attributes: CfRef) -> CfRef;
 }

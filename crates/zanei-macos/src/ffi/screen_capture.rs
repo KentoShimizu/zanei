@@ -22,6 +22,7 @@ use super::geometry::{AxFrame, AxPoint, AxSize};
 
 /// `SCStreamErrorUserDeclined`: ScreenCaptureKit's report that Screen Recording is not granted.
 const SC_STREAM_ERROR_USER_DECLINED: isize = -3801;
+const SC_CAPTURE_RESOLUTION_BEST: usize = 1;
 pub(super) const BYTES_PER_PIXEL: usize = 4;
 /// `kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big`: bytes in R, G, B, A order. Bitmap
 /// contexts cannot hold straight alpha, so the buffer is un-premultiplied after drawing.
@@ -130,20 +131,29 @@ pub(crate) fn capture_window(
     let configuration =
         unsafe { OwnedObject::from_retained(send_id_0(config_class as ObjcId, sel(c"new"))) }
             .ok_or(failed)?;
-    let set_size = msg_send::<unsafe extern "C" fn(ObjcId, ObjcSel, usize)>();
     let (width, height) = pixel_size(frame.size.width, frame.size.height, scale);
-    unsafe {
-        set_size(configuration.as_ptr(), sel(c"setWidth:"), width);
-        set_size(configuration.as_ptr(), sel(c"setHeight:"), height);
-        send_void_bool(configuration.as_ptr(), sel(c"setShowsCursor:"), false);
-        // Otherwise a size above the window's backing resolution is padded, not upscaled.
-        send_void_bool(configuration.as_ptr(), sel(c"setScalesToFit:"), true);
-        // The default single-window capture adds the shadow around `frame` (macOS 14+ setter).
-        send_void_bool(
-            configuration.as_ptr(),
-            sel(c"setIgnoreShadowsSingleWindow:"),
-            true,
-        );
+    // Integer properties are `size_t` or non-negative `NSInteger`, passed alike.
+    let set_integer = msg_send::<unsafe extern "C" fn(ObjcId, ObjcSel, usize)>();
+    for (setter, value) in [
+        (c"setWidth:", width),
+        (c"setHeight:", height),
+        // Sample backing pixels instead of letting the system pick a lower source resolution.
+        (c"setCaptureResolution:", SC_CAPTURE_RESOLUTION_BEST),
+    ] {
+        unsafe { set_integer(configuration.as_ptr(), sel(setter), value) };
+    }
+    // Together these make the whole image exactly `frame` at the requested size.
+    for (setter, value) in [
+        (c"setShowsCursor:", false),
+        // Upscale as well as downscale, instead of padding a size above the backing resolution.
+        (c"setScalesToFit:", true),
+        // Fill the requested size instead of letterboxing its rounding remainder.
+        (c"setPreservesAspectRatio:", false),
+        // macOS 14+: no shadow around `frame`, and no clipping of off-screen parts.
+        (c"setIgnoreShadowsSingleWindow:", true),
+        (c"setIgnoreGlobalClipSingleWindow:", true),
+    ] {
+        unsafe { send_void_bool(configuration.as_ptr(), sel(setter), value) };
     }
     let image = complete(
         deadline,

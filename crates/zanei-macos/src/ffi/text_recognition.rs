@@ -20,7 +20,8 @@ use super::{
     },
 };
 
-const VN_REQUEST_TEXT_RECOGNITION_LEVEL_ACCURATE: isize = 0;
+const VN_REQUEST_TEXT_RECOGNITION_LEVEL_ACCURATE: usize = 0;
+const VN_RECOGNIZE_TEXT_REQUEST_REVISION_3: usize = 3;
 /// `kCGImageAlphaLast` in the default byte order: straight R, G, B, A bytes.
 const RGBA_STRAIGHT_BITMAP_INFO: u32 = 3;
 const BITS_PER_COMPONENT: usize = 8;
@@ -74,18 +75,24 @@ pub(crate) fn recognize_text(image: &WindowImage) -> Result<Vec<RecognizedLine>,
     let request =
         unsafe { OwnedObject::from_retained(send_id_0(request_class as ObjcId, sel(c"new"))) }
             .ok_or(failed)?;
-    unsafe {
-        msg_send::<unsafe extern "C" fn(ObjcId, ObjcSel, isize)>()(
-            request.as_ptr(),
-            sel(c"setRecognitionLevel:"),
+    // Integer properties are `NSUInteger` or non-negative `NSInteger`, passed alike.
+    let set_integer = msg_send::<unsafe extern "C" fn(ObjcId, ObjcSel, usize)>();
+    for (setter, value) in [
+        (
+            c"setRecognitionLevel:",
             VN_REQUEST_TEXT_RECOGNITION_LEVEL_ACCURATE,
-        );
-        send_void_bool(request.as_ptr(), sel(c"setUsesLanguageCorrection:"), false);
-        send_void_bool(
-            request.as_ptr(),
-            sel(c"setAutomaticallyDetectsLanguage:"),
-            true,
-        );
+        ),
+        // Pinned: the default follows the SDK the binary was linked with, and only revision 3
+        // detects languages and reads Japanese.
+        (c"setRevision:", VN_RECOGNIZE_TEXT_REQUEST_REVISION_3),
+    ] {
+        unsafe { set_integer(request.as_ptr(), sel(setter), value) };
+    }
+    for (setter, value) in [
+        (c"setUsesLanguageCorrection:", false),
+        (c"setAutomaticallyDetectsLanguage:", true),
+    ] {
+        unsafe { send_void_bool(request.as_ptr(), sel(setter), value) };
     }
     // SAFETY: `arrayWithObject:` returns an autoreleased array retaining the live request.
     let requests = unsafe {
