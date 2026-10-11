@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::content_snapshot::{
     budget::{DAILY_BUDGET_WINDOW, DAILY_TEXT_BUDGET_BYTES},
-    state::{SaveBlock, SnapshotState, SnapshotWindowKey},
+    state::{SaveBlock, SnapshotOrigin::Ax, SnapshotState, SnapshotWindowKey},
 };
 
 fn key(pid: i64, window_id: i64) -> SnapshotWindowKey {
@@ -16,22 +16,23 @@ fn reservation_consumes_limits_but_hash_is_recorded_only_after_release() {
     let first = key(7, 11);
     let hash = SnapshotState::text_hash("same");
 
-    assert_eq!(state.evaluate_save(first, hash, 4, base), Ok(()));
-    assert_eq!(state.evaluate_save(first, hash, 4, base), Ok(()));
+    assert_eq!(state.evaluate_save(first, Ax, hash, 4, base), Ok(()));
+    assert_eq!(state.evaluate_save(first, Ax, hash, 4, base), Ok(()));
     state.reserve(first, 4, base);
     assert_eq!(
-        state.evaluate_save(first, hash, 4, base + Duration::from_secs(5)),
+        state.evaluate_save(first, Ax, hash, 4, base + Duration::from_secs(5)),
         Ok(()),
         "a reserved snapshot that is later dropped must not deduplicate its body"
     );
-    state.record_hash(first, hash);
+    state.record_hash(first, Ax, hash);
     assert_eq!(
-        state.evaluate_save(first, hash, 4, base + Duration::from_secs(5)),
+        state.evaluate_save(first, Ax, hash, 4, base + Duration::from_secs(5)),
         Err(SaveBlock::Duplicate)
     );
     assert_eq!(
         state.evaluate_save(
             key(8, 12),
+            Ax,
             SnapshotState::text_hash("different"),
             9,
             base + Duration::from_secs(4)
@@ -63,7 +64,7 @@ fn a_body_that_would_cross_the_daily_limit_marks_the_current_budget_degraded() {
         usize::try_from(DAILY_TEXT_BUDGET_BYTES - 1).expect("design budget fits usize");
     state.reserve(key(7, 11), almost_full, base);
     assert_eq!(
-        state.evaluate_save(key(8, 12), 2, 2, base + Duration::from_secs(5)),
+        state.evaluate_save(key(8, 12), Ax, 2, 2, base + Duration::from_secs(5)),
         Err(SaveBlock::DailyBudget)
     );
     assert!(!state.daily_budget_allows(base + Duration::from_secs(5)));

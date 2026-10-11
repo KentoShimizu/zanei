@@ -10,18 +10,23 @@ use super::{
     ACCESSIBILITY_SETTINGS_URL, AE_PERMISSION_GRANTED, AE_PERMISSION_NOT_DETERMINED,
     AUTOMATION_SETTINGS_URL, AutomationProbeState, AutomationTargetError, Capability,
     CapabilityState, INPUT_MONITORING_SETTINGS_URL, MacOsPermission, PermissionError,
-    PermissionProbe, PermissionStatus, SAFARI_BUNDLE_ID, SettingsOpener,
-    automation_status_with_timeout, automation_target_error, capability_detail, open_settings_with,
-    permission_status_with,
+    PermissionProbe, PermissionStatus, SAFARI_BUNDLE_ID, SCREEN_RECORDING_SETTINGS_URL,
+    SettingsOpener, automation_status_with_timeout, automation_target_error, capability_detail,
+    open_settings_with, permission_status_with,
 };
 
 struct StubPermissionProbe {
     accessibility_trusted: bool,
     input_status: i32,
     automation_status: Result<i32, AutomationTargetError>,
+    screen_capture: bool,
 }
 
 impl PermissionProbe for StubPermissionProbe {
+    fn screen_capture_access(&self) -> bool {
+        self.screen_capture
+    }
+
     fn accessibility_is_trusted(&self) -> bool {
         self.accessibility_trusted
     }
@@ -56,6 +61,7 @@ fn probe_with(
         accessibility_trusted,
         input_status,
         automation_status,
+        screen_capture: false,
     }
 }
 
@@ -69,6 +75,9 @@ fn maps_all_native_permission_statuses() {
     use {Capability::{AutomateBrowser, AutomateSafari, ObserveInput, ReadAccessibilityTree}, PermissionStatus::{Denied, Granted, NotDetermined}};
     assert_status(probe_with(true, 0, Ok(0)), ReadAccessibilityTree, Granted);
     assert_status(probe_with(false, 0, Ok(0)), ReadAccessibilityTree, Denied);
+    // Catches the optional permission panicking or reading another permission's state.
+    assert_status(StubPermissionProbe { screen_capture: true, ..probe_with(false, 1, Ok(-1_743)) }, Capability::CaptureScreen, Granted);
+    assert_status(probe_with(true, 0, Ok(0)), Capability::CaptureScreen, Denied);
     for (raw, expected) in [(0, Granted), (1, Denied), (2, NotDetermined)] {
         assert_status(probe_with(false, raw, Ok(0)), ObserveInput, expected);
     }
@@ -93,7 +102,7 @@ fn maps_all_native_permission_statuses() {
 #[rustfmt::skip]
 fn describes_each_capability_and_state_for_macos() {
     use {Capability::{AutomateBrowser, AutomateSafari, ObserveInput, ReadAccessibilityTree}, CapabilityState::{ActionRequired, Available, Deferred}, PermissionStatus::{Denied, Granted, NotDetermined}};
-    for capability in [ReadAccessibilityTree, ObserveInput, AutomateBrowser, AutomateSafari] {
+    for capability in [ReadAccessibilityTree, ObserveInput, AutomateBrowser, AutomateSafari, Capability::CaptureScreen] {
         for (state, status) in [(Available, Granted), (ActionRequired, Denied), (Deferred, NotDetermined)] {
             assert_eq!(capability_detail(capability, state).status, status);
         }
@@ -113,6 +122,8 @@ fn describes_each_capability_and_state_for_macos() {
     assert_eq!(automation.target_bundle_id, Some(zanei_core::privacy::CHROME_BUNDLE_ID));
     let safari = capability_detail(AutomateSafari, Available);
     assert_eq!(safari.target_bundle_id, Some(SAFARI_BUNDLE_ID));
+    let screen = capability_detail(Capability::CaptureScreen, ActionRequired);
+    assert_eq!((screen.permission.as_str(), screen.settings_url), ("screen_recording", SCREEN_RECORDING_SETTINGS_URL));
     assert_eq!(MacOsPermission::InputMonitoring.as_str(), "input_monitoring");
     assert_eq!(NotDetermined.as_str(), "not_determined");
 }
@@ -172,6 +183,7 @@ fn opens_the_permission_specific_settings_pane() {
     open_settings_with(&opener, &Capability::ObserveInput).unwrap();
     open_settings_with(&opener, &Capability::AutomateBrowser).unwrap();
     open_settings_with(&opener, &Capability::AutomateSafari).unwrap();
+    open_settings_with(&opener, &Capability::CaptureScreen).unwrap();
 
     assert_eq!(
         *opener.borrow(),
@@ -180,6 +192,7 @@ fn opens_the_permission_specific_settings_pane() {
             INPUT_MONITORING_SETTINGS_URL,
             AUTOMATION_SETTINGS_URL,
             AUTOMATION_SETTINGS_URL,
+            SCREEN_RECORDING_SETTINGS_URL,
         ]
     );
 }

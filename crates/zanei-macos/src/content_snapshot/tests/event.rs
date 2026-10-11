@@ -4,12 +4,17 @@ use zanei_core::{
     config::{FilterConfig, RedactorKind},
     normalize::Normalizer,
     privacy::PrivacyFilter,
-    schema::{CaptureContext, ContentSnapshotCutoff, ContentSnapshotTrigger, EventData},
+    schema::{
+        CaptureContext, ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotLine,
+        ContentSnapshotTrigger, EventData, RgbColor, WindowFraction,
+    },
 };
 
 use crate::content_snapshot::{
-    SnapshotTriggerKind, output::build_raw_event, scheduler::ScheduledSnapshot,
-    state::SnapshotWindowKey,
+    SnapshotTriggerKind,
+    output::{SnapshotBody, build_raw_event},
+    scheduler::ScheduledSnapshot,
+    state::{SnapshotOrigin, SnapshotWindowKey},
 };
 
 use super::support::trigger;
@@ -21,14 +26,19 @@ fn raw_event_matches_the_v4_content_snapshot_contract() {
         trigger: ContentSnapshotTrigger::Settle,
         activity_window: None,
     };
+    let body = SnapshotBody::ax(
+        "日本語 alice@example.com".to_owned(),
+        None,
+        candidate.trigger,
+    );
     let event = build_raw_event(
         &candidate,
         SnapshotWindowKey {
             pid: 7,
             window_id: 11,
         },
-        "日本語 alice@example.com".to_owned(),
-        None,
+        body.origin,
+        body.data,
         CaptureContext {
             url: Some("https://example.com/path".into()),
             surface: None,
@@ -87,14 +97,15 @@ fn raw_event_preserves_every_snapshot_cutoff_reason() {
         ContentSnapshotCutoff::Bytes,
         ContentSnapshotCutoff::Stopped,
     ] {
+        let body = SnapshotBody::ax("partial".to_owned(), Some(cutoff), candidate.trigger);
         let event = build_raw_event(
             &candidate,
             SnapshotWindowKey {
                 pid: 7,
                 window_id: 11,
             },
-            "partial".to_owned(),
-            Some(cutoff),
+            body.origin,
+            body.data,
             CaptureContext::default(),
             time::OffsetDateTime::UNIX_EPOCH,
         );
@@ -103,4 +114,55 @@ fn raw_event_preserves_every_snapshot_cutoff_reason() {
         };
         assert_eq!(data.cutoff(), Some(Some(cutoff)));
     }
+}
+
+#[test]
+fn recognized_body_is_written_as_a_valid_ocr_snapshot() {
+    // Catches recognized text written under the Accessibility source, which core rejects
+    // because `lines` belongs only to `macos.ocr`.
+    let candidate = ScheduledSnapshot {
+        target: trigger(7, 11, SnapshotTriggerKind::Focus, Instant::now()),
+        trigger: ContentSnapshotTrigger::Settle,
+        activity_window: None,
+    };
+    let half = WindowFraction::from_ratio(0.5).expect("fraction");
+    let line = ContentSnapshotLine {
+        text: "hello".to_owned(),
+        x: half,
+        y: half,
+        w: half,
+        h: half,
+        bg: RgbColor {
+            red: 0,
+            green: 0,
+            blue: 0,
+        },
+        ink: None,
+    };
+    let data = ContentSnapshotData::recognized(
+        Some("hello".to_owned()),
+        5,
+        None,
+        candidate.trigger,
+        vec![line],
+    );
+    let event = build_raw_event(
+        &candidate,
+        SnapshotWindowKey {
+            pid: 7,
+            window_id: 11,
+        },
+        SnapshotOrigin::Ocr,
+        data,
+        CaptureContext::default(),
+        time::OffsetDateTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(event.source, "macos.ocr");
+    let normalized = Normalizer::new()
+        .push(event)
+        .expect("a recognized snapshot is valid")
+        .pop()
+        .expect("content snapshot emits immediately");
+    assert_eq!(normalized.version, 4);
 }

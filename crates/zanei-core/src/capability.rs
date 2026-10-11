@@ -32,6 +32,8 @@ pub enum CapabilityState {
     Available,
     ActionRequired,
     Deferred,
+    /// This OS version lacks the capability. Only the optional screen capture reports it.
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -130,21 +132,26 @@ mod tests {
         // Catches the optional permission leaking into `permissions_ok` / `start`'s exit
         // code, and a heartbeat losing or inventing the reported state.
         let required = BTreeSet::from([Capability::ReadAccessibilityTree]);
-        let capabilities = DaemonCapabilities::new(
-            required.clone(),
-            CapabilityState::Available,
-            CapabilityState::Deferred,
-            CapabilityState::Deferred,
-        )
-        .with_capture_screen(CapabilityState::ActionRequired);
+        for (state, name) in [
+            (CapabilityState::ActionRequired, "action_required"),
+            (CapabilityState::Unavailable, "unavailable"),
+        ] {
+            let capabilities = DaemonCapabilities::new(
+                required.clone(),
+                CapabilityState::Available,
+                CapabilityState::Deferred,
+                CapabilityState::Deferred,
+            )
+            .with_capture_screen(state);
 
-        assert!(capabilities.ready());
-        assert_eq!(capabilities.ready_for(&required), Some(true));
-        let json = serde_json::to_value(&capabilities).expect("serialize capabilities");
-        assert_eq!(json["capture_screen"], "action_required");
-        let read: DaemonCapabilities =
-            serde_json::from_value(json).expect("deserialize capabilities");
-        assert_eq!(read.capture_screen(), Some(CapabilityState::ActionRequired));
+            assert!(capabilities.ready());
+            assert_eq!(capabilities.ready_for(&required), Some(true));
+            let json = serde_json::to_value(&capabilities).expect("serialize capabilities");
+            assert_eq!(json["capture_screen"], name);
+            let read: DaemonCapabilities =
+                serde_json::from_value(json).expect("deserialize capabilities");
+            assert_eq!(read.capture_screen(), Some(state));
+        }
 
         let unreported: DaemonCapabilities = serde_json::from_value(serde_json::json!({
             "required": ["read_accessibility_tree"],

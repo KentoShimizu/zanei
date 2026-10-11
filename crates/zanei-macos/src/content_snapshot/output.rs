@@ -13,13 +13,13 @@ use zanei_collector::RawEvent;
 use zanei_core::privacy::PrivacyScope;
 use zanei_core::schema::{
     CaptureContext, ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotTrigger, EventData,
-    Window,
+    RECOGNIZED_TEXT_SOURCE, Window,
 };
 
 use super::{
     SharedHealth, SnapshotWalkOutput,
     scheduler::ScheduledSnapshot,
-    state::{SaveBlock, SnapshotState, SnapshotWindowKey},
+    state::{SaveBlock, SnapshotOrigin, SnapshotState, SnapshotWindowKey},
 };
 use crate::{
     browser_context::BrowserTarget,
@@ -27,12 +27,63 @@ use crate::{
     text_capture::{ChromeWindowKey, ReleasedEvent, TextQuarantine},
 };
 
+const AX_SOURCE: &str = "macos.ax";
+
+/// A snapshot body for the send-time gates, from either origin.
+pub(super) struct SnapshotBody {
+    pub(super) origin: SnapshotOrigin,
+    pub(super) data: ContentSnapshotData,
+    hash: u64,
+    /// Daily-budget size: the text, and for recognized text the whole payload with its lines.
+    bytes: usize,
+    /// Fingerprint of the window image recognized text came from.
+    image: Option<u64>,
+}
+
+impl SnapshotBody {
+    pub(super) fn ax(
+        text: String,
+        cutoff: Option<ContentSnapshotCutoff>,
+        trigger: ContentSnapshotTrigger,
+    ) -> Self {
+        let chars = u64::try_from(text.chars().count())
+            .expect("the 32 KiB design limit always fits in u64");
+        Self {
+            origin: SnapshotOrigin::Ax,
+            hash: SnapshotState::text_hash(&text),
+            bytes: text.len(),
+            data: ContentSnapshotData::new(Some(text), chars, cutoff, trigger),
+            image: None,
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used once the worker recognizes text")
+    )]
+    pub(super) fn recognized(data: ContentSnapshotData, image: u64) -> Self {
+        Self {
+            origin: SnapshotOrigin::Ocr,
+            hash: SnapshotState::text_hash(
+                data.text
+                    .as_deref()
+                    .expect("recognized bodies always have text"),
+            ),
+            bytes: serde_json::to_vec(&data)
+                .expect("content snapshot payloads serialize to JSON")
+                .len(),
+            data,
+            image: Some(image),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit(
     candidate: ScheduledSnapshot,
-    output: SnapshotWalkOutput,
+    output: &SnapshotWalkOutput,
+    body: SnapshotBody,
     key: SnapshotWindowKey,
-    hash: u64,
     capture_policy: &CapturePolicy,
     earlier_decision: &CaptureDecision,
     observed_at: OffsetDateTime,
@@ -42,8 +93,18 @@ pub(super) fn emit(
     health: &SharedHealth,
     quarantine: &mut TextQuarantine,
 ) {
-    let bytes = output.text.len();
-    let metrics = TraceMetrics::from(&output);
+    let SnapshotBody {
+        origin,
+        data,
+        hash,
+        bytes,
+        image,
+    } = body;
+    let metrics = TraceMetrics {
+        bytes,
+        source: origin_trace_name(origin),
+        ..TraceMetrics::from(output)
+    };
     let decision = capture_policy.decision_at_send(
         PrivacyScope::ContentSnapshot,
         &candidate.target.app.raw_app(),
@@ -62,7 +123,7 @@ pub(super) fn emit(
         trace_metrics(&candidate, "chrome_version", metrics);
         return;
     }
-    if let Err(block) = state.evaluate_save(key, hash, bytes, reserved_at) {
+    if let Err(block) = state.evaluate_save(key, origin, hash, bytes, reserved_at) {
         let gate = match block {
             SaveBlock::Duplicate => "duplicate",
             SaveBlock::GlobalInterval => "global_interval",
@@ -74,8 +135,8 @@ pub(super) fn emit(
     let event = build_raw_event(
         &candidate,
         key,
-        output.text,
-        output.cutoff,
+        origin,
+        data,
         decision.capture_context(),
         observed_at,
     );
@@ -99,7 +160,10 @@ pub(super) fn emit(
     let gate = match sender.try_send(event) {
         Ok(()) => {
             state.reserve(key, bytes, reserved_at);
-            state.record_hash(key, hash);
+            state.record_hash(key, origin, hash);
+            if let Some(image) = image {
+                state.record_recognized_image(key, image);
+            }
             "emit"
         }
         Err(TrySendError::Full(_)) => {
@@ -122,6 +186,11 @@ pub(super) fn emit_released(
 ) {
     for released in events {
         let (event, snapshot_hash) = released.into_parts();
+        let origin = if event.source == RECOGNIZED_TEXT_SOURCE {
+            SnapshotOrigin::Ocr
+        } else {
+            SnapshotOrigin::Ax
+        };
         match sender.try_send(event) {
             Ok(()) => {
                 if let Some((key, hash)) = snapshot_hash {
@@ -130,6 +199,7 @@ pub(super) fn emit_released(
                             pid: key.pid,
                             window_id: key.window_id,
                         },
+                        origin,
                         hash,
                     );
                 }
@@ -144,16 +214,18 @@ pub(super) fn emit_released(
 pub(super) fn build_raw_event(
     candidate: &ScheduledSnapshot,
     key: SnapshotWindowKey,
-    text: String,
-    cutoff: Option<ContentSnapshotCutoff>,
+    origin: SnapshotOrigin,
+    data: ContentSnapshotData,
     capture_context: CaptureContext,
     observed_at: OffsetDateTime,
 ) -> RawEvent {
-    let chars =
-        u64::try_from(text.chars().count()).expect("the 32 KiB design limit always fits in u64");
     RawEvent {
         observed_at: Some(observed_at),
-        source: "macos.ax".to_owned(),
+        source: match origin {
+            SnapshotOrigin::Ax => AX_SOURCE,
+            SnapshotOrigin::Ocr => RECOGNIZED_TEXT_SOURCE,
+        }
+        .to_owned(),
         event_type: "content.snapshot".to_owned(),
         app: candidate.target.app.raw_app(),
         window: Some(Window {
@@ -161,12 +233,7 @@ pub(super) fn build_raw_event(
             id: Some(key.window_id),
         }),
         element: None,
-        data: EventData::ContentSnapshot(ContentSnapshotData::new(
-            Some(text),
-            chars,
-            cutoff,
-            candidate.trigger,
-        )),
+        data: EventData::ContentSnapshot(data),
         capture_context,
     }
 }
@@ -201,6 +268,7 @@ pub(super) fn trace_candidate(
                 bytes,
                 complete,
                 cutoff,
+                source: "none",
             },
         )
     );
@@ -215,6 +283,7 @@ struct TraceMetrics {
     bytes: usize,
     complete: bool,
     cutoff: Option<ContentSnapshotCutoff>,
+    source: &'static str,
 }
 
 impl From<&SnapshotWalkOutput> for TraceMetrics {
@@ -227,6 +296,7 @@ impl From<&SnapshotWalkOutput> for TraceMetrics {
             bytes: output.text.len(),
             complete: output.cutoff.is_none(),
             cutoff: output.cutoff,
+            source: "ax",
         }
     }
 }
@@ -243,9 +313,10 @@ fn trace_summary(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetric
         .id
         .map_or_else(|| "none".to_owned(), |window_id| window_id.to_string());
     format!(
-        "component=content_snapshot trigger={} gate={} nodes={} degraded_nodes={} frameless_nodes={} elapsed_ms={} bytes={} complete={} cutoff={} pid={} window_id={}",
+        "component=content_snapshot trigger={} gate={} source={} nodes={} degraded_nodes={} frameless_nodes={} elapsed_ms={} bytes={} complete={} cutoff={} pid={} window_id={}",
         trigger,
         gate,
+        metrics.source,
         metrics.nodes,
         metrics.degraded_nodes,
         metrics.frameless_nodes,
@@ -256,6 +327,13 @@ fn trace_summary(candidate: &ScheduledSnapshot, gate: &str, metrics: TraceMetric
         candidate.target.app.pid,
         window_id
     )
+}
+
+const fn origin_trace_name(origin: SnapshotOrigin) -> &'static str {
+    match origin {
+        SnapshotOrigin::Ax => "ax",
+        SnapshotOrigin::Ocr => "ocr",
+    }
 }
 
 pub(super) const fn cutoff_trace_name(cutoff: ContentSnapshotCutoff) -> &'static str {
