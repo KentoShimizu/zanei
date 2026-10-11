@@ -2,6 +2,7 @@ mod budget;
 mod chromium;
 mod collector;
 mod event;
+mod ocr_engine;
 mod output;
 mod policy;
 mod role;

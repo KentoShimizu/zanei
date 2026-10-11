@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     ffi::{CString, c_char, c_long, c_void},
     ptr,
     time::{Duration, Instant},
@@ -79,7 +78,7 @@ fn live_vision_recognizes_synthetic_lines_top_to_bottom() {
 
 #[test]
 #[ignore = "captures a real window; needs Screen Recording for the terminal running it"]
-fn live_capture_and_recognition_at_one_and_two_x() {
+fn live_capture_and_recognition_at_the_backing_scale() {
     initialize_application();
     assert!(screen_capture_available(), "requires macOS 14 or later");
     assert!(screen_capture_access(), "needs Screen Recording");
@@ -90,26 +89,18 @@ fn live_capture_and_recognition_at_one_and_two_x() {
     let window = pid.and_then(front_window).expect("an on-screen window");
     let window_id = window.id.expect("a window id");
     // An expired deadline must not block.
-    let expired = capture_window(window_id, 1.0, Duration::ZERO);
+    let expired = capture_window(window_id, Duration::ZERO);
     assert_eq!(expired.err(), Some(CaptureError::Timeout));
 
-    let mut texts: Vec<HashSet<String>> = Vec::new();
-    for scale in [1.0, 2.0] {
-        let mut lines = Vec::new();
-        for attempt in 1..=2 {
-            let started = Instant::now();
-            let image = capture_window(window_id, scale, LIVE_CAPTURE_TIMEOUT).expect("capture");
-            let capture_ms = started.elapsed().as_millis();
-            lines = recognize_and_report(
-                &format!("capture attempt={attempt} capture_ms={capture_ms}"),
-                &image,
-            );
-        }
-        texts.push(lines.into_iter().map(|line| line.text).collect());
+    for attempt in 1..=2 {
+        let started = Instant::now();
+        let image = capture_window(window_id, LIVE_CAPTURE_TIMEOUT).expect("capture");
+        let capture_ms = started.elapsed().as_millis();
+        recognize_and_report(
+            &format!("capture attempt={attempt} capture_ms={capture_ms}"),
+            &image,
+        );
     }
-    let missing_at_1x = texts[1].difference(&texts[0]).count();
-    let missing_at_2x = texts[0].difference(&texts[1]).count();
-    eprintln!("lines_missing_at_1x={missing_at_1x} lines_missing_at_2x={missing_at_2x}");
 }
 
 /// Draws black text lines on an opaque white image, `scale` pixels per point, 13 pt type.

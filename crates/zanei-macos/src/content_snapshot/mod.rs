@@ -3,6 +3,8 @@
 pub(crate) mod budget;
 mod coverage;
 mod ocr;
+#[expect(dead_code, reason = "driven by the snapshot worker")]
+mod ocr_engine;
 mod output;
 mod role;
 mod scheduler;
@@ -34,6 +36,7 @@ pub use crate::ffi::ax::{
     AxFrame, AxPoint, AxSize, AxTextRange, SnapshotAttribute, SnapshotAttributeResult,
     SnapshotAttributeValue, SnapshotAxApplication, SnapshotAxElement, SnapshotAxError,
 };
+pub use ocr_engine::prepare_window_capture;
 pub use role::{SnapshotNodeClass, classify_role};
 #[cfg(test)]
 pub(crate) use scheduler::SnapshotScheduler;

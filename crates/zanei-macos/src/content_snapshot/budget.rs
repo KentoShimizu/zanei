@@ -8,6 +8,12 @@ pub(crate) const WALK_WALL_TIME_LIMIT: Duration = Duration::from_millis(200);
 pub(crate) const WALK_NODE_LIMIT: usize = 2_000;
 // Design limit: one snapshot body is at most 32 KiB of UTF-8.
 pub(crate) const SNAPSHOT_TEXT_LIMIT_BYTES: usize = 32 * 1_024;
+// Design limit: one snapshot's `lines` are at most 64 KiB of compact JSON,
+// about 590 lines at the ~110 bytes measured per line.
+pub(crate) const SNAPSHOT_LINES_LIMIT_BYTES: usize = 64 * 1_024;
+// Design limit: one window capture may take 2 s, four times the slowest first
+// capture measured on device.
+pub(crate) const OCR_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 // Design limit: the AX process gets at most 100 ms for one messaging call.
 pub(crate) const AX_CALL_TIMEOUT: Duration = Duration::from_millis(100);
 // Design limit: successful snapshot bodies are capped at 128 MiB per 24 hours.

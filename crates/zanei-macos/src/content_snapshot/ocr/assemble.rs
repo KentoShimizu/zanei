@@ -4,11 +4,7 @@ use zanei_core::schema::{
     ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotLine, ContentSnapshotTrigger,
 };
 
-use crate::content_snapshot::budget::SNAPSHOT_TEXT_LIMIT_BYTES;
-
-// Design limit: one snapshot's `lines` are at most 64 KiB of compact JSON,
-// about 590 lines at the ~110 bytes measured per line.
-const LINES_LIMIT_BYTES: usize = 64 * 1_024;
+use crate::content_snapshot::budget::{SNAPSHOT_LINES_LIMIT_BYTES, SNAPSHOT_TEXT_LIMIT_BYTES};
 
 /// Joins `lines` with `\n` into `text`, adding whole lines until the next one
 /// would exceed the text or the `lines` limit, so both stop at the same line.
@@ -29,7 +25,7 @@ pub(super) fn assemble(
                 .expect("content snapshot lines serialize to JSON")
                 .len();
         if text.len() + separator + line.text.len() > SNAPSHOT_TEXT_LIMIT_BYTES
-            || next_lines_bytes > LINES_LIMIT_BYTES
+            || next_lines_bytes > SNAPSHOT_LINES_LIMIT_BYTES
         {
             cutoff = Some(ContentSnapshotCutoff::Bytes);
             break;
