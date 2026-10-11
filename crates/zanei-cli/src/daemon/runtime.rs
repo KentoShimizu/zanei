@@ -26,7 +26,7 @@ use zanei_macos::permission::{PermissionError, PermissionStatus, permission_stat
 use super::{
     DaemonError, StoreOwner, StoreOwnership,
     collectors::{CollectorSet, merge_collector_failures},
-    executable_guard::ExecutableGuard,
+    executable_guard::{ExecutableGuard, executable_shutdown_requested},
     main_thread,
     permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
     pipeline::{Pipeline, SharedStoreWriter},
@@ -56,8 +56,6 @@ const PERMISSION_REQUEST_TIMEOUT_MESSAGE: &str =
     "permission request timed out before macOS reported a decision";
 const PERMISSION_REQUEST_WORKER_STOPPED_MESSAGE: &str =
     "permission request worker terminated without a result";
-const EXECUTABLE_REMOVED_MESSAGE: &str =
-    "zanei: executable removed (uninstalled?); recorder shutting down.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordOutput {
@@ -570,18 +568,6 @@ fn normalize_pause_request(
     // paused until the next pause poll reads it: a new `pause` must not let
     // capture start in between.
     Ok(!lock_writer(writer)?.clear_expired_pause(paused_until)?)
-}
-
-fn executable_shutdown_requested(
-    guard: &mut ExecutableGuard,
-    exists: impl FnOnce(&Path) -> bool,
-    notify: impl FnOnce(&str),
-) -> bool {
-    if !guard.check_with(exists) {
-        return false;
-    }
-    notify(EXECUTABLE_REMOVED_MESSAGE);
-    true
 }
 
 fn lock_writer(

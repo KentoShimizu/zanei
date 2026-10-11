@@ -21,13 +21,13 @@ use zanei_macos::chrome::{ChromeFailure, ChromeFailureState, ChromeQueryFailure}
 use zanei_macos::permission::{PermissionError, PermissionStatus};
 
 use super::{
-    ActiveDaemon, CollectorSet, EXECUTABLE_REMOVED_MESSAGE, Pipeline, StoreOwner,
-    configure_eventtap_start_gate, ensure_pipeline_running, executable_shutdown_requested,
+    ActiveDaemon, CollectorSet, Pipeline, StoreOwner, configure_eventtap_start_gate,
+    ensure_pipeline_running, executable_shutdown_requested,
     initialize_permission_dependent_runtime, merge_collector_failures, normalize_pause_request,
     queue_permission_expansion, service_permission_request_worker, shutdown_daemon,
 };
 use crate::daemon::{
-    executable_guard::ExecutableGuard,
+    executable_guard::{EXECUTABLE_REMOVED_MESSAGE, ExecutableGuard},
     permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
     supervisor::EventTapStartGate,
 };
