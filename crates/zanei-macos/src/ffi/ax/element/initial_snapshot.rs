@@ -72,7 +72,7 @@ pub(in crate::ffi::ax) fn focused_element_snapshot(
         return Ok(None);
     }
     let field_class = observed_field_class(role.as_deref(), subrole.as_deref(), secure_input);
-    let window = element_window(element, OwningWindow::Focused)?;
+    let window = element_window(element, OwningWindow::Focused { recorded: None })?;
     let capture_decision = capture_decision(window.as_ref());
     let capture_text_content = capture_decision
         .as_ref()

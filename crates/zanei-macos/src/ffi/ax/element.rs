@@ -44,13 +44,21 @@ pub(super) fn capture_value_snapshot(
     secure_input: bool,
     surface_changed: impl FnMut(),
 ) -> (ValueSnapshot, Option<crate::CaptureDecision>) {
+    let recorded = window.clone();
     capture_value_snapshot_with(
         window,
         policy,
         app,
         capture_enabled,
         surface_changed,
-        || element_window(element, OwningWindow::Focused),
+        || {
+            element_window(
+                element,
+                OwningWindow::Focused {
+                    recorded: recorded.clone(),
+                },
+            )
+        },
         |allowed| value_snapshot(element, allowed, secure_input),
     )
 }
