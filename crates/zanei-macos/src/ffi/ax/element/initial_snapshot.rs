@@ -1,11 +1,12 @@
 //! Initial focused and hit-tested element acquisition.
 
 use super::{
-    AX_NUMBER_OF_CHARACTERS_ATTRIBUTE, AX_VALUE_ATTRIBUTE, copy_attribute, copy_element,
-    copy_string, gated_value, value_length, window_snapshot,
+    AX_NUMBER_OF_CHARACTERS_ATTRIBUTE, AX_VALUE_ATTRIBUTE, copy_attribute, copy_string,
+    gated_value, value_length,
+    window::{OwningWindow, element_window},
 };
 use crate::ffi::ax::{
-    NativeAxError, NativeWindow,
+    AxPoint, NativeAxError, NativeWindow,
     cf::{CfRef, i64_value},
 };
 use crate::focused_field::{FieldClass, field_class, observed_field_class};
@@ -18,8 +19,10 @@ pub(in crate::ffi::ax) struct FocusedElementSnapshot {
     pub(in crate::ffi::ax) field_class: FieldClass,
 }
 
+/// Snapshots the element hit-tested at `point`.
 pub(in crate::ffi::ax) fn element_snapshot(
     element: CfRef,
+    point: AxPoint,
     capture_decision: impl FnOnce(Option<&NativeWindow>) -> Option<CaptureDecision>,
 ) -> Result<Option<(Option<NativeWindow>, NativeElement)>, NativeAxError> {
     let subrole = copy_string(element, "AXSubrole")?;
@@ -28,10 +31,7 @@ pub(in crate::ffi::ax) fn element_snapshot(
     if field_class == FieldClass::SecureText {
         return Ok(None);
     }
-    let window = copy_element(element, "AXWindow")?
-        .map(|window| window_snapshot(window.as_ptr()))
-        .transpose()?
-        .flatten();
+    let window = element_window(element, OwningWindow::UnderPoint(point))?;
     let capture_decision = capture_decision(window.as_ref());
     let capture_text_content = capture_decision
         .as_ref()
@@ -72,10 +72,7 @@ pub(in crate::ffi::ax) fn focused_element_snapshot(
         return Ok(None);
     }
     let field_class = observed_field_class(role.as_deref(), subrole.as_deref(), secure_input);
-    let window = copy_element(element, "AXWindow")?
-        .map(|window| window_snapshot(window.as_ptr()))
-        .transpose()?
-        .flatten();
+    let window = element_window(element, OwningWindow::Focused)?;
     let capture_decision = capture_decision(window.as_ref());
     let capture_text_content = capture_decision
         .as_ref()

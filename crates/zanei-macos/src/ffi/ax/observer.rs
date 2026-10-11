@@ -29,7 +29,7 @@ use super::{
     element::{
         cf_equal, copy_element,
         initial_snapshot::{FocusedElementSnapshot, focused_element_snapshot},
-        window_snapshot,
+        window::window_snapshot,
     },
     remove_notification,
     value_context::{FocusedValueContext, after_target_preparation},

@@ -22,13 +22,13 @@ use time::OffsetDateTime;
 use zanei_core::schema::App;
 
 use super::{
-    AXObserverGetRunLoopSource, ManualAccessibilityPolicy, ObserverContext, QueuedNotification,
-    TargetKind, add_notification,
+    AXObserverGetRunLoopSource, AxPoint, ManualAccessibilityPolicy, ObserverContext,
+    QueuedNotification, TargetKind, add_notification,
     cf::{add_current_run_loop_source, run_loop_tick, string_value},
     create_observer,
     element::{
         create_application, element_at_position, element_role, initial_snapshot::element_snapshot,
-        set_timeout, window_snapshot,
+        set_timeout, window::window_snapshot,
     },
     native_error,
     observer::{AppObserver, FocusSource},
@@ -353,7 +353,7 @@ impl NativeAx {
                 return None;
             }
         };
-        match element_snapshot(element.as_ptr(), |window| {
+        match element_snapshot(element.as_ptr(), AxPoint { x, y }, |window| {
             observer.text_content_decision(window)
         }) {
             Ok(hit) => {
