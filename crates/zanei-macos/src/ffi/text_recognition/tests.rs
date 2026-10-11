@@ -5,8 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{AxPoint, CfRef, OwnedCf, RecognizedLine, normalized_box, recognize_text};
+use super::{AxFrame, CfRef, OwnedCf, RecognizedLine, normalized_box, recognize_text};
 use crate::ffi::{
+    geometry::{AxPoint, AxSize},
     screen_capture::{
         CaptureError, WindowImage, bitmap_context, capture_window, initialize_application,
         screen_capture_access, screen_capture_available,
@@ -17,18 +18,18 @@ use crate::ffi::{
 
 const LIVE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 
-fn box_of(top_left: (f64, f64), bottom_right: (f64, f64)) -> [f64; 4] {
-    let corner = |(x, y)| AxPoint { x, y };
-    let bounds = normalized_box(corner(top_left), corner(bottom_right));
+fn box_of(x: f64, y: f64, width: f64, height: f64) -> [f64; 4] {
+    let (origin, size) = (AxPoint { x, y }, AxSize { width, height });
+    let bounds = normalized_box(AxFrame { origin, size });
     [bounds.x, bounds.y, bounds.width, bounds.height].map(|value| (value * 1e6).round() / 1e6)
 }
 
 #[test]
-fn vision_corners_become_a_top_left_origin_box_clamped_to_the_window() {
+fn vision_box_becomes_a_top_left_origin_box_clamped_to_the_window() {
     // A line near the top of the window has a large Vision y.
-    assert_eq!(box_of((0.1, 0.9), (0.5, 0.8)), [0.1, 0.1, 0.4, 0.1]);
+    assert_eq!(box_of(0.1, 0.8, 0.4, 0.1), [0.1, 0.1, 0.4, 0.1]);
     // Vision can place an edge slightly outside the image.
-    assert_eq!(box_of((-0.02, 1.01), (0.3, 0.95)), [0.0, 0.0, 0.3, 0.05]);
+    assert_eq!(box_of(-0.02, 0.95, 0.32, 0.06), [0.0, 0.0, 0.3, 0.05]);
 }
 
 const SYNTHETIC_LINES: [&str; 6] = [

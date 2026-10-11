@@ -136,6 +136,8 @@ pub(crate) fn capture_window(
         set_size(configuration.as_ptr(), sel(c"setWidth:"), width);
         set_size(configuration.as_ptr(), sel(c"setHeight:"), height);
         send_void_bool(configuration.as_ptr(), sel(c"setShowsCursor:"), false);
+        // Otherwise a size above the window's backing resolution is padded, not upscaled.
+        send_void_bool(configuration.as_ptr(), sel(c"setScalesToFit:"), true);
         // The default single-window capture adds the shadow around `frame` (macOS 14+ setter).
         send_void_bool(
             configuration.as_ptr(),

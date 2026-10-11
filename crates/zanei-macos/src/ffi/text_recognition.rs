@@ -9,13 +9,13 @@ use std::{
 };
 
 use super::{
-    geometry::AxPoint,
+    geometry::AxFrame,
     screen_capture::{
         BYTES_PER_PIXEL, WindowImage,
         runtime::{
             AutoreleasePool, CfRef, Classes, ObjcBool, ObjcId, ObjcSel, OwnedCf, OwnedObject,
-            class, error_code, load_classes, msg_send, sel, send_id_0, send_id_id, send_id_usize,
-            send_usize_0, send_void_bool, srgb_color_space,
+            class, error_code, load_classes, msg_send, sel, send_frame_0, send_id_0, send_id_id,
+            send_id_usize, send_usize_0, send_void_bool, srgb_color_space,
         },
     },
 };
@@ -127,23 +127,20 @@ unsafe fn recognized_line(observation: ObjcId) -> Option<RecognizedLine> {
     let utf8 = msg_send::<unsafe extern "C" fn(ObjcId, ObjcSel) -> *const c_char>();
     let bytes = NonNull::new(unsafe { utf8(string, sel(c"UTF8String")) }.cast_mut())?;
     let text = unsafe { CStr::from_ptr(bytes.as_ptr()) }.to_str().ok()?;
-    // Corners rather than `boundingBox`, whose CGRect would need a struct-return call on x86_64.
-    let corner = msg_send::<unsafe extern "C" fn(ObjcId, ObjcSel) -> AxPoint>();
-    let top_left = unsafe { corner(observation, sel(c"topLeft")) };
-    let bottom_right = unsafe { corner(observation, sel(c"bottomRight")) };
     Some(RecognizedLine {
         text: text.to_owned(),
-        bounds: normalized_box(top_left, bottom_right),
+        // The axis-aligned box contains all four corners, even of rotated text.
+        bounds: normalized_box(unsafe { send_frame_0(observation, sel(c"boundingBox")) }),
     })
 }
 
-/// Converts Vision's normalized corners (bottom-left origin) to a top-left-origin box clamped to
-/// the image, since Vision can place a box edge slightly outside it.
-fn normalized_box(top_left: AxPoint, bottom_right: AxPoint) -> NormalizedBox {
-    let left = top_left.x.min(bottom_right.x).clamp(0.0, 1.0);
-    let right = top_left.x.max(bottom_right.x).clamp(0.0, 1.0);
-    let top = (1.0 - top_left.y.max(bottom_right.y)).clamp(0.0, 1.0);
-    let bottom = (1.0 - top_left.y.min(bottom_right.y)).clamp(0.0, 1.0);
+/// Converts Vision's normalized box (bottom-left origin) to a top-left-origin box clamped to the
+/// image, since Vision can place a box edge slightly outside it.
+fn normalized_box(bounds: AxFrame) -> NormalizedBox {
+    let left = bounds.origin.x.clamp(0.0, 1.0);
+    let right = (bounds.origin.x + bounds.size.width).clamp(0.0, 1.0);
+    let top = (1.0 - bounds.origin.y - bounds.size.height).clamp(0.0, 1.0);
+    let bottom = (1.0 - bounds.origin.y).clamp(0.0, 1.0);
     NormalizedBox {
         x: left,
         y: top,
