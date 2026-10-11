@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::config::RedactorKind;
-use crate::schema::{Event, EventData, Redaction};
+use crate::schema::{ContentSnapshotLine, Event, EventData, Redaction};
 
 mod patterns;
 
@@ -62,13 +62,12 @@ fn redact_payload(data: &mut EventData, rule: RedactorKind) -> bool {
         EventData::ClipboardCopy(value) => redact_optional(&mut value.text, rule),
         EventData::ClipboardPaste(value) => redact_optional(&mut value.text, rule),
         EventData::ContentSnapshot(value) => {
-            let mut changed = redact_optional(&mut value.text, rule);
-            if let Some(Some(lines)) = value.lines_mut() {
-                for line in lines {
-                    changed |= redact_required(&mut line.text, rule);
-                }
-            }
-            changed
+            let text_changed = redact_optional(&mut value.text, rule);
+            let lines_changed = value
+                .lines_mut()
+                .and_then(Option::as_mut)
+                .is_some_and(|lines| redact_lines(lines, rule));
+            text_changed | lines_changed
         }
         EventData::BrowserNavigate(value) => {
             let url_changed = redact_optional(value.url.as_option_mut(), rule);
@@ -82,6 +81,35 @@ fn redact_payload(data: &mut EventData, rule: RedactorKind) -> bool {
         | EventData::UiClick(_)
         | EventData::InputScroll(_) => false,
     }
+}
+
+/// OCR `text` is the lines joined by `\n`, and a rule can match across that newline, for
+/// example a label ending one line and its secret starting the next. Matching once over
+/// the joined lines and applying each match to every line it overlaps removes the same
+/// secrets from `lines` as from `text`.
+fn redact_lines(lines: &mut [ContentSnapshotLine], rule: RedactorKind) -> bool {
+    let joined = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let matches = patterns::ranges(&joined, rule);
+    let mut changed = false;
+    let mut start = 0;
+    for line in lines {
+        let end = start + line.text.len();
+        let local: Vec<_> = matches
+            .iter()
+            .filter(|range| range.start < end && range.end > start)
+            .map(|range| range.start.max(start) - start..range.end.min(end) - start)
+            .collect();
+        if !local.is_empty() {
+            line.text = patterns::replace_ranges(&line.text, &local, rule_marker(rule));
+            changed = true;
+        }
+        start = end + 1;
+    }
+    changed
 }
 
 fn redact_optional(value: &mut Option<String>, rule: RedactorKind) -> bool {
@@ -108,8 +136,8 @@ pub(crate) fn redact_text(value: &str, rule: RedactorKind) -> String {
 mod tests {
     use crate::normalize::{URL_TITLE_FIELD_MAX_BYTES, enforce_size_limits};
     use crate::schema::{
-        App, BrowserMode, BrowserNavigateData, BrowserTransition, Element, Event, EventData,
-        UiValueData, Window, WindowTitleData,
+        App, BrowserMode, BrowserNavigateData, BrowserTransition, ContentSnapshotData,
+        ContentSnapshotTrigger, Element, Event, EventData, UiValueData, Window, WindowTitleData,
     };
 
     use super::*;
@@ -236,6 +264,58 @@ mod tests {
         assert!(redacted.is_truncated());
         assert_eq!(redacted.redaction.rules, ["size_limit"]);
         assert!(redacted.redaction.applied);
+    }
+
+    #[test]
+    fn recognized_lines_drop_the_same_secrets_as_their_joined_text() {
+        // Catches a label and its secret split across OCR lines surviving in `lines` while
+        // `text` is redacted, and redaction reordering, merging, or dropping lines.
+        for (lines, expected) in [
+            (
+                ["key token=", "abcd1234 next", "plain"],
+                ["key token=", "[REDACTED:token] next", "plain"],
+            ),
+            (
+                ["Bearer xyz987abc", "token", "x"],
+                ["Bearer [REDACTED:token]", "token", "x"],
+            ),
+        ] {
+            let mut event = browser_event("https://example.com", None, None);
+            event.version = 4;
+            event.source = crate::schema::RECOGNIZED_TEXT_SOURCE.to_owned();
+            event.event_type = "content.snapshot".to_owned();
+            event.element = None;
+            let line = |text: &str| -> ContentSnapshotLine {
+                serde_json::from_value(serde_json::json!({
+                    "text": text, "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.02,
+                    "bg": "#000000", "ink": null
+                }))
+                .expect("line")
+            };
+            event.data = EventData::ContentSnapshot(ContentSnapshotData::recognized(
+                Some(lines.join("\n")),
+                1,
+                None,
+                ContentSnapshotTrigger::Settle,
+                lines.into_iter().map(line).collect(),
+            ));
+
+            let redacted = redact_event(event, &[RedactorKind::Token]);
+
+            assert_eq!(redacted.redaction.rules, ["token"]);
+            let EventData::ContentSnapshot(data) = redacted.data else {
+                panic!("expected content.snapshot data");
+            };
+            let texts: Vec<_> = data
+                .lines()
+                .and_then(Option::as_ref)
+                .expect("lines")
+                .iter()
+                .map(|line| line.text.clone())
+                .collect();
+            assert_eq!(texts, expected);
+            assert_eq!(data.text, Some(expected.join("\n")));
+        }
     }
 
     fn browser_event(url: &str, tab_title: Option<&str>, element_value: Option<&str>) -> Event {

@@ -3,12 +3,16 @@ use std::ops::Range;
 use crate::config::RedactorKind;
 
 pub(super) fn redact(value: &str, rule: RedactorKind, replacement: &str) -> String {
-    let ranges = match rule {
+    replace_ranges(value, &ranges(value, rule), replacement)
+}
+
+/// Sorted, non-overlapping byte ranges of `value` that `rule` matches.
+pub(super) fn ranges(value: &str, rule: RedactorKind) -> Vec<Range<usize>> {
+    match rule {
         RedactorKind::Email => email_ranges(value),
         RedactorKind::CreditCard => credit_card_ranges(value),
         RedactorKind::Token => token_ranges(value),
-    };
-    replace_ranges(value, &ranges, replacement)
+    }
 }
 
 fn email_ranges(value: &str) -> Vec<Range<usize>> {
@@ -309,7 +313,7 @@ fn normalize_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
         })
 }
 
-fn replace_ranges(value: &str, ranges: &[Range<usize>], replacement: &str) -> String {
+pub(super) fn replace_ranges(value: &str, ranges: &[Range<usize>], replacement: &str) -> String {
     if ranges.is_empty() {
         return value.to_owned();
     }
