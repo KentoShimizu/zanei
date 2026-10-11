@@ -11,9 +11,9 @@ use zanei_core::schema::ContentSnapshotCutoff;
 use crate::{
     content_snapshot::{
         budget::WalkBudget,
+        coverage::{WalkAnalysis, WindowRect},
         walker::{
             NodeContentAttributes, NodeSafeAttributes, SnapshotNode, SnapshotReadError, WalkClock,
-            coverage::{WalkAnalysis, WindowRect},
             walk_snapshot, walk_snapshot_analyzed,
         },
     },

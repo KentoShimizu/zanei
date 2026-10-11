@@ -11,6 +11,7 @@ use crate::ffi::ax::{AxFrame, AxTextRange, SnapshotAxError};
 
 use super::{
     budget::{CHILDREN_BATCH_SIZE, WalkBudget},
+    coverage::{WalkAnalysis, WalkAnalyzer, WalkedNode, WindowRect},
     role::{SnapshotNodeClass, classify_role},
 };
 
@@ -20,10 +21,6 @@ use text::TextAssembler;
 
 #[path = "walker/ax_node.rs"]
 mod ax_node;
-
-#[path = "coverage.rs"]
-pub(crate) mod coverage;
-use coverage::{WalkAnalysis, WalkAnalyzer, WalkedNode, WindowRect};
 
 #[derive(Debug)]
 pub enum SnapshotReadError {
