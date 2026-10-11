@@ -1,6 +1,6 @@
 //! Timeout-bounded AX element reads and privacy-safe snapshots.
 
-use std::ptr;
+use std::{cell::Cell, ptr};
 
 use crate::focused_field::{FieldClass, field_class, observed_field_class};
 
@@ -9,7 +9,7 @@ use super::{AX_ERROR_ATTRIBUTE_UNSUPPORTED, NativeAxError, NativeWindow, cf::*, 
 pub(super) mod initial_snapshot;
 pub(super) mod window;
 
-use window::{OwningWindow, element_window};
+use window::{ElementWindow, OwningWindow, element_window};
 
 const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 0.5;
 const AX_ERROR_SUCCESS: i32 = 0;
@@ -44,22 +44,67 @@ pub(super) fn capture_value_snapshot(
     secure_input: bool,
     surface_changed: impl FnMut(),
 ) -> (ValueSnapshot, Option<crate::CaptureDecision>) {
+    capture_value_snapshot_verified(
+        window,
+        policy,
+        app,
+        capture_enabled,
+        surface_changed,
+        || element_window(element, OwningWindow::Focused),
+        |allowed| value_snapshot(element, allowed, secure_input),
+    )
+}
+
+/// Requires the window behind a surface-checked body read to be verified both before
+/// and after the read (see `window.rs`). An unverified window keeps the recorded
+/// window for attribution, and the read is suppressed as unreadable.
+fn capture_value_snapshot_verified(
+    window: &mut Option<NativeWindow>,
+    policy: &crate::CapturePolicy,
+    app: &zanei_core::schema::App,
+    capture_enabled: bool,
+    surface_changed: impl FnMut(),
+    mut resolve_window: impl FnMut() -> Result<ElementWindow, NativeAxError>,
+    read_value: impl FnOnce(bool) -> ValueSnapshot,
+) -> (ValueSnapshot, Option<crate::CaptureDecision>) {
     let recorded = window.clone();
-    capture_value_snapshot_with(
+    let verified = Cell::new(true);
+    let (snapshot, decision) = capture_value_snapshot_with(
         window,
         policy,
         app,
         capture_enabled,
         surface_changed,
         || {
-            element_window(
-                element,
-                OwningWindow::Focused {
-                    recorded: recorded.clone(),
-                },
-            )
+            Ok(match resolve_window()? {
+                ElementWindow::Verified(current) => current,
+                ElementWindow::Unverified => {
+                    verified.set(false);
+                    recorded.clone()
+                }
+            })
         },
-        |allowed| value_snapshot(element, allowed, secure_input),
+        |allowed| {
+            if verified.get() {
+                read_value(allowed)
+            } else {
+                unverified_window_snapshot()
+            }
+        },
+    );
+    if verified.get() {
+        (snapshot, decision)
+    } else {
+        (unverified_window_snapshot(), None)
+    }
+}
+
+fn unverified_window_snapshot() -> ValueSnapshot {
+    suppressed_value_snapshot(
+        FieldClass::Unknown,
+        None,
+        None,
+        Some(native_error("AXFocusedUIElement window verification", -1)),
     )
 }
 

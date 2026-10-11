@@ -31,7 +31,7 @@ pub(in crate::ffi::ax) fn element_snapshot(
     if field_class == FieldClass::SecureText {
         return Ok(None);
     }
-    let window = element_window(element, OwningWindow::UnderPoint(point))?;
+    let window = element_window(element, OwningWindow::UnderPoint(point))?.into_verified();
     let capture_decision = capture_decision(window.as_ref());
     let capture_text_content = capture_decision
         .as_ref()
@@ -72,7 +72,7 @@ pub(in crate::ffi::ax) fn focused_element_snapshot(
         return Ok(None);
     }
     let field_class = observed_field_class(role.as_deref(), subrole.as_deref(), secure_input);
-    let window = element_window(element, OwningWindow::Focused { recorded: None })?;
+    let window = element_window(element, OwningWindow::Focused)?.into_verified();
     let capture_decision = capture_decision(window.as_ref());
     let capture_text_content = capture_decision
         .as_ref()
