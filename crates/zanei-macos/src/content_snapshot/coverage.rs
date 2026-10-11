@@ -10,10 +10,6 @@ const COVERAGE_GRID: usize = 48;
 const COVERAGE_CELLS: usize = COVERAGE_GRID * COVERAGE_GRID;
 /// Accessibility is insufficient when at least a quarter of the window is
 /// occupied by elements that exist to present content but expose none.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the text-recognition fallback")
-)]
 const BLANK_COVERAGE_MIN: f64 = 0.25;
 /// Order containers cover at least 3 % of the window area.
 const ORDER_CONTAINER_MIN_AREA: f64 = 0.03;
@@ -129,10 +125,6 @@ pub(crate) struct WalkAnalysis {
 }
 
 impl WalkAnalysis {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the text-recognition fallback")
-    )]
     pub(crate) fn ax_insufficient(&self) -> bool {
         self.blank_coverage >= BLANK_COVERAGE_MIN
     }

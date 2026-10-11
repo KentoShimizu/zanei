@@ -9,19 +9,20 @@ use crate::{
         SnapshotAttribute, SnapshotAttributeValue, SnapshotAxApplication, SnapshotAxElement,
         SnapshotAxError, SnapshotWalkOutput,
         budget::WalkBudget,
-        walker::{InstantWalkClock, SnapshotNode, WalkClock, walk_snapshot},
+        coverage::WalkAnalyzer,
+        walker::{InstantWalkClock, SnapshotNode, WalkClock, walk_snapshot_analyzed},
     },
     ffi::window_list::window_id_for_frame,
 };
 
-use super::ScanError;
+use super::{ScanError, ScannedWindow};
 
 pub(super) fn scan(
     pid: i32,
     expected_window_id: i64,
     stop: &AtomicBool,
     read_allowed: &mut dyn FnMut(Option<String>) -> bool,
-) -> Result<Option<SnapshotWalkOutput>, ScanError> {
+) -> Result<Option<ScannedWindow>, ScanError> {
     let application = SnapshotAxApplication::new(pid)?;
     scan_application(
         application,
@@ -92,7 +93,7 @@ pub(in crate::content_snapshot) fn scan_application<A>(
     stop: &AtomicBool,
     resolve_bounds: impl Fn(i64, crate::ffi::ax::AxFrame) -> Option<i64>,
     read_allowed: &mut dyn FnMut(Option<String>) -> bool,
-) -> Result<Option<SnapshotWalkOutput>, ScanError>
+) -> Result<Option<ScannedWindow>, ScanError>
 where
     A: SnapshotApplication,
 {
@@ -155,7 +156,7 @@ fn scan_window<W>(
     clock: &impl WalkClock,
     ax_calls: &mut usize,
     read_allowed: &mut dyn FnMut(Option<String>) -> bool,
-) -> Result<Option<SnapshotWalkOutput>, ScanError>
+) -> Result<Option<ScannedWindow>, ScanError>
 where
     W: SnapshotWindow,
 {
@@ -173,7 +174,7 @@ where
 enum WindowResolution<W> {
     Match(W, crate::ffi::ax::AxFrame),
     Miss,
-    Cutoff(SnapshotWalkOutput),
+    Cutoff(ScannedWindow),
 }
 
 fn resolve_window<W>(
@@ -218,28 +219,32 @@ fn walk_window<W>(
     stop: &AtomicBool,
     clock: &impl WalkClock,
     ax_calls: usize,
-) -> Result<SnapshotWalkOutput, ScanError>
+) -> Result<ScannedWindow, ScanError>
 where
     W: SnapshotWindow,
 {
-    let mut output = walk_snapshot(window, frame, WalkBudget::DESIGN, clock, || {
-        stop.load(Ordering::Acquire)
-    })
-    .map_err(ScanError::Walk)?;
+    let (mut output, analysis) =
+        walk_snapshot_analyzed(window, frame, WalkBudget::DESIGN, clock, || {
+            stop.load(Ordering::Acquire)
+        })
+        .map_err(ScanError::Walk)?;
     output.ax_calls = output.ax_calls.saturating_add(ax_calls);
-    Ok(output)
+    Ok((output, analysis))
 }
 
-fn initial_time_cutoff(clock: &impl WalkClock, ax_calls: usize) -> Option<SnapshotWalkOutput> {
+fn initial_time_cutoff(clock: &impl WalkClock, ax_calls: usize) -> Option<ScannedWindow> {
     let elapsed = clock.elapsed();
-    (elapsed >= WalkBudget::DESIGN.wall_time).then(|| SnapshotWalkOutput {
-        text: String::new(),
-        nodes: 0,
-        ax_calls,
-        elapsed,
-        cutoff: Some(ContentSnapshotCutoff::Time),
-        degraded_nodes: 0,
-        frameless_nodes: 0,
+    (elapsed >= WalkBudget::DESIGN.wall_time).then(|| {
+        let output = SnapshotWalkOutput {
+            text: String::new(),
+            nodes: 0,
+            ax_calls,
+            elapsed,
+            cutoff: Some(ContentSnapshotCutoff::Time),
+            degraded_nodes: 0,
+            frameless_nodes: 0,
+        };
+        (output, WalkAnalyzer::new().finish())
     })
 }
 
@@ -248,5 +253,7 @@ pub(in crate::content_snapshot) fn test_live_scan(
     pid: i32,
     window_id: i64,
 ) -> Result<Option<SnapshotWalkOutput>, String> {
-    scan(pid, window_id, &AtomicBool::new(false), &mut |_| true).map_err(|error| error.to_string())
+    scan(pid, window_id, &AtomicBool::new(false), &mut |_| true)
+        .map(|scanned| scanned.map(|(output, _)| output))
+        .map_err(|error| error.to_string())
 }

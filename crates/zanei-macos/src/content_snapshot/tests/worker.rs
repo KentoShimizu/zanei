@@ -37,7 +37,7 @@ use crate::{
     workspace::notification_channel,
 };
 
-use super::support::trigger;
+use super::support::{ocr_off, sufficient, trigger};
 
 #[derive(Clone)]
 struct FakeApplication {
@@ -78,16 +78,17 @@ fn non_focused_candidate_window_is_walked_by_window_id() {
     let app = application(11);
     let reads = Arc::clone(&app.windows_reads);
     let stop = AtomicBool::new(false);
-    let output = scan_application(app, 22, &stop, |_, _| None, &mut |_| true)
+    let (output, _) = scan_application(app, 22, &stop, |_, _| None, &mut |_| true)
         .expect("scan non-focused window")
         .expect("candidate window");
 
     assert_eq!(output.text, "Previous");
     assert_eq!(reads.load(Ordering::Relaxed), 1);
 
-    let focused_output = scan_application(application(22), 22, &stop, |_, _| None, &mut |_| true)
-        .expect("scan focused window")
-        .expect("focused candidate");
+    let (focused_output, _) =
+        scan_application(application(22), 22, &stop, |_, _| None, &mut |_| true)
+            .expect("scan focused window")
+            .expect("focused candidate");
     assert_eq!(
         output.ax_calls,
         focused_output.ax_calls + 3,
@@ -186,20 +187,24 @@ fn captures_with_actual_title(
                 SharedHealth::default(),
                 &mut state,
                 focus_context,
+                ocr_off(),
                 move |_pid, _window_id, _stop, read_allowed| {
                     if !read_allowed(actual_title.clone()) {
                         scanner_stop.store(true, Ordering::Release);
                         return Ok(None);
                     }
-                    Ok(Some(SnapshotWalkOutput {
-                        text: "visible".to_owned(),
-                        nodes: 1,
-                        ax_calls: 1,
-                        elapsed: Duration::from_millis(1),
-                        cutoff: None,
-                        degraded_nodes: 0,
-                        frameless_nodes: 0,
-                    }))
+                    Ok(Some((
+                        SnapshotWalkOutput {
+                            text: "visible".to_owned(),
+                            nodes: 1,
+                            ax_calls: 1,
+                            elapsed: Duration::from_millis(1),
+                            cutoff: None,
+                            degraded_nodes: 0,
+                            frameless_nodes: 0,
+                        },
+                        sufficient(),
+                    )))
                 },
             );
         })
@@ -363,6 +368,7 @@ fn s26_restarted_worker_processes_current_focus_without_a_new_trigger() {
                 SharedHealth::default(),
                 &mut state,
                 focus_context,
+                ocr_off(),
                 move |_pid, _window_id, _stop, _read_allowed| {
                     observed_scan_calls.fetch_add(1, Ordering::Release);
                     Ok(None)
@@ -423,18 +429,22 @@ fn secure_input_enabled_after_walk_discards_the_snapshot() {
                 SharedHealth::default(),
                 &mut state,
                 focus_context,
+                ocr_off(),
                 move |_pid, _window_id, _stop, read_allowed| {
                     observed_scan_calls.fetch_add(1, Ordering::Relaxed);
                     read_allowed(None);
-                    Ok(Some(SnapshotWalkOutput {
-                        text: "private".to_owned(),
-                        nodes: 1,
-                        ax_calls: 1,
-                        elapsed: Duration::from_millis(1),
-                        cutoff: None,
-                        degraded_nodes: 0,
-                        frameless_nodes: 0,
-                    }))
+                    Ok(Some((
+                        SnapshotWalkOutput {
+                            text: "private".to_owned(),
+                            nodes: 1,
+                            ax_calls: 1,
+                            elapsed: Duration::from_millis(1),
+                            cutoff: None,
+                            degraded_nodes: 0,
+                            frameless_nodes: 0,
+                        },
+                        sufficient(),
+                    )))
                 },
             );
         })
@@ -489,21 +499,25 @@ fn s27_filter_reload_during_walk_discards_the_snapshot() {
                 SharedHealth::default(),
                 &mut state,
                 focus_context,
+                ocr_off(),
                 move |_pid, _window_id, _stop, read_allowed| {
                     read_allowed(None);
                     reload_policy.replace_filter(FilterConfig {
                         exclude_apps: vec!["dev.example.App".to_owned()],
                         ..FilterConfig::default()
                     });
-                    Ok(Some(SnapshotWalkOutput {
-                        text: "must not escape".to_owned(),
-                        nodes: 1,
-                        ax_calls: 1,
-                        elapsed: Duration::from_millis(1),
-                        cutoff: None,
-                        degraded_nodes: 0,
-                        frameless_nodes: 0,
-                    }))
+                    Ok(Some((
+                        SnapshotWalkOutput {
+                            text: "must not escape".to_owned(),
+                            nodes: 1,
+                            ax_calls: 1,
+                            elapsed: Duration::from_millis(1),
+                            cutoff: None,
+                            degraded_nodes: 0,
+                            frameless_nodes: 0,
+                        },
+                        sufficient(),
+                    )))
                 },
             );
         })
@@ -568,21 +582,25 @@ fn v2_4_post_walk_deny_does_not_exhaust_daily_budget() {
                 SharedHealth::default(),
                 &mut state,
                 focus_context,
+                ocr_off(),
                 move |_pid, _window_id, _stop, read_allowed| {
                     read_allowed(None);
                     reload_policy.replace_filter(FilterConfig {
                         exclude_apps: vec!["dev.example.App".to_owned()],
                         ..FilterConfig::default()
                     });
-                    Ok(Some(SnapshotWalkOutput {
-                        text: "xx".to_owned(),
-                        nodes: 1,
-                        ax_calls: 1,
-                        elapsed: Duration::from_millis(1),
-                        cutoff: None,
-                        degraded_nodes: 0,
-                        frameless_nodes: 0,
-                    }))
+                    Ok(Some((
+                        SnapshotWalkOutput {
+                            text: "xx".to_owned(),
+                            nodes: 1,
+                            ax_calls: 1,
+                            elapsed: Duration::from_millis(1),
+                            cutoff: None,
+                            degraded_nodes: 0,
+                            frameless_nodes: 0,
+                        },
+                        sufficient(),
+                    )))
                 },
             );
             let now = Instant::now();

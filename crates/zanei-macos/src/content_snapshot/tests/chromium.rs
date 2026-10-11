@@ -28,7 +28,7 @@ use crate::{
     workspace::{ApplicationActivationPolicy, ApplicationInfo, notification_channel},
 };
 
-use super::walker::FakeNode;
+use super::{support::ocr_off, walker::FakeNode};
 
 struct ChromiumApplication;
 
@@ -107,6 +107,7 @@ fn chromium_profile_produces_snapshot_through_trigger_scheduler_and_worker() {
                 health,
                 &mut state,
                 focus_context,
+                ocr_off(),
                 move |_pid, expected_window_id, stop, read_allowed| {
                     observed_scan_calls.fetch_add(1, Ordering::Release);
                     scan_application(

@@ -57,10 +57,6 @@ impl SnapshotBody {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used once the worker recognizes text")
-    )]
     pub(super) fn recognized(data: ContentSnapshotData, image: u64) -> Self {
         Self {
             origin: SnapshotOrigin::Ocr,

@@ -151,18 +151,8 @@ enum Work<N> {
     },
 }
 
-pub(crate) fn walk_snapshot<N: SnapshotNode>(
-    root: N,
-    window_frame: AxFrame,
-    budget: WalkBudget,
-    clock: &impl WalkClock,
-    stopped: impl Fn() -> bool,
-) -> Result<SnapshotWalkOutput, SnapshotWalkError> {
-    walk_snapshot_analyzed(root, window_frame, budget, clock, stopped).map(|(output, _)| output)
-}
-
-/// Walks like `walk_snapshot` and also returns the analysis of the same
-/// traversal, collected within the same budgets.
+/// Walks the window and returns its text together with the analysis of the
+/// same traversal, collected within the same budgets.
 pub(crate) fn walk_snapshot_analyzed<N: SnapshotNode>(
     root: N,
     window_frame: AxFrame,
