@@ -4,7 +4,10 @@ mod model;
 mod payload;
 
 pub use capture_context::{CaptureContext, CaptureSurface};
-pub use content_snapshot::{ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotTrigger};
+pub use content_snapshot::{
+    ContentSnapshotCutoff, ContentSnapshotData, ContentSnapshotLine, ContentSnapshotTrigger,
+    RECOGNIZED_TEXT_SOURCE, RgbColor, WindowFraction,
+};
 pub(crate) use model::event_schema_version_for_data;
 pub use model::{
     App, Element, Event, KNOWN_EVENT_TYPES, RawEvent, Redaction, Window, event_schema_version,

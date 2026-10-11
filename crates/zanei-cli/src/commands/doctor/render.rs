@@ -333,6 +333,7 @@ fn pane_title(capability: &Capability) -> String {
         Capability::AutomateSafari => {
             format!("Automation ({})", automation_target(*capability))
         }
+        Capability::CaptureScreen => "Screen Recording".to_owned(),
     }
 }
 
@@ -340,7 +341,9 @@ fn automation_target(capability: Capability) -> &'static str {
     match capability {
         Capability::AutomateBrowser => "Google Chrome",
         Capability::AutomateSafari => "Safari",
-        Capability::ReadAccessibilityTree | Capability::ObserveInput => unreachable!(),
+        Capability::ReadAccessibilityTree
+        | Capability::ObserveInput
+        | Capability::CaptureScreen => unreachable!(),
     }
 }
 

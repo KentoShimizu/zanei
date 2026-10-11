@@ -280,7 +280,7 @@ fn default_reads_exclude_content_while_explicit_queries_and_all_exports_include_
         assert!(
             events
                 .iter()
-                .any(|event| event.event_type == "content.snapshot" && event.version == 3),
+                .any(|event| event.event_type == "content.snapshot" && event.version == 4),
             "types={types}: {events:?}"
         );
     }
@@ -415,7 +415,7 @@ fn mcp_status_query_and_timeline_apply_the_content_contract() {
         serde_json::json!({ "types": ["content.snapshot"] }),
     );
     assert_eq!(content["events"][0]["type"], "content.snapshot");
-    assert_eq!(content["events"][0]["v"], 3);
+    assert_eq!(content["events"][0]["v"], 4);
     let timeline = mcp_tool(
         &mut stdin,
         &mut stdout,

@@ -1,10 +1,11 @@
-use crate::schema::{Event, EventData};
+use crate::schema::{ContentSnapshotLine, Event, EventData};
 
 /// Text content remains useful at this size while bounding per-field redaction,
 /// serialization, and batch-memory cost.
 pub const TEXT_FIELD_MAX_BYTES: usize = 64 * 1024;
 
-/// A second-line safety valve above the collector's 32 KiB snapshot budget.
+/// A second-line safety valve above the collector's 32 KiB snapshot text and
+/// 64 KiB serialized `lines` budgets, against growth from redaction markers.
 pub const CONTENT_SNAPSHOT_SAFETY_MAX_BYTES: usize = 64 * 1024;
 
 /// URLs and titles are contextual metadata; 4 KiB covers normal values while
@@ -35,7 +36,8 @@ pub(crate) fn enforce_size_limits(event: &mut Event) {
         EventData::ClipboardCopy(data) => drop_oversized(&mut data.text, TEXT_FIELD_MAX_BYTES),
         EventData::ClipboardPaste(data) => drop_oversized(&mut data.text, TEXT_FIELD_MAX_BYTES),
         EventData::ContentSnapshot(data) => {
-            drop_oversized(&mut data.text, CONTENT_SNAPSHOT_SAFETY_MAX_BYTES)
+            let text = drop_oversized(&mut data.text, CONTENT_SNAPSHOT_SAFETY_MAX_BYTES);
+            text | data.lines_mut().is_some_and(drop_oversized_lines)
         }
         EventData::AppActivate(_)
         | EventData::AppLaunch(_)
@@ -49,6 +51,19 @@ pub(crate) fn enforce_size_limits(event: &mut Event) {
     if truncated {
         event.mark_truncated();
     }
+}
+
+fn drop_oversized_lines(lines: &mut Option<Vec<ContentSnapshotLine>>) -> bool {
+    let oversized = lines.as_ref().is_some_and(|lines| {
+        serde_json::to_vec(lines)
+            .expect("content snapshot lines serialize to JSON")
+            .len()
+            > CONTENT_SNAPSHOT_SAFETY_MAX_BYTES
+    });
+    if oversized {
+        *lines = None;
+    }
+    oversized
 }
 
 fn drop_oversized(value: &mut Option<String>, max_bytes: usize) -> bool {

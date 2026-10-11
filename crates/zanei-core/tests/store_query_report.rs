@@ -193,7 +193,7 @@ fn content_selection_defaults_and_explicit_patterns_match_active_and_retired_sou
             explicit
                 .events
                 .iter()
-                .all(|event| event.event_type == "content.snapshot" && event.version == 3)
+                .all(|event| event.event_type == "content.snapshot" && event.version == 4)
         );
     }
 
@@ -228,7 +228,9 @@ fn content_selection_defaults_and_explicit_patterns_match_active_and_retired_sou
 }
 
 #[test]
-fn v2_content_snapshots_remain_lossless_across_active_retired_and_export_reads() {
+fn content_snapshots_of_every_version_remain_lossless_across_active_retired_and_export_reads() {
+    // Catches a store row losing `lines`, a retained v2 row gaining an invented cutoff, and
+    // retained v3 rows becoming unreadable without a migration.
     let directory = TestDirectory::new("content-v2-compatibility");
     let store = directory.path().join("store.sqlite");
     let retired = directory
@@ -237,6 +239,17 @@ fn v2_content_snapshots_remain_lossless_across_active_retired_and_export_reads()
     let snapshot = directory.path().join("snapshot.sqlite");
     let now = OffsetDateTime::now_utc();
     let current = content_event("evt_01K00000000000000000001013", now, 1);
+    let recognized = recognized_content_event(
+        "evt_01K00000000000000000001016",
+        now + time::Duration::milliseconds(3),
+        4,
+    );
+    let mut retained_v3 = content_event(
+        "evt_01K00000000000000000001017",
+        now + time::Duration::milliseconds(4),
+        5,
+    );
+    retained_v3.version = 3;
     let active_legacy = legacy_content_event(
         "evt_01K00000000000000000001014",
         now + time::Duration::milliseconds(1),
@@ -250,7 +263,14 @@ fn v2_content_snapshots_remain_lossless_across_active_retired_and_export_reads()
         false,
     );
     StoreWriter::open(&store)
-        .and_then(|mut writer| writer.append_batch(&[current, active_legacy.clone()]))
+        .and_then(|mut writer| {
+            writer.append_batch(&[
+                current.clone(),
+                recognized.clone(),
+                retained_v3.clone(),
+                active_legacy.clone(),
+            ])
+        })
         .expect("active v2/v3 fixtures");
     StoreWriter::open(&retired)
         .and_then(|mut writer| writer.append(&retired_legacy))
@@ -273,10 +293,22 @@ fn v2_content_snapshots_remain_lossless_across_active_retired_and_export_reads()
             .iter()
             .map(|event| event.version)
             .collect::<Vec<_>>(),
-        [3, 2, 2]
+        [4, 2, 2, 4, 4]
     );
+    assert_eq!(result.events[0], current);
     assert_eq!(result.events[1], active_legacy);
     assert_eq!(result.events[2], retired_legacy);
+    assert_eq!(result.events[3], recognized);
+    // The store keeps no version column and a v3 payload equals a v4 one without `lines`.
+    assert_eq!(
+        result.events[4],
+        Event {
+            version: 4,
+            ..retained_v3
+        }
+    );
+    let recognized_json = serde_json::to_value(&result.events[3]).expect("serialize OCR");
+    assert_eq!(recognized_json["data"]["lines"][0]["bg"], "#2D2E30");
     let retained_json = serde_json::to_value(&result.events[2]).expect("serialize retained v2");
     assert_eq!(retained_json["v"], 2);
     assert_eq!(retained_json["data"]["complete"], false);
@@ -292,7 +324,7 @@ fn v2_content_snapshots_remain_lossless_across_active_retired_and_export_reads()
             configured_retention_hours: RETENTION_HOURS,
         })
         .expect("v2/v3 metadata query");
-    assert_eq!(metadata.len(), 3);
+    assert_eq!(metadata.len(), 5);
 
     export_plain_sqlite(
         &store,
@@ -321,14 +353,7 @@ fn v2_content_snapshots_remain_lossless_across_active_retired_and_export_reads()
             )
         })
         .expect("query SQLite export");
-    assert_eq!(
-        exported
-            .events
-            .iter()
-            .map(|event| event.version)
-            .collect::<Vec<_>>(),
-        [3, 2, 2]
-    );
+    assert_eq!(exported.events, result.events);
 }
 
 #[test]
@@ -411,7 +436,7 @@ fn event(id: &str, at: OffsetDateTime, mono_ns: u64) -> Event {
 fn content_event(id: &str, at: OffsetDateTime, mono_ns: u64) -> Event {
     let text = "Visible snapshot";
     Event {
-        version: 3,
+        version: 4,
         id: id.to_owned(),
         ts: format_timestamp(at),
         mono_ns,
@@ -438,6 +463,23 @@ fn content_event(id: &str, at: OffsetDateTime, mono_ns: u64) -> Event {
             rules: Vec::new(),
         },
     }
+}
+
+fn recognized_content_event(id: &str, at: OffsetDateTime, mono_ns: u64) -> Event {
+    let mut value = serde_json::to_value(content_event(id, at, mono_ns))
+        .expect("serialize accessibility content fixture");
+    value["source"] = serde_json::json!("macos.ocr");
+    value["data"] = serde_json::json!({
+        "text": "12:30\nSee you",
+        "chars": 13,
+        "cutoff": null,
+        "trigger": "settle",
+        "lines": [
+            { "text": "12:30", "x": 0.5, "y": 0.1, "w": 0.04, "h": 0.02, "bg": "#2D2E30", "ink": "#A0A0A0" },
+            { "text": "See you", "x": 0.25, "y": 0.2, "w": 0.1, "h": 0.03, "bg": "#545454", "ink": null }
+        ]
+    });
+    serde_json::from_value(value).expect("deserialize recognized content fixture")
 }
 
 fn legacy_content_event(id: &str, at: OffsetDateTime, mono_ns: u64, complete: bool) -> Event {
