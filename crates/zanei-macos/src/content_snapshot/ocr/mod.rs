@@ -13,30 +13,14 @@ mod order;
 use zanei_core::schema::{ContentSnapshotData, ContentSnapshotTrigger};
 
 use super::coverage::WindowRect;
-
-/// One captured window image. Private user content: never log or persist it.
-pub(crate) struct RgbaImage<'a> {
-    pub(crate) width: usize,
-    pub(crate) height: usize,
-    /// Image pixels per window point.
-    pub(crate) scale: f64,
-    /// sRGB with straight alpha, rows top to bottom without padding;
-    /// `width * height * 4` bytes.
-    pub(crate) rgba: &'a [u8],
-}
-
-/// One recognized line and its box, relative to the window with a top-left origin.
-pub(crate) struct RecognizedLine {
-    pub(crate) text: String,
-    pub(crate) bounds: WindowRect,
-}
+use crate::ffi::{screen_capture::WindowImage, text_recognition::RecognizedLine};
 
 /// Builds the snapshot body from the lines recognized in `image`.
 ///
 /// Returns `None` when every line lies in an input field, so the caller records
 /// the Accessibility body instead of an empty recognized one.
 pub(crate) fn recognized_snapshot(
-    image: &RgbaImage<'_>,
+    image: &WindowImage,
     lines: Vec<RecognizedLine>,
     mask_regions: &[WindowRect],
     order_containers: &[WindowRect],

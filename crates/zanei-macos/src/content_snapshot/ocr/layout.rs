@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use zanei_core::schema::{ContentSnapshotLine, RgbColor, WindowFraction};
 
-use super::{RecognizedLine, RgbaImage};
+use super::{RecognizedLine, WindowImage};
 
 /// `bg` is sampled on a ring this many window points wide around the line box.
 const RING_POINTS: f64 = 5.0;
@@ -14,7 +14,7 @@ const INK_MIN_DISTANCE_SQUARED: u32 = 80 * 80;
 const LEVEL_SHIFT: u32 = 4;
 const BUCKETS: usize = 1 << (3 * (8 - LEVEL_SHIFT));
 
-pub(super) fn lay_out(image: &RgbaImage<'_>, line: RecognizedLine) -> ContentSnapshotLine {
+pub(super) fn lay_out(image: &WindowImage, line: RecognizedLine) -> ContentSnapshotLine {
     let RecognizedLine { text, bounds } = line;
     let columns = span(bounds.x, bounds.width, image.width);
     let rows = span(bounds.y, bounds.height, image.height);
@@ -67,7 +67,7 @@ fn span(start: f64, length: f64, pixels: usize) -> Range<usize> {
 }
 
 fn pixels<'a>(
-    image: &'a RgbaImage<'_>,
+    image: &'a WindowImage,
     columns: &Range<usize>,
     rows: &Range<usize>,
 ) -> impl Iterator<Item = [u8; 3]> + 'a {
@@ -77,7 +77,7 @@ fn pixels<'a>(
 }
 
 /// Straight alpha: the colour channels already hold the colour, so alpha is not applied.
-fn pixel(image: &RgbaImage<'_>, column: usize, row: usize) -> [u8; 3] {
+fn pixel(image: &WindowImage, column: usize, row: usize) -> [u8; 3] {
     let offset = (row * image.width + column) * 4;
     [
         image.rgba[offset],

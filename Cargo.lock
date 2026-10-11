@@ -1904,6 +1904,7 @@ name = "zanei-macos"
 version = "0.6.3"
 dependencies = [
  "block2",
+ "serde_json",
  "tempfile",
  "thiserror",
  "time",

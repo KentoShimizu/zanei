@@ -4,8 +4,10 @@ use zanei_core::schema::{
 };
 
 use super::{
-    RecognizedLine, RgbaImage, WindowRect, assemble::assemble, layout::lay_out, recognized_snapshot,
+    RecognizedLine, WindowImage, WindowRect, assemble::assemble, layout::lay_out,
+    recognized_snapshot,
 };
+use crate::ffi::text_recognition::NormalizedBox;
 
 const TRIGGER: ContentSnapshotTrigger = ContentSnapshotTrigger::Settle;
 const WINDOW: [u8; 4] = [0x2D, 0x2E, 0x30, 0xFF];
@@ -23,7 +25,12 @@ fn rect(x: f64, y: f64, width: f64, height: f64) -> WindowRect {
 fn line(text: &str, x: f64, y: f64, width: f64, height: f64) -> RecognizedLine {
     RecognizedLine {
         text: text.to_owned(),
-        bounds: rect(x, y, width, height),
+        bounds: NormalizedBox {
+            x,
+            y,
+            width,
+            height,
+        },
     }
 }
 
@@ -60,8 +67,8 @@ fn paint(width: usize, height: usize, pixel: impl Fn(usize, usize) -> [u8; 4]) -
         .collect()
 }
 
-fn image(width: usize, height: usize, scale: f64, rgba: &[u8]) -> RgbaImage<'_> {
-    RgbaImage {
+fn image(width: usize, height: usize, scale: f64, rgba: Vec<u8>) -> WindowImage {
+    WindowImage {
         width,
         height,
         scale,
@@ -80,7 +87,7 @@ fn inside(
 
 fn snapshot_text(lines: Vec<RecognizedLine>, containers: &[WindowRect]) -> String {
     let rgba = paint(64, 64, |_, _| WHITE);
-    recognized_snapshot(&image(64, 64, 1.0, &rgba), lines, &[], containers, TRIGGER)
+    recognized_snapshot(&image(64, 64, 1.0, rgba), lines, &[], containers, TRIGGER)
         .expect("unmasked lines")
         .text
         .expect("text")
@@ -109,7 +116,7 @@ fn background_is_the_dominant_ring_colour_and_ink_the_glyph_colour() {
     });
 
     let laid_out = lay_out(
-        &image(128, 128, 1.0, &rgba),
+        &image(128, 128, 1.0, rgba),
         line("hello", 0.25, 0.25, 0.5, 0.125),
     );
 
@@ -133,7 +140,7 @@ fn ink_needs_a_colour_distance_above_eighty() {
         (50..70, 10) => [0x2D + 81, 0x2E, 0x30, 0xFF],
         _ => WINDOW,
     });
-    let image = image(80, 20, 1.0, &rgba);
+    let image = image(80, 20, 1.0, rgba);
 
     let at_threshold = lay_out(&image, line("a", 0.125, 0.25, 0.25, 0.5));
     let above = lay_out(&image, line("b", 0.625, 0.25, 0.25, 0.5));
@@ -160,7 +167,7 @@ fn background_ring_is_five_points_at_the_image_scale() {
     });
 
     let laid_out = lay_out(
-        &image(64, 64, 2.0, &rgba),
+        &image(64, 64, 2.0, rgba),
         line("a", 0.25, 0.4375, 0.5, 0.125),
     );
 
@@ -179,7 +186,7 @@ fn a_line_filling_the_window_takes_its_background_from_inside() {
         }
     });
 
-    let laid_out = lay_out(&image(8, 4, 1.0, &rgba), line("a", 0.0, 0.0, 1.0, 1.0));
+    let laid_out = lay_out(&image(8, 4, 1.0, rgba), line("a", 0.0, 0.0, 1.0, 1.0));
 
     assert_eq!(
         (laid_out.bg, laid_out.ink),
@@ -200,7 +207,7 @@ fn lines_centred_in_input_fields_are_dropped_from_text_and_lines() {
         line("beside", 0.45, 0.06, 0.2, 0.03),
     ];
 
-    let snapshot = recognized_snapshot(&image(64, 64, 1.0, &rgba), lines, &[field], &[], TRIGGER);
+    let snapshot = recognized_snapshot(&image(64, 64, 1.0, rgba), lines, &[field], &[], TRIGGER);
 
     assert_eq!(
         snapshot,
@@ -224,7 +231,7 @@ fn a_fully_masked_window_yields_no_recognized_snapshot() {
     let rgba = paint(64, 64, |_, _| WHITE);
 
     let snapshot = recognized_snapshot(
-        &image(64, 64, 1.0, &rgba),
+        &image(64, 64, 1.0, rgba),
         vec![line("typed query", 0.12, 0.06, 0.2, 0.03)],
         &[rect(0.1, 0.05, 0.4, 0.05)],
         &[],
@@ -283,55 +290,47 @@ fn window_without_containers_reads_top_to_bottom_then_left_to_right() {
 
 #[test]
 fn lines_limit_cuts_text_and_lines_at_the_same_line() {
-    // Catches `text` and `lines` diverging at the cutoff, and a serialized
-    // size that undercounts JSON escapes, number digits, or `ink`, which would
-    // let the core size safety rule remove every line.
+    // Catches `text` and `lines` diverging at the cutoff, and a miscounted
+    // array size (brackets, commas, escapes) that would let the core size
+    // safety rule remove every line.
     let quoted = stored(
         "say \"hi\"\\\u{1}é",
         [0.0001, 0.25, 1.0, 0.0],
         [0, 0, 0, 0xFF],
         None,
     );
-    let quoted_json = r##"{"text":"say \"hi\"\\\u0001é","x":0.0001,"y":0.25,"w":1.0,"h":0.0,"bg":"#000000","ink":null}"##;
     let short = stored(
         "b",
         [0.5, 0.125, 0.0625, 0.0313],
         WHITE,
         Some([0xAB, 0xCD, 0xEF, 0xFF]),
     );
-    let short_json =
-        r##"{"text":"b","x":0.5,"y":0.125,"w":0.0625,"h":0.0313,"bg":"#FFFFFF","ink":"#ABCDEF"}"##;
-    let candidates: Vec<_> = (0..2_000)
+    let lines: Vec<_> = (0..2_000)
         .map(|index| {
             if index % 2 == 0 {
-                (quoted.clone(), quoted_json)
+                quoted.clone()
             } else {
-                (short.clone(), short_json)
+                short.clone()
             }
         })
         .collect();
-    let mut array_bytes = "[]".len() - ",".len();
-    let fitting = candidates
-        .iter()
-        .take_while(|(_, json)| {
-            array_bytes += ",".len() + json.len();
-            array_bytes <= 64 * 1_024
+    let fitting = (0..=lines.len())
+        .take_while(|&count| {
+            serde_json::to_vec(&lines[..count])
+                .expect("lines serialize")
+                .len()
+                <= 64 * 1_024
         })
-        .count();
-    let kept: Vec<_> = candidates[..fitting]
-        .iter()
-        .map(|(line, _)| line.clone())
-        .collect();
+        .last()
+        .expect("no lines fit");
+    let kept = lines[..fitting].to_vec();
     let text = kept
         .iter()
         .map(|line| line.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
 
-    let snapshot = assemble(
-        candidates.into_iter().map(|(line, _)| line).collect(),
-        TRIGGER,
-    );
+    let snapshot = assemble(lines, TRIGGER);
 
     assert!(fitting < 2_000 && text.len() < 32 * 1_024);
     assert_eq!(
