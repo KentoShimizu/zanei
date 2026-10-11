@@ -436,7 +436,7 @@ fn run_ax_loop(
             .try_iter()
             .take(MAX_CLICK_OBSERVATIONS_PER_TICK)
         {
-            if let Some(hit) = api.hit_test(click)
+            if let Some(hit) = api.observe_click(click)
                 && let Some(event) = builder.click_event(hit, click)
             {
                 output.send(event);

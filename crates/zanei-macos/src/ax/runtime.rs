@@ -35,7 +35,8 @@ pub(super) trait AxApi {
     fn detach(&mut self, pid: i32) -> Vec<NativeAxEvent>;
     fn poll(&mut self, timeout: Duration) -> Vec<NativeAxObservation>;
     fn flush_pending(&mut self) -> Vec<NativeAxEvent>;
-    fn hit_test(&self, click: ClickObservation) -> Option<NativeHitTest>;
+    /// Hit-tests the click and arms a focused-field pull for the clicked application.
+    fn observe_click(&mut self, click: ClickObservation) -> Option<NativeHitTest>;
     fn take_dropped_events(&self) -> u64;
     fn take_degraded_operations(&self) -> u64;
 }
@@ -122,8 +123,8 @@ impl AxApi for SystemAxApi {
         self.native.flush_pending()
     }
 
-    fn hit_test(&self, click: ClickObservation) -> Option<NativeHitTest> {
-        self.native.hit_test(click.pid, click.x, click.y)
+    fn observe_click(&mut self, click: ClickObservation) -> Option<NativeHitTest> {
+        self.native.observe_click(click.pid, click.x, click.y)
     }
 
     fn take_dropped_events(&self) -> u64 {

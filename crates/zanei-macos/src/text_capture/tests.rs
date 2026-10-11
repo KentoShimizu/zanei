@@ -7,9 +7,9 @@ use zanei_core::{
 };
 
 use super::{
-    AUTHORIZATION_QUEUE_CAPACITY, FocusChangeCapture, FocusedTarget, INPUT_WINDOW,
-    InputAuthorizations, VALUE_DEBOUNCE, VALUE_MAX_HOLD, ValueCapture, ValueEmission,
-    ValueObservation, input_authorization_channel,
+    AUTHORIZATION_QUEUE_CAPACITY, FocusChangeCapture, FocusedTarget, INPUT_WINDOW, InputActivity,
+    InputActivityKind, InputAuthorizations, VALUE_DEBOUNCE, VALUE_MAX_HOLD, ValueCapture,
+    ValueEmission, ValueObservation, input_authorization_channel,
 };
 use crate::{
     CapturePolicy,
@@ -1474,4 +1474,61 @@ fn secure_transition_invalidates_baseline_and_authorization() {
             capture_decision: None,
         })
     );
+}
+
+fn activity(pid: i32, at: Instant) -> InputActivity {
+    InputActivity {
+        pid,
+        kind: InputActivityKind::Edit,
+        at,
+    }
+}
+
+// Bug: authorization matching drains the channel first and the activity it received is lost, or
+// input for an application that quit still arms a pull.
+#[test]
+fn activity_received_while_matching_is_still_taken() {
+    let now = Instant::now();
+    let (publisher, mut authorizations) = input_authorization_channel();
+    for pid in [7, 8] {
+        publisher
+            .report_activity(activity(pid, now))
+            .expect("channel should accept the activity");
+    }
+    publisher
+        .prepare(7, 1, now)
+        .expect("channel should accept the reservation")
+        .confirm();
+
+    assert!(authorizations.matching_for_test(7, 1, now));
+    authorizations.remove_pid(8);
+    assert_eq!(authorizations.take_activity(), vec![activity(7, now)]);
+    assert!(authorizations.take_activity().is_empty());
+}
+
+// Bug: activity opens a text window, or accumulates as authorization history until the pending
+// capacity resets every reservation.
+#[test]
+fn activity_never_authorizes_and_never_fills_authorization_history() {
+    let now = Instant::now();
+    let (publisher, mut authorizations) = input_authorization_channel();
+    publisher
+        .report_activity(activity(8, now))
+        .expect("channel should accept the activity");
+    assert!(!authorizations.matching_for_test(8, 1, now));
+
+    publisher
+        .prepare(7, 1, now)
+        .expect("channel should accept the reservation")
+        .confirm();
+    for _ in 0..2 {
+        for _ in 0..AUTHORIZATION_QUEUE_CAPACITY - 1 {
+            publisher
+                .report_activity(activity(7, now))
+                .expect("channel should accept the activity");
+        }
+        authorizations.take_activity();
+    }
+
+    assert!(authorizations.matching_for_test(7, 1, now));
 }

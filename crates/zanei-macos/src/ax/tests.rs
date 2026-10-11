@@ -389,7 +389,7 @@ impl AxApi for FakeAxApi {
         Vec::new()
     }
 
-    fn hit_test(&self, _click: ClickObservation) -> Option<NativeHitTest> {
+    fn observe_click(&mut self, _click: ClickObservation) -> Option<NativeHitTest> {
         None
     }
 
