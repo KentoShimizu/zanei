@@ -13,10 +13,11 @@ use crate::{
         budget::WalkBudget,
         walker::{
             NodeContentAttributes, NodeSafeAttributes, SnapshotNode, SnapshotReadError, WalkClock,
-            walk_snapshot,
+            coverage::{WalkAnalysis, WindowRect},
+            walk_snapshot, walk_snapshot_analyzed,
         },
     },
-    ffi::ax::AxTextRange,
+    ffi::ax::{AxFrame, AxTextRange},
 };
 
 use super::support::frame;
@@ -473,4 +474,158 @@ fn invalid_window_root_ends_the_walk() {
         error.source,
         SnapshotReadError::Ax(error) if error.is_invalid_ui_element()
     ));
+}
+
+fn placed(role: &str, x: f64, y: f64, width: f64, height: f64) -> FakeNode {
+    let mut node = FakeNode::new(role);
+    node.attributes.frame = Some(frame(x, y, width, height));
+    node
+}
+
+fn with_value(mut node: FakeNode, value: &str) -> FakeNode {
+    node.value = Some(value.to_owned());
+    node
+}
+
+fn analyze(root: FakeNode, window: AxFrame) -> (String, WalkAnalysis) {
+    let clock = FakeClock(Arc::clone(&root.elapsed_micros));
+    let (output, analysis) =
+        walk_snapshot_analyzed(root, window, generous_budget(), &clock, || false)
+            .expect("fake walk");
+    assert_eq!(output.cutoff, None);
+    (output.text, analysis)
+}
+
+fn rect(x: f64, y: f64, width: f64, height: f64) -> WindowRect {
+    WindowRect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+#[test]
+fn custom_drawn_chat_window_with_blank_texts_and_childless_rows_is_ax_insufficient() {
+    // Window at (100, 50), 1000 x 500 points: a sidebar of childless rows
+    // under a search field, a header label, a chat log of blank static texts,
+    // and an empty composer.
+    let mut root = placed("AXWindow", 100.0, 50.0, 1000.0, 500.0).with_window_title(Some("Chat"));
+    let mut split = placed("AXSplitGroup", 100.0, 50.0, 1000.0, 500.0);
+    let mut sidebar = placed("AXScrollArea", 100.0, 50.0, 250.0, 500.0);
+    let search = with_value(
+        placed("AXTextField", 110.0, 60.0, 230.0, 30.0),
+        "typed query",
+    );
+    let mut table = placed("AXTable", 100.0, 100.0, 250.0, 450.0);
+    table.children = (0..6)
+        .map(|row| placed("AXRow", 100.0, 100.0 + 75.0 * f64::from(row), 250.0, 75.0))
+        .collect();
+    sidebar.children = vec![search, table];
+    let header = with_value(placed("AXStaticText", 350.0, 50.0, 200.0, 40.0), "Name");
+    let mut log = placed("AXScrollArea", 350.0, 90.0, 750.0, 360.0);
+    let mut list = placed("AXList", 350.0, 90.0, 750.0, 360.0);
+    list.content_attributes.title = Some("Messages".to_owned());
+    list.children = (0..3)
+        .map(|item| {
+            placed(
+                "AXStaticText",
+                370.0,
+                100.0 + 120.0 * f64::from(item),
+                700.0,
+                100.0,
+            )
+        })
+        .collect();
+    log.children = vec![list];
+    let composer = placed("AXTextArea", 350.0, 450.0, 750.0, 100.0);
+    split.children = vec![sidebar, header, log, composer];
+    root.children = vec![split];
+
+    let (text, analysis) = analyze(root, frame(100.0, 50.0, 1000.0, 500.0));
+
+    // Catches the window or list title counting as a text region, which
+    // would cancel the blank coverage of this window.
+    assert_eq!(text, "Chat\nName\nMessages");
+    assert!(analysis.blank_coverage > 0.7, "{}", analysis.blank_coverage);
+    assert!(analysis.ax_insufficient());
+    // Catches a bottom-left flip or a missing window offset in mask regions.
+    assert_eq!(analysis.mask_regions, [rect(0.01, 0.02, 0.23, 0.06)]);
+    // Catches rows, static texts, the root, or small fields becoming order
+    // containers.
+    assert_eq!(
+        analysis.order_containers,
+        [
+            rect(0.0, 0.0, 1.0, 1.0),
+            rect(0.0, 0.0, 0.25, 1.0),
+            rect(0.0, 0.1, 0.25, 0.9),
+            rect(0.25, 0.08, 0.75, 0.72),
+            rect(0.25, 0.08, 0.75, 0.72),
+            rect(0.25, 0.8, 0.75, 0.2),
+        ]
+    );
+}
+
+#[test]
+fn web_window_with_large_childless_decorative_groups_is_ax_sufficient() {
+    let mut root = placed("AXWindow", 0.0, 0.0, 1200.0, 800.0).with_window_title(Some("App"));
+    let backdrop = placed("AXGroup", 0.0, 0.0, 1200.0, 800.0);
+    let rail = placed("AXGroup", 0.0, 0.0, 200.0, 800.0);
+    let unknown = placed("AXFutureControl", 200.0, 0.0, 1000.0, 400.0);
+    let picture = placed("AXImage", 300.0, 300.0, 400.0, 300.0);
+    let icon = placed("AXButton", 10.0, 10.0, 24.0, 24.0);
+    let mut page = placed("AXWebArea", 200.0, 0.0, 1000.0, 800.0);
+    page.children = (0..4)
+        .map(|paragraph| {
+            with_value(
+                placed(
+                    "AXStaticText",
+                    220.0,
+                    20.0 + 40.0 * f64::from(paragraph),
+                    900.0,
+                    30.0,
+                ),
+                "Paragraph",
+            )
+        })
+        .collect();
+    root.children = vec![backdrop, rail, unknown, picture, icon, page];
+
+    let (_, analysis) = analyze(root, frame(0.0, 0.0, 1200.0, 800.0));
+
+    // Catches containers, unknown roles, or images counting as blank slots;
+    // only the small icon button is blank here.
+    assert!(
+        analysis.blank_coverage < 0.01,
+        "{}",
+        analysis.blank_coverage
+    );
+    assert!(!analysis.ax_insufficient());
+}
+
+#[test]
+fn text_areas_are_blank_slots_only_when_empty_and_childless() {
+    let window = frame(0.0, 0.0, 800.0, 600.0);
+    let editor = |visible: Option<&str>, children: Vec<FakeNode>| {
+        let mut root = placed("AXWindow", 0.0, 0.0, 800.0, 600.0).with_window_title(Some("Doc"));
+        let mut toolbar = placed("AXToolbar", 0.0, 0.0, 800.0, 50.0);
+        let mut bold = placed("AXButton", 10.0, 10.0, 30.0, 30.0);
+        bold.content_attributes.description = Some("Bold".to_owned());
+        toolbar.children = vec![bold];
+        let mut area = placed("AXTextArea", 0.0, 50.0, 800.0, 550.0);
+        area.visible = visible.map(str::to_owned);
+        area.children = children;
+        root.children = vec![toolbar, area];
+        analyze(root, window).1
+    };
+
+    // A native editor showing its text is sufficient.
+    assert_eq!(editor(Some("Draft text"), Vec::new()).blank_coverage, 0.0);
+    // A text area that exposes no visible text, as a custom-drawn terminal
+    // does, covers most of the window.
+    assert!(editor(None, Vec::new()).ax_insufficient());
+    // Catches skipping the childless rule for text areas, whose children the
+    // walk never reads.
+    let attachment = placed("AXImage", 0.0, 50.0, 100.0, 100.0);
+    assert_eq!(editor(None, vec![attachment]).blank_coverage, 0.0);
 }

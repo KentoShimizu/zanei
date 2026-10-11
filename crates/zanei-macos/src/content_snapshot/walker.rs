@@ -21,6 +21,10 @@ use text::TextAssembler;
 #[path = "walker/ax_node.rs"]
 mod ax_node;
 
+#[path = "coverage.rs"]
+pub(crate) mod coverage;
+use coverage::{WalkAnalysis, WalkAnalyzer, WalkedNode, WindowRect};
+
 #[derive(Debug)]
 pub enum SnapshotReadError {
     Ax(SnapshotAxError),
@@ -157,6 +161,18 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
     clock: &impl WalkClock,
     stopped: impl Fn() -> bool,
 ) -> Result<SnapshotWalkOutput, SnapshotWalkError> {
+    walk_snapshot_analyzed(root, window_frame, budget, clock, stopped).map(|(output, _)| output)
+}
+
+/// Walks like `walk_snapshot` and also returns the analysis of the same
+/// traversal, collected within the same budgets.
+pub(crate) fn walk_snapshot_analyzed<N: SnapshotNode>(
+    root: N,
+    window_frame: AxFrame,
+    budget: WalkBudget,
+    clock: &impl WalkClock,
+    stopped: impl Fn() -> bool,
+) -> Result<(SnapshotWalkOutput, WalkAnalysis), SnapshotWalkError> {
     let mut context = WalkContext {
         budget,
         clock,
@@ -167,6 +183,7 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
         cutoff: None,
         degraded_nodes: 0,
         frameless_nodes: 0,
+        analysis: WalkAnalyzer::new(),
     };
     let mut stack = vec![Work::Visit {
         node: root,
@@ -202,7 +219,7 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
     // Account for the final native call crossing the wall-time boundary even
     // when it discovers that no work remains.
     let _ = context.can_continue();
-    Ok(SnapshotWalkOutput {
+    let output = SnapshotWalkOutput {
         text: context.text.finish(),
         nodes: context.nodes,
         ax_calls: context.ax_calls,
@@ -210,7 +227,8 @@ pub(crate) fn walk_snapshot<N: SnapshotNode>(
         cutoff: context.cutoff,
         degraded_nodes: context.degraded_nodes,
         frameless_nodes: context.frameless_nodes,
-    })
+    };
+    Ok((output, context.analysis.finish()))
 }
 
 fn visit_node<'a, N: SnapshotNode>(
@@ -254,20 +272,43 @@ fn visit_node<'a, N: SnapshotNode>(
         descend_if_container(node, is_root, class, false, stack, context)?;
         return Ok(());
     };
-    if !frames_intersect(frame, window_frame) {
+    let Some(rect) = WindowRect::within(frame, window_frame) else {
         return Ok(());
-    }
+    };
     let (fragments, degraded) = node_fragments(&node, is_root, class, context)?;
     if degraded {
         context.degraded_nodes = context.degraded_nodes.saturating_add(1);
     }
+    let mut walked = WalkedNode {
+        role: attributes.role.as_deref(),
+        class,
+        rect,
+        is_root,
+        contributed_text: !fragments.is_empty(),
+        degraded,
+        children: None,
+    };
     for fragment in fragments {
         if !context.text.push(&fragment) {
             context.cutoff = Some(ContentSnapshotCutoff::Bytes);
+            context.analysis.record(&walked);
             return Ok(());
         }
     }
-    descend_if_container(node, is_root, class, degraded, stack, context)
+    walked.children = if class.descends() {
+        descend_if_container(node, is_root, class, degraded, stack, context)?
+    } else if walked.may_be_blank_slot() && context.can_continue() {
+        // A text area is never descended, so only an otherwise blank one pays
+        // one extra read for the childless part of the blank-slot rule.
+        match context.read_node(is_root, || node.children_count())? {
+            NodeRead::Value(count) => Some(count),
+            NodeRead::Degraded => None,
+        }
+    } else {
+        None
+    };
+    context.analysis.record(&walked);
+    Ok(())
 }
 
 fn descend_if_container<'a, N: SnapshotNode>(
@@ -277,25 +318,30 @@ fn descend_if_container<'a, N: SnapshotNode>(
     degraded: bool,
     stack: &mut Vec<Work<N>>,
     context: &mut WalkContext<'a>,
-) -> Result<(), SnapshotWalkError> {
-    if class.descends() && context.can_continue() {
-        match context.read_node(is_root, || node.children_count())? {
-            NodeRead::Value(0) => {}
-            NodeRead::Value(count) => stack.push(Work::Children {
-                node,
-                index: 0,
-                count,
-                is_root,
-                degraded,
-            }),
-            NodeRead::Degraded => {
-                if !degraded {
-                    context.degraded_nodes = context.degraded_nodes.saturating_add(1);
-                }
+) -> Result<Option<usize>, SnapshotWalkError> {
+    if !(class.descends() && context.can_continue()) {
+        return Ok(None);
+    }
+    match context.read_node(is_root, || node.children_count())? {
+        NodeRead::Value(count) => {
+            if count > 0 {
+                stack.push(Work::Children {
+                    node,
+                    index: 0,
+                    count,
+                    is_root,
+                    degraded,
+                });
             }
+            Ok(Some(count))
+        }
+        NodeRead::Degraded => {
+            if !degraded {
+                context.degraded_nodes = context.degraded_nodes.saturating_add(1);
+            }
+            Ok(None)
         }
     }
-    Ok(())
 }
 
 fn load_children<'a, N: SnapshotNode>(
@@ -426,6 +472,7 @@ struct WalkContext<'a> {
     cutoff: Option<ContentSnapshotCutoff>,
     degraded_nodes: usize,
     frameless_nodes: usize,
+    analysis: WalkAnalyzer,
 }
 
 enum NodeRead<T> {
@@ -465,19 +512,4 @@ impl WalkContext<'_> {
             Err(_) => Ok(NodeRead::Degraded),
         }
     }
-}
-
-fn frames_intersect(left: AxFrame, right: AxFrame) -> bool {
-    let left_max_x = left.origin.x + left.size.width;
-    let left_max_y = left.origin.y + left.size.height;
-    let right_max_x = right.origin.x + right.size.width;
-    let right_max_y = right.origin.y + right.size.height;
-    left.size.width > 0.0
-        && left.size.height > 0.0
-        && right.size.width > 0.0
-        && right.size.height > 0.0
-        && left.origin.x < right_max_x
-        && left_max_x > right.origin.x
-        && left.origin.y < right_max_y
-        && left_max_y > right.origin.y
 }

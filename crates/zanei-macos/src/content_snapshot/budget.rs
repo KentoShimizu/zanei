@@ -22,6 +22,19 @@ pub(crate) const PID_BACKOFF_INITIAL: Duration = Duration::from_secs(30);
 pub(crate) const PID_BACKOFF_MAX: Duration = Duration::from_secs(10 * 60);
 // Design limit: child arrays are materialized in bounded traversal-sized chunks.
 pub(crate) const CHILDREN_BATCH_SIZE: usize = 64;
+// Design limit: one text recognition per 10 seconds across all windows bounds
+// the worst case near 12 % of one core; revisit if measured recognition CPU
+// exceeds 1 % of the daily average.
+#[expect(dead_code, reason = "used by the OCR pipeline")]
+pub(crate) const OCR_MIN_INTERVAL: Duration = Duration::from_secs(10);
+// Design limit: one window capture may take 2 seconds, 4x the first-capture
+// latency measured on Apple Silicon.
+#[expect(dead_code, reason = "used by the OCR pipeline")]
+pub(crate) const OCR_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
+// Design limit: serialized OCR line layouts are at most 64 KiB per snapshot,
+// about 590 lines at the measured 110 bytes per line.
+#[expect(dead_code, reason = "used by the OCR pipeline")]
+pub(crate) const OCR_LINES_LIMIT_BYTES: usize = 64 * 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WalkBudget {
