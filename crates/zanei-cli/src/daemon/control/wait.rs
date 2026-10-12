@@ -35,10 +35,9 @@ pub(super) enum DaemonReadiness {
     NotStarted,
     /// A recorder holds the store but has not written its first heartbeat:
     /// it is still opening the store.
-    Starting {
-        instance_id: String,
-    },
-    Alive,
+    Starting { instance_id: String },
+    /// The recorder holding the store has written its first heartbeat.
+    Alive { instance_id: String },
 }
 
 pub(super) fn start_launch_agent_with(
@@ -90,7 +89,9 @@ pub(super) fn daemon_readiness_with(
         return Ok(DaemonReadiness::NotStarted);
     };
     if status.is_some_and(|status| owner_has_fresh_heartbeat(&owner, &status)) {
-        return Ok(DaemonReadiness::Alive);
+        return Ok(DaemonReadiness::Alive {
+            instance_id: owner.instance_id,
+        });
     }
     Ok(DaemonReadiness::Starting {
         instance_id: owner.instance_id,
@@ -119,7 +120,10 @@ pub(super) fn wait_for_daemon_start_with(
     let mut noticed = false;
     loop {
         match (readiness()?, &starting) {
-            (DaemonReadiness::Alive, _) => return Ok(()),
+            (DaemonReadiness::Alive { .. }, None) => return Ok(()),
+            (DaemonReadiness::Alive { instance_id }, Some(seen)) if instance_id == *seen => {
+                return Ok(());
+            }
             (DaemonReadiness::NotStarted, None) => {}
             (DaemonReadiness::Starting { instance_id }, None) => {
                 deadline = deadline.max(started_at + STORE_OPEN_TIMEOUT);
@@ -127,10 +131,8 @@ pub(super) fn wait_for_daemon_start_with(
             }
             (DaemonReadiness::Starting { instance_id }, Some(seen)) if instance_id == *seen => {}
             // The recorder seen holding the store exited, and launchd may
-            // already have relaunched another one.
-            (DaemonReadiness::NotStarted | DaemonReadiness::Starting { .. }, Some(_)) => {
-                return Err(DaemonError::DaemonDidNotStart);
-            }
+            // already have relaunched another one, even one that is alive.
+            (_, Some(_)) => return Err(DaemonError::DaemonDidNotStart),
         }
         let current = now();
         if current >= deadline {
@@ -199,6 +201,12 @@ mod tests {
         }
     }
 
+    fn alive(instance_id: &str) -> DaemonReadiness {
+        DaemonReadiness::Alive {
+            instance_id: instance_id.to_owned(),
+        }
+    }
+
     /// Runs the wait on a simulated clock; `recorder` sees the time since
     /// bootstrap. Returns the result, when it came, and the notices printed.
     fn wait_with(
@@ -221,7 +229,7 @@ mod tests {
     fn a_recorder_migrating_a_large_store_is_not_reported_as_failed() {
         let (result, elapsed, notices) = wait_with(|elapsed| match elapsed.as_secs() {
             0..150 => starting("1@start"),
-            _ => DaemonReadiness::Alive,
+            _ => alive("1@start"),
         });
 
         result.expect("a recorder holding the store keeps the wait going");
@@ -240,8 +248,13 @@ mod tests {
 
     #[test]
     fn a_recorder_that_exits_while_starting_fails_the_wait_at_once() {
-        // Crashes at 5 s; launchd may relaunch it before the next poll.
-        for after_exit in [DaemonReadiness::NotStarted, starting("2@restart")] {
+        // Crashes at 5 s; by the next poll launchd may have relaunched it, and
+        // the relaunched recorder may even have reported alive already.
+        for after_exit in [
+            DaemonReadiness::NotStarted,
+            starting("2@restart"),
+            alive("2@restart"),
+        ] {
             let mut after_exit = Some(after_exit);
             let (result, elapsed, _) = wait_with(|elapsed| match elapsed.as_secs() {
                 0..5 => starting("1@start"),

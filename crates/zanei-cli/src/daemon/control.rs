@@ -483,7 +483,9 @@ mod tests {
         let readiness = RefCell::new(VecDeque::from([
             DaemonReadiness::NotStarted,
             DaemonReadiness::NotStarted,
-            DaemonReadiness::Alive,
+            DaemonReadiness::Alive {
+                instance_id: "1@start".to_owned(),
+            },
         ]));
         let sleeps = RefCell::new(Vec::new());
 
