@@ -98,7 +98,7 @@ Diagnostic/state commands use a separate fixed-output convention:
 
 ## `doctor`
 
-Diagnoses recorder health and the granted state of required TCC permissions (Accessibility / Input Monitoring / Automation) against the configured sources and content opt-ins.
+Diagnoses recorder health and the granted state of required TCC permissions (Accessibility / Input Monitoring / Automation) against the configured sources and content opt-ins. While content snapshots are on, it also shows the optional Screen Recording permission that the text-recognition fallback uses.
 
 ```bash
 zanei doctor            # human-readable; shows granting steps and the System Settings pane if anything is missing
@@ -114,9 +114,12 @@ zanei doctor --json     # machine-readable, for agents
 `--fix` handles missing permissions one pane at a time. Before opening the next pane, it waits for
 Return; the final pane does not add another wait. Combining `--json --fix` does not disable this
 walkthrough: Zanei prints the JSON report first and then enters the same interactive flow when a
-required permission is missing. In that combination, stdout is therefore not JSON-only.
+required permission is missing. In that combination, stdout is therefore not JSON-only. While
+content snapshots are on and the recorder reports Screen Recording as not granted, `--fix` also
+opens the Screen Recording pane, after any required panes or on its own when nothing required is
+missing, and copies and reveals the same `Zanei.app` target as for Input Monitoring.
 
-- Exits with **code 3** if any required permission is missing.
+- Exits with **code 3** if any required permission is missing. Screen Recording is optional and never causes code 3.
 - `input_monitoring` counts as required when the configuration captures `input.*` or `ui.click`;
   when neither `input` nor `ui` is selected, its absence still yields `ok`.
 
@@ -145,6 +148,11 @@ required permission is missing. In that combination, stdout is therefore not JSO
     "automate_safari": {
       "state": "deferred", "required": true,
       "detail": { "platform": "macos", "permission": "automation", "status": "not_determined", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation", "target_bundle_id": "com.apple.Safari" }
+    },
+    "capture_screen": {
+      "state": "action_required", "required": false,
+      "required_for": ["content.snapshot"],
+      "detail": { "platform": "macos", "permission": "screen_recording", "status": "denied", "settings_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" }
     }
   },
   "store_key": { "state": "key_store", "detail": "the login Keychain (item \"Zanei store key\")" },
@@ -156,7 +164,9 @@ required permission is missing. In that combination, stdout is therefore not JSO
 }
 ```
 
-Capability `state` values are `available` / `action_required` / `deferred`. The nested macOS `detail` preserves the native permission name and `granted` / `denied` / `not_determined` status, and owns the relevant System Settings URL and optional target bundle ID. `reported_by_recorder` is `true` when the result came from a fresh recorder heartbeat. Without one, `doctor` probes from its own process, sets this field to `false`, and the human output notes that the recorder must be started to see its own permissions.
+Capability `state` values are `available` / `action_required` / `deferred`; `capture_screen` can also be `unavailable`. The nested macOS `detail` preserves the native permission name and `granted` / `denied` / `not_determined` status, and owns the relevant System Settings URL and optional target bundle ID. `reported_by_recorder` is `true` when the result came from a fresh recorder heartbeat. Without one, `doctor` probes from its own process, sets this field to `false`, and the human output notes that the recorder must be started to see its own permissions.
+
+`capture_screen` is the optional Screen Recording permission for the text-recognition fallback of content snapshots. Only the recorder reports it, while `capture.content_snapshot` is on; below macOS 14 its state is `unavailable`. It always has `required: false` and never affects `ok` or the exit code. A local probe would check the terminal's permission rather than the recorder's, so when the recorder has not reported it, including without a fresh recorder heartbeat, `doctor` omits it and the human output shows the fallback state as unknown. Human-readable output marks Screen Recording as optional and states the fallback state, for example `OCR fallback off: Screen Recording not granted` or `OCR fallback unavailable: requires macOS 14`.
 
 `store_key` reports where the store's encryption key is. `state` is `key_store` (the key was found; `detail` names the place, either the login Keychain or the `ZANEI_STORE_KEY_FILE` development override), `not_needed` (the store is missing, plaintext, or not recognized), `missing` (the store is encrypted but there is no key), `mismatch` (the key does not decrypt this store), `key_store_locked` or `key_store_denied` (`detail` carries the platform's advice, for example that the login Keychain is locked), or `unavailable`; `detail` is present only when there is more to report. Human-readable output adds a `Store key: ...` line after the permission table. `doctor` does not fail when the store is locked: it reports the key state and probes permissions from its own process instead.
 
@@ -212,7 +222,7 @@ build also produces a warning that rebuilding will reset granted permissions.
 Registers Zanei with launchd and starts background recording.
 If an agent is already registered, Zanei waits up to 10 seconds for launchd to finish unregistering it before registering the agent again.
 For background starts, Zanei first waits up to 10 seconds for the daemon to report that it is alive. After that, the permission check described below may take up to another 20 seconds.
-At recorder startup, required missing Accessibility and Input Monitoring permissions are requested once. Automation remains deferred until the first real Apple Event to Chrome.
+At recorder startup, required missing Accessibility and Input Monitoring permissions are requested once. While content snapshots are on, the optional Screen Recording permission is then requested once if it is not granted; it never affects the exit code (see the [permissions guide](/guides/permissions#screen-recording)). Automation remains deferred until the first real Apple Event to Chrome.
 
 ```bash
 zanei start              # start background recording
@@ -319,7 +329,7 @@ zanei status
 zanei status --json
 ```
 
-Human-readable output shows the current app/site scope next to enabled `TEXT CONTENT` and `CONTENT SNAPSHOT` lines. Disabled lines show their explicit activation commands, so both privacy-sensitive opt-ins are visible without requesting JSON. Examples are `TEXT CONTENT      on (apps: exclude 6, sites: exclude 0)` and `CONTENT SNAPSHOT   off (opt-in: zanei config set capture.content_snapshot true)`.
+Human-readable output shows the current app/site scope next to enabled `TEXT CONTENT` and `CONTENT SNAPSHOT` lines. Disabled lines show their explicit activation commands, so both privacy-sensitive opt-ins are visible without requesting JSON. Examples are `TEXT CONTENT      on (apps: exclude 6, sites: exclude 0)` and `CONTENT SNAPSHOT   off (opt-in: zanei config set capture.content_snapshot true)`. An enabled `CONTENT SNAPSHOT` line also shows the text-recognition fallback state, for example `CONTENT SNAPSHOT   on (apps: exclude 6, sites: exclude 0), ocr: off (Screen Recording not granted)`.
 
 ```json
 {
@@ -341,7 +351,7 @@ Human-readable output shows the current app/site scope next to enabled `TEXT CON
   "store_write_state": "healthy",
   "degraded": {},
   "store": { "path": "~/.local/state/zanei/store.sqlite", "size_bytes": 5242880, "retention_hours": 48, "oldest_event_ts": "2026-08-14T09:00:00.000Z", "encryption": "sqlcipher" },
-  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false },
+  "capture": { "sources": ["app", "window", "ui", "input", "browser"], "text_content": false, "content_snapshot": false, "ocr": null },
   "permissions_ok": true
 }
 ```
@@ -376,6 +386,7 @@ The JSON object always has the following fields. `integer` values are non-negati
 | `capture.sources` | `string[]` | Sources from the current configuration. Never null |
 | `capture.text_content` | boolean | Text-content opt-in from the current configuration. Never null |
 | `capture.content_snapshot` | boolean | Frontmost-window content-snapshot opt-in from the current configuration. Independent from `capture.sources`; never null |
+| `capture.ocr` | `"on"` \| `"off"` \| `"unavailable"` \| null | Text-recognition fallback state from a fresh heartbeat whose instance matches the current owner: `on` when Screen Recording is granted on macOS 14 or later, `off` when it is not granted, `unavailable` when the recorder reports `capture_screen` as unavailable (below macOS 14). Null when `capture.content_snapshot` is false or the recorder has not reported the state, including when no such heartbeat is available. Not part of `permissions_ok` or `degraded` |
 | `permissions_ok` | boolean | Available permission snapshot from a fresh heartbeat whose instance matches the current owner; otherwise, including when the snapshot is absent or the heartbeat is stale, future, or missing, a local probe. Never null |
 
 Human-readable output is a fixed set of lines rather than a table selected with `--format`:
@@ -395,7 +406,7 @@ Human-readable output is a fixed set of lines rather than a table selected with 
 | `STORE WRITES` | `store_write_state`, or `-` when null |
 | `STORE` | `store.path`, followed by ` (encrypted)` or ` (plaintext; the recorder encrypts it on its next start)` when `store.encryption` is not null |
 | `TEXT CONTENT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` or `off (opt-in: zanei config set capture.text_content true)` |
-| `CONTENT SNAPSHOT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N)` or `off (opt-in: zanei config set capture.content_snapshot true)` |
+| `CONTENT SNAPSHOT` | `on (apps: <exclude\|only> N, sites: <exclude\|only> N), ocr: <state>` or `off (opt-in: zanei config set capture.content_snapshot true)`. `<state>` is `on`, `off (Screen Recording not granted)`, `unavailable (macOS 14+)`, or `unknown` when `capture.ocr` is null |
 | `PERMISSIONS OK` | `true` or `false` |
 | `COLLECTOR FAILURES` | `none` for an empty map; `-` when the store cannot be read; otherwise followed by one indented `component: count` line per entry |
 | `DEGRADED` | `false` for an empty map; otherwise `true` followed by one indented `component: reason` line per entry |
@@ -619,6 +630,11 @@ Content snapshots record the text shown in the frontmost window, including messa
 documents written by other people and text you typed that is on screen. Password fields and
 Chrome Incognito windows are never captured; stored text is redacted and deleted after 48 hours.
 
+After the restart, the recorder asks once for the macOS Screen Recording permission. If you
+grant it, Zanei reads a window's text from its pixels when Accessibility exposes too little of
+it: the window image stays in memory and is discarded, and only the text and its layout are
+stored. Input fields that an app does not expose to Accessibility cannot be masked in that text.
+
 Current scope (change it first if this is not what you want):
   Apps:  every app except 6 excluded (Safari, Firefox, Brave, Edge, Vivaldi, Arc)
   Sites: every site
@@ -630,6 +646,8 @@ Enable content snapshots with this scope? [y/N]
 ```
 
 `N`, Enter, or EOF leaves the file unchanged. With non-TTY input, `--quiet` is required to write; without it Zanei prints the scope summary to stderr, exits with code 2, and does not save. After choosing the scope with `filter content-snapshot`, an agent can use `zanei config set capture.content_snapshot true --quiet`, must state what will be recorded, and then restart. Setting the value to `false` does not ask for confirmation.
+
+The CLI itself does not request Screen Recording or open System Settings. The recorder requests it at its next start, as described in the [permissions guide](/guides/permissions#screen-recording).
 
 Schema: see the [configuration reference](/reference/config).
 

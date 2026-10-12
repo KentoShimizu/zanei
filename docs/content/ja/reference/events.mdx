@@ -28,11 +28,11 @@ Zanei が記録するすべてのイベントは、ソースによらず OS 非�
 
 | フィールド | 説明 |
 | --- | --- |
-| `v` | この event type と payload を解釈するために必要な最小 envelope version。既存 type は `1`、保持中の旧 `content.snapshot` event は `2`、現在の `content.snapshot` event は `3` |
+| `v` | この event type と payload を解釈するために必要な最小 envelope version。既存 type は `1`。現在の `content.snapshot` event は `4`、ストアから読む保持中の旧 `content.snapshot` event は `2`。以前のリリースが出力した JSON の `3` も有効 |
 | `id` | ULID ベースのイベント ID。一意かつ時刻順ソート可能 |
 | `ts` | 実時刻タイムスタンプ（RFC3339、ミリ秒精度） |
 | `mono_ns` | 単調時計（ナノ秒）。実時刻が変わっても順序が保たれる |
-| `source` | 捕捉バックエンド。例：`macos.ax`・`macos.workspace`・`macos.eventtap`・`macos.applescript` |
+| `source` | 捕捉バックエンド。例：`macos.ax`・`macos.workspace`・`macos.eventtap`・`macos.applescript`・`macos.ocr`（文字認識で読んだ content snapshot） |
 | `type` | イベント型（[タクソノミー](#イベント型タクソノミー)参照） |
 | `app` | アプリ名・バンドル ID・PID。帰属不能な `clipboard.copy` は `name: "Unknown"`、`bundle_id: null`、`pid: null` |
 | `window` | ウィンドウタイトルと ID（該当時） |
@@ -51,8 +51,9 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 
 | 上限 | 対象 field | 根拠 |
 | --- | --- | --- |
-| 32 KiB（32,768 bytes） | 取得時の `content.snapshot.data.text` | 有用な可視 text を保ちながら Accessibility snapshot 1 件を制限。この上限で打ち切った snapshot は `data.cutoff: "bytes"` |
-| 64 KiB（65,536 bytes） | `element.value` と `content.snapshot` を含むすべての `data.text` | field 単位の redaction・serialize・batch memory コストを制限。snapshot は取得段階で 32 KiB に止まるため、この type には core の独立した安全弁としてだけ働く |
+| 32 KiB（32,768 bytes） | 取得時の `content.snapshot.data.text` | 有用な可視 text を保ちながら snapshot 1 件を制限。この上限で打ち切った snapshot は `data.cutoff: "bytes"` |
+| 64 KiB（65,536 bytes） | 取得時の `content.snapshot.data.lines`（serialize した JSON で計測） | OCR による snapshot 1 件の行配置を制限。行は読み順に追加し、この上限か 32 KiB の text 上限のどちらかに達した時点で止めるため、`text` と `lines` は同じ行で終わり、`data.cutoff: "bytes"` になる |
+| 64 KiB（65,536 bytes） | `element.value`、`content.snapshot` を含むすべての `data.text`、serialize した `content.snapshot.data.lines` | field 単位の redaction・serialize・batch memory コストを制限。snapshot は取得段階で上の上限に止まるため、この type には redaction marker による増加などに備えた core の安全弁としてだけ働く |
 | 4 KiB（4,096 bytes） | `window.title`、`element.title`、`window.title` の `data.prev_title`、`browser.navigate` の `data.url`・`data.tab_title` | URL/title は文脈 metadata であり、通常値を十分収めながら異常な OS・application payload を拒否するため |
 
 同じ上限を key event の coalesce 後と privacy redaction 後にも再検査します。文字列の連結や置換 marker により byte 数が増えるためです。URL が除去された browser event は website filter を評価できないため、filter を迂回させず event 全体を破棄します。
@@ -74,7 +75,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `input.scroll` | `macos.eventtap` | スクロール | アクセシビリティ + 入力監視 |
 | `browser.navigate` | `macos.applescript` | URL / タブの変化。ChromeとSafariに対応。Chrome incognitoは除外 | アクセシビリティ + オートメーション |
 | `clipboard.copy` / `clipboard.paste` | `macos.eventtap` | クリップボード操作。内容は opt-in | アクセシビリティ + 入力監視 |
-| `content.snapshot` | `macos.ax` | 前面ウィンドウの可視範囲に表示された Accessibility text。既定では記録せず、設定で有効化 | アクセシビリティ |
+| `content.snapshot` | `macos.ax`・`macos.ocr` | 前面ウィンドウの可視範囲に表示された text。Accessibility から読み、Accessibility から読める text が少なすぎる場合は端末上の文字認識で読む。既定では記録せず、設定で有効化 | アクセシビリティ（`macos.ocr` には画面収録も） |
 
 `--types` フィルタでは、`browser.*`・`ui.*`・`content.*` のように末尾ワイルドカードでファミリー全体を選べます。
 
@@ -98,7 +99,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `browser.navigate` | ✓ | — | `url`（size limit 適用後のみ null）、`tab_title`、`mode`（`"normal"` または `"unknown"`）、`transition`（`navigate`/`tab_switch`/null） |
 | `clipboard.copy` | ✓ / — | — | `origin`（`copy_shortcut`/`unknown`）、`content_kind`（`text`/`image`/`file`/`other`）、`size_bytes`、`text`。unknown origin は app/window 帰属と本文を持たない |
 | `clipboard.paste` | ✓ | — | `content_kind`、`size_bytes`、`text`、ペースト先の `field_kind` |
-| `content.snapshot` | ✓ | — | 現在の v3：`text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`cutoff`（打ち切り時は `time` / `nodes` / `bytes` / `stopped`、完了時は null）、`trigger`（`settle` / `refresh` / `focus_out`）。保持中の旧 v2 event は代わりに `complete` を持ち、打ち切り理由は識別できない。source は `macos.ax` |
+| `content.snapshot` | ✓ | — | 現在の v4：`text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`cutoff`（打ち切り時は `time` / `nodes` / `bytes` / `stopped`、完了時は null）、`trigger`（`settle` / `refresh` / `focus_out`）、`source` が `macos.ocr` のときだけ `lines`（下記参照）。以前のリリースが v3 として保存した snapshot は、source `macos.ax`・同一の payload の v4 として読み出す。保持中の旧 v2 event は代わりに `complete` を持ち、打ち切り理由は識別できず、source は常に `macos.ax` |
 
 `field_kind` はフォーカス中の入力フィールドの種別です：`text` / `search` / `url` / `email` / `number` / `other`、テキスト系要素にフォーカスがなければ null。`password` という値は存在しません。Accessibility が既知の非 secure 入力欄を確認できなければ、`input.key.text` とペースト本文は null です。
 
@@ -110,7 +111,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 
 入力欄の値を Accessibility に公開していても、その変化を通知しないアプリがあります。そうした入力欄では、Zanei はキー入力・Return・クリック・ウィンドウ切り替えの少し後に値を読み、操作のない間に定期的に読むことはありません。この方法でフォーカス中の入力欄を初めて見つけたときは、その入力欄の `ui.focus` も記録します。この読み取りはベストエフォートです。Zanei が読む前に入力して送信したテキストは失われることがあり（読み取り済みのテキストは保持されます）、Zanei がその入力欄を把握する前の入力は本文として記録されません。
 
-各イベントが持つのは差分だけなので、`ui.value` を並べても入力された文章は復元できず、`data.text` を連結すると本人が入力していない文面ができ上がることがあります。IME は確定時に値の末尾を書き換えるため、後の差分は前の差分の続きではなく、その一部を置き換えたものになります。これらのイベントは「何について書いていたか」の手掛かりとして読み、逐語の記録として扱わないでください。正確な文面が必要な場合は、同じウィンドウの直後の `content.snapshot` を探します。入力または送信された時点でアプリが可視範囲にその文面を描画するため、引用に適するのはそちらです。ただし利用できるのは `capture.content_snapshot` が有効で、そのアプリが snapshot のフィルタ範囲内にある場合に限られます。snapshot のトリガーが動く前に離脱した短い滞在では取得されず、取得できるのは可視範囲だけです。
+各イベントが持つのは差分だけなので、`ui.value` を並べても入力された文章は復元できず、`data.text` を連結すると本人が入力していない文面ができ上がることがあります。IME は確定時に値の末尾を書き換えるため、後の差分は前の差分の続きではなく、その一部を置き換えたものになります。これらのイベントは「何について書いていたか」の手掛かりとして読み、逐語の記録として扱わないでください。正確な文面が必要な場合は、同じウィンドウの直後の `content.snapshot` を探します。入力または送信された時点でアプリが可視範囲にその文面を描画するため、引用に適するのは `source: "macos.ax"` の snapshot です。`macos.ocr` の snapshot にも文面は含まれますが、認識の誤りを含むことがあります。ただし利用できるのは `capture.content_snapshot` が有効で、そのアプリが snapshot のフィルタ範囲内にある場合に限られます。snapshot のトリガーが動く前に離脱した短い滞在では取得されず、取得できるのは可視範囲だけです。
 
 認可する入力のない値変化（別のアプリ、別のフォーカス要素、最後の入力から 3 秒超、本文抑止中の Chrome ウィンドウ）はテキストとして記録しません。`data.text` は null となり、変化後の `value_len` だけを記録します。削除の場合も `text: null` です。音声入力自体は、記録済みの打鍵またはペーストのトリガーを伴わないため認可窓を開きません。ただし、同じアプリ・同じフォーカス要素世代への直前の打鍵またはペーストが開いた 3 秒の窓が有効な間に音声テキストが挿入されると、そのテキストが認可された差分に含まれ得ます。
 
@@ -127,6 +128,33 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `other` | Esc・F キー・メディアキー | null | null | しない |
 
 ショートカットは「内容」ではなく「操作」なので、`combo` は opt-in なしで記録されます。保存・コミット・タブ切替などタイムラインの主要な材料です。`input.key.text` には Secure Input が無効、Accessibility field が既知かつ非 secure、Chrome 使用時は window が本文許可済み、という条件も必要です。
+
+### `content.snapshot` の詳細
+
+現在のリリースが書き込む `content.snapshot` はすべて `v: 4` です。テキストの取得元は envelope の `source` で分かります。
+
+| `source` | テキストの取得元 | `data.lines` |
+| --- | --- | --- |
+| `macos.ax` | macOS Accessibility | なし |
+| `macos.ocr` | ウィンドウ画像に対する端末上の文字認識。Accessibility から読めるテキストが少なすぎる場合に使う（[プライバシーモデル](/ja/guides/privacy#content-snapshot-は-opt-in)） | あり |
+
+`text`・`chars`・`cutoff`・`trigger` の意味はどちらの source でも同じです。`macos.ocr` では次のようになります。
+
+- `text` は認識した行を `\n` で連結したもので、入力欄の除去と redaction を適用済みです。`cutoff` は null、またはサイズ上限で取得を止めた場合の `bytes` です。
+- 行の順序は、Accessibility がそのウィンドウについて報告する領域（サイドバー、メッセージ一覧、入力欄など）に従います。どの領域にも属さない行が先頭で、領域は左から右、同じ位置なら上から下の順に並びます。領域内では上から下、同じ高さなら左から右です。こうした領域がないウィンドウは、上から下、同じ高さなら左から右に読みます。
+- `lines` は `text` と同じ行を同じ順序で並べたものです。null になるのは core の size safety rule で除去された場合だけで、そのとき `truncated: true` になります。
+- 信頼度や、話者・役割のラベルはありません。背景色や横方向の位置などから、配置は利用側で解釈してください。
+- 認識したテキストは近似です。認識の誤りやアイコン由来の短いノイズを含むことがあるため、正確な文面として引用しないでください。
+
+`lines` の各要素は次のとおりです。
+
+| フィールド | 型 | 意味 |
+| --- | --- | --- |
+| `text` | string | その行の認識テキスト（redaction 適用後） |
+| `x`, `y` | number | 行の矩形の左上の位置。ウィンドウ左上を原点とし、ウィンドウの幅と高さに対する 0〜1 の比率で表し、小数点以下 4 桁に丸める |
+| `w`, `h` | number | 矩形の幅と高さ。ウィンドウの幅と高さに対する比率で、小数点以下 4 桁に丸める |
+| `bg` | string | 行の周囲で最も多い色。大文字 16 進の `#RRGGBB` |
+| `ink` | string \| null | 文字の色（`#RRGGBB`）。矩形内に `bg` と明確に異なる画素がない場合は null |
 
 ### クリップボードの帰属
 
@@ -168,13 +196,13 @@ opt-in なのは「内容」（打った・コピーした文字列）だけで�
 
 ## スキーマのバージョニング
 
-envelope version は出力全体ではなく event type と payload ごとに決まります。既存 13 type は `v: 1`、現在の `content.snapshot` event は `v: 3` が必要です。`v: 2` の旧 `content.snapshot` event も有効なまま保持し、`query`・`export`・MCP `query_events` は打ち切り理由を捏造せず、`complete` field を持つ v2 のまま欠落なく返します。`v: 2` だけを理解する consumer は `v: 3` event を受理する必要がありません。envelope・event taxonomy・context・version 別 payload は closed です。`content.snapshot` の `v: 1`、`cutoff` を持つ v2、`complete` を持つ v3、snapshot 以外の既存 type の v2 / v3、未知の field・event type は不正です。type の追加には新しい最小 `v` と対応する store migration が必要です。
+envelope version は出力全体ではなく event type と payload ごとに決まります。既存 13 type は `v: 1`、現在の `content.snapshot` event は `v: 4` が必要です。ストアは row ごとの version を持たず、保存された snapshot の形から読み方が決まります。`query`・`export`・MCP `query_events` は、保持中の v2 snapshot を打ち切り理由を捏造せず `complete` field を持つ `v: 2` のまま返し、以前のリリースが v3 として保存した snapshot は source `macos.ax`・同一の payload の `v: 4`（`lines` なし）として返します。store migration は伴いません。以前のリリースが書き出した NDJSON ファイルなど、JSON 上の `v: 3` event は引き続き有効です。古い `v` だけを理解する consumer は新しい `v` を受理する必要がありません。また、`v: 4` より前の Zanei リリースは、それ以降のリリースが書き込む `v: 4` の snapshot を解釈できません。envelope・event taxonomy・context・version 別 payload は closed です。`content.snapshot` の `v: 1`、`cutoff` を持つ v2、`complete` を持つ v3 / v4、`lines` を持つ v2 / v3、`lines` のない v4 の `macos.ocr` event、`lines` を持つそれ以外の source の v4 event、snapshot 以外の既存 type の v2 / v3 / v4、未知の field・event type は不正です。type の追加には新しい最小 `v` と対応する store migration が必要です。
 
 store reader は未知の event type を含む行を skip し、read 全体は失敗させません。CLI の `query` と `export` は JSON array の形を維持し、skip 件数を stderr に warning として出します。`--quiet` で抑止できます。MCP `query_events`、`timeline --format json`、structured MCP `get_timeline` は既存の result object に `skipped_unknown_types` を返します。
 
 ## Content snapshot の読み取り
 
-`query` と MCP `query_events` は type filter 未指定なら `content.*` を返しません。snapshot 本文を読むときは `content.snapshot` または `content.*` を明示し、狭い時間範囲と小さい limit を使ってください。他の event family と併記できます。`export` は backup surface なので、全形式で既定ですべての type を含み、`--types` で絞ります。
+`query` と MCP `query_events` は type filter 未指定なら `content.*` を返しません。snapshot 本文を読むときは `content.snapshot` または `content.*` を明示し、狭い時間範囲と小さい limit を使ってください。結果には両方の source の snapshot が含まれ、`source` で区別できます。他の event family と併記できます。`export` は backup surface なので、全形式で既定ですべての type を含み、`--types` で絞ります。
 
 timeline は snapshot 本文を inline しません。各 session は snapshot 件数だけを示します。Markdown は activity 行の後に `Content snapshots: N` を追加し、0 件なら省略します。JSON は 0 を含めて常に `content_snapshots` を出します。
 

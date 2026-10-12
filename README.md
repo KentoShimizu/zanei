@@ -25,6 +25,7 @@ only; Windows and Linux are planned.
   `start` asks once while the setting is unset, and the default is no.
 - Password fields are dropped at capture time. Chrome Incognito produces no URL events
   and no text bodies (window titles can remain).
+- Zanei never stores screenshots or video. When content snapshots are on, Zanei asks once for the macOS Screen Recording permission. If you grant it, Zanei reads a window's text from its pixels whenever Accessibility exposes too little of it: it captures that one window in memory, recognizes the text on this Mac with Apple Vision, keeps only the text and its on-screen layout (position and colors), and discards the image immediately. Images are never written to disk or sent anywhere. Without Screen Recording, this fallback is off.
 - Events are deleted after 48 hours by default.
 - Encrypted at rest: the store is a SQLCipher database; the key lives in your login Keychain.
 

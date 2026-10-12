@@ -34,7 +34,7 @@ zanei config set capture.content_snapshot true
 [capture]
 sources = ["app", "window", "ui", "input", "browser"]
 text_content = false            # 内容の捕捉は明示的な opt-in
-content_snapshot = false        # 前面ウィンドウの Accessibility text を記録するか
+content_snapshot = false        # 前面ウィンドウに表示されたテキストを記録するか
 
 [filter]                        # capture-time フィルタ = プライバシー境界（ストア書込前に適用）
 exclude_apps = ["1Password", "Keychain Access"]   # 不許可リスト（bundle_id 推奨）。既定除外を同梱
@@ -86,7 +86,7 @@ egress に相当する設定はありません。外部送信という機能自�
 | --- | --- | --- |
 | `sources` | `["app", "window", "ui", "input", "browser"]` | 捕捉するイベントファミリー。`browser` がない場合、browserのAutomationは、対象のcontent snapshot、または `text_content` と `ui` / `input` を有効にした場合に必要です。`window` 単独では不要です（[権限](/ja/guides/permissions)参照） |
 | `text_content` | `false` | 入力・フィールド内容（`ui.value`・`input.key`・クリップボードの中身）の捕捉。既定オフ。[プライバシーモデル](/ja/guides/privacy)参照 |
-| `content_snapshot` | `false` | 前面ウィンドウに表示された Accessibility text を `content.snapshot` として捕捉。`sources` と `text_content` から独立しており、`window` が `sources` に無くてもこの opt-in は Accessibility を必要とし snapshot を記録可能。再起動が必要 |
+| `content_snapshot` | `false` | 前面ウィンドウに表示されたテキストを `content.snapshot` として捕捉。Accessibility から読み、画面収録が許可されていれば文字認識（OCR）のフォールバックも使う（[プライバシーモデル](/ja/guides/privacy#content-snapshot-は-opt-in)参照）。`sources` と `text_content` から独立しており、`window` が `sources` に無くてもこの opt-in は Accessibility を必要とし snapshot を記録可能。再起動が必要 |
 
 ## `[filter]`
 
