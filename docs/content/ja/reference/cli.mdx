@@ -220,7 +220,7 @@ capability の `state` は `available` / `action_required` / `deferred` で、`c
 
 launchd に登録し、バックグラウンド記録を開始します。
 既に agent が登録されている場合は、launchd による登録解除の完了を最大 10 秒待ってから再登録します。
-バックグラウンド起動では、まずデーモンが生存報告するまで最大 10 秒待ちます。その後、下記の権限確認にさらに最大 20 秒かかる場合があります。
+バックグラウンド起動では、まずデーモンの生存報告を待ちます。デーモンは 10 秒以内に store を確保する必要があります。store を開いている間（upgrade 後の初回起動では大きな store の移行を含む場合があります）は、登録から最大 3 分まで待ち続け、10 秒を過ぎると `--quiet` でなければ stderr に `Waiting for the recorder to finish opening the store; the first start after an upgrade can take a while...` を 1 回だけ表示します。デーモンが store を確保しない、3 分経っても store を開き終えない、または生存報告の前に終了した場合、`start` は **終了コード 1** で失敗し、デーモンは launchd に登録されたまま残ります。生存報告の後、下記の権限確認にさらに最大 20 秒かかる場合があります。
 recorder は起動時に、必要かつ未付与のアクセシビリティと入力監視を 1 回要求します。content snapshot が有効な場合は、続けて任意の画面収録権限を、未許可なら 1 回要求します。これは終了コードに影響しません（[権限ガイド](/ja/guides/permissions#画面収録)）。オートメーションは Chrome への初回の実 Apple Event まで要求しません。
 
 ```bash

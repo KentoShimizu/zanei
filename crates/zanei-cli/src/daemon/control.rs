@@ -2,7 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use super::{DaemonError, StoreOwner, StoreOwnership};
@@ -22,7 +22,10 @@ use plist::{
 };
 pub use wait::wait_for_launch_agent_removal;
 #[cfg(test)]
-use wait::{daemon_is_alive_with, owner_has_fresh_heartbeat, start_launch_agent_with};
+use wait::{
+    DaemonReadiness, daemon_readiness_with, owner_has_fresh_heartbeat, start_launch_agent_with,
+    wait_for_daemon_start_with,
+};
 
 const LABEL: &str = "dev.zanei.agent";
 const PLIST_FILE_NAME: &str = "dev.zanei.agent.plist";
@@ -36,6 +39,7 @@ pub fn start_launch_agent(
     executable: &Path,
     config_path: &Path,
     store_path: &Path,
+    notice: impl FnMut(&str),
 ) -> Result<bool, DaemonError> {
     let (_start_lock, plist_path) = acquire_start_lock()?;
     start_launch_agent_after_preparation_with(
@@ -51,12 +55,20 @@ pub fn start_launch_agent(
         thread::sleep,
         |prepared| prepared.install_and_bootstrap(),
         |readiness_store_path| {
-            wait::daemon_is_alive_with(readiness_store_path, || {
-                crate::store_access::load_store_key(
-                    crate::store_access::KeyAccess::Existing,
-                    crate::store_access::KeyPrompt::Suppressed,
-                )
-            })
+            wait::wait_for_daemon_start_with(
+                DAEMON_CONTROL_TIMEOUT,
+                || {
+                    wait::daemon_readiness_with(readiness_store_path, || {
+                        crate::store_access::load_store_key(
+                            crate::store_access::KeyAccess::Existing,
+                            crate::store_access::KeyPrompt::Suppressed,
+                        )
+                    })
+                },
+                Instant::now,
+                thread::sleep,
+                notice,
+            )
         },
     )
 }
@@ -96,7 +108,7 @@ fn start_launch_agent_after_preparation_with<T>(
     mut is_registered: impl FnMut() -> Result<bool, DaemonError>,
     sleep: impl FnMut(Duration),
     mut install_and_bootstrap: impl FnMut(&mut T) -> Result<(), DaemonError>,
-    mut is_daemon_alive: impl FnMut(&Path) -> Result<bool, DaemonError>,
+    wait_for_daemon_start: impl FnOnce(&Path) -> Result<(), DaemonError>,
 ) -> Result<bool, DaemonError> {
     let (mut prepared, readiness_store_path) = prepare()?;
     let registered = is_registered()?;
@@ -107,7 +119,7 @@ fn start_launch_agent_after_preparation_with<T>(
         is_registered,
         sleep,
         || install_and_bootstrap(&mut prepared),
-        || is_daemon_alive(&readiness_store_path),
+        || wait_for_daemon_start(&readiness_store_path),
     )
 }
 
@@ -120,7 +132,7 @@ mod tests {
         os::unix::fs::{PermissionsExt, symlink},
         path::Path,
         process::Command,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use tempfile::TempDir;
@@ -138,7 +150,7 @@ mod tests {
 
         assert!(
             matches!(
-                super::daemon_is_alive_with(&store, locked),
+                super::daemon_readiness_with(&store, locked),
                 Err(crate::daemon::DaemonError::Store(StoreError::Locked(_)))
             ),
             "missing store: the recorder is about to create the key"
@@ -146,21 +158,42 @@ mod tests {
         StoreWriter::open(&store).expect("plaintext store");
         assert!(
             matches!(
-                super::daemon_is_alive_with(&store, locked),
+                super::daemon_readiness_with(&store, locked),
                 Err(crate::daemon::DaemonError::Store(StoreError::Locked(_)))
             ),
             "plaintext store: the recorder is about to create the key"
         );
-        assert!(
-            !super::daemon_is_alive_with(&store, || Ok(None)).expect("no key yet is not a failure"),
+        assert_eq!(
+            super::daemon_readiness_with(&store, || Ok(None)).expect("no key yet is not a failure"),
+            super::DaemonReadiness::NotStarted,
             "nothing owns the store yet"
         );
     }
 
+    #[test]
+    fn a_recorder_holding_an_unreadable_store_is_starting_until_it_releases_it() {
+        let directory = TempDir::new().expect("store directory");
+        let store = directory.path().join("store.sqlite");
+        let owner = StoreOwner::new(DaemonMode::Launchd, "2026-10-12T10:00:00.000Z".to_owned());
+        let ownership = StoreOwnership::acquire(&store, owner.clone()).expect("own the store");
+        let readiness = || super::daemon_readiness_with(&store, || Ok(None)).expect("readiness");
+
+        // The store does not exist yet, as while the recorder creates it.
+        assert_eq!(
+            readiness(),
+            DaemonReadiness::Starting {
+                instance_id: owner.instance_id
+            }
+        );
+        drop(ownership);
+        assert_eq!(readiness(), DaemonReadiness::NotStarted);
+    }
+
     use super::{
-        DaemonError, StoreOwner, build_launch_agent_plist, launch_agent_paths,
-        owner_has_fresh_heartbeat, prepare_launch_agent_logs, render_launch_agent_plist,
-        start_launch_agent_after_preparation_with, start_launch_agent_with,
+        DaemonError, DaemonReadiness, StoreOwner, StoreOwnership, build_launch_agent_plist,
+        launch_agent_paths, owner_has_fresh_heartbeat, prepare_launch_agent_logs,
+        render_launch_agent_plist, start_launch_agent_after_preparation_with,
+        start_launch_agent_with, wait_for_daemon_start_with,
     };
 
     fn plist_string_value<'a>(plist: &'a str, key: &str) -> &'a str {
@@ -390,7 +423,7 @@ mod tests {
             |store_path| {
                 assert_eq!(store_path, Path::new("/canonical/store.sqlite"));
                 events.borrow_mut().push("alive");
-                Ok(true)
+                Ok(())
             },
         )
         .expect("restart launch agent");
@@ -447,32 +480,25 @@ mod tests {
 
     #[test]
     fn daemon_start_succeeds_after_repeated_not_ready_probes() {
-        let events = RefCell::new(Vec::new());
-        let readiness = RefCell::new(VecDeque::from([false, false, true]));
+        let readiness = RefCell::new(VecDeque::from([
+            DaemonReadiness::NotStarted,
+            DaemonReadiness::NotStarted,
+            DaemonReadiness::Alive {
+                instance_id: "1@start".to_owned(),
+            },
+        ]));
         let sleeps = RefCell::new(Vec::new());
 
-        let restarted = start_launch_agent_with(
-            false,
+        wait_for_daemon_start_with(
             Duration::from_secs(1),
-            || panic!("unregistered launch agent must not be booted out"),
-            || panic!("unregistered launch agent must not be polled"),
+            || Ok(readiness.borrow_mut().pop_front().expect("readiness state")),
+            Instant::now,
             |duration| sleeps.borrow_mut().push(duration),
-            || {
-                events.borrow_mut().push("bootstrap");
-                Ok(())
-            },
-            || {
-                events.borrow_mut().push("probe");
-                Ok(readiness.borrow_mut().pop_front().expect("readiness state"))
-            },
+            |_| panic!("a prompt start needs no notice"),
         )
-        .expect("start unregistered launch agent");
+        .expect("daemon reports alive");
 
-        assert!(!restarted);
-        assert_eq!(
-            events.into_inner(),
-            ["bootstrap", "probe", "probe", "probe"]
-        );
+        assert!(readiness.borrow().is_empty());
         assert_eq!(
             sleeps.into_inner(),
             [Duration::from_millis(100), Duration::from_millis(100)]
@@ -492,12 +518,20 @@ mod tests {
                 Ok(())
             },
             || panic!("unregistered launch agent must not be polled"),
-            |_| panic!("timeout must not sleep after the deadline"),
+            |_| panic!("unregistered launch agent must not wait for removal"),
             || {
                 bootstrap_called.set(true);
                 Ok(())
             },
-            || Ok(false),
+            || {
+                wait_for_daemon_start_with(
+                    Duration::ZERO,
+                    || Ok(DaemonReadiness::NotStarted),
+                    Instant::now,
+                    |_| panic!("timeout must not sleep after the deadline"),
+                    |_| panic!("a failed start needs no notice"),
+                )
+            },
         )
         .expect_err("daemon readiness must time out");
 
@@ -506,10 +540,7 @@ mod tests {
         assert!(message.contains("last exit code"));
         assert!(message.contains("launchctl print gui/$(id -u)/dev.zanei.agent"));
         assert!(message.contains("`zanei start --foreground`"));
-        assert!(matches!(
-            &error,
-            DaemonError::DaemonDidNotStart { timeout_seconds: 0 }
-        ));
+        assert!(matches!(&error, DaemonError::DaemonDidNotStart));
         assert_eq!(crate::error::CliError::from(error).exit_code(), 1);
         assert!(bootstrap_called.get());
         assert!(!bootout_called.get());
@@ -517,7 +548,7 @@ mod tests {
 
     #[test]
     fn locked_store_aborts_the_startup_wait_instead_of_timing_out() {
-        let mut sleeps = 0;
+        let sleeps = Cell::new(0);
         let mut boot_outs = 0;
         let error = super::start_launch_agent_with(
             false,
@@ -527,12 +558,20 @@ mod tests {
                 Ok(())
             },
             || Ok(false),
-            |_| sleeps += 1,
+            |_| {},
             || Ok(()),
             || {
-                Err(crate::daemon::DaemonError::Store(StoreError::Locked(
-                    LockedReason::KeyMissing,
-                )))
+                wait_for_daemon_start_with(
+                    Duration::from_secs(10),
+                    || {
+                        Err(crate::daemon::DaemonError::Store(StoreError::Locked(
+                            LockedReason::KeyMissing,
+                        )))
+                    },
+                    Instant::now,
+                    |_| sleeps.set(sleeps.get() + 1),
+                    |_| {},
+                )
             },
         )
         .expect_err("a locked store is not a not-ready observation");
@@ -542,7 +581,8 @@ mod tests {
             crate::daemon::DaemonError::Store(StoreError::Locked(LockedReason::KeyMissing))
         ));
         assert_eq!(
-            sleeps, 0,
+            sleeps.get(),
+            0,
             "the wait must stop at the first locked observation"
         );
         assert_eq!(

@@ -94,9 +94,9 @@ pub enum DaemonError {
     )]
     LaunchAgentStillLoaded { timeout_seconds: u64 },
     #[error(
-        "Zanei daemon did not report that it was alive within {timeout_seconds} seconds; it remains registered with launchd. Run `zanei status` to inspect its state, check the last exit code with `launchctl print gui/$(id -u)/dev.zanei.agent`, or run `zanei start --foreground` to see the error directly"
+        "Zanei daemon did not report that it was alive; it remains registered with launchd. Run `zanei status` to inspect its state, check the last exit code with `launchctl print gui/$(id -u)/dev.zanei.agent`, or run `zanei start --foreground` to see the error directly"
     )]
-    DaemonDidNotStart { timeout_seconds: u64 },
+    DaemonDidNotStart,
     #[error(transparent)]
     MainRunLoop(#[from] zanei_macos::main_run_loop::MainRunLoopError),
     #[error(transparent)]

@@ -68,8 +68,12 @@ pub fn start(
         quiet,
         config.capture.text_content,
         || {
-            crate::daemon::start_launch_agent(&executable, &paths.config, &paths.store)
-                .map_err(CliError::from)
+            crate::daemon::start_launch_agent(&executable, &paths.config, &paths.store, |message| {
+                if !quiet {
+                    eprintln!("{message}");
+                }
+            })
+            .map_err(CliError::from)
         },
         || {
             start_permissions::after_bootstrap(
