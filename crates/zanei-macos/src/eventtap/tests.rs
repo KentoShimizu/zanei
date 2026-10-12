@@ -283,6 +283,7 @@ fn click_only_mode_skips_input_source_and_secure_input_state() {
         Some(click_sender),
         None,
         None,
+        None,
         capture_policy(),
         ChromeObserver::new(),
         FocusContext::new(),
@@ -525,6 +526,7 @@ fn windowless_click_does_not_increment_drop_counter() {
 
     assert!(handle_event(
         NativeEvent::MouseDown {
+            target_pid: Some(501),
             x: 1.0,
             y: 2.0,
             button: 0,
@@ -554,6 +556,7 @@ fn contextless_click_is_filtered_without_incrementing_drop_counter() {
 
     assert!(handle_event(
         NativeEvent::MouseDown {
+            target_pid: Some(501),
             x: 1.0,
             y: 2.0,
             button: 0,

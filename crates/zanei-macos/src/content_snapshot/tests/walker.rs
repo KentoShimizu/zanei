@@ -210,7 +210,9 @@ impl SnapshotNode for FakeNode {
             .children_count_reads
             .fetch_add(1, Ordering::Relaxed);
         if self.fail_children_count {
-            return Err(SnapshotReadError::Contract("AXChildren count failed"));
+            return Err(SnapshotReadError::Ax(
+                crate::content_snapshot::SnapshotAxError::illegal_argument_for_test(7),
+            ));
         }
         Ok(self.children.len() + self.vanished_children)
     }
@@ -666,14 +668,16 @@ fn failed_child_count_of_a_blank_text_area_is_degraded_not_blank() {
 fn masks_are_complete_only_when_every_input_field_could_be_placed() {
     // Catches recognition masking from a partial walk: a cut-off walk, an unreadable role or
     // child list, a child list shorter than its count, or a frameless input can each hide a
-    // field whose text would then be stored.
-    let masks_complete = |root: FakeNode, budget: WalkBudget| {
+    // field whose text would then be stored. Also catches the trace losing which of these
+    // happened and the AX error codes behind an unreadable role or child list.
+    let mask_gaps = |root: FakeNode, budget: WalkBudget| {
         let clock = FakeClock(Arc::clone(&root.elapsed_micros));
         let window = frame(0.0, 0.0, 100.0, 100.0);
-        walk_snapshot_analyzed(root, window, budget, &clock, || false)
+        let gaps = walk_snapshot_analyzed(root, window, budget, &clock, || false)
             .expect("fake walk")
             .1
-            .masks_complete
+            .mask_gaps;
+        (!gaps.is_empty()).then(|| gaps.to_string())
     };
     let window_with = |child: FakeNode| {
         let mut root = FakeNode::new("AXGroup");
@@ -681,26 +685,60 @@ fn masks_are_complete_only_when_every_input_field_could_be_placed() {
         root
     };
     let field = FakeNode::new("AXTextField");
-    assert!(masks_complete(
-        window_with(field.clone()),
-        generous_budget()
-    ));
+    assert_eq!(
+        mask_gaps(window_with(field.clone()), generous_budget()),
+        None
+    );
 
     let one_node = WalkBudget {
         nodes: 1,
         ..generous_budget()
     };
-    assert!(!masks_complete(window_with(field.clone()), one_node));
     let mut unreadable = FakeNode::new("AXGroup");
     unreadable.fail_safe_read = true;
-    assert!(!masks_complete(window_with(unreadable), generous_budget()));
     let mut uncounted = window_with(field.clone());
     uncounted.fail_children_count = true;
-    assert!(!masks_complete(uncounted, generous_budget()));
     let mut shrunk = window_with(field.clone());
     shrunk.vanished_children = 1;
-    assert!(!masks_complete(shrunk, generous_budget()));
-    let mut frameless = field;
+    let mut frameless = field.clone();
     frameless.attributes.frame = None;
-    assert!(!masks_complete(window_with(frameless), generous_budget()));
+    let mut unlisted = FakeNode::new("AXGroup");
+    unlisted.illegal_leaf_range = true;
+    unlisted.vanished_children = 1;
+    let mut both = window_with(unreadable.clone());
+    both.children.push(unlisted);
+    for (root, budget, expected) in [
+        (
+            window_with(field),
+            one_node,
+            "mask_gaps=cutoff:nodes ax_errors=none",
+        ),
+        (
+            window_with(unreadable),
+            generous_budget(),
+            "mask_gaps=role_unreadable:1 ax_errors=contract",
+        ),
+        (
+            uncounted,
+            generous_budget(),
+            "mask_gaps=children_unreadable:1 ax_errors=-25201",
+        ),
+        (
+            shrunk,
+            generous_budget(),
+            "mask_gaps=children_short:1 ax_errors=none",
+        ),
+        (
+            window_with(frameless),
+            generous_budget(),
+            "mask_gaps=frameless_input:1 ax_errors=none",
+        ),
+        (
+            both,
+            generous_budget(),
+            "mask_gaps=role_unreadable:1,children_unreadable:1 ax_errors=contract,-25201",
+        ),
+    ] {
+        assert_eq!(mask_gaps(root, budget).as_deref(), Some(expected));
+    }
 }

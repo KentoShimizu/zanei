@@ -52,7 +52,7 @@ In 0.3.0, the default `[filter.text_content]` scope excludes Safari, Firefox, Br
 
 ## Content snapshots are opt-in
 
-`capture.content_snapshot = true` records the text shown in the visible part of the frontmost window. A snapshot is considered after the window settles, periodically while you remain active in it, and when you leave it. Each event contains at most 32 KiB of UTF-8 text. `data.cutoff` reports `time`, `nodes`, `bytes`, or `stopped` when collection ends early, and is null when it completes.
+`capture.content_snapshot = true` records the text shown in the visible part of the frontmost window. A snapshot is considered after the window settles, after you click, scroll, or type in it and then pause, periodically while you remain active in it, and when you leave it. Clicks count only while `capture.sources` includes `ui`, and scrolling and typing only while it includes `input`. Each event contains at most 32 KiB of UTF-8 text. `data.cutoff` reports `time`, `nodes`, `bytes`, or `stopped` when collection ends early, and is null when it completes.
 
 Zanei reads this text through macOS Accessibility. Some apps draw their own text and expose little of it to Accessibility. For those windows, Zanei can use text recognition (OCR) instead, as described under [Defaults](#defaults). The fallback runs only when all of these hold:
 

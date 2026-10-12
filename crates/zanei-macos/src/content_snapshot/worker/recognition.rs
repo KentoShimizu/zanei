@@ -55,8 +55,9 @@ pub(super) fn start_recognition(
         return None;
     }
     // Recognized lines inside an input field the walk missed could not be masked.
-    if !analysis.masks_complete {
-        trace_recognition(&walked, "masks_incomplete", None);
+    if !analysis.mask_gaps.is_empty() {
+        let outcome = format!("masks_incomplete {}", analysis.mask_gaps);
+        trace_recognition(&walked, &outcome, None);
         send_ax(walked, state, delivery);
         return None;
     }

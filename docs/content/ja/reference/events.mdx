@@ -99,7 +99,7 @@ Zanei は normalize 時に UTF-8 byte 数で上限を判定します。上限ち
 | `browser.navigate` | ✓ | — | `url`（size limit 適用後のみ null）、`tab_title`、`mode`（`"normal"` または `"unknown"`）、`transition`（`navigate`/`tab_switch`/null） |
 | `clipboard.copy` | ✓ / — | — | `origin`（`copy_shortcut`/`unknown`）、`content_kind`（`text`/`image`/`file`/`other`）、`size_bytes`、`text`。unknown origin は app/window 帰属と本文を持たない |
 | `clipboard.paste` | ✓ | — | `content_kind`、`size_bytes`、`text`、ペースト先の `field_kind` |
-| `content.snapshot` | ✓ | — | 現在の v4：`text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`cutoff`（打ち切り時は `time` / `nodes` / `bytes` / `stopped`、完了時は null）、`trigger`（`settle` / `refresh` / `focus_out`）、`source` が `macos.ocr` のときだけ `lines`（下記参照）。以前のリリースが v3 として保存した snapshot は、source `macos.ax`・同一の payload の v4 として読み出す。保持中の旧 v2 event は代わりに `complete` を持ち、打ち切り理由は識別できず、source は常に `macos.ax` |
+| `content.snapshot` | ✓ | — | 現在の v4：`text`（core size rule 適用後は string または null）、`chars`（collector 上限適用後・redaction 前の文字数）、`cutoff`（打ち切り時は `time` / `nodes` / `bytes` / `stopped`、完了時は null）、`trigger`（`settle` / `refresh` / `focus_out`。`settle` はウィンドウ内のクリック・スクロール・キー入力が途切れた後にも使われます）、`source` が `macos.ocr` のときだけ `lines`（下記参照）。以前のリリースが v3 として保存した snapshot は、source `macos.ax`・同一の payload の v4 として読み出す。保持中の旧 v2 event は代わりに `complete` を持ち、打ち切り理由は識別できず、source は常に `macos.ax` |
 
 `field_kind` はフォーカス中の入力フィールドの種別です：`text` / `search` / `url` / `email` / `number` / `other`、テキスト系要素にフォーカスがなければ null。`password` という値は存在しません。Accessibility が既知の非 secure 入力欄を確認できなければ、`input.key.text` とペースト本文は null です。
 

@@ -9,7 +9,7 @@ use crate::{
         SnapshotAttribute, SnapshotAttributeValue, SnapshotAxApplication, SnapshotAxElement,
         SnapshotAxError, SnapshotWalkOutput,
         budget::WalkBudget,
-        coverage::WalkAnalyzer,
+        coverage::{MaskGap, WalkAnalyzer},
         walker::{InstantWalkClock, SnapshotNode, WalkClock, walk_snapshot_analyzed},
     },
     ffi::window_list::window_id_for_frame,
@@ -245,7 +245,7 @@ fn initial_time_cutoff(clock: &impl WalkClock, ax_calls: usize) -> Option<Scanne
             frameless_nodes: 0,
         };
         let mut analyzer = WalkAnalyzer::new();
-        analyzer.masks_incomplete();
+        analyzer.mask_gap(MaskGap::Cutoff(ContentSnapshotCutoff::Time));
         (output, analyzer.finish())
     })
 }

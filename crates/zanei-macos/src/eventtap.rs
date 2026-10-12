@@ -3,6 +3,7 @@ mod clipboard;
 pub(crate) mod logic;
 mod mode;
 mod output;
+mod snapshot_input;
 mod state;
 mod support;
 mod worker;
@@ -23,7 +24,8 @@ pub use mode::EventTapMode;
 pub use crate::input_source::InputSourceObserver;
 
 use crate::{
-    CapturePolicy, ax::ClickObservation, chrome::ChromeObserver, focus_context::FocusContext,
+    CapturePolicy, ax::ClickObservation, chrome::ChromeObserver,
+    content_snapshot::SnapshotTriggerPublisher, focus_context::FocusContext,
     input_source::ImeState, secure_input::SecureInputProbe,
     text_capture::InputAuthorizationPublisher,
 };
@@ -34,6 +36,7 @@ pub struct EventTapCollector {
     mode: EventTapMode,
     click_sender: Option<SyncSender<ClickObservation>>,
     input_authorizations: Option<InputAuthorizationPublisher>,
+    snapshot_triggers: Option<SnapshotTriggerPublisher>,
     secure_input_probe: Option<SecureInputProbe>,
     capture_policy: CapturePolicy,
     chrome_observer: ChromeObserver,
@@ -49,11 +52,15 @@ pub struct EventTapCollector {
 }
 
 impl EventTapCollector {
+    /// Input routed to the frontmost window re-arms its content snapshot through
+    /// `snapshot_triggers`.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: EventTapMode,
         click_sender: Option<SyncSender<ClickObservation>>,
         input_authorizations: Option<InputAuthorizationPublisher>,
+        snapshot_triggers: Option<SnapshotTriggerPublisher>,
         secure_input_probe: Option<SecureInputProbe>,
         capture_policy: CapturePolicy,
         chrome_observer: ChromeObserver,
@@ -68,6 +75,7 @@ impl EventTapCollector {
             mode,
             click_sender,
             input_authorizations,
+            snapshot_triggers,
             secure_input_probe,
             capture_policy,
             chrome_observer,
@@ -151,6 +159,7 @@ impl Collector for EventTapCollector {
         let current_degraded = Arc::clone(&self.current_degraded);
         let secure_input_enabled = Arc::clone(&self.secure_input_enabled);
         let input_authorizations = self.input_authorizations.clone();
+        let snapshot_triggers = self.snapshot_triggers.clone();
         let secure_input_probe = self.secure_input_probe.clone();
         let ime_state = self.ime_state.clone();
         let capture_policy = self.capture_policy.clone();
@@ -171,6 +180,7 @@ impl Collector for EventTapCollector {
                     current_degraded,
                     secure_input_enabled,
                     input_authorizations,
+                    snapshot_triggers,
                     secure_input_probe,
                     ime_state,
                     capture_policy,

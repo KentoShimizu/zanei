@@ -20,6 +20,7 @@ use super::{
         EmitResult, emit, emit_clipboard, emit_or_quarantine, emit_released, raw_event,
         resolve_input_authorization, try_send_counted,
     },
+    snapshot_input::SnapshotInputTriggers,
     state::{Driver, EventTapApi, MonotonicTime, TapState, WATCHDOG_INTERVAL},
     support::{
         click_button, disable_reason, elapsed, record_degraded_entries, refresh_secure_input,
@@ -29,6 +30,7 @@ use crate::{
     ax::ClickObservation,
     capture_policy::CapturePolicy,
     chrome::ChromeObserver,
+    content_snapshot::SnapshotTriggerPublisher,
     ffi::eventtap::{
         self as native, EventTap, EventTapConfig, NativeApp, NativeContext, NativeEvent,
         Pasteboard, WakeObserver,
@@ -142,6 +144,7 @@ pub(super) fn run(
     current_degraded: Arc<AtomicBool>,
     secure_input_enabled: Arc<AtomicBool>,
     input_authorizations: Option<InputAuthorizationPublisher>,
+    snapshot_triggers: Option<SnapshotTriggerPublisher>,
     secure_input_probe: Option<SecureInputProbe>,
     ime_state: ImeState,
     capture_policy: CapturePolicy,
@@ -182,6 +185,7 @@ pub(super) fn run(
         .captures_input()
         .then(|| ClipboardTracker::new(pasteboard.change_count()));
     let mut quarantine = TextQuarantine::new(chrome_observer);
+    let mut snapshot_inputs = snapshot_triggers.map(SnapshotInputTriggers::new);
     let mut last_watchdog = Instant::now();
     let _ = ready_sender.try_send(());
 
@@ -246,6 +250,9 @@ pub(super) fn run(
         let context = needs_context
             .then(|| focus_context.current().map(native_context))
             .flatten();
+        if let Some(snapshot_inputs) = snapshot_inputs.as_mut() {
+            snapshot_inputs.observe(&events, context.as_ref(), Instant::now());
+        }
 
         for event in events {
             if !handle_native_event(
@@ -520,6 +527,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             vertical,
             horizontal,
             observed_at,
+            ..
         } => {
             let (Some(context), Some(data)) = (context, scroll_data(vertical, horizontal)) else {
                 return true;
@@ -543,6 +551,7 @@ pub(super) fn handle_native_event<A: EventTapApi>(
             button,
             click_count,
             observed_at,
+            ..
         } => {
             let (Some(sender), Some(context)) = (click_sender, context) else {
                 return true;

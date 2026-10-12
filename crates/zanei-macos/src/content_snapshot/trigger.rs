@@ -11,6 +11,8 @@ use std::{
 
 use crate::{ax::NativeWindow, focus_context::FocusTransition, workspace::ApplicationInfo};
 
+use super::state::SnapshotWindowKey;
+
 const SNAPSHOT_TRIGGER_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +44,11 @@ pub(crate) enum SnapshotTriggerMessage {
     Trigger(SnapshotTrigger),
     FocusTransition {
         transition: FocusTransition,
+        observed_at: Instant,
+    },
+    /// Click, scroll, or key-down input attributed to the frontmost window.
+    Input {
+        window: SnapshotWindowKey,
         observed_at: Instant,
     },
 }
@@ -86,6 +93,13 @@ impl SnapshotTriggerPublisher {
         })
     }
 
+    pub(crate) fn publish_input(&self, window: SnapshotWindowKey, observed_at: Instant) -> bool {
+        self.publish_message(SnapshotTriggerMessage::Input {
+            window,
+            observed_at,
+        })
+    }
+
     fn publish_message(&self, message: SnapshotTriggerMessage) -> bool {
         match self.sender.try_send(message) {
             Ok(()) => true,
@@ -123,6 +137,7 @@ impl SnapshotTriggerPublisher {
                         .unwrap_or_default(),
                 )
             }
+            SnapshotTriggerMessage::Input { window, .. } => ("input", window.pid, window.window_id),
         };
         crate::trace::trace!(
             "component=content_snapshot phase=trigger action=drop kind={} pid={} window_id={} reason={}",

@@ -1,4 +1,9 @@
 //! Pure settle, refresh, and focus-out scheduling state machine.
+//!
+//! Focus and title changes start a settle and reset the refresh backoff. Input in
+//! the current window re-arms its settle and postpones the next refresh by the
+//! current backoff interval without resetting it, so input never makes refreshes
+//! more frequent than the settles it triggers itself.
 
 use std::{
     collections::VecDeque,
@@ -13,7 +18,7 @@ use super::{
     trigger::{SnapshotTrigger, SnapshotTriggerKind, SnapshotTriggerMessage},
 };
 
-// Design limit: settle after two seconds without a focus/title change.
+// Design limit: settle after two seconds without a focus/title change or input.
 pub(crate) const SETTLE_QUIET_INTERVAL: Duration = Duration::from_secs(2);
 // Design limit: force settle no later than ten seconds after the first change.
 pub(crate) const SETTLE_MAX_INTERVAL: Duration = Duration::from_secs(10);
@@ -54,6 +59,17 @@ struct CurrentWindow {
     refresh_index: usize,
 }
 
+impl CurrentWindow {
+    fn arm_settle(&mut self, changed_at: Instant) {
+        if self.settle_due.is_none() {
+            self.first_change = changed_at;
+        }
+        self.last_change = changed_at;
+        self.settle_due =
+            Some((changed_at + SETTLE_QUIET_INTERVAL).min(self.first_change + SETTLE_MAX_INTERVAL));
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FocusOut {
     target: SnapshotTrigger,
@@ -84,7 +100,29 @@ impl SnapshotScheduler {
                 transition,
                 observed_at,
             } => self.observe_focus_transition(transition, observed_at),
+            SnapshotTriggerMessage::Input {
+                window,
+                observed_at,
+            } => self.observe_input(window, observed_at),
         }
+    }
+
+    /// Input arms nothing on its own: window transitions belong to the focus path,
+    /// so input for any window other than the current one is ignored.
+    fn observe_input(&mut self, window: SnapshotWindowKey, observed_at: Instant) {
+        if !self.active {
+            return;
+        }
+        let Some(current) = self.current.as_mut().filter(|current| {
+            current.target.app.pid == window.pid
+                && current.target.window.id == Some(window.window_id)
+        }) else {
+            return;
+        };
+        current.arm_settle(observed_at);
+        current.refresh_due = current
+            .refresh_due
+            .max(observed_at + REFRESH_INTERVALS[current.refresh_index]);
     }
 
     pub(crate) fn observe(&mut self, trigger: SnapshotTrigger) {
@@ -268,16 +306,9 @@ impl SnapshotScheduler {
         let Some(current) = self.current.as_mut() else {
             return;
         };
-        let starts_new_settle_burst = current.settle_due.is_none();
+        let observed_at = trigger.observed_at;
         current.target = trigger;
-        current.last_change = current.target.observed_at;
-        if starts_new_settle_burst {
-            current.first_change = current.last_change;
-        }
-        current.settle_due = Some(
-            (current.last_change + SETTLE_QUIET_INTERVAL)
-                .min(current.first_change + SETTLE_MAX_INTERVAL),
-        );
+        current.arm_settle(observed_at);
         current.refresh_index = 0;
         current.refresh_due = current.last_change + REFRESH_INTERVALS[0];
     }
