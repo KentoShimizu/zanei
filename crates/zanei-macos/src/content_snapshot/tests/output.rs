@@ -41,6 +41,7 @@ fn v2_1_chrome_snapshot_without_version_is_dropped() {
         target,
         trigger: ContentSnapshotTrigger::Settle,
         activity_window: None,
+        deferred: false,
     };
     let key = SnapshotWindowKey {
         pid: 7,
@@ -99,6 +100,7 @@ fn snapshot_ts_quarantine_release_preserves_candidate_time_and_reservation() {
         target,
         trigger: ContentSnapshotTrigger::Settle,
         activity_window: None,
+        deferred: false,
     };
     let key = SnapshotWindowKey {
         pid: 7,
@@ -198,6 +200,7 @@ fn dropped_snapshot_does_not_deduplicate_identical_settle_on_return() {
         target,
         trigger: ContentSnapshotTrigger::FocusOut,
         activity_window: None,
+        deferred: false,
     };
     let key = SnapshotWindowKey {
         pid: 7,
@@ -446,6 +449,7 @@ fn safari_candidate(now: Instant) -> ScheduledSnapshot {
         target,
         trigger: ContentSnapshotTrigger::Settle,
         activity_window: None,
+        deferred: false,
     }
 }
 
@@ -511,6 +515,7 @@ fn recognized_body_is_deduplicated_per_origin_and_charged_with_its_lines() {
         target: trigger(7, 11, SnapshotTriggerKind::Focus, now),
         trigger: ContentSnapshotTrigger::Settle,
         activity_window: None,
+        deferred: false,
     };
     let key = SnapshotWindowKey {
         pid: 7,

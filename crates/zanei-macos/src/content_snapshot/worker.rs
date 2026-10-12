@@ -20,7 +20,7 @@ use crate::{
         SnapshotTriggerReceiver, SnapshotWalkOutput,
         coverage::WalkAnalysis,
         ocr_engine::OcrEngine,
-        output::{emit_released, trace_candidate, trace_output},
+        output::{emit_released, trace_candidate, trace_output, trace_unresolved},
         scheduler::{ScheduledSnapshot, SnapshotScheduler},
         state::SnapshotState,
     },
@@ -38,6 +38,7 @@ mod scheduling;
 
 use recognition::Delivery;
 use recognition::{WalkedCandidate, finish_recognition, start_recognition};
+use scan::ScanOutcome;
 use scheduling::CandidateTime;
 pub(super) use scheduling::seed_scheduler_from_focus;
 
@@ -94,7 +95,7 @@ pub(super) fn run_worker_with_scanner<F>(
         i64,
         &AtomicBool,
         &mut dyn FnMut(Option<String>) -> bool,
-    ) -> Result<Option<ScannedWindow>, ScanError>,
+    ) -> Result<ScanOutcome, ScanError>,
 {
     debug_assert_eq!(std::thread::current().name(), Some("zanei-content"));
     let mut scheduler = SnapshotScheduler::default();
@@ -153,6 +154,7 @@ pub(super) fn run_worker_with_scanner<F>(
                 taken_at,
                 state,
                 CandidateContext {
+                    scheduler: &mut scheduler,
                     delivery: &mut delivery,
                     stop: &stop,
                     focus_context: &focus_context,
@@ -226,6 +228,7 @@ fn service_lifecycle(
 }
 
 struct CandidateContext<'a, 'b, F> {
+    scheduler: &'a mut SnapshotScheduler,
     delivery: &'a mut Delivery<'b>,
     stop: &'a AtomicBool,
     focus_context: &'a FocusContext,
@@ -246,9 +249,10 @@ where
         i64,
         &AtomicBool,
         &mut dyn FnMut(Option<String>) -> bool,
-    ) -> Result<Option<ScannedWindow>, ScanError>,
+    ) -> Result<ScanOutcome, ScanError>,
 {
     let CandidateContext {
+        scheduler,
         delivery,
         stop,
         focus_context,
@@ -309,16 +313,13 @@ where
         trace_candidate(&candidate, "activity", 0, Duration::ZERO, 0, false, None);
         return None;
     }
-    if !state.global_interval_allows(now) {
-        trace_candidate(
-            &candidate,
-            "global_interval",
-            0,
-            Duration::ZERO,
-            0,
-            false,
-            None,
-        );
+    if let Some(ends) = state.global_interval_ends(now) {
+        let gate = if scheduler.defer(&candidate, ends) {
+            "global_interval_deferred"
+        } else {
+            "global_interval"
+        };
+        trace_candidate(&candidate, gate, 0, Duration::ZERO, 0, false, None);
         return None;
     }
     if !state.daily_budget_allows(now) {
@@ -361,9 +362,13 @@ where
         )
     };
     let (output, analysis) = match scan_result {
-        Ok(Some(scanned)) => scanned,
-        Ok(None) => {
-            trace_candidate(&candidate, "stale", 0, Duration::ZERO, 0, false, None);
+        Ok(ScanOutcome::Scanned(scanned)) => scanned,
+        Ok(ScanOutcome::Denied) => {
+            trace_candidate(&candidate, "scope", 0, Duration::ZERO, 0, false, None);
+            return None;
+        }
+        Ok(ScanOutcome::Unresolved(misses)) => {
+            trace_unresolved(&candidate, &misses);
             return None;
         }
         Err(error) => {

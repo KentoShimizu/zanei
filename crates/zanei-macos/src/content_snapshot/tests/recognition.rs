@@ -21,7 +21,7 @@ use crate::{
         ocr_engine::{OcrBackend, OcrEngine, OcrUnavailable, fingerprint},
         snapshot_trigger_channel,
         state::{SnapshotOrigin, SnapshotState, SnapshotWindowKey},
-        worker::run_worker_with_scanner,
+        worker::{run_worker_with_scanner, scan::ScanOutcome},
     },
     ffi::{
         screen_capture::{CaptureError, WindowImage},
@@ -155,7 +155,7 @@ impl Run {
                             degraded_nodes: 0,
                             frameless_nodes: 0,
                         };
-                        Ok(Some((output, walk.clone())))
+                        Ok(ScanOutcome::Scanned((output, walk.clone())))
                     },
                 );
             })

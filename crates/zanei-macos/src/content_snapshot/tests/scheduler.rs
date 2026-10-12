@@ -238,3 +238,126 @@ fn input_delivered_late_never_pulls_the_settle_before_the_last_change() {
             .is_none()
     );
 }
+
+#[test]
+fn a_candidate_held_back_by_the_global_interval_is_retried_once_when_it_ends() {
+    // Catches a settle or refresh blocked by another window's recent save being discarded,
+    // so the window is recorded only after new input; a retry that changes its trigger;
+    // and a retry that is retried again, which would poll every five seconds.
+    let base = Instant::now();
+    let ends = base + Duration::from_secs(4);
+    let mut scheduler = SnapshotScheduler::default();
+    scheduler.observe(trigger(7, 11, SnapshotTriggerKind::Focus, base));
+    let settle = scheduler
+        .take_due(base + SETTLE_QUIET_INTERVAL)
+        .expect("initial settle");
+    assert!(scheduler.defer(&settle, ends));
+    assert_eq!(scheduler.next_deadline(), Some(ends));
+    assert!(
+        scheduler
+            .take_due(ends - Duration::from_millis(1))
+            .is_none()
+    );
+    let retry = scheduler.take_due(ends).expect("deferred settle");
+    assert_eq!(retry.trigger, ContentSnapshotTrigger::Settle);
+    assert!(retry.deferred);
+    assert!(!scheduler.defer(&retry, ends + Duration::from_secs(5)));
+    assert_eq!(scheduler.next_deadline(), Some(base + REFRESH_INTERVALS[0]));
+
+    let refresh = scheduler
+        .take_due(base + REFRESH_INTERVALS[0])
+        .expect("first refresh");
+    let refresh_ends = base + REFRESH_INTERVALS[0] + Duration::from_secs(1);
+    assert!(scheduler.defer(&refresh, refresh_ends));
+    let retry = scheduler.take_due(refresh_ends).expect("deferred refresh");
+    assert_eq!(retry.trigger, ContentSnapshotTrigger::Refresh);
+    assert_eq!(retry.activity_window, Some(REFRESH_INTERVALS[0]));
+}
+
+#[test]
+fn a_deferred_settle_is_replaced_by_newer_input_and_dropped_by_window_change_or_pause() {
+    // Catches a stale retry outliving the change that superseded it: it would add a
+    // snapshot after newer input, or snapshot a window the user already left.
+    let base = Instant::now();
+    let input = SnapshotTriggerMessage::Input {
+        window: SnapshotWindowKey {
+            pid: 7,
+            window_id: 11,
+        },
+        observed_at: base + Duration::from_secs(3),
+    };
+    let ends = base + Duration::from_secs(4);
+    let mut scheduler = SnapshotScheduler::default();
+    scheduler.observe(trigger(7, 11, SnapshotTriggerKind::Focus, base));
+    let settle = scheduler
+        .take_due(base + SETTLE_QUIET_INTERVAL)
+        .expect("initial settle");
+    assert!(scheduler.defer(&settle, ends));
+    scheduler.observe_message(input);
+    assert_eq!(
+        scheduler.next_deadline(),
+        Some(base + Duration::from_secs(3) + SETTLE_QUIET_INTERVAL)
+    );
+    let settle = scheduler
+        .take_due(base + Duration::from_secs(3) + SETTLE_QUIET_INTERVAL)
+        .expect("input settle");
+    assert!(!settle.deferred);
+
+    assert!(scheduler.defer(&settle, ends));
+    scheduler.observe(trigger(8, 12, SnapshotTriggerKind::Focus, base));
+    let next = scheduler.take_due(ends).expect("new window settle");
+    assert_eq!((next.target.window.id, next.deferred), (Some(12), false));
+    assert!(
+        scheduler.take_due(ends).is_none(),
+        "the left window's retry"
+    );
+    assert!(
+        !scheduler.defer(&settle, ends),
+        "only the current window defers"
+    );
+
+    scheduler.observe(trigger(7, 11, SnapshotTriggerKind::Focus, base));
+    let settle = scheduler
+        .take_due(base + SETTLE_QUIET_INTERVAL)
+        .expect("returned settle");
+    assert!(scheduler.defer(&settle, ends));
+    scheduler.pause();
+    assert!(scheduler.take_due(ends).is_none());
+    assert!(!scheduler.defer(&settle, ends));
+}
+
+#[test]
+fn a_deferred_focus_out_waits_its_turn_and_yields_to_a_newer_trigger_for_its_window() {
+    // Catches a deferred focus-out at the queue front holding back later immediate
+    // focus-outs, and a retry that still snapshots a window the user returned to.
+    let base = Instant::now();
+    let ends = base + Duration::from_secs(4);
+    let mut scheduler = SnapshotScheduler::default();
+    scheduler.observe(trigger(7, 11, SnapshotTriggerKind::FocusOut, base));
+    let left = scheduler.take_due(base).expect("first focus-out");
+    assert!(scheduler.defer(&left, ends));
+    let next_left = base + Duration::from_secs(1);
+    scheduler.observe(trigger(8, 12, SnapshotTriggerKind::FocusOut, next_left));
+    assert_eq!(
+        scheduler
+            .take_due(next_left)
+            .expect("immediate focus-out")
+            .target
+            .window
+            .id,
+        Some(12)
+    );
+    let retry = scheduler.take_due(ends).expect("deferred focus-out");
+    assert_eq!(retry.trigger, ContentSnapshotTrigger::FocusOut);
+    assert_eq!(retry.target.window.id, Some(11));
+    assert!(!scheduler.defer(&retry, ends + Duration::from_secs(5)));
+
+    scheduler.observe(trigger(7, 11, SnapshotTriggerKind::FocusOut, base));
+    let left = scheduler.take_due(base).expect("second focus-out");
+    assert!(scheduler.defer(&left, ends));
+    scheduler.observe(trigger(7, 11, SnapshotTriggerKind::Focus, next_left));
+    assert_eq!(
+        scheduler.next_deadline(),
+        Some(next_left + SETTLE_QUIET_INTERVAL)
+    );
+}

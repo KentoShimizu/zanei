@@ -23,12 +23,16 @@ use crate::{
         state::SnapshotState,
         worker::{run_worker_with_scanner, scan::SnapshotApplication, scan::scan_application},
     },
+    ffi::window_list::OnScreenWindow,
     focus_context::FocusContext,
     secure_input::secure_input_test_channel,
     workspace::{ApplicationActivationPolicy, ApplicationInfo, notification_channel},
 };
 
-use super::{support::ocr_off, walker::FakeNode};
+use super::{
+    support::{frame, ocr_off},
+    walker::FakeNode,
+};
 
 struct ChromiumApplication;
 
@@ -114,10 +118,14 @@ fn chromium_profile_produces_snapshot_through_trigger_scheduler_and_worker() {
                         ChromiumApplication,
                         expected_window_id,
                         stop,
-                        |pid, frame| {
+                        |pid| {
                             assert_eq!(pid, 7);
-                            assert_eq!(frame.origin.x, 0.0);
-                            Some(11)
+                            vec![OnScreenWindow {
+                                id: 11,
+                                layer: 0,
+                                title: None,
+                                bounds: frame(0.0, 0.0, 100.0, 100.0),
+                            }]
                         },
                         read_allowed,
                     )

@@ -14,6 +14,7 @@ use zanei_core::{
         capture_policy::{BrowserMode, BrowserPolicy, IdePolicy, PolicyAction},
     },
     privacy::PrivacyScope,
+    schema::{ContentSnapshotTrigger, EventData},
 };
 
 use crate::{
@@ -29,16 +30,17 @@ use crate::{
         tests::walker::FakeNode,
         worker::{
             loop_wait, run_worker_with_scanner,
-            scan::{SnapshotApplication, scan_application},
+            scan::{ScanOutcome, SnapshotApplication, WindowMisses, scan_application},
             seed_scheduler_from_focus, service_controls,
         },
     },
+    ffi::window_list::OnScreenWindow,
     focus_context::FocusContext,
     secure_input::secure_input_test_channel,
     workspace::notification_channel,
 };
 
-use super::support::{ocr_off, sufficient, trigger};
+use super::support::{frame, ocr_off, sufficient, trigger};
 
 #[derive(Clone)]
 struct FakeApplication {
@@ -79,17 +81,22 @@ fn non_focused_candidate_window_is_walked_by_window_id() {
     let app = application(11);
     let reads = Arc::clone(&app.windows_reads);
     let stop = AtomicBool::new(false);
-    let (output, _) = scan_application(app, 22, &stop, |_, _| None, &mut |_| true)
-        .expect("scan non-focused window")
-        .expect("candidate window");
+    let ScanOutcome::Scanned((output, _)) =
+        scan_application(app, 22, &stop, |_| Vec::new(), &mut |_| true)
+            .expect("scan non-focused window")
+    else {
+        panic!("candidate window");
+    };
 
     assert_eq!(output.text, "Previous");
     assert_eq!(reads.load(Ordering::Relaxed), 1);
 
-    let (focused_output, _) =
-        scan_application(application(22), 22, &stop, |_, _| None, &mut |_| true)
+    let ScanOutcome::Scanned((focused_output, _)) =
+        scan_application(application(22), 22, &stop, |_| Vec::new(), &mut |_| true)
             .expect("scan focused window")
-            .expect("focused candidate");
+    else {
+        panic!("focused candidate");
+    };
     assert_eq!(
         output.ax_calls,
         focused_output.ax_calls + 3,
@@ -111,7 +118,7 @@ fn actual_window_title_is_authorized_before_body_walk() {
         app,
         11,
         &AtomicBool::new(false),
-        |_, _| None,
+        |_| Vec::new(),
         &mut |title| {
             observed_title = title;
             false
@@ -119,7 +126,10 @@ fn actual_window_title_is_authorized_before_body_walk() {
     )
     .expect("scan window");
 
-    assert!(output.is_none(), "denied title must skip the body walk");
+    assert!(
+        matches!(output, ScanOutcome::Denied),
+        "denied title must skip the body walk"
+    );
     assert_eq!(observed_title.as_deref(), Some(".env"));
     assert_eq!(metrics.content_attribute_reads(), 0);
     assert_eq!(metrics.value_reads(), 0);
@@ -192,9 +202,9 @@ fn captures_with_actual_title(
                 move |_pid, _window_id, _stop, read_allowed| {
                     if !read_allowed(actual_title.clone()) {
                         scanner_stop.store(true, Ordering::Release);
-                        return Ok(None);
+                        return Ok(ScanOutcome::Denied);
                     }
-                    Ok(Some((
+                    Ok(ScanOutcome::Scanned((
                         SnapshotWalkOutput {
                             text: "visible".to_owned(),
                             nodes: 1,
@@ -254,11 +264,17 @@ fn unknown_candidate_window_id_fails_closed() {
     let app = application(11);
     let reads = Arc::clone(&app.windows_reads);
 
-    assert!(
-        scan_application(app, 33, &AtomicBool::new(false), |_, _| None, &mut |_| true,)
-            .expect("scan missing window")
-            .is_none()
-    );
+    assert!(matches!(
+        scan_application(
+            app,
+            33,
+            &AtomicBool::new(false),
+            |_| Vec::new(),
+            &mut |_| true
+        )
+        .expect("scan missing window"),
+        ScanOutcome::Unresolved(_)
+    ));
     assert_eq!(reads.load(Ordering::Relaxed), 1);
 }
 
@@ -372,7 +388,7 @@ fn s26_restarted_worker_processes_current_focus_without_a_new_trigger() {
                 ocr_off(),
                 move |_pid, _window_id, _stop, _read_allowed| {
                     observed_scan_calls.fetch_add(1, Ordering::Release);
-                    Ok(None)
+                    Ok(ScanOutcome::Unresolved(WindowMisses::default()))
                 },
             );
         })
@@ -434,7 +450,7 @@ fn secure_input_enabled_after_walk_discards_the_snapshot() {
                 move |_pid, _window_id, _stop, read_allowed| {
                     observed_scan_calls.fetch_add(1, Ordering::Relaxed);
                     read_allowed(None);
-                    Ok(Some((
+                    Ok(ScanOutcome::Scanned((
                         SnapshotWalkOutput {
                             text: "private".to_owned(),
                             nodes: 1,
@@ -507,7 +523,7 @@ fn s27_filter_reload_during_walk_discards_the_snapshot() {
                         exclude_apps: vec!["dev.example.App".to_owned()],
                         ..FilterConfig::default()
                     });
-                    Ok(Some((
+                    Ok(ScanOutcome::Scanned((
                         SnapshotWalkOutput {
                             text: "must not escape".to_owned(),
                             nodes: 1,
@@ -590,7 +606,7 @@ fn v2_4_post_walk_deny_does_not_exhaust_daily_budget() {
                         exclude_apps: vec!["dev.example.App".to_owned()],
                         ..FilterConfig::default()
                     });
-                    Ok(Some((
+                    Ok(ScanOutcome::Scanned((
                         SnapshotWalkOutput {
                             text: "xx".to_owned(),
                             nodes: 1,
@@ -635,4 +651,143 @@ fn a_due_candidate_does_not_spin_the_loop_while_recognizing() {
         loop_wait(false, Some(now + Duration::from_millis(5)), now),
         Duration::from_millis(5)
     );
+}
+
+#[test]
+fn an_unresolved_window_reports_why_each_window_missed() {
+    // Catches a miss traced without the reason that tells a closed, hidden, or
+    // other-Space window apart from an AX frame that disagrees with its on-screen
+    // bounds, and a helper window being mistaken for the expected window.
+    let helper_frame = frame(80.0, 290.0, 1.0, 1.0);
+    let app = FakeApplication {
+        focused: None,
+        windows: vec![
+            FakeNode::framed_window(Some(helper_frame)),
+            FakeNode::framed_window(Some(frame(0.0, 57.0, 604.0, 421.0))),
+            FakeNode::framed_window(None),
+            FakeNode::numbered_window(22, "Other"),
+        ],
+        windows_reads: Arc::new(AtomicUsize::new(0)),
+    };
+    let on_screen = |pid| {
+        assert_eq!(pid, 7);
+        vec![OnScreenWindow {
+            id: 154,
+            layer: 0,
+            title: None,
+            bounds: helper_frame,
+        }]
+    };
+    let stop = AtomicBool::new(false);
+
+    let ScanOutcome::Unresolved(misses) =
+        scan_application(app.clone(), 62, &stop, on_screen, &mut |_| true).expect("scan")
+    else {
+        panic!("the expected window is not on screen");
+    };
+    assert_eq!(
+        misses,
+        WindowMisses {
+            focused: None,
+            number_other: 1,
+            frame_missing: 1,
+            bounds_other: 1,
+            bounds_none: 1,
+            expected_on_screen: false,
+        }
+    );
+    assert_eq!(
+        misses.to_string(),
+        "focused=absent number_other=1 frame_missing=1 bounds_other=1 bounds_none=1 expected_on_screen=false"
+    );
+    assert!(matches!(
+        scan_application(app, 154, &stop, on_screen, &mut |_| true).expect("scan helper"),
+        ScanOutcome::Scanned(_)
+    ));
+}
+
+#[test]
+fn a_settle_held_back_by_the_global_interval_is_recorded_when_it_ends() {
+    // Catches the candidate being discarded, which left the window unrecorded until
+    // later input re-armed a settle.
+    let (trigger_publisher, trigger_receiver) = snapshot_trigger_channel();
+    let (_lifecycle_publisher, lifecycle_receiver) = notification_channel();
+    let (_control, controls) = channel();
+    let (sender, events) = sync_channel(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let focus_context = FocusContext::new();
+    let target = trigger(
+        7,
+        11,
+        SnapshotTriggerKind::Focus,
+        Instant::now() - SETTLE_QUIET_INTERVAL,
+    );
+    focus_context.activate(target.app.clone(), Some(target.window.clone()));
+    let filter = FilterConfig::default();
+    let (_chrome_publisher, chrome) = chrome_eligibility_channel(filter.clone());
+    let (secure_input, secure_responder) = secure_input_test_channel();
+    let policy = CapturePolicy::new(chrome, filter, Some(secure_input));
+    let worker_stop = Arc::clone(&stop);
+    let held_back = Duration::from_millis(300);
+    let worker = thread::Builder::new()
+        .name("zanei-content".to_owned())
+        .spawn(move || {
+            let saved_at = Instant::now() - GLOBAL_SAVE_INTERVAL + held_back;
+            let mut state = SnapshotState::new(saved_at);
+            state.reserve(
+                SnapshotWindowKey {
+                    pid: 8,
+                    window_id: 12,
+                },
+                1,
+                saved_at,
+            );
+            run_worker_with_scanner(
+                &trigger_receiver,
+                &lifecycle_receiver,
+                controls,
+                worker_stop,
+                sender,
+                policy,
+                ChromeObserver::new(),
+                SharedHealth::default(),
+                &mut state,
+                focus_context,
+                ocr_off(),
+                move |_pid, _window_id, _stop, read_allowed| {
+                    assert!(read_allowed(None));
+                    Ok(ScanOutcome::Scanned((
+                        SnapshotWalkOutput {
+                            text: "visible".to_owned(),
+                            nodes: 1,
+                            ax_calls: 1,
+                            elapsed: Duration::from_millis(1),
+                            cutoff: None,
+                            degraded_nodes: 0,
+                            frameless_nodes: 0,
+                        },
+                        sufficient(),
+                    )))
+                },
+            );
+        })
+        .expect("spawn content worker");
+    assert!(trigger_publisher.publish(target));
+    // The held-back attempt, then the retry's gate and send-time checks.
+    let secure_worker = thread::spawn(move || {
+        for _ in 0..3 {
+            secure_responder.respond_next(false);
+        }
+    });
+
+    let event = events.recv_timeout(Duration::from_secs(2));
+    stop.store(true, Ordering::Release);
+    worker.join().expect("content worker");
+    secure_worker.join().expect("Secure Input responder");
+
+    let event = event.expect("deferred settle snapshot");
+    let EventData::ContentSnapshot(data) = event.data else {
+        panic!("content.snapshot");
+    };
+    assert_eq!(data.trigger, ContentSnapshotTrigger::Settle);
 }

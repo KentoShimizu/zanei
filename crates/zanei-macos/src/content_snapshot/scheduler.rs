@@ -4,6 +4,11 @@
 //! the current window re-arms its settle and postpones the next refresh by the
 //! current backoff interval without resetting it, so input never makes refreshes
 //! more frequent than the settles it triggers itself.
+//!
+//! A candidate held back only by the global save interval is retried once when the
+//! interval ends. A settle or refresh retry belongs to the current window, so newer
+//! input or a change to that window, or a window change, discards it. A focus-out
+//! retry is discarded by any newer trigger for its window.
 
 use std::{
     collections::VecDeque,
@@ -38,6 +43,8 @@ pub(crate) struct ScheduledSnapshot {
     pub(crate) target: SnapshotTrigger,
     pub(crate) trigger: ContentSnapshotTrigger,
     pub(crate) activity_window: Option<Duration>,
+    /// Already retried once after the global save interval held it back.
+    pub(crate) deferred: bool,
 }
 
 impl ScheduledSnapshot {
@@ -57,6 +64,8 @@ struct CurrentWindow {
     settle_due: Option<Instant>,
     refresh_due: Instant,
     refresh_index: usize,
+    /// A settle or refresh held back by the global save interval, due when it ends.
+    retry: Option<(Instant, ScheduledSnapshot)>,
     /// Taken from the focus at worker start rather than observed as a change, so
     /// the first observed focus or title change replaces it.
     seeded: bool,
@@ -69,6 +78,7 @@ impl CurrentWindow {
         if self.settle_due.is_none() {
             self.first_change = changed_at;
         }
+        self.retry = None;
         self.last_change = self.last_change.max(changed_at);
         self.settle_due = Some(
             (self.last_change + SETTLE_QUIET_INTERVAL).min(self.first_change + SETTLE_MAX_INTERVAL),
@@ -80,6 +90,7 @@ impl CurrentWindow {
 struct FocusOut {
     target: SnapshotTrigger,
     due: Instant,
+    deferred: bool,
 }
 
 pub(crate) struct SnapshotScheduler {
@@ -136,6 +147,12 @@ impl SnapshotScheduler {
         if !self.active || trigger.window.id.is_none() {
             return;
         }
+        // Any newer trigger for a window supersedes its pending focus-out retry.
+        self.focus_out.retain(|candidate| {
+            !candidate.deferred
+                || candidate.target.app.pid != trigger.app.pid
+                || candidate.target.window.id != trigger.window.id
+        });
         if trigger.kind == SnapshotTriggerKind::FocusOut {
             if self.current.as_ref().is_some_and(|current| {
                 current.target.app.pid == trigger.app.pid
@@ -143,9 +160,10 @@ impl SnapshotScheduler {
             }) {
                 self.current = None;
             }
-            self.focus_out.push_back(FocusOut {
+            self.push_focus_out(FocusOut {
                 due: trigger.observed_at,
                 target: trigger,
+                deferred: false,
             });
             return;
         }
@@ -175,9 +193,16 @@ impl SnapshotScheduler {
             return None;
         }
         let focus_out = self.focus_out.front().map(|candidate| candidate.due);
+        let retry = self
+            .current
+            .as_ref()
+            .and_then(|current| current.retry.as_ref().map(|(due, _)| *due));
         let settle = self.current.as_ref().and_then(|current| current.settle_due);
         let refresh = self.current.as_ref().map(|current| current.refresh_due);
-        [focus_out, settle, refresh].into_iter().flatten().min()
+        [focus_out, retry, settle, refresh]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub(crate) fn take_due(&mut self, now: Instant) -> Option<ScheduledSnapshot> {
@@ -194,28 +219,75 @@ impl SnapshotScheduler {
                 target: candidate.target,
                 trigger: ContentSnapshotTrigger::FocusOut,
                 activity_window: None,
+                deferred: candidate.deferred,
             });
         }
         let current = self.current.as_mut()?;
+        if current.retry.as_ref().is_some_and(|(due, _)| *due <= now) {
+            return current.retry.take().map(|(_, candidate)| candidate);
+        }
         if current.settle_due.is_some_and(|deadline| deadline <= now) {
             current.settle_due = None;
+            current.retry = None;
             return Some(ScheduledSnapshot {
                 target: current.target.clone(),
                 trigger: ContentSnapshotTrigger::Settle,
                 activity_window: None,
+                deferred: false,
             });
         }
         if current.refresh_due <= now {
             let interval = REFRESH_INTERVALS[current.refresh_index];
             current.refresh_index = (current.refresh_index + 1).min(REFRESH_INTERVALS.len() - 1);
             current.refresh_due = now + REFRESH_INTERVALS[current.refresh_index];
+            current.retry = None;
             return Some(ScheduledSnapshot {
                 target: current.target.clone(),
                 trigger: ContentSnapshotTrigger::Refresh,
                 activity_window: Some(interval),
+                deferred: false,
             });
         }
         None
+    }
+
+    /// Retries a candidate held back only by the global save interval once, at `due`.
+    /// Returns false when the candidate is dropped instead: it was already retried, or
+    /// its window is no longer the current one.
+    pub(crate) fn defer(&mut self, candidate: &ScheduledSnapshot, due: Instant) -> bool {
+        if !self.active || candidate.deferred {
+            return false;
+        }
+        if candidate.trigger == ContentSnapshotTrigger::FocusOut {
+            self.push_focus_out(FocusOut {
+                target: candidate.target.clone(),
+                due,
+                deferred: true,
+            });
+            return true;
+        }
+        let Some(current) = self.current.as_mut().filter(|current| {
+            current.target.app.pid == candidate.target.app.pid
+                && current.target.window.id == candidate.target.window.id
+        }) else {
+            return false;
+        };
+        current.retry = Some((
+            due,
+            ScheduledSnapshot {
+                deferred: true,
+                ..candidate.clone()
+            },
+        ));
+        true
+    }
+
+    /// Keeps the queue ordered by due time, since a retry is due later than new focus-outs.
+    fn push_focus_out(&mut self, candidate: FocusOut) {
+        let index = self
+            .focus_out
+            .partition_point(|queued| queued.due <= candidate.due);
+        self.focus_out.insert(index, candidate);
     }
 
     pub(crate) fn terminate_pid(&mut self, pid: i64) {
@@ -241,6 +313,7 @@ impl SnapshotScheduler {
         current.settle_due = Some(now + SETTLE_QUIET_INTERVAL);
         current.refresh_index = 0;
         current.refresh_due = now + REFRESH_INTERVALS[0];
+        current.retry = None;
         Some(current.target.app.pid)
     }
 
@@ -276,6 +349,7 @@ impl SnapshotScheduler {
             settle_due: Some(observed_at + SETTLE_QUIET_INTERVAL),
             refresh_due: observed_at + REFRESH_INTERVALS[0],
             refresh_index: 0,
+            retry: None,
             seeded: false,
         }
     }
