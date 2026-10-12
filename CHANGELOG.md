@@ -1,7 +1,39 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-10-12
 
+- Content snapshots can read a window's text from its pixels when Accessibility
+  exposes too little of it (macOS 14 or later, with the optional Screen
+  Recording permission). Zanei captures that one window in memory, recognizes
+  its text on the Mac with Apple Vision, keeps only the text and its on-screen
+  layout, and discards the image immediately; images are never written to disk
+  or sent anywhere. The decision is made per window from what Accessibility
+  exposes, not from a list of apps, and every existing snapshot rule applies:
+  scopes, built-in exclusions, Secure Input, pause, size and daily limits,
+  redaction, retention, and encryption. When recognition is unavailable or
+  fails, the Accessibility text is recorded as before, and an unchanged window
+  is not recognized again. Secure and single-line input fields that the app
+  exposes to Accessibility are masked; text in a field the app does not expose
+  can appear in a recognized snapshot.
+- The privacy promise changes accordingly: Zanei never stores screenshots or
+  video, and reads pixels only for this fallback.
+- While content snapshots are on, the recorder requests Screen Recording once
+  at startup, after the Accessibility and Input Monitoring steps. If content
+  snapshots were already on, this request appears once on the first start
+  after upgrading. The permission is optional: it never affects
+  `permissions_ok`, `start`, or exit codes. `zanei status`, `zanei doctor`, and
+  the MCP `get_status` tool show the fallback state (`on`, `off`,
+  `unavailable`), and `zanei doctor --fix` opens the Screen Recording pane.
+- `content.snapshot` events are now `v: 4`. `source` is `macos.ax` or
+  `macos.ocr`, and recognized snapshots add `data.lines` with each line's
+  text, window-relative position and size, and colors. Retained v3 rows read
+  back as v4 `macos.ax` with an identical payload, and v2 rows are unchanged.
+  Releases before 0.7.0 cannot read v4 rows, so downgrading after recording
+  with this release is not supported.
+- Focus, typed-text, and click events from apps whose elements do not report
+  their window are attributed to the app's window instead of being dropped.
+  Such a window is used only to say where the event happened, never to decide
+  whether content may be read.
 - Content snapshots follow changes made inside one window. Clicking,
   scrolling, or typing in the frontmost window considers a new snapshot once
   that input has paused for 2 seconds (`trigger: settle`), so switching
