@@ -35,7 +35,7 @@ pub(in crate::content_snapshot) fn seed_scheduler_from_focus(
     let Some(window) = focus.window else {
         return;
     };
-    scheduler.observe(SnapshotTrigger {
+    scheduler.seed(SnapshotTrigger {
         app: focus.app,
         window,
         kind: SnapshotTriggerKind::Focus,

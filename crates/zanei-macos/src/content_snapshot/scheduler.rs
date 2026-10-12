@@ -57,16 +57,22 @@ struct CurrentWindow {
     settle_due: Option<Instant>,
     refresh_due: Instant,
     refresh_index: usize,
+    /// Taken from the focus at worker start rather than observed as a change, so
+    /// the first observed focus or title change replaces it.
+    seeded: bool,
 }
 
 impl CurrentWindow {
+    /// Rate-limited input can arrive after a later title or focus change with its
+    /// own earlier time, so the last change only moves forward.
     fn arm_settle(&mut self, changed_at: Instant) {
         if self.settle_due.is_none() {
             self.first_change = changed_at;
         }
-        self.last_change = changed_at;
-        self.settle_due =
-            Some((changed_at + SETTLE_QUIET_INTERVAL).min(self.first_change + SETTLE_MAX_INTERVAL));
+        self.last_change = self.last_change.max(changed_at);
+        self.settle_due = Some(
+            (self.last_change + SETTLE_QUIET_INTERVAL).min(self.first_change + SETTLE_MAX_INTERVAL),
+        );
     }
 }
 
@@ -119,10 +125,11 @@ impl SnapshotScheduler {
         }) else {
             return;
         };
+        current.seeded = false;
         current.arm_settle(observed_at);
         current.refresh_due = current
             .refresh_due
-            .max(observed_at + REFRESH_INTERVALS[current.refresh_index]);
+            .max(current.last_change + REFRESH_INTERVALS[current.refresh_index]);
     }
 
     pub(crate) fn observe(&mut self, trigger: SnapshotTrigger) {
@@ -143,7 +150,8 @@ impl SnapshotScheduler {
             return;
         }
         let same_window = self.current.as_ref().is_some_and(|current| {
-            current.target.app.pid == trigger.app.pid
+            !current.seeded
+                && current.target.app.pid == trigger.app.pid
                 && current.target.window.id == trigger.window.id
         });
         if same_window {
@@ -152,6 +160,14 @@ impl SnapshotScheduler {
         }
 
         self.current = Some(Self::new_current(trigger));
+    }
+
+    /// Starts from the window focused when the worker starts.
+    pub(crate) fn seed(&mut self, trigger: SnapshotTrigger) {
+        self.observe(trigger);
+        if let Some(current) = self.current.as_mut() {
+            current.seeded = true;
+        }
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
@@ -260,6 +276,7 @@ impl SnapshotScheduler {
             settle_due: Some(observed_at + SETTLE_QUIET_INTERVAL),
             refresh_due: observed_at + REFRESH_INTERVALS[0],
             refresh_index: 0,
+            seeded: false,
         }
     }
 
