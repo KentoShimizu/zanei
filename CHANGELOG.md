@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `zanei start` no longer reports a failure while the recorder is still
+  opening the store. The first start after an upgrade can migrate a large
+  store for longer than the 10-second startup wait, and `start` used to give
+  up while the recorder was still working. It now waits up to 3 minutes
+  while the recorder holds the store, and says once that it is waiting. A
+  recorder that never takes the store, is still opening it after 3 minutes,
+  or exits before it is alive still fails the start.
 - Content snapshots follow changes made inside one window. Clicking,
   scrolling, or typing in the frontmost window considers a new snapshot once
   that input has paused for 2 seconds (`trigger: settle`), so switching
