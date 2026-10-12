@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Content snapshots follow changes made inside one window. Clicking,
+  scrolling, or typing in the frontmost window considers a new snapshot once
+  that input has paused for 2 seconds (`trigger: settle`), so switching
+  conversations or scrolling a document no longer waits for the next refresh.
+  Clicks count while `capture.sources` includes `ui`, scrolling and typing
+  while it includes `input`. The existing limits still apply: one snapshot
+  every 5 seconds at most, unchanged text is not stored again, and nothing is
+  taken while Secure Input is active.
 - Typed text is captured in apps that expose a focused text field to
   Accessibility but post no focus or value change notifications for it. Zanei
   reads the focused field shortly after keystrokes, Return, clicks, and window

@@ -3,7 +3,14 @@
 //! fields are (mask regions), and which large elements partition the window
 //! (order containers).
 
-use crate::{content_snapshot::SnapshotNodeClass, ffi::ax::AxFrame};
+use std::{collections::BTreeSet, fmt};
+
+use zanei_core::schema::ContentSnapshotCutoff;
+
+use crate::{
+    content_snapshot::{SnapshotNodeClass, output::cutoff_trace_name},
+    ffi::ax::AxFrame,
+};
 
 /// Blank coverage is sampled on this many columns and rows of the window.
 const COVERAGE_GRID: usize = 48;
@@ -122,14 +129,112 @@ pub(crate) struct WalkAnalysis {
     pub(crate) mask_regions: Vec<WindowRect>,
     /// Large non-root elements that partition the window, in walk order.
     pub(crate) order_containers: Vec<WindowRect>,
-    /// False when an input may be missing from `mask_regions`: the walk was cut
-    /// off, a node's role or children were unreadable, or an input had no frame.
-    pub(crate) masks_complete: bool,
+    /// Why an input may be missing from `mask_regions`; empty when none can be.
+    pub(crate) mask_gaps: MaskGaps,
 }
 
 impl WalkAnalysis {
     pub(crate) fn ax_insufficient(&self) -> bool {
         self.blank_coverage >= BLANK_COVERAGE_MIN
+    }
+}
+
+/// A failed Accessibility read: its AX error code, or `None` when the reply
+/// broke the wrapper's contract.
+pub(crate) type ReadFailure = Option<i32>;
+
+/// One reason the walk may have missed an input field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MaskGap {
+    Cutoff(ContentSnapshotCutoff),
+    /// The node's role is unknown, so it may be an input.
+    RoleUnreadable(ReadFailure),
+    /// The unvisited subtree may hold inputs.
+    ChildrenUnreadable(ReadFailure),
+    /// The child list was shorter than its count; the missing children may be inputs.
+    ChildrenShort,
+    FramelessInput,
+}
+
+/// The mask gaps of one walk, as counts and distinct failures: trace metadata only.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MaskGaps {
+    cutoff: Option<ContentSnapshotCutoff>,
+    role_unreadable: usize,
+    children_unreadable: usize,
+    children_short: usize,
+    frameless_inputs: usize,
+    failures: BTreeSet<ReadFailure>,
+}
+
+impl MaskGaps {
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub(crate) fn record(&mut self, gap: MaskGap) {
+        let failure = match gap {
+            MaskGap::Cutoff(cutoff) => {
+                self.cutoff = Some(cutoff);
+                return;
+            }
+            MaskGap::RoleUnreadable(failure) => {
+                self.role_unreadable += 1;
+                failure
+            }
+            MaskGap::ChildrenUnreadable(failure) => {
+                self.children_unreadable += 1;
+                failure
+            }
+            MaskGap::ChildrenShort => {
+                self.children_short += 1;
+                return;
+            }
+            MaskGap::FramelessInput => {
+                self.frameless_inputs += 1;
+                return;
+            }
+        };
+        self.failures.insert(failure);
+    }
+}
+
+/// Renders `mask_gaps=<reason>:<count>,... ax_errors=<code>,...`, where a
+/// contract failure appears as `contract` and the cutoff by its kind.
+impl fmt::Display for MaskGaps {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let counts = [
+            ("role_unreadable", self.role_unreadable),
+            ("children_unreadable", self.children_unreadable),
+            ("children_short", self.children_short),
+            ("frameless_input", self.frameless_inputs),
+        ];
+        let gaps = self
+            .cutoff
+            .map(|cutoff| format!("cutoff:{}", cutoff_trace_name(cutoff)))
+            .into_iter()
+            .chain(
+                counts
+                    .into_iter()
+                    .filter(|(_, count)| *count > 0)
+                    .map(|(reason, count)| format!("{reason}:{count}")),
+            )
+            .collect::<Vec<_>>();
+        let failures = self
+            .failures
+            .iter()
+            .map(|failure| failure.map_or_else(|| "contract".to_owned(), |code| code.to_string()))
+            .collect::<Vec<_>>();
+        write!(
+            formatter,
+            "mask_gaps={} ax_errors={}",
+            gaps.join(","),
+            if failures.is_empty() {
+                "none".to_owned()
+            } else {
+                failures.join(",")
+            }
+        )
     }
 }
 
@@ -139,7 +244,7 @@ pub(crate) struct WalkAnalyzer {
     text_cells: [bool; COVERAGE_CELLS],
     mask_regions: Vec<WindowRect>,
     order_containers: Vec<WindowRect>,
-    masks_complete: bool,
+    mask_gaps: MaskGaps,
 }
 
 impl WalkAnalyzer {
@@ -149,12 +254,12 @@ impl WalkAnalyzer {
             text_cells: [false; COVERAGE_CELLS],
             mask_regions: Vec::new(),
             order_containers: Vec::new(),
-            masks_complete: true,
+            mask_gaps: MaskGaps::default(),
         }
     }
 
-    pub(crate) fn masks_incomplete(&mut self) {
-        self.masks_complete = false;
+    pub(crate) fn mask_gap(&mut self, gap: MaskGap) {
+        self.mask_gaps.record(gap);
     }
 
     pub(crate) fn record(&mut self, node: &WalkedNode<'_>) {
@@ -183,7 +288,7 @@ impl WalkAnalyzer {
             blank_coverage: blank as f64 / COVERAGE_CELLS as f64,
             mask_regions: self.mask_regions,
             order_containers: self.order_containers,
-            masks_complete: self.masks_complete,
+            mask_gaps: self.mask_gaps,
         }
     }
 }

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use zanei_core::schema::ContentSnapshotTrigger;
 
 use crate::content_snapshot::{
-    SnapshotTriggerKind,
+    SnapshotTriggerKind, SnapshotTriggerMessage, SnapshotWindowKey,
     scheduler::{
         FOCUS_OUT_MIN_INTERVAL, REFRESH_INTERVALS, SETTLE_MAX_INTERVAL, SETTLE_QUIET_INTERVAL,
         SnapshotScheduler,
@@ -150,4 +150,91 @@ fn filter_replacement_rearms_current_target_while_pause_stop_and_wake_discard_it
     assert_eq!(scheduler.next_deadline(), None);
     scheduler.stop();
     assert!(scheduler.take_due(base + Duration::from_secs(30)).is_none());
+}
+
+#[test]
+fn input_rearms_the_current_window_without_resetting_the_refresh_backoff() {
+    // Catches content changed by clicking, scrolling, or typing inside one window never
+    // producing another snapshot, input for another window arming one, and input that
+    // resets the backoff so refreshes outnumber the settles input triggers itself.
+    let base = Instant::now();
+    let input = |window_id, observed_at| SnapshotTriggerMessage::Input {
+        window: SnapshotWindowKey { pid: 7, window_id },
+        observed_at,
+    };
+    let mut scheduler = SnapshotScheduler::default();
+    scheduler.observe(trigger(7, 11, SnapshotTriggerKind::Focus, base));
+    scheduler
+        .take_due(base + SETTLE_QUIET_INTERVAL)
+        .expect("initial settle");
+    scheduler
+        .take_due(base + REFRESH_INTERVALS[0])
+        .expect("first refresh");
+    let next_refresh = base + REFRESH_INTERVALS[0] + REFRESH_INTERVALS[1];
+
+    let typed = base + Duration::from_secs(40);
+    scheduler.observe_message(input(12, typed));
+    assert_eq!(scheduler.next_deadline(), Some(next_refresh));
+
+    scheduler.observe_message(input(11, typed));
+    assert_eq!(
+        scheduler.next_deadline(),
+        Some(typed + SETTLE_QUIET_INTERVAL)
+    );
+    assert!(
+        scheduler
+            .take_due(typed + SETTLE_QUIET_INTERVAL - Duration::from_millis(1))
+            .is_none()
+    );
+    assert_eq!(
+        scheduler
+            .take_due(typed + SETTLE_QUIET_INTERVAL)
+            .expect("input settle")
+            .trigger,
+        ContentSnapshotTrigger::Settle
+    );
+    assert_eq!(
+        scheduler.next_deadline(),
+        Some(typed + REFRESH_INTERVALS[1])
+    );
+
+    let burst = typed + Duration::from_secs(10);
+    for second in 0..=12 {
+        scheduler.observe_message(input(11, burst + Duration::from_secs(second)));
+    }
+    assert_eq!(scheduler.next_deadline(), Some(burst + SETTLE_MAX_INTERVAL));
+}
+
+#[test]
+fn input_delivered_late_never_pulls_the_settle_before_the_last_change() {
+    // Catches a held-back input, published with its own earlier time after a title change
+    // was processed, moving the settle earlier than two quiet seconds after that change.
+    let base = Instant::now();
+    let input = |observed_at| SnapshotTriggerMessage::Input {
+        window: SnapshotWindowKey {
+            pid: 7,
+            window_id: 11,
+        },
+        observed_at,
+    };
+    let mut scheduler = SnapshotScheduler::default();
+    scheduler.observe(trigger(7, 11, SnapshotTriggerKind::Focus, base));
+    scheduler
+        .take_due(base + SETTLE_QUIET_INTERVAL)
+        .expect("initial settle");
+    let typed = base + Duration::from_secs(5);
+    scheduler.observe_message(input(typed));
+    let retitled = typed + Duration::from_millis(400);
+    scheduler.observe(trigger(7, 11, SnapshotTriggerKind::Title, retitled));
+    scheduler.observe_message(input(typed + Duration::from_millis(100)));
+
+    assert_eq!(
+        scheduler.next_deadline(),
+        Some(retitled + SETTLE_QUIET_INTERVAL)
+    );
+    assert!(
+        scheduler
+            .take_due(retitled + SETTLE_QUIET_INTERVAL - Duration::from_millis(1))
+            .is_none()
+    );
 }

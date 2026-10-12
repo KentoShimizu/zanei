@@ -17,7 +17,7 @@ use crate::{
     content_snapshot::{
         Control, SharedHealth, SnapshotTriggerKind, SnapshotTriggerPublisher, SnapshotWalkOutput,
         budget::GLOBAL_SAVE_INTERVAL,
-        coverage::{WalkAnalysis, WindowRect},
+        coverage::{MaskGap, MaskGaps, WalkAnalysis, WindowRect},
         ocr_engine::{OcrBackend, OcrEngine, OcrUnavailable, fingerprint},
         snapshot_trigger_channel,
         state::{SnapshotOrigin, SnapshotState, SnapshotWindowKey},
@@ -51,7 +51,7 @@ fn analysis(mask_regions: Vec<WindowRect>) -> WalkAnalysis {
         blank_coverage: 1.0,
         mask_regions,
         order_containers: Vec::new(),
-        masks_complete: true,
+        mask_gaps: MaskGaps::default(),
     }
 }
 
@@ -230,10 +230,8 @@ fn without_a_recognized_body_the_accessibility_body_is_recorded() {
         })
     };
     let denied = counted(|| Err(OcrUnavailable::Permission));
-    let incomplete = WalkAnalysis {
-        masks_complete: false,
-        ..analysis(Vec::new())
-    };
+    let mut incomplete = analysis(Vec::new());
+    incomplete.mask_gaps.record(MaskGap::FramelessInput);
     let timed_out = backend(|| Ok(()), |_| Err(CaptureError::Timeout));
     let masked = backend(|| Ok(()), |_| Ok(image(1)));
     for (backend, walk, secure, failures) in [

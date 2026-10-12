@@ -39,6 +39,7 @@ pub use ocr_engine::prepare_window_capture;
 pub use role::{SnapshotNodeClass, classify_role};
 #[cfg(test)]
 pub(crate) use scheduler::SnapshotScheduler;
+pub(crate) use state::SnapshotWindowKey;
 #[cfg(test)]
 pub(crate) use trigger::SnapshotTriggerMessage;
 #[cfg(test)]

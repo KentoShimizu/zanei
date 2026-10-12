@@ -199,7 +199,7 @@ impl CollectorSet {
                     filter: config.filter.clone(),
                     capture_policy: capture_policy.clone(),
                     chrome_observer: Some(chrome_observer.clone()),
-                    snapshot_trigger_publisher,
+                    snapshot_trigger_publisher: snapshot_trigger_publisher.clone(),
                     focus_context: focus_context.clone(),
                 },
             ))
@@ -220,6 +220,7 @@ impl CollectorSet {
                 mode,
                 click_sender,
                 authorization_publisher,
+                snapshot_trigger_publisher,
                 secure_input_probe,
                 capture_policy.clone(),
                 chrome_observer.clone(),

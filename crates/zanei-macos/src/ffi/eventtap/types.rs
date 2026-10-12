@@ -22,12 +22,16 @@ pub(crate) enum NativeEvent {
         ime_active: bool,
         observed_at: OffsetDateTime,
     },
+    /// `target_pid` is the process the window server routes the event to: the
+    /// owner of the window under the pointer, which need not be frontmost.
     Scroll {
+        target_pid: Option<i64>,
         vertical: f64,
         horizontal: f64,
         observed_at: OffsetDateTime,
     },
     MouseDown {
+        target_pid: Option<i64>,
         x: f64,
         y: f64,
         button: u32,

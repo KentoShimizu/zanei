@@ -368,6 +368,11 @@ fn decode_event(
     // SAFETY: event owns a valid CGEventRef while all fields are read.
     unsafe {
         let raw = event.0.as_ptr();
+        let target_pid = Some(CGEventGetIntegerValueField(
+            raw,
+            EVENT_TARGET_UNIX_PROCESS_ID_FIELD,
+        ))
+        .filter(|pid| *pid > 0);
         match CGEventGetType(raw) {
             EVENT_KEY_DOWN => {
                 let flags = CGEventGetFlags(raw);
@@ -410,6 +415,7 @@ fn decode_event(
                     authorization.reject();
                 }
                 NativeEvent::Scroll {
+                    target_pid,
                     vertical: CGEventGetDoubleValueField(raw, SCROLL_FIXED_AXIS_1_FIELD),
                     horizontal: CGEventGetDoubleValueField(raw, SCROLL_FIXED_AXIS_2_FIELD),
                     observed_at,
@@ -421,6 +427,7 @@ fn decode_event(
                 }
                 let point = CGEventGetLocation(raw);
                 NativeEvent::MouseDown {
+                    target_pid,
                     x: point.x,
                     y: point.y,
                     button: u32::try_from(CGEventGetIntegerValueField(

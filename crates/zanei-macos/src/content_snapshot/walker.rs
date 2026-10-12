@@ -11,7 +11,7 @@ use crate::ffi::ax::{AxFrame, AxTextRange, SnapshotAxError};
 
 use super::{
     budget::{CHILDREN_BATCH_SIZE, WalkBudget},
-    coverage::{WalkAnalysis, WalkAnalyzer, WalkedNode, WindowRect},
+    coverage::{MaskGap, ReadFailure, WalkAnalysis, WalkAnalyzer, WalkedNode, WindowRect},
     role::{SnapshotNodeClass, classify_role},
 };
 
@@ -55,6 +55,13 @@ impl From<SnapshotAxError> for SnapshotReadError {
 impl SnapshotReadError {
     fn ends_root_walk(&self) -> bool {
         matches!(self, Self::Ax(error) if error.is_invalid_ui_element())
+    }
+
+    const fn failure(&self) -> ReadFailure {
+        match self {
+            Self::Ax(error) => Some(error.code()),
+            Self::Contract(_) => None,
+        }
     }
 }
 
@@ -206,8 +213,8 @@ pub(crate) fn walk_snapshot_analyzed<N: SnapshotNode>(
     // Account for the final native call crossing the wall-time boundary even
     // when it discovers that no work remains.
     let _ = context.can_continue();
-    if context.cutoff.is_some() {
-        context.analysis.masks_incomplete();
+    if let Some(cutoff) = context.cutoff {
+        context.analysis.mask_gap(MaskGap::Cutoff(cutoff));
     }
     let output = SnapshotWalkOutput {
         text: context.text.finish(),
@@ -235,10 +242,9 @@ fn visit_node<'a, N: SnapshotNode>(
     context.nodes += 1;
     let attributes = match context.read_node(is_root, || node.safe_attributes())? {
         NodeRead::Value(attributes) => attributes,
-        NodeRead::Degraded => {
+        NodeRead::Degraded(failure) => {
             context.degraded_nodes = context.degraded_nodes.saturating_add(1);
-            // An unknown role may be an input field.
-            context.analysis.masks_incomplete();
+            context.analysis.mask_gap(MaskGap::RoleUnreadable(failure));
             if context.can_continue()
                 && let NodeRead::Value(count) =
                     context.read_node(is_root, || node.children_count())?
@@ -265,7 +271,7 @@ fn visit_node<'a, N: SnapshotNode>(
             class,
             SnapshotNodeClass::SecureInput | SnapshotNodeClass::SingleLineInput
         ) {
-            context.analysis.masks_incomplete();
+            context.analysis.mask_gap(MaskGap::FramelessInput);
         }
         descend_if_container(node, is_root, class, false, stack, context)?;
         return Ok(());
@@ -300,7 +306,7 @@ fn visit_node<'a, N: SnapshotNode>(
         // one extra read for the childless part of the blank-slot rule.
         match context.read_node(is_root, || node.children_count())? {
             NodeRead::Value(count) => Some(count),
-            NodeRead::Degraded => {
+            NodeRead::Degraded(_) => {
                 // An otherwise blank node is not yet counted as degraded.
                 context.degraded_nodes = context.degraded_nodes.saturating_add(1);
                 walked.degraded = true;
@@ -338,12 +344,13 @@ fn descend_if_container<'a, N: SnapshotNode>(
             }
             Ok(Some(count))
         }
-        NodeRead::Degraded => {
+        NodeRead::Degraded(failure) => {
             if !degraded {
                 context.degraded_nodes = context.degraded_nodes.saturating_add(1);
             }
-            // The unvisited subtree may hold input fields.
-            context.analysis.masks_incomplete();
+            context
+                .analysis
+                .mask_gap(MaskGap::ChildrenUnreadable(failure));
             Ok(None)
         }
     }
@@ -361,18 +368,19 @@ fn load_children<'a, N: SnapshotNode>(
     let maximum_count = CHILDREN_BATCH_SIZE.min(count.saturating_sub(index));
     let children = match context.read_node(is_root, || node.children_range(index, maximum_count))? {
         NodeRead::Value(children) => children,
-        NodeRead::Degraded => {
+        NodeRead::Degraded(failure) => {
             if !degraded {
                 context.degraded_nodes = context.degraded_nodes.saturating_add(1);
             }
-            context.analysis.masks_incomplete();
+            context
+                .analysis
+                .mask_gap(MaskGap::ChildrenUnreadable(failure));
             return Ok(());
         }
     };
     if children.len() < maximum_count {
-        // The tree changed after the count, or the list was unavailable: the
-        // missing children may hold input fields.
-        context.analysis.masks_incomplete();
+        // The tree changed after the count, or the list was unavailable.
+        context.analysis.mask_gap(MaskGap::ChildrenShort);
     }
     if !context.can_continue() {
         return Ok(());
@@ -409,7 +417,7 @@ fn node_fragments(
     } else {
         match context.read_node(is_root, || node.content_attributes())? {
             NodeRead::Value(content) => content,
-            NodeRead::Degraded => return Ok((fragments, true)),
+            NodeRead::Degraded(_) => return Ok((fragments, true)),
         }
     };
     match class {
@@ -420,7 +428,7 @@ fn node_fragments(
         SnapshotNodeClass::MultiLineText => {
             let range = match context.read_node(is_root, || node.visible_range())? {
                 NodeRead::Value(range) => range,
-                NodeRead::Degraded => {
+                NodeRead::Degraded(_) => {
                     degraded = true;
                     None
                 }
@@ -430,7 +438,7 @@ fn node_fragments(
             {
                 match context.read_node(is_root, || node.string_for_range(range))? {
                     NodeRead::Value(text) => push_unique(&mut fragments, text.as_deref()),
-                    NodeRead::Degraded => degraded = true,
+                    NodeRead::Degraded(_) => degraded = true,
                 }
             }
         }
@@ -438,7 +446,7 @@ fn node_fragments(
             let value = if context.can_continue() {
                 match context.read_node(is_root, || node.value())? {
                     NodeRead::Value(value) => value,
-                    NodeRead::Degraded => {
+                    NodeRead::Degraded(_) => {
                         degraded = true;
                         None
                     }
@@ -488,7 +496,7 @@ struct WalkContext<'a> {
 
 enum NodeRead<T> {
     Value(T),
-    Degraded,
+    Degraded(ReadFailure),
 }
 
 impl WalkContext<'_> {
@@ -520,7 +528,7 @@ impl WalkContext<'_> {
                 nodes: self.nodes,
                 elapsed: self.clock.elapsed(),
             }),
-            Err(_) => Ok(NodeRead::Degraded),
+            Err(source) => Ok(NodeRead::Degraded(source.failure())),
         }
     }
 }
