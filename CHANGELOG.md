@@ -10,6 +10,19 @@
   while it includes `input`. The existing limits still apply: one snapshot
   every 5 seconds at most, unchanged text is not stored again, and nothing is
   taken while Secure Input is active.
+- A content snapshot held back only because another window was saved less
+  than 5 seconds earlier is now taken once those 5 seconds have passed,
+  instead of being dropped. Switching apps no longer leaves the new window
+  unrecorded until the next click or keystroke, and a window you leave right
+  after another window was saved is still recorded a few seconds later. Each
+  held-back snapshot is retried once, after all the usual checks run again;
+  it is discarded if you move to another window, interact with the window
+  again (which schedules a new snapshot), return to the window you left, or
+  pause recording.
+- With `ZANEI_TRACE=1`, a skipped content snapshot whose window cannot be
+  found again now says why, as counts per reason, never titles or text, and a
+  snapshot skipped by the capture scope or filters is reported as
+  `gate=scope` instead of `gate=stale`.
 - Typed text is captured in apps that expose a focused text field to
   Accessibility but post no focus or value change notifications for it. Zanei
   reads the focused field shortly after keystrokes, Return, clicks, and window

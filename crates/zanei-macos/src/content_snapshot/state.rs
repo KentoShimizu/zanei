@@ -7,7 +7,8 @@ use std::{
 };
 
 use super::budget::{
-    DAILY_BUDGET_WINDOW, DAILY_TEXT_BUDGET_BYTES, PID_BACKOFF_INITIAL, PID_BACKOFF_MAX,
+    DAILY_BUDGET_WINDOW, DAILY_TEXT_BUDGET_BYTES, GLOBAL_SAVE_INTERVAL, PID_BACKOFF_INITIAL,
+    PID_BACKOFF_MAX,
 };
 use super::scheduler::SnapshotScheduler;
 
@@ -75,6 +76,13 @@ impl SnapshotState {
 
     pub(crate) fn global_interval_allows(&self, now: Instant) -> bool {
         SnapshotScheduler::global_interval_allows(self.global_saved_at, now)
+    }
+
+    /// When the global save interval holds a save back at `now`, the instant it ends.
+    pub(crate) fn global_interval_ends(&self, now: Instant) -> Option<Instant> {
+        self.global_saved_at
+            .filter(|_| !self.global_interval_allows(now))
+            .map(|saved_at| saved_at + GLOBAL_SAVE_INTERVAL)
     }
 
     pub(crate) fn daily_budget_allows(&mut self, now: Instant) -> bool {

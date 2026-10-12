@@ -116,6 +116,13 @@ impl FakeNode {
         root.with_shared(&shared)
     }
 
+    /// A window without `AXWindowNumber`, resolved by its frame.
+    pub(super) fn framed_window(frame: Option<crate::ffi::ax::AxFrame>) -> Self {
+        let mut root = Self::new("AXWindow");
+        root.attributes.frame = frame;
+        root
+    }
+
     pub(super) fn with_window_title(mut self, title: Option<&str>) -> Self {
         self.content_attributes.title = title.map(str::to_owned);
         self

@@ -25,6 +25,7 @@ fn raw_event_matches_the_v4_content_snapshot_contract() {
         target: trigger(7, 11, SnapshotTriggerKind::Focus, Instant::now()),
         trigger: ContentSnapshotTrigger::Settle,
         activity_window: None,
+        deferred: false,
     };
     let body = SnapshotBody::ax(
         "日本語 alice@example.com".to_owned(),
@@ -89,6 +90,7 @@ fn raw_event_preserves_every_snapshot_cutoff_reason() {
         target: trigger(7, 11, SnapshotTriggerKind::Focus, Instant::now()),
         trigger: ContentSnapshotTrigger::Refresh,
         activity_window: None,
+        deferred: false,
     };
 
     for cutoff in [
@@ -124,6 +126,7 @@ fn recognized_body_is_written_as_a_valid_ocr_snapshot() {
         target: trigger(7, 11, SnapshotTriggerKind::Focus, Instant::now()),
         trigger: ContentSnapshotTrigger::Settle,
         activity_window: None,
+        deferred: false,
     };
     let half = WindowFraction::from_ratio(0.5).expect("fraction");
     let line = ContentSnapshotLine {

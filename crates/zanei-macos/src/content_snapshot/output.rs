@@ -258,15 +258,22 @@ pub(super) fn trace_candidate(
             gate,
             TraceMetrics {
                 nodes,
-                degraded_nodes: 0,
-                frameless_nodes: 0,
                 elapsed,
                 bytes,
                 complete,
                 cutoff,
-                source: "none",
+                ..TraceMetrics::NONE
             },
         )
+    );
+}
+
+/// A window that no longer resolves: the metrics are empty and `misses` is metadata only.
+pub(super) fn trace_unresolved(candidate: &ScheduledSnapshot, misses: &impl std::fmt::Display) {
+    crate::trace::trace!(
+        "{} {}",
+        trace_summary(candidate, "stale", TraceMetrics::NONE),
+        misses
     );
 }
 
@@ -280,6 +287,19 @@ struct TraceMetrics {
     complete: bool,
     cutoff: Option<ContentSnapshotCutoff>,
     source: &'static str,
+}
+
+impl TraceMetrics {
+    const NONE: Self = Self {
+        nodes: 0,
+        degraded_nodes: 0,
+        frameless_nodes: 0,
+        elapsed: Duration::ZERO,
+        bytes: 0,
+        complete: false,
+        cutoff: None,
+        source: "none",
+    };
 }
 
 impl From<&SnapshotWalkOutput> for TraceMetrics {

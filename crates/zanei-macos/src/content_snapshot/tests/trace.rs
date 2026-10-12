@@ -16,6 +16,7 @@ fn trace_contains_only_metrics_and_identifiers_never_content_context() {
         target,
         trigger: ContentSnapshotTrigger::Settle,
         activity_window: None,
+        deferred: false,
     };
 
     let trace = test_trace_summary(&candidate, None);
