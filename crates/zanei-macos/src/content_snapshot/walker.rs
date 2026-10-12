@@ -369,6 +369,11 @@ fn load_children<'a, N: SnapshotNode>(
             return Ok(());
         }
     };
+    if children.len() < maximum_count {
+        // The tree changed after the count, or the list was unavailable: the
+        // missing children may hold input fields.
+        context.analysis.masks_incomplete();
+    }
     if !context.can_continue() {
         return Ok(());
     }
