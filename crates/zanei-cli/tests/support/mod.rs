@@ -125,6 +125,19 @@ impl Fixture {
     }
 
     pub fn set_recorder_permissions(&self, permissions_ok: bool) {
+        self.set_recorder_capabilities(DaemonCapabilities::new(
+            BTreeSet::from([Capability::ReadAccessibilityTree]),
+            if permissions_ok {
+                CapabilityState::Available
+            } else {
+                CapabilityState::ActionRequired
+            },
+            CapabilityState::Available,
+            CapabilityState::Deferred,
+        ));
+    }
+
+    pub fn set_recorder_capabilities(&self, capabilities: DaemonCapabilities) {
         let status = self.open_reader().status().expect("fixture daemon status");
         StoreWriter::open_with_key(&self.store, Some(&self.key()))
             .and_then(|writer| {
@@ -140,19 +153,10 @@ impl Fixture {
                     last_event_ts: status.last_event_ts,
                     degraded: status.degraded,
                     collector_failures: status.collector_failures,
-                    capabilities: Some(DaemonCapabilities::new(
-                        BTreeSet::from([Capability::ReadAccessibilityTree]),
-                        if permissions_ok {
-                            CapabilityState::Available
-                        } else {
-                            CapabilityState::ActionRequired
-                        },
-                        CapabilityState::Available,
-                        CapabilityState::Deferred,
-                    )),
+                    capabilities: Some(capabilities),
                 })
             })
-            .expect("set fixture recorder permissions");
+            .expect("set fixture recorder capabilities");
     }
 
     fn create(contents: StoreContents) -> Self {

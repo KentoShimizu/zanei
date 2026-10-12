@@ -36,6 +36,33 @@ pub enum CapabilityState {
     Unavailable,
 }
 
+/// The text-recognition fallback of content snapshots, as the recorder reports it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrFallback {
+    /// Screen Recording is granted on macOS 14 or later.
+    On,
+    /// Screen Recording is not granted.
+    Off,
+    /// The OS is older than macOS 14.
+    Unavailable,
+}
+
+impl OcrFallback {
+    /// The state from `recorder`, the snapshot of a fresh heartbeat from the current recorder.
+    /// `None` (unknown) when content snapshots are off or the recorder has not reported it.
+    #[must_use]
+    pub fn reported(recorder: Option<&DaemonCapabilities>, content_snapshot: bool) -> Option<Self> {
+        match recorder.filter(|_| content_snapshot)?.capture_screen()? {
+            CapabilityState::Available => Some(Self::On),
+            CapabilityState::ActionRequired => Some(Self::Off),
+            CapabilityState::Unavailable => Some(Self::Unavailable),
+            // The recorder never reports screen capture as deferred.
+            CapabilityState::Deferred => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonCapabilities {

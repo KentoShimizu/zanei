@@ -9,6 +9,7 @@ use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use zanei_core::OcrFallback;
 use zanei_core::config::{Config, parse_time_expression};
 use zanei_core::normalize::format_timestamp;
 use zanei_core::store::{QueryFilter, QueryResult, StoreError, StoreReader};
@@ -236,6 +237,10 @@ impl ZaneiServer {
                 || (self.permission_check)(&config).map_err(internal_error),
                 Ok,
             )?;
+        let ocr = OcrFallback::reported(
+            status.reported_capabilities(),
+            config.capture.content_snapshot,
+        );
         let retention_hours = status.effective_retention_hours(config.output.retention_hours);
 
         Ok(Json(GetStatusOutput {
@@ -256,6 +261,7 @@ impl ZaneiServer {
                     .collect(),
                 text_content: config.capture.text_content,
                 content_snapshot: config.capture.content_snapshot,
+                ocr,
             },
             permissions_ok,
         }))

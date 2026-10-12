@@ -71,6 +71,22 @@ pub(super) fn render_human(
                 .expect("macOS automation detail has a target bundle ID")
         ));
     }
+    if report.content_snapshot {
+        let (status, fallback) = report.capabilities.capture_screen.as_ref().map_or(
+            ("-", "unknown: start the recorder to see it"),
+            |capability| match capability.state {
+                "available" => (capability.detail.status, "on"),
+                "unavailable" => ("unavailable", "unavailable: requires macOS 14"),
+                _ => (
+                    capability.detail.status,
+                    "off: Screen Recording not granted",
+                ),
+            },
+        );
+        output.push_str(&format!(
+            "screen_recording {status:<15} optional; OCR fallback {fallback}\n"
+        ));
+    }
     if report.reported_by_recorder {
         output.push_str("\nPermission status as reported by the running recorder.\n");
     } else {
@@ -99,6 +115,12 @@ pub(super) fn render_human(
     if safari_automation_pending {
         output.push_str(
             "\nAutomation: macOS will show a permission dialog the first time Zanei contacts Safari; no setup is needed in advance.\n",
+        );
+    }
+
+    if report.screen_recording_missing() {
+        output.push_str(
+            "\nScreen Recording (optional): macOS asks for it only once. To turn the OCR fallback on, run `zanei doctor --fix` to open its pane with the path on your clipboard, switch the row ON or add it with `+`, then run `zanei stop && zanei start`.\n",
         );
     }
 
@@ -220,6 +242,13 @@ pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Resul
     let permission_target = permission_target_path(executable);
     let bundled = permission_target != executable;
     let has_non_automation_missing = has_manual_permission_missing(missing);
+    // macOS asks for Screen Recording only once, so restarting brings no dialog for it.
+    let has_required_manual_missing = missing.iter().any(|capability| {
+        matches!(
+            capability,
+            Capability::ReadAccessibilityTree | Capability::ObserveInput
+        )
+    });
     if has_non_automation_missing {
         copy_to_clipboard(&permission_target.display().to_string());
         reveal_in_finder(permission_target)?;
@@ -230,10 +259,12 @@ pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Resul
     let checker = PermissionChecker::new();
     let total = missing.len();
     println!();
-    if has_non_automation_missing {
+    if has_required_manual_missing {
         println!(
             "First run `zanei start` (`zanei stop && zanei start` if it is already running) so the recorder asks macOS for the permissions."
         );
+    }
+    if has_non_automation_missing {
         println!("Finder is showing the app or executable whose path is on your clipboard.");
     }
     for (index, permission) in missing.iter().enumerate() {
@@ -247,6 +278,8 @@ pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Resul
         );
         if permission.is_browser_automation() {
             print!("{}", automation_guidance(*permission));
+        } else if *permission == Capability::CaptureScreen {
+            print!("{}", screen_recording_steps(bundled, permission_target));
         } else {
             if bundled {
                 println!(
@@ -280,13 +313,27 @@ pub(super) fn guide_granting(missing: &[Capability], executable: &Path) -> Resul
         println!(
             "When every toggle is on, run `zanei stop && zanei start` (or `zanei start` if it is not running), then `zanei doctor` to confirm."
         );
-        println!("{}", permission_list_note(bundled).trim_end());
+        if has_required_manual_missing {
+            println!("{}", permission_list_note(bundled).trim_end());
+        }
     } else {
         println!(
             "After enabling the listed Automation toggles, run `zanei start` if recording is stopped, then `zanei doctor` to confirm."
         );
     }
     Ok(())
+}
+
+fn screen_recording_steps(bundled: bool, permission_target: &Path) -> String {
+    let listed = if bundled {
+        "If `Zanei` is listed, switch that row ON."
+    } else {
+        "If the executable is listed, switch its row ON."
+    };
+    format!(
+        "  1. {listed}\n  2. Otherwise click `+`, press Command-V in the file dialog, then Return. (The path is on your clipboard:)\n       {}\n  3. Click Open, then switch the new row ON.\n  Screen Recording is optional: it turns on the OCR fallback for content snapshots.\n",
+        permission_target.display()
+    )
 }
 
 const fn permission_list_note(bundled: bool) -> &'static str {

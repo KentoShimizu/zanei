@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, thread, time::Duration};
 use zanei_collector::Capability;
 use zanei_core::{CapabilityState, DaemonCapabilities};
 use zanei_macos::permission::{
-    PermissionChecker, PermissionError, PermissionStatus, request_accessibility,
-    request_input_monitoring,
+    PermissionChecker, PermissionError, PermissionStatus, capture_screen_state,
+    request_accessibility, request_input_monitoring, request_screen_recording,
 };
 
 const PERMISSION_DECISION_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -20,12 +20,17 @@ pub(crate) enum PermissionRequestOutcome {
     TimedOut,
 }
 
+/// Requests the missing required permissions one dialog at a time and, when `screen_recording`
+/// is set, then the optional Screen Recording permission. Runs only in the recorder, whose TCC
+/// identity the requests belong to.
 pub(crate) fn request_missing_permissions(
     required: &BTreeSet<Capability>,
+    screen_recording: bool,
 ) -> Result<PermissionRequestOutcome, PermissionError> {
     let checker = PermissionChecker::new();
     request_missing_permissions_with(
         required,
+        screen_recording.then_some(capture_screen_state),
         |capability| permission_request_status(&checker, capability),
         |capability| match capability {
             Capability::ReadAccessibilityTree => request_accessibility(),
@@ -36,7 +41,10 @@ pub(crate) fn request_missing_permissions(
             Capability::AutomateBrowser | Capability::AutomateSafari => {
                 unreachable!("browser automation is requested by use")
             }
-            Capability::CaptureScreen => unreachable!("screen capture is never required"),
+            Capability::CaptureScreen => {
+                request_screen_recording();
+                Ok(())
+            }
         },
         thread::sleep,
         PERMISSION_DECISION_POLL_INTERVAL,
@@ -46,6 +54,7 @@ pub(crate) fn request_missing_permissions(
 
 fn request_missing_permissions_with<E>(
     required: &BTreeSet<Capability>,
+    screen_capture_state: Option<impl FnOnce() -> CapabilityState>,
     mut status_for: impl FnMut(&Capability) -> Result<PermissionStatus, E>,
     mut request: impl FnMut(&Capability) -> Result<(), E>,
     mut sleep: impl FnMut(Duration),
@@ -70,6 +79,11 @@ fn request_missing_permissions_with<E>(
         )? {
             outcome = PermissionRequestOutcome::TimedOut;
         }
+    }
+    // Optional and last, so its dialog never covers a required one. A grant applies only after
+    // a restart, so there is nothing to wait for; below macOS 14 there is nothing to ask for.
+    if screen_capture_state.is_some_and(|state| state() == CapabilityState::ActionRequired) {
+        request(&Capability::CaptureScreen)?;
     }
     Ok(outcome)
 }
@@ -161,6 +175,8 @@ mod tests {
         PermissionRequestOutcome, probe_permissions_with, request_missing_permissions_with,
     };
 
+    const NO_SCREEN_RECORDING: Option<fn() -> CapabilityState> = None;
+
     #[test]
     fn false_accessibility_status_does_not_advance_before_timeout() {
         let required =
@@ -171,6 +187,7 @@ mod tests {
 
         let outcome = request_missing_permissions_with(
             &required,
+            NO_SCREEN_RECORDING,
             |permission| {
                 Ok::<_, ()>(match permission {
                     Capability::ReadAccessibilityTree => {
@@ -229,6 +246,7 @@ mod tests {
 
         let outcome = request_missing_permissions_with(
             &required,
+            NO_SCREEN_RECORDING,
             |permission| {
                 let checks = match permission {
                     Capability::ReadAccessibilityTree => &accessibility_checks,
@@ -278,6 +296,7 @@ mod tests {
 
         let outcome = request_missing_permissions_with(
             &required,
+            NO_SCREEN_RECORDING,
             |permission| {
                 Ok::<_, ()>(match permission {
                     Capability::ReadAccessibilityTree => {
@@ -340,6 +359,7 @@ mod tests {
 
         let outcome = request_missing_permissions_with(
             &required,
+            NO_SCREEN_RECORDING,
             |permission| {
                 probed.borrow_mut().push(*permission);
                 Ok::<_, ()>(PermissionStatus::Granted)
@@ -360,6 +380,87 @@ mod tests {
             [Capability::ReadAccessibilityTree, Capability::ObserveInput]
         );
         assert!(requested.into_inner().is_empty());
+    }
+
+    #[test]
+    fn screen_recording_is_requested_once_after_required_steps_settle_without_waiting() {
+        // Catches its dialog colliding with a pending required one, the sequence blocking on a
+        // grant that applies only after a restart, and a timed-out step skipping it.
+        let required =
+            BTreeSet::from([Capability::ReadAccessibilityTree, Capability::ObserveInput]);
+        let requested = RefCell::new(Vec::new());
+        let input_checks = Cell::new(0);
+
+        let outcome = request_missing_permissions_with(
+            &required,
+            Some(|| CapabilityState::ActionRequired),
+            |permission| {
+                Ok::<_, ()>(match permission {
+                    Capability::ReadAccessibilityTree => PermissionStatus::NotDetermined,
+                    Capability::ObserveInput => {
+                        input_checks.set(input_checks.get() + 1);
+                        if input_checks.get() == 1 {
+                            PermissionStatus::NotDetermined
+                        } else {
+                            PermissionStatus::Granted
+                        }
+                    }
+                    Capability::AutomateBrowser
+                    | Capability::AutomateSafari
+                    | Capability::CaptureScreen => panic!("only required steps are probed"),
+                })
+            },
+            |permission| {
+                requested.borrow_mut().push(*permission);
+                Ok::<_, ()>(())
+            },
+            |_| assert!(!requested.borrow().contains(&Capability::CaptureScreen)),
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        )
+        .expect("request permissions");
+
+        assert_eq!(outcome, PermissionRequestOutcome::TimedOut);
+        assert_eq!(
+            requested.into_inner(),
+            [
+                Capability::ReadAccessibilityTree,
+                Capability::ObserveInput,
+                Capability::CaptureScreen,
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_recording_is_not_requested_when_granted_unavailable_or_snapshots_are_off() {
+        // Catches a dialog for a permission already held, one below macOS 14 where it cannot be
+        // used, and one for users who never turned content snapshots on.
+        let required = BTreeSet::from([Capability::ReadAccessibilityTree]);
+        let request = |screen_state: Option<CapabilityState>| {
+            let requested = RefCell::new(Vec::new());
+            request_missing_permissions_with(
+                &required,
+                screen_state.map(|state| move || state),
+                |_| Ok::<_, ()>(PermissionStatus::Granted),
+                |permission| {
+                    requested.borrow_mut().push(*permission);
+                    Ok(())
+                },
+                |_| panic!("granted permissions are not polled"),
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+            )
+            .expect("request permissions");
+            requested.into_inner()
+        };
+
+        assert_eq!(request(None), []);
+        assert_eq!(request(Some(CapabilityState::Available)), []);
+        assert_eq!(request(Some(CapabilityState::Unavailable)), []);
+        assert_eq!(
+            request(Some(CapabilityState::ActionRequired)),
+            [Capability::CaptureScreen]
+        );
     }
 
     #[test]
@@ -448,6 +549,7 @@ mod tests {
 
         request_missing_permissions_with(
             &required,
+            NO_SCREEN_RECORDING,
             |_| Ok::<_, ()>(PermissionStatus::Granted),
             |permission| {
                 requested.borrow_mut().push(*permission);

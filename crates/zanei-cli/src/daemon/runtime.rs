@@ -21,12 +21,13 @@ use zanei_core::{
         StoreWriter, purge_retired_plaintext, retired_plaintext_stores, set_aside_plaintext,
     },
 };
+use zanei_macos::content_snapshot::prepare_window_capture;
 use zanei_macos::permission::{PermissionError, PermissionStatus, permission_status};
 
 use super::{
     DaemonError, StoreOwner, StoreOwnership,
     collectors::{CollectorSet, merge_collector_failures},
-    executable_guard::ExecutableGuard,
+    executable_guard::{ExecutableGuard, executable_shutdown_requested},
     main_thread,
     permission_worker::{PermissionRequestPoll, PermissionRequestWorker},
     pipeline::{Pipeline, SharedStoreWriter},
@@ -56,8 +57,6 @@ const PERMISSION_REQUEST_TIMEOUT_MESSAGE: &str =
     "permission request timed out before macOS reported a decision";
 const PERMISSION_REQUEST_WORKER_STOPPED_MESSAGE: &str =
     "permission request worker terminated without a result";
-const EXECUTABLE_REMOVED_MESSAGE: &str =
-    "zanei: executable removed (uninstalled?); recorder shutting down.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordOutput {
@@ -107,11 +106,16 @@ pub fn run_daemon(
     ) = initialize_permission_dependent_runtime(&writer, &initial_heartbeat, || {
         let main_run_loop = main_thread::prepare()?;
         let mut collectors = CollectorSet::new(&config);
+        if collectors.captures_content_snapshot() {
+            prepare_window_capture();
+        }
         let initial_input_monitoring_status = collectors
             .has_eventtap()
             .then(|| permission_status(&Capability::ObserveInput));
-        let permission_request_worker =
-            PermissionRequestWorker::start(collectors.required_capabilities())?;
+        let permission_request_worker = PermissionRequestWorker::start(
+            collectors.required_capabilities(),
+            collectors.captures_content_snapshot(),
+        )?;
         let main_thread_observers = collectors.prepare_main_thread();
         Ok((
             main_run_loop,
@@ -516,7 +520,7 @@ impl ActiveDaemon<'_> {
         let Some(required) = self.pending_permission_request.take() else {
             return;
         };
-        match PermissionRequestWorker::start(required) {
+        match PermissionRequestWorker::start(required, false) {
             Ok(worker) => self.permission_request_worker = Some(worker),
             Err(error) => {
                 self.degraded
@@ -570,18 +574,6 @@ fn normalize_pause_request(
     // paused until the next pause poll reads it: a new `pause` must not let
     // capture start in between.
     Ok(!lock_writer(writer)?.clear_expired_pause(paused_until)?)
-}
-
-fn executable_shutdown_requested(
-    guard: &mut ExecutableGuard,
-    exists: impl FnOnce(&Path) -> bool,
-    notify: impl FnOnce(&str),
-) -> bool {
-    if !guard.check_with(exists) {
-        return false;
-    }
-    notify(EXECUTABLE_REMOVED_MESSAGE);
-    true
 }
 
 fn lock_writer(

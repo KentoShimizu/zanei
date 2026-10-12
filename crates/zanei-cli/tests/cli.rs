@@ -132,7 +132,8 @@ fn status_json_stdout_matches_integration_snapshot() {
       "app"
     ],
     "text_content": false,
-    "content_snapshot": false
+    "content_snapshot": false,
+    "ocr": null
   }},
   "permissions_ok": true
 }}"#,

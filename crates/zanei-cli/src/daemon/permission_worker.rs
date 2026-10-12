@@ -23,8 +23,13 @@ pub(super) struct PermissionRequestWorker {
 }
 
 impl PermissionRequestWorker {
-    pub(super) fn start(required: BTreeSet<Capability>) -> Result<Self, DaemonError> {
-        Self::start_with(move || request_missing_permissions(&required))
+    /// `screen_recording` adds the optional Screen Recording request, which only the startup
+    /// sequence makes while content snapshots are on.
+    pub(super) fn start(
+        required: BTreeSet<Capability>,
+        screen_recording: bool,
+    ) -> Result<Self, DaemonError> {
+        Self::start_with(move || request_missing_permissions(&required, screen_recording))
     }
 
     pub(super) fn start_with(
